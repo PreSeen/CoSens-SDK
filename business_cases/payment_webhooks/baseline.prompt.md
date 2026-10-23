@@ -1,0 +1,10 @@
+请使用 cosens-rsi:rsi-run 技能与 cosens_rsi MCP 完成一个实际 Python 业务代码修复任务。工作目录 /home/zhoujunjie/CoSens。业务为仿真支付模块，不涉及线上支付。
+先读 /home/zhoujunjie/.codex/plugins/cache/cosens-local/cosens-rsi/0.1.0/skills/rsi-run/SKILL.md，business_cases/payment_webhooks/protocol.json 和 requirements.md，以及本次工作目录 business_cases/payment_webhooks/work/baseline/ 中的 payment.py、test_payment.py。
+只允许读取/修改本次 work/baseline 下代码测试与说明，以及公共协议/需求和技能；禁止读取其他 work、output、acceptance.py、var、任何凭证或任何评估器/留出样例。禁止访问独立 Memory MCP/管理员/发布/改进接口。不要联网。评估不是让你强行证明 RSI 有效。
+任务 objective 原样使用：修复支付网关重复与乱序回调导致的重复出库和退款状态错误：未有经验的留出基准。交付兼容公开接口的真实代码补丁、自己的测试和中文修复说明；准确记录仍未验证的业务边界。
+只 prepare 一次，task_family 原样 protocol.task_family，environment 原样 protocol.environment（不要加角色等字段），execution_mode=guided, requires_evidence=true。family 使用通用 seed Recipe，未经业务效果验证。Memory 只由 RSI 内部调用。
+按 next_step 发出的 prepare -> produce -> verify 合同完成。prepare 交非空 brief，清楚写业务目标、公开约束、实际开发方式。produce 发出后立即 request_guidance(node_id=produce, candidates=protocol.actions, observation=protocol.observation, request_key=payment-repair-v1)。不要改变候选/评分或暗示经验。本次实际采用 RSI 推荐的开发方式。
+在本次目录真正修改 payment.py，自主解决需求，不预置答案。两种方式均可解决全部需求，不得为了制造差异故意留下错误。第一种方式是从故障出发最小修改、运行既有回归再审查全部需求；第二种方式先写明确不变量/乱序与重启测试，观察实际反例后实现。忠实执行记录的方式，若实际采用另一种要记录真实 action_id。
+允许新增回归测试，但禁止修改原 test_payment.py 和公共需求。运行 python3 -m unittest discover -s business_cases/payment_webhooks/work/baseline -p 'test*.py' -v，命令真实执行。把开发过程、实际发现与修复风险写本目录 修复说明.md。不要声称外部验收通过；独立验收在提交后运行，不供你提前查看结果。
+produce 通过 cosens_store_artifact 存全部最终 payment.py（名字为 baseline-payment.py）、新增测试与中文修复说明，保存引用。submit_step(files=这些引用, decision_id=真实返回ID, actual_action_id=真实方式)。verify 自己审查补丁、重跑实际回归，把真实结果保存为中文 核验记录.md 工件。verify 的 files 必须同时包含最终 payment.py、测试、修复说明与核验记录，确保最终交付可读且保留完整补丁。不要用 submit_result 绕过 guided。complete_run 后 get_decision，确认 upsert 写回 done（reward 此时 pending，不能伪称 verified）。
+最后本目录写 run.json：{"label":"baseline","run_id":"真实ID","decision_id":"真实ID","action_id":"真实实际方式","source_artifact":{"artifact_id":"...","content_hash":"..."}}。不含 attempt_token，不写任何独立评分。执行到 completed，若阻塞如实报告。

@@ -1,0 +1,50 @@
+{
+  "schema": "hierarchical-recipe-1",
+  "steps": {
+    "refund-review@v1": {
+      "id": "refund-review",
+      "version": "v1",
+      "inputs": {
+        "task": "text"
+      },
+      "outputs": {
+        "files": "artifacts"
+      },
+      "body": {
+        "preconditions": [],
+        "steps": [
+          "阅读任务和全部授权资料，按公开契约完成退款核算、证据审核和中文回复；保存结果，并自查金额、审批边界及文件完整性。"
+        ],
+        "checks": [
+          "输出覆盖用户要求，金额和证据有依据，保存的文件可读。"
+        ],
+        "recovery": [
+          "发现明确缺项时进行修正并重新检查。"
+        ]
+      }
+    }
+  },
+  "bindings": {
+    "review": "refund-review@v1"
+  },
+  "flow": {
+    "id": "refund-review-flow",
+    "version": "v1",
+    "checks": [
+      "满足任务的全部公开要求，不编造审批或付款。"
+    ],
+    "nodes": [
+      {
+        "id": "review",
+        "goal": "完成中文退款审核与自查，保存交付结果",
+        "skill": "review",
+        "inputs": {
+          "task": "$task"
+        },
+        "after": [],
+        "max_repairs": 1
+      }
+    ],
+    "final": "review.files"
+  }
+}

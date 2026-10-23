@@ -1,0 +1,13 @@
+{
+  "family": "memory-recipe-closure-luna-v1",
+  "model": "gpt-6-luna",
+  "train_rollouts": 2,
+  "policy": {
+    "max_rounds": 1,
+    "max_candidates": 2,
+    "min_confirm_tasks": 8,
+    "min_delta": 0.03,
+    "exploration_enabled": false
+  },
+  "design": "Predeclared fresh cohort. Two train, two screen, eight paired confirm. Same frozen inputs/Memory/model/tools/budget per arm; only Recipe changes. No retries selected by scores; preserve every attempt."
+}

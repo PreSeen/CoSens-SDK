@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+set -a
+source "$ROOT/var/local.env"
+set +a
+export COSENS_RSI_DB="${COSENS_RSI_DB:-$ROOT/var/cosens-rsi.sqlite3}"
+export COSENS_MEMORY_URL="${COSENS_MEMORY_URL:-http://127.0.0.1:18104/memory}"
+export COSENS_MEMORY_PROJECT="${COSENS_MEMORY_PROJECT:-default}"
+exec "$ROOT/.venv/bin/cosens-rsi-mcp-stdio"

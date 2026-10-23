@@ -1,0 +1,34 @@
+{
+  "schema": "sla-recipe-quality-v1",
+  "family": "sla-recipe-quality-luna-v1",
+  "model": "gpt-6-luna",
+  "reasoning_effort": "medium",
+  "partitions": {
+    "train": [
+      "train-lunch",
+      "train-calendar"
+    ],
+    "screen": [
+      "screen-offset",
+      "screen-seconds"
+    ],
+    "confirm": [
+      "confirm-spring",
+      "confirm-afterhours",
+      "confirm-multiday",
+      "confirm-interval"
+    ]
+  },
+  "policy": {
+    "max_rounds": 1,
+    "max_candidates": 2,
+    "min_confirm_tasks": 4,
+    "min_delta": 0.03,
+    "exploration_enabled": false
+  },
+  "train_rollouts": 2,
+  "design": "Same initial code and inputs per paired task. Model-generated Recipe from train-only observable code failures, screen selects, fresh confirm tests correctness. Keep all attempts. Synthetic calendars, no production claim.",
+  "editable_inputs": [
+    "sla.py"
+  ]
+}

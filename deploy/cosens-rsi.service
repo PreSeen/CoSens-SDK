@@ -1,0 +1,22 @@
+[Unit]
+Description=CoSens RSI API, MCP and private Memory
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@ROOT@
+EnvironmentFile=@ROOT@/var/local.env
+Environment=MEMORY_DB=@ROOT@/var/memory.sqlite3
+Environment=COSENS_RSI_DB=@ROOT@/var/cosens-rsi.sqlite3
+Environment=COSENS_MEMORY_URL=http://127.0.0.1:18104/memory
+Environment=COSENS_MEMORY_PROJECT=default
+ExecStart=@ROOT@/.venv/bin/cosens-rsi --host 0.0.0.0 --port 18104
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=25
+UMask=0077
+StandardOutput=append:@ROOT@/var/rsi.log
+StandardError=append:@ROOT@/var/rsi.log
+
+[Install]
+WantedBy=default.target

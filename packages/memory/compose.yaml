@@ -1,0 +1,37 @@
+name: memory-dev
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: memory
+      POSTGRES_USER: memory
+      POSTGRES_PASSWORD: ${MEMORY_DEV_POSTGRES_PASSWORD:?Set a development database password}
+    ports:
+      - "127.0.0.1:25432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    mem_limit: 512m
+    cpus: 1
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memory -d memory"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  neo4j:
+    image: neo4j:5.26-community
+    environment:
+      NEO4J_AUTH: neo4j/${MEMORY_DEV_NEO4J_PASSWORD:?Set a development graph password}
+      NEO4J_server_memory_heap_initial__size: 128m
+      NEO4J_server_memory_heap_max__size: 256m
+      NEO4J_server_memory_pagecache_size: 128m
+      NEO4J_dbms_usage__report_enabled: "false"
+    ports:
+      - "127.0.0.1:27687:7687"
+      - "127.0.0.1:27474:7474"
+    volumes:
+      - graphdata:/data
+    mem_limit: 768m
+    cpus: 1
+volumes:
+  pgdata:
+  graphdata:

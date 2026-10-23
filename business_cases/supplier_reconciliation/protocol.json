@@ -1,0 +1,37 @@
+{
+  "schema": "supplier-feedback-replay-v1",
+  "task_family": "supplier-reconciliation-luna-20261023-v1",
+  "actions": [
+    {
+      "id": "supplier_csv_scan",
+      "version": "1",
+      "description": "逐家供应商读取原始 CSV 并完成付款与发票核对；无数据库准备成本，保持相同业务规则。",
+      "confidence": 0.5,
+      "cost": 0.0
+    },
+    {
+      "id": "supplier_sqlite_batch",
+      "version": "1",
+      "description": "本次从零导入相同 CSV、建立 SQLite 索引，再批量完成所有供应商核对；索引构建计入成本，保持相同业务规则。",
+      "confidence": 0.5,
+      "cost": 0.0
+    }
+  ],
+  "environment": {
+    "case_id": "supplier-reconciliation-luna-20261023-v1",
+    "case_title": "中文供应商月结对账：一次反馈后的 RSI 选路改善",
+    "executor_model": "gpt-6-luna",
+    "fixture_version": "fictional-supplier-2026-09-v1",
+    "experiment_design": "online-feedback-replay",
+    "requirements_sha256": "59f0f2d4fdea0109add62f889e4d15e2a3a6bd4a2e33716310aac4c2add06c45",
+    "engine_sha256": "8527282034313d887edaaf470ea07c76695d15e9732ac7d81b804f4cafcd8320"
+  },
+  "observation": "为 18 家供应商完成同一 2026 年 9 月账套的付款发票核对；原始账套 80000 张发票、81631 条付款记录；目标为批次计算 2 秒以内，要求精确异常清单，数据库冷建成本必须计入。",
+  "reward": {
+    "spec": "verified-decision-return-v1",
+    "sla_seconds": 2.0,
+    "formula": "exact match ? max(-1,min(1,(2-median_seconds)/2)) : -1"
+  },
+  "design": "Two separate GPT-6 Luna sessions. First real result is independently verified and written to Memory before replay. Same dataset, methods, priors and evaluation; no holdout generalization claim. Tie breaks by first candidate.",
+  "timing_scope": "Complete reconciliation calculation including fresh index import/build and exception CSV; excludes model/MCP, hash checks and independent oracle."
+}

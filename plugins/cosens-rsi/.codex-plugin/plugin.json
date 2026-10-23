@@ -1,0 +1,6 @@
+{
+  "name": "cosens-rsi",
+  "version": "0.1.0",
+  "description": "Hierarchical RSI task workflow for Codex.",
+  "skills": "./skills/"
+}
