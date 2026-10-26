@@ -48,3 +48,24 @@ class AsyncTransport:
 
     async def aclose(self):
         await self.client.aclose()
+
+
+class SyncTransport:
+    def __init__(self, token: str | None, *, transport=None, timeout=30.0):
+        self.token = token
+        self.client = httpx.Client(base_url=SERVICE_URL, timeout=timeout, transport=transport)
+
+    def request(self, method, path, *, body=None, key=None):
+        if not self.token:
+            raise ValueError("A CoSens bearer token is required")
+        headers = {"Authorization": f"Bearer {self.token}"}
+        if key:
+            headers["Idempotency-Key"] = key
+        try:
+            response = self.client.request(method, path, json=body, headers=headers)
+        except httpx.HTTPError as exc:
+            raise RSITransportError(str(exc)) from exc
+        return _decode(response)
+
+    def close(self):
+        self.client.close()

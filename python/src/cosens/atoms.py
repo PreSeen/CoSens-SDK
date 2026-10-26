@@ -4,7 +4,7 @@ import asyncio
 import os
 from urllib.parse import quote
 
-from .http import AsyncTransport
+from .http import AsyncTransport, SyncTransport
 
 
 def _part(value):
@@ -89,17 +89,47 @@ class _AdminClient:
         self.atoms = AdminAtoms(transport)
 
 
+class SyncAtoms:
+    """Internal synchronous form used by wrapped synchronous OpenAI clients."""
+
+    def __init__(self, transport):
+        self._http = transport
+
+    def artifact(self, *, name, content):
+        return self._http.request("POST", "/v1/artifacts", body={"name": name, "content": content})
+
+    def prepare(self, *, objective, key, task_family="general", input_artifact_ids=None, **options):
+        body = {"objective": objective, "task_family": task_family, "input_artifact_ids": input_artifact_ids or []}
+        body.update(options)
+        return self._http.request("POST", "/v1/runs/prepare", body=body, key=_key(key))
+
+    def get_run(self, run_id):
+        return self._http.request("GET", f"/v1/runs/{_part(run_id)}")
+
+    def session_events(self, run_id, events):
+        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/session-events", body={"events": events})
+
+    def submit(self, run_id, *, data=None, key=None):
+        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/submit", body={"data": data or {}}, key=_key(key) if key else None)
+
+
 class CoSensClient:
     def __init__(self, token=None, *, admin_token=None, state_path=None, _http_transport=None):
         self._transport = AsyncTransport(token or os.getenv("COSENS_RSI_TOKEN"), transport=_http_transport)
         self._admin_transport = AsyncTransport(admin_token or os.getenv("COSENS_RSI_ADMIN_TOKEN"), transport=_http_transport)
+        self._sync_transport = SyncTransport(token or os.getenv("COSENS_RSI_TOKEN"), transport=_http_transport)
         self.atoms = AsyncAtoms(self._transport)
+        self.sync_atoms = SyncAtoms(self._sync_transport)
         self.admin = _AdminClient(self._admin_transport)
         self.state_path = state_path
 
     async def aclose(self):
         await self._transport.aclose()
         await self._admin_transport.aclose()
+        self._sync_transport.close()
+
+    def close(self):
+        self._sync_transport.close()
 
     async def __aenter__(self):
         return self
