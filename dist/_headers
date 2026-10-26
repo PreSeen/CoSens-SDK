@@ -1,5 +1,0 @@
-/pricing/
-  Cache-Control: public, max-age=0, must-revalidate, no-transform
-
-/pricing/index.html
-  Cache-Control: public, max-age=0, must-revalidate, no-transform

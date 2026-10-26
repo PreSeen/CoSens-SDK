@@ -1,1 +1,0 @@
-"""CoSens RSI service."""
