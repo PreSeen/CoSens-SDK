@@ -6,7 +6,7 @@ Continue on the user's `wangzhichao_sdk_2026-10-26` branch. Preserve unrelated `
 
 ### Task 1: Private gateway transport
 
-- [ ] Test sync/async requests retain `/api`, query strings, Bearer and idempotency headers, including administrator paths.
+- [ ] Test sync/async requests retain `/api`, query strings, Friday API Key Bearer and idempotency headers, including administrator paths.
 - [ ] Change the private service URL and service identity; retain native model URL behavior.
 - [ ] Update HTTP fixtures to the gateway paths and run the suite.
 
@@ -28,6 +28,8 @@ Expected: targeted regression tests fail before changes; all tests pass afterwar
 - [ ] Update usage documentation and implementation status honestly; verify tests and build.
 
 Expected: no claim of working standalone remote recall without its contract. Successful standalone recall remains blocked pending backend details.
+
+Gateway authentication follows `/Users/a1111/IdeaProjects/friday-rsi/docs/api/gateway-authentication.md`: only `api_key` / `RSI_API_KEY` is provided by the caller, sent as Authorization Bearer; no custom api-key header or backend service token.
 
 ## Review Focus
 

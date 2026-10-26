@@ -38,7 +38,7 @@ def rsi_server(calls):
     return httpx.MockTransport(server)
 
 
-def test_disable_preserves_native_calls_and_full_resource_tree(tmp_path):
+def test_disable_preserves_native_calls_and_full_resource_tree(tmp_path, empty_recall):
     native = OpenAI(api_key="test", base_url="https://model.example/v1")
     original = SimpleNamespace(output_text="native")
     seen = []
@@ -74,7 +74,7 @@ async def test_sync_openai_client_can_read_session_inside_running_event_loop(tmp
         return SimpleNamespace(id="resp-1", status="completed", output_text="done", output=[SimpleNamespace(type="message", role="assistant")])
 
     native.responses.create = create
-    client = cosens(native, mode="auto", decision_model="decision", session=Session(), token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server([]))
+    client = cosens(native, mode="auto", decision_model="decision", session=Session(), api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server([]))
     assert client.responses.create(model="app", input="hello").output_text == "done"
 
 
@@ -104,7 +104,7 @@ def test_auto_retry_after_prepare_receipt_loss_reuses_turn_and_blocks_uncertain_
         raise AssertionError(request.url.path)
 
     native.responses.create = create
-    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
     with pytest.raises(RSITransportError):
         client.responses.create(model="app", input="hello")
     with pytest.raises(RuntimeError, match="outcome unknown"):
@@ -137,7 +137,7 @@ def test_rewrapping_same_proxy_rejects_conflicting_decision_model(tmp_path):
         cosens(client, mode="auto", decision_model="classifier-b")
 
 
-def test_disable_delegates_real_openai_sdk_http_and_return_models(tmp_path):
+def test_disable_delegates_real_openai_sdk_http_and_return_models(tmp_path, empty_recall):
     model_requests = []
 
     def model_server(request):
@@ -158,7 +158,7 @@ def test_disable_delegates_real_openai_sdk_http_and_return_models(tmp_path):
     assert model_requests == ["/v1/models", "/v1/responses"]
 
 
-def test_auto_false_calls_native_once_and_never_contacts_cosens(tmp_path):
+def test_auto_false_recalls_then_calls_native_once_without_run(tmp_path, empty_recall):
     native = OpenAI(api_key="test")
     calls = []
 
@@ -169,10 +169,11 @@ def test_auto_false_calls_native_once_and_never_contacts_cosens(tmp_path):
         return SimpleNamespace(output_text="answer")
 
     native.responses.create = create
-    client = cosens(native, mode="auto", decision_model="decision", session=Session(), token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server([]))
+    client = cosens(native, mode="auto", decision_model="decision", session=Session(), api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server([]))
     assert client.responses.create(model="app", input="hello").output_text == "answer"
     assert [c["model"] for c in calls] == ["decision", "app"]
     assert client.cosens.rsi_capture == "skipped"
+    assert empty_recall == ["hello"]
 
 
 def test_auto_true_prepares_injects_context_and_submits_after_response(tmp_path):
@@ -189,7 +190,7 @@ def test_auto_true_prepares_injects_context_and_submits_after_response(tmp_path)
         return SimpleNamespace(id="resp-1", status="completed", output_text="done", output=[SimpleNamespace(type="message", role="assistant")])
 
     native.responses.create = create
-    client = cosens(native, mode="auto", decision_model="decision", session=Session(), token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(rsi_calls))
+    client = cosens(native, mode="auto", decision_model="decision", session=Session(), api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(rsi_calls))
     result = client.responses.create(model="app", instructions="Original", input="current")
     assert result.output_text == "done"
     assert [c[0] for c in rsi_calls] == [
@@ -214,14 +215,14 @@ def test_current_input_already_in_session_is_not_reported_twice(tmp_path):
         return SimpleNamespace(id="resp-1", status="completed", output_text="done", output=[SimpleNamespace(type="message", role="assistant")])
 
     native.responses.create = create
-    client = cosens(native, mode="auto", decision_model="decision", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    client = cosens(native, mode="auto", decision_model="decision", session=session, api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
     client.responses.create(model="app", input="current")
     user_events = [event for path, body in calls if path.endswith("/session-events") for event in body["events"] if event["kind"] == "user_prompt"]
     assert len(user_events) == 1
     assert user_events[0]["id"] == "chat:current"
 
 
-def test_classifier_failure_does_not_block_native_call_or_advance_history(tmp_path):
+def test_classifier_failure_still_recalls_before_native_call(tmp_path, empty_recall):
     native = OpenAI(api_key="test")
     calls = []
 
@@ -232,7 +233,7 @@ def test_classifier_failure_does_not_block_native_call_or_advance_history(tmp_pa
         return SimpleNamespace(output_text="native")
 
     native.responses.create = create
-    client = cosens(native, mode="auto", decision_model="decision", session=Session(), token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server([]))
+    client = cosens(native, mode="auto", decision_model="decision", session=Session(), api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server([]))
     assert client.responses.create(model="app", input="current").output_text == "native"
     assert calls == ["decision", "app"]
     assert client.cosens.rsi_capture == "decision_failed"
@@ -251,7 +252,7 @@ def test_approval_mode_stops_before_native_execution_when_endpoint_is_absent(tmp
         return SimpleNamespace(output_text="unexpected")
 
     native.responses.create = create
-    client = cosens(native, mode="approval", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(rsi_calls))
+    client = cosens(native, mode="approval", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(rsi_calls))
     with pytest.raises(RSIApprovalUnavailable):
         client.responses.create(model="app", input="current")
     assert native_app_calls == 0
@@ -266,7 +267,7 @@ def test_approval_decision_failure_is_fail_closed(tmp_path):
         client.responses.create(model="app", input="current")
 
 
-def test_decision_timeout_and_output_limit_are_configurable(tmp_path):
+def test_decision_timeout_and_output_limit_are_configurable(tmp_path, empty_recall):
     native = OpenAI(api_key="test")
     calls = []
 
@@ -294,7 +295,7 @@ async def test_async_openai_generation_uses_same_atomic_flow(tmp_path):
         return SimpleNamespace(id="resp-1", status="completed", output_text="done", output=[SimpleNamespace(type="message", role="assistant")])
 
     native.responses.create = create
-    client = cosens(native, mode="auto", decision_model="decision", session=Session(), token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    client = cosens(native, mode="auto", decision_model="decision", session=Session(), api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
     result = await client.responses.create(model="app", input="current")
     assert result.output_text == "done"
     assert calls[-1][0] == "/api/v1/runs/r1/submit"
@@ -307,7 +308,7 @@ def test_raw_response_is_returned_with_parse_hook_and_original_headers(tmp_path)
     parsed = SimpleNamespace(id="resp-1", status="completed", output_text="done", output=[SimpleNamespace(type="message", role="assistant")])
     raw = SimpleNamespace(headers={"x-model": "original"}, parse=lambda: parsed)
     native.responses.with_raw_response.create = lambda **kwargs: raw
-    client = cosens(native, mode="auto", decision_model="decision", session=Session(), token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    client = cosens(native, mode="auto", decision_model="decision", session=Session(), api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
     wrapped = client.responses.with_raw_response.create(model="app", input="current")
     assert wrapped.headers is raw.headers
     assert "/api/v1/runs/r1/submit" not in [path for path, _ in calls]
@@ -328,7 +329,7 @@ def test_stream_true_submits_after_completed_event_and_preserves_iterator(tmp_pa
         return iter([SimpleNamespace(type="response.created"), SimpleNamespace(type="response.completed", response=completed)])
 
     native.responses.create = create
-    client = cosens(native, mode="auto", decision_model="decision", session=Session(), token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    client = cosens(native, mode="auto", decision_model="decision", session=Session(), api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
     stream = client.responses.create(model="app", input="current", stream=True)
     assert "/api/v1/runs/r1/submit" not in [path for path, _ in calls]
     assert [event.type for event in stream] == ["response.created", "response.completed"]
@@ -349,7 +350,7 @@ def test_context_managed_stream_keeps_completed_state_after_exit(tmp_path):
             return False
 
     native.responses.stream = lambda **kwargs: Manager()
-    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
     with client.responses.stream(model="app", input="current") as stream:
         assert [event.type for event in stream] == ["response.completed"]
     assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "completed"
@@ -376,7 +377,7 @@ async def test_async_stream_manager_prepares_on_enter_and_submits_on_completion(
 
     native.responses.create = create
     native.responses.stream = lambda **kwargs: Manager()
-    client = cosens(native, mode="auto", decision_model="decision", session=Session(), token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    client = cosens(native, mode="auto", decision_model="decision", session=Session(), api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
     async with client.responses.stream(model="app", input="current") as stream:
         assert [event.type async for event in stream] == ["response.completed"]
     assert calls[-1][0] == "/api/v1/runs/r1/submit"
@@ -399,7 +400,7 @@ def test_chat_completions_keeps_original_messages_in_order_and_adds_context(tmp_
 
     native.responses.create = decide
     native.chat.completions.create = complete
-    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
     response = client.chat.completions.create(model="app", messages=original_messages)
     assert response.choices[0].message.content == "chat answer"
     assert original_messages == [{"role": "system", "content": "Original policy"}, {"role": "user", "content": "Current question"}]
@@ -420,7 +421,7 @@ def test_function_call_continuation_reuses_one_run_and_submits_only_final_messag
         if not kwargs.get("previous_response_id") else
         SimpleNamespace(id="final-response", status="completed", output_text="finished", output=[SimpleNamespace(type="message", role="assistant")])
     )
-    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
     client.responses.create(model="app", input="Call a tool")
     assert "/api/v1/runs/r1/submit" not in [path for path, _ in calls]
     client.responses.create(model="app", previous_response_id="tool-response", input=[{"type": "function_call_output", "call_id": "c1", "output": "tool result"}])
@@ -460,7 +461,7 @@ def test_openai_reconcile_completed_run_does_not_call_native_again(tmp_path):
         raise AssertionError(path)
 
     native.responses.create = create
-    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
     assert client.responses.create(model="app", input="current").output_text == "done"
     turn_id = client.cosens.last_turn_id
     assert client.cosens.get_turn(turn_id)["state"] == "completion_pending"
@@ -499,7 +500,7 @@ def test_unresolved_turn_blocks_passthrough_after_classifier_change(tmp_path, se
         raise AssertionError(path)
 
     native.responses.create = create
-    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
     client.responses.create(model="app", input="current")
     with pytest.raises(RSIRecoveryRequired):
         client.responses.create(model="app", input="current")
@@ -533,7 +534,7 @@ def test_repeated_continuation_cannot_reexecute_after_uncertain_submit(tmp_path)
         raise AssertionError(path)
 
     native.responses.create = create
-    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
     client.responses.create(model="app", input="use tool")
     continuation = {"model": "app", "previous_response_id": "tool-response", "input": [{"type": "function_call_output", "call_id": "c1", "output": "result"}]}
     client.responses.create(**continuation)
@@ -558,7 +559,7 @@ def test_chat_stream_chunk_events_submit_after_final_stop_chunk(tmp_path):
             return False
 
     native.chat.completions.stream = lambda **kwargs: Manager()
-    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
     with client.chat.completions.stream(model="app", messages=[{"role": "user", "content": "task"}]) as stream:
         assert len(list(stream)) == 2
     assert calls[-1][0] == "/api/v1/runs/r1/submit"
@@ -586,7 +587,7 @@ def test_stream_get_final_response_also_records_completion(tmp_path):
             return False
 
     native.responses.stream = lambda **kwargs: Manager()
-    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
     with client.responses.stream(model="app", input="current") as stream:
         assert stream.get_final_response() is final
         assert len(list(stream)) == 1
@@ -617,7 +618,7 @@ def test_real_openai_raw_stream_parse_supports_next_and_records_terminal_event(t
 
     model_http = httpx.Client(transport=httpx.MockTransport(model_server))
     native = OpenAI(api_key="test", base_url="https://model.example/v1", http_client=model_http)
-    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(rsi_calls))
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(rsi_calls))
     raw = getattr(client.responses, raw_mode).create(model="m", input="task", stream=True)
     if raw_mode == "with_streaming_response":
         with raw as response:
@@ -657,7 +658,7 @@ async def test_real_async_openai_raw_stream_parse_supports_anext(tmp_path, raw_m
 
     model_http = httpx.AsyncClient(transport=httpx.MockTransport(model_server))
     native = AsyncOpenAI(api_key="test", base_url="https://model.example/v1", http_client=model_http)
-    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(rsi_calls))
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(rsi_calls))
     if raw_mode == "with_streaming_response":
         async with client.responses.with_streaming_response.create(model="m", input="task", stream=True) as response:
             stream = await response.parse()
@@ -685,7 +686,7 @@ def test_unparsed_streaming_response_closure_marks_turn_incomplete(tmp_path):
             return False
 
     native.responses.with_streaming_response.create = lambda **kwargs: Manager()
-    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
     with client.responses.with_streaming_response.create(model="m", input="task", stream=True):
         pass
     assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "incomplete"

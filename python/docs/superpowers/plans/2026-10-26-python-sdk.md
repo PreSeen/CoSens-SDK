@@ -1,5 +1,7 @@
 # CoSens Python SDK Implementation Plan
 
+> Historical implementation plan. Gateway authentication and mandatory turn recall now follow `2026-10-26-gateway-recall.md` and the current design; older token and disable/auto-false passthrough assumptions below are superseded.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship the three Python SDK entry points in the approved design with durable incremental Session reporting and native OpenAI behavior preserved.

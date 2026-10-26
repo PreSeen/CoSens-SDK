@@ -5,6 +5,7 @@ import os
 from urllib.parse import quote
 
 from .http import AsyncTransport, SyncTransport
+from .errors import RSIRecallUnavailable
 
 
 def _part(value):
@@ -22,6 +23,10 @@ def _key(value):
 class AsyncAtoms:
     def __init__(self, transport):
         self._http = transport
+
+    async def recall_context(self, *, query):
+        """Standalone recall boundary; the public HTTP contract is pending."""
+        raise RSIRecallUnavailable("Standalone Recipe/Memory recall HTTP contract is not configured; no Run was created")
 
     async def artifact(self, *, name, content):
         return await self._http.request("POST", "/v1/artifacts", body={"name": name, "content": content})
@@ -77,8 +82,6 @@ class AdminAtoms:
         self._http = transport
 
     async def publish(self, job_id, *, expected_revision, reason):
-        if not self._http.token:
-            raise ValueError("A separate CoSens administrator token is required")
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("reason is required")
         return await self._http.request(
@@ -97,6 +100,10 @@ class SyncAtoms:
 
     def __init__(self, transport):
         self._http = transport
+
+    def recall_context(self, *, query):
+        """Standalone recall boundary; the public HTTP contract is pending."""
+        raise RSIRecallUnavailable("Standalone Recipe/Memory recall HTTP contract is not configured; no Run was created")
 
     def artifact(self, *, name, content):
         return self._http.request("POST", "/v1/artifacts", body={"name": name, "content": content})
@@ -120,11 +127,11 @@ class SyncAtoms:
 
 
 class CoSensClient:
-    def __init__(self, token=None, *, api_key=None, admin_token=None, state_path=None, _http_transport=None):
-        api_key = api_key if api_key is not None else os.getenv("COSENS_API_KEY")
-        self._transport = AsyncTransport(token or os.getenv("COSENS_RSI_TOKEN"), api_key=api_key, transport=_http_transport)
-        self._admin_transport = AsyncTransport(admin_token or os.getenv("COSENS_RSI_ADMIN_TOKEN"), api_key=api_key, transport=_http_transport)
-        self._sync_transport = SyncTransport(token or os.getenv("COSENS_RSI_TOKEN"), api_key=api_key, transport=_http_transport)
+    def __init__(self, api_key=None, *, state_path=None, _http_transport=None):
+        api_key = api_key if api_key is not None else (os.getenv("RSI_API_KEY") or os.getenv("COSENS_API_KEY"))
+        self._transport = AsyncTransport(api_key=api_key, transport=_http_transport)
+        self._admin_transport = AsyncTransport(api_key=api_key, transport=_http_transport)
+        self._sync_transport = SyncTransport(api_key=api_key, transport=_http_transport)
         self.atoms = AsyncAtoms(self._transport)
         self.sync_atoms = SyncAtoms(self._sync_transport)
         self.admin = _AdminClient(self._admin_transport)

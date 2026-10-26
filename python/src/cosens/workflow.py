@@ -24,6 +24,16 @@ def freeze_run_context(prepared, run):
     return result(frozen)
 
 
+def freeze_recall_context(context):
+    """Internal normalized adapter result, independent of the future HTTP schema."""
+    if not isinstance(context, dict) or context.get("run_id"):
+        raise RSIRecoveryRequired("Standalone recall must not create a Run")
+    for field in ("recipe", "context", "snapshot"):
+        if not isinstance(context.get(field), dict):
+            raise RSIRecoveryRequired(f"Standalone recall {field} is missing or invalid")
+    return result(deepcopy(context))
+
+
 def _delay(reply):
     try:
         delay = float(reply.get("retry_after_seconds", 2))

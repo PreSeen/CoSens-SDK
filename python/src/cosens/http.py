@@ -31,20 +31,22 @@ def _decode(response):
     return result(payload)
 
 
+def _headers(api_key, key):
+    if not isinstance(api_key, str) or not api_key or any(c.isspace() for c in api_key):
+        raise ValueError("CoSens api_key must be the bare Friday API Key; set api_key or RSI_API_KEY")
+    headers = {"Authorization": f"Bearer {api_key}"}
+    if key:
+        headers["Idempotency-Key"] = key
+    return headers
+
+
 class AsyncTransport:
-    def __init__(self, token: str | None, *, api_key=None, transport=None, timeout=30.0):
-        self.token = token
+    def __init__(self, *, api_key=None, transport=None, timeout=30.0):
         self.api_key = api_key
         self.client = httpx.AsyncClient(base_url=SERVICE_URL, timeout=timeout, transport=transport)
 
     async def request(self, method, path, *, body=None, key=None):
-        if not self.api_key:
-            raise ValueError("CoSens api_key or COSENS_API_KEY is required")
-        headers = {"api-key": self.api_key}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        if key:
-            headers["Idempotency-Key"] = key
+        headers = _headers(self.api_key, key)
         try:
             response = await self.client.request(method, path, json=body, headers=headers)
         except httpx.HTTPError as exc:
@@ -56,19 +58,12 @@ class AsyncTransport:
 
 
 class SyncTransport:
-    def __init__(self, token: str | None, *, api_key=None, transport=None, timeout=30.0):
-        self.token = token
+    def __init__(self, *, api_key=None, transport=None, timeout=30.0):
         self.api_key = api_key
         self.client = httpx.Client(base_url=SERVICE_URL, timeout=timeout, transport=transport)
 
     def request(self, method, path, *, body=None, key=None):
-        if not self.api_key:
-            raise ValueError("CoSens api_key or COSENS_API_KEY is required")
-        headers = {"api-key": self.api_key}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        if key:
-            headers["Idempotency-Key"] = key
+        headers = _headers(self.api_key, key)
         try:
             response = self.client.request(method, path, json=body, headers=headers)
         except httpx.HTTPError as exc:

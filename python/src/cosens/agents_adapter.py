@@ -95,11 +95,11 @@ class _StreamResult:
 
 
 class CoSensAgentRunner:
-    def __init__(self, agent, *, mode, session, token, api_key, state_path, http_transport, runner):
+    def __init__(self, agent, *, mode, session, api_key, state_path, http_transport, runner):
         self.native = agent
-        self._client = CoSensClient(token=token, api_key=api_key, state_path=state_path, _http_transport=http_transport)
-        self._cursor = CursorStore(state_path, principal=[self._client._transport.api_key, self._client._transport.token])
-        self._turns = TurnStore(state_path, principal=[self._client._transport.api_key, self._client._transport.token])
+        self._client = CoSensClient(api_key=api_key, state_path=state_path, _http_transport=http_transport)
+        self._cursor = CursorStore(state_path, principal=self._client._transport.api_key)
+        self._turns = TurnStore(state_path, principal=self._client._transport.api_key)
         if runner is None:
             try:
                 from agents import Runner

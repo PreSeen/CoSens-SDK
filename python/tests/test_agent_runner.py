@@ -56,7 +56,7 @@ async def test_explicit_run_composes_atoms_around_one_native_runner_call(tmp_pat
     Runner.calls = 0
     agent = Agent(name="assistant", instructions="Original instructions")
     session = Session()
-    client = cosens(agent, mode="disable", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
+    client = cosens(agent, mode="disable", session=session, api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
     result = await client.run(agent, "Current request", session=session)
     assert result.final_output == "done"
     assert Runner.calls == 1
@@ -88,7 +88,7 @@ async def test_pre_execution_event_failure_never_runs_agent_or_advances_cursor(t
     Runner.calls = 0
     session = Session()
     agent = Agent(name="assistant")
-    client = cosens(agent, mode="disable", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
+    client = cosens(agent, mode="disable", session=session, api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
     with pytest.raises(Exception):
         await client.run(agent, "Current request", session=session)
     assert Runner.calls == 0
@@ -114,7 +114,7 @@ async def test_post_execution_submit_failure_keeps_native_result_and_blocks_reex
     Runner.calls = 0
     session = Session()
     agent = Agent(name="assistant")
-    client = cosens(agent, mode="disable", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
+    client = cosens(agent, mode="disable", session=session, api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
     result = await client.run(agent, "Current request", session=session)
     assert result.final_output == "done"
     assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "completion_pending"
@@ -156,7 +156,7 @@ async def test_streamed_run_submits_only_after_native_stream_finishes(tmp_path):
 
     session = Session()
     agent = Agent(name="assistant")
-    client = cosens(agent, mode="disable", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=StreamingRunner)
+    client = cosens(agent, mode="disable", session=session, api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=StreamingRunner)
     stream = await client.run_streamed(agent, "Current request", session=session)
     assert "/api/v1/runs/r1/submit" not in calls
     assert [event async for event in stream.stream_events()] == ["chunk"]
@@ -187,7 +187,7 @@ async def test_processing_prepare_retries_with_same_key_before_native_run(tmp_pa
     Runner.calls = 0
     session = Session()
     agent = Agent(name="assistant")
-    client = cosens(agent, mode="disable", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
+    client = cosens(agent, mode="disable", session=session, api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
     result = await client.run(agent, "Current request", session=session)
     assert result.final_output == "done"
     assert len(prepare_keys) == 2
@@ -220,7 +220,7 @@ async def test_retry_after_pre_execution_failure_reuses_run_and_frozen_recipe(tm
     Runner.calls = 0
     session = Session()
     agent = Agent(name="assistant", instructions="Original")
-    client = cosens(agent, mode="disable", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
+    client = cosens(agent, mode="disable", session=session, api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
     with pytest.raises(Exception):
         await client.run(agent, "Current request", session=session)
     result = await client.run(agent, "Current request", session=session)
@@ -255,7 +255,7 @@ async def test_reconcile_lost_submit_response_uses_server_result_without_rerunni
     Runner.calls = 0
     session = Session()
     agent = Agent(name="assistant")
-    client = cosens(agent, mode="disable", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
+    client = cosens(agent, mode="disable", session=session, api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
     await client.run(agent, "Current request", session=session)
     turn_id = client.cosens.last_turn_id
     assert client.cosens.get_turn(turn_id)["state"] == "completion_pending"
@@ -293,7 +293,7 @@ async def test_explicit_run_uploads_real_input_and_output_artifacts(tmp_path):
             return SimpleNamespace(final_output={"summary": "done", "files": [{"name": "out.txt", "content": "answer"}]})
 
     agent = Agent(name="assistant")
-    client = cosens(agent, mode="disable", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=FileRunner)
+    client = cosens(agent, mode="disable", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=FileRunner)
     await client.run(agent, "Current request", input_artifacts=[{"name": "input.txt", "content": "facts"}])
     assert [path for path, _ in calls] == [
         "/api/v1/artifacts", "/api/v1/runs/prepare", "/api/v1/runs/r1", "/api/v1/artifacts", "/api/v1/runs/r1/submit",
@@ -325,7 +325,7 @@ async def test_lost_output_artifact_receipt_is_not_blindly_uploaded_again(tmp_pa
             return SimpleNamespace(final_output={"summary": "done", "files": [{"name": "out.txt", "content": "answer"}]})
 
     agent = Agent(name="assistant")
-    client = cosens(agent, mode="disable", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=FileRunner)
+    client = cosens(agent, mode="disable", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=FileRunner)
     await client.run(agent, "Current request")
     with pytest.raises(RSIRecoveryRequired):
         await client.cosens.reconcile(client.cosens.last_turn_id)
@@ -364,7 +364,7 @@ async def test_concurrent_runs_for_same_session_serialize_history_uploads(tmp_pa
 
     agent = Agent(name="assistant")
     session = Session()
-    client = cosens(agent, mode="disable", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=SlowRunner)
+    client = cosens(agent, mode="disable", session=session, api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=SlowRunner)
     first, second = await asyncio.gather(
         client.run(agent, "one", session=session),
         client.run(agent, "two", session=session),
@@ -396,7 +396,7 @@ async def test_native_failure_is_not_retried_automatically_after_possible_tool_e
             raise RuntimeError("tool may have run")
 
     agent = Agent(name="assistant")
-    client = cosens(agent, mode="disable", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=FailingRunner)
+    client = cosens(agent, mode="disable", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=FailingRunner)
     with pytest.raises(RuntimeError):
         await client.run(agent, "Current request")
     with pytest.raises(RSIRecoveryRequired):
@@ -429,7 +429,7 @@ async def test_completed_identical_user_request_starts_a_new_run(tmp_path):
             return SimpleNamespace(final_output="done")
 
     agent = Agent(name="assistant")
-    client = cosens(agent, mode="disable", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=RunnerStub)
+    client = cosens(agent, mode="disable", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=RunnerStub)
     await client.run(agent, "same task")
     first_turn = client.cosens.last_turn_id
     await client.run(agent, "same task")
@@ -474,7 +474,7 @@ async def test_native_approval_interruptions_pause_submit_and_resume_same_run(tm
             return SimpleNamespace(interruptions=[], final_output="approved result")
 
     agent = Agent(name="assistant")
-    client = cosens(agent, mode="disable", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=RunnerStub)
+    client = cosens(agent, mode="disable", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=RunnerStub)
     await client.run(agent, "task")
     turn_id = client.cosens.last_turn_id
     assert client.cosens.get_turn(turn_id)["state"] == "awaiting_native_approval"
@@ -523,7 +523,7 @@ async def test_streamed_native_approval_interruptions_do_not_submit(tmp_path):
             return NativeStream()
 
     agent = Agent(name="assistant")
-    client = cosens(agent, mode="disable", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=RunnerStub)
+    client = cosens(agent, mode="disable", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=RunnerStub)
     stream = await client.run_streamed(agent, "task")
     assert [event async for event in stream.stream_events()] == ["approval-event"]
     assert submitted == 0

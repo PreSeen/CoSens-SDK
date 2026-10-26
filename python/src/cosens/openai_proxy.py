@@ -18,7 +18,7 @@ from .responses_adapter import SUPPORTED, base_path, inject, summary, terminal, 
 from .session_cursor import CursorStore
 from .state import TurnStore
 from .models import result
-from .workflow import freeze_run_context, prepare_ready_async, prepare_ready_sync
+from .workflow import freeze_recall_context, freeze_run_context, prepare_ready_async, prepare_ready_sync
 
 
 def _resource(value):
@@ -280,40 +280,15 @@ class _DeferredAsyncManager:
         self._kwargs = kwargs
         self._runtime = runtime
         self._manager = None
+        self._entered_response = None
 
     async def __aenter__(self):
         runtime = self._runtime
-        if runtime.mode == "disable" or self._args:
-            runtime.status.rsi_capture = "disabled" if runtime.mode == "disable" else "unsupported"
+        if self._args:
+            runtime.status.rsi_capture = "unsupported"
             self._manager = self._method(*self._args, **self._kwargs)
             return await self._manager.__aenter__()
-        runtime._guard_request(self._kwargs, self._path)
-        try:
-            decision = await runtime._decide_async(self._client, self._path, self._kwargs)
-        except Exception as exc:
-            if runtime.mode == "approval":
-                raise RSIDecisionUnavailable(str(exc)) from exc
-            runtime.status.rsi_capture = "decision_failed"
-            self._manager = self._method(**self._kwargs)
-            return await self._manager.__aenter__()
-        if not decision["activate"]:
-            runtime.status.rsi_capture = "skipped"
-            self._manager = self._method(**self._kwargs)
-            return await self._manager.__aenter__()
-        if runtime.mode == "approval":
-            raise RSIApprovalUnavailable("The configured CoSens service has no /v1/invocations approval endpoint")
-        if not decision["objective"].strip():
-            decision["objective"] = user_text(self._path, self._kwargs)
-        state, run = await runtime._prepare_async(decision, self._kwargs, self._path)
-        state["visible_input"] = user_text(self._path, self._kwargs)
-        before = await runtime._snapshot_async()
-        state["session_before_count"] = len(before.items) if before else 0
-        state["visible_input_in_session"] = runtime._input_in_snapshot(before, state["visible_input"])
-        runtime._save(state)
-        await runtime._send_observable_async(state, runtime._tool_output_events(state, self._kwargs))
-        updated = inject(self._path, self._kwargs, run)
-        state["state"] = "native_running"
-        runtime._save(state)
+        state, updated = await runtime._preflight_async(self._client, self._path, self._kwargs)
         try:
             self._manager = self._method(**updated)
             entered = await self._manager.__aenter__()
@@ -323,15 +298,21 @@ class _DeferredAsyncManager:
             runtime._save(state)
             raise
         if "with_streaming_response" in self._path:
-            return _RawResponse(entered, runtime, state, asynchronous=True)
-        return _GenerationStream(entered, runtime, state, asynchronous=True)
+            self._entered_response = _RawResponse(entered, runtime, state, asynchronous=True)
+        else:
+            self._entered_response = _GenerationStream(entered, runtime, state, asynchronous=True)
+        return self._entered_response
 
     async def __aexit__(self, exc_type, exc, tb):
-        return await self._manager.__aexit__(exc_type, exc, tb)
+        try:
+            return await self._manager.__aexit__(exc_type, exc, tb)
+        finally:
+            if self._entered_response is not None:
+                self._entered_response._incomplete()
 
 
 class _Runtime:
-    def __init__(self, *, mode, decision_model, session, token, api_key, state_path, http_transport, asynchronous=False, decision_timeout=5, decision_max_output_tokens=256):
+    def __init__(self, *, mode, decision_model, session, api_key, state_path, http_transport, asynchronous=False, decision_timeout=5, decision_max_output_tokens=256):
         if mode in {"auto", "approval"} and not decision_model:
             raise ValueError("decision_model is required for auto/approval")
         self.mode = mode
@@ -342,9 +323,9 @@ class _Runtime:
         self.decision_timeout = decision_timeout
         self.decision_max_output_tokens = decision_max_output_tokens
         self.session = session
-        self.client = CoSensClient(token=token, api_key=api_key, state_path=state_path, _http_transport=http_transport)
-        self.cursor = CursorStore(state_path, principal=[self.client._transport.api_key, self.client._transport.token])
-        self.turns = TurnStore(state_path, principal=[self.client._transport.api_key, self.client._transport.token])
+        self.client = CoSensClient(api_key=api_key, state_path=state_path, _http_transport=http_transport)
+        self.cursor = CursorStore(state_path, principal=self.client._transport.api_key)
+        self.turns = TurnStore(state_path, principal=self.client._transport.api_key)
         self.status = _Status(self)
         self._owner_lock = threading.Lock()
         self._owners = 0
@@ -435,20 +416,46 @@ class _Runtime:
             return state.get("decision")
         return None
 
+    def _decision_result(self, decision, path, kwargs):
+        if self.mode == "approval" and decision["activate"]:
+            raise RSIApprovalUnavailable("The configured CoSens service has no verified /v1/invocations approval contract")
+        decision = dict(decision)
+        if not decision["objective"].strip():
+            decision["objective"] = user_text(path, kwargs)
+        decision.setdefault("capture", "active" if decision["activate"] else "skipped")
+        self.status.rsi_capture = decision["capture"]
+        return decision
+
+    def _no_run_decision(self, path, kwargs, capture):
+        return {"activate": False, "objective": user_text(path, kwargs), "task_family": "general", "reason": capture, "capture": capture}
+
     def _decide_sync(self, native, path, kwargs):
-        return self._saved_decision(kwargs, path) or decide_sync(
-            native, self.decision_model, user_text(path, kwargs), tool_names(kwargs),
-            timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens,
-        )
+        saved = self._saved_decision(kwargs, path)
+        if saved:
+            return saved
+        if self.mode == "disable":
+            return self._no_run_decision(path, kwargs, "disabled")
+        try:
+            decision = decide_sync(native, self.decision_model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens)
+        except Exception as exc:
+            if self.mode == "approval":
+                raise RSIDecisionUnavailable(str(exc)) from exc
+            decision = self._no_run_decision(path, kwargs, "decision_failed")
+        return self._decision_result(decision, path, kwargs)
 
     async def _decide_async(self, native, path, kwargs):
         saved = self._saved_decision(kwargs, path)
         if saved:
             return saved
-        return await decide_async(
-            native, self.decision_model, user_text(path, kwargs), tool_names(kwargs),
-            timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens,
-        )
+        if self.mode == "disable":
+            return self._no_run_decision(path, kwargs, "disabled")
+        try:
+            decision = await decide_async(native, self.decision_model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens)
+        except Exception as exc:
+            if self.mode == "approval":
+                raise RSIDecisionUnavailable(str(exc)) from exc
+            decision = self._no_run_decision(path, kwargs, "decision_failed")
+        return self._decision_result(decision, path, kwargs)
 
     def _new_state(self, objective, task_family, kwargs, path):
         request_key = self._request_key(kwargs, path)
@@ -664,7 +671,87 @@ class _Runtime:
             self._save(state)
             raise
 
+    def _recall_sync(self, decision, kwargs, path):
+        state = self._new_state(decision["objective"], decision["task_family"], kwargs, path)
+        state["decision"] = decision
+        state["capture"] = decision["capture"]
+        self._save(state)
+        try:
+            if "frozen_context" not in state:
+                recalled = self.client.sync_atoms.recall_context(query=state["objective"])
+                state["frozen_context"] = freeze_recall_context(recalled)
+                self._save(state)
+            return state, result(state["frozen_context"])
+        except Exception as exc:
+            state["last_error"] = str(exc)
+            self._save(state)
+            raise
+
+    async def _recall_async(self, decision, kwargs, path):
+        state = self._new_state(decision["objective"], decision["task_family"], kwargs, path)
+        state["decision"] = decision
+        state["capture"] = decision["capture"]
+        self._save(state)
+        try:
+            if "frozen_context" not in state:
+                recalled = await self.client.atoms.recall_context(query=state["objective"])
+                state["frozen_context"] = freeze_recall_context(recalled)
+                self._save(state)
+            return state, result(state["frozen_context"])
+        except Exception as exc:
+            state["last_error"] = str(exc)
+            self._save(state)
+            raise
+
+    def _preflight_sync(self, native, path, kwargs):
+        self._guard_request(kwargs, path)
+        decision = self._decide_sync(native, path, kwargs)
+        state, context = self._prepare_sync(decision, kwargs, path) if decision["activate"] else self._recall_sync(decision, kwargs, path)
+        if state["run_id"]:
+            state["visible_input"] = user_text(path, kwargs)
+            before = self._snapshot_sync()
+            state["session_before_count"] = len(before.items) if before else 0
+            state["visible_input_in_session"] = self._input_in_snapshot(before, state["visible_input"])
+            self._save(state)
+            self._send_observable_sync(state, self._tool_output_events(state, kwargs))
+        updated = inject(path, kwargs, context)
+        state["state"] = "native_running"
+        self._save(state)
+        return state, updated
+
+    async def _preflight_async(self, native, path, kwargs):
+        self._guard_request(kwargs, path)
+        decision = await self._decide_async(native, path, kwargs)
+        state, context = await self._prepare_async(decision, kwargs, path) if decision["activate"] else await self._recall_async(decision, kwargs, path)
+        if state["run_id"]:
+            state["visible_input"] = user_text(path, kwargs)
+            before = await self._snapshot_async()
+            state["session_before_count"] = len(before.items) if before else 0
+            state["visible_input_in_session"] = self._input_in_snapshot(before, state["visible_input"])
+            self._save(state)
+            await self._send_observable_async(state, self._tool_output_events(state, kwargs))
+        updated = inject(path, kwargs, context)
+        state["state"] = "native_running"
+        self._save(state)
+        return state, updated
+
+    def _complete_without_run(self, state, response):
+        if state["run_id"] is not None:
+            return False
+        if terminal(response):
+            state["state"] = "completed"
+            state["result"] = {"summary": summary(response), "outcome": "completed"}
+        else:
+            state["state"] = "awaiting_continuation"
+            response_id = getattr(response, "id", None)
+            if response_id:
+                self.turns.put("response:" + str(response_id), {"turn_ref": state["turn_id"]})
+        self._save(state)
+        return True
+
     def _complete_sync(self, state, response):
+        if self._complete_without_run(state, response):
+            return
         response_id = getattr(response, "id", None)
         if not terminal(response):
             try:
@@ -697,6 +784,8 @@ class _Runtime:
         self._save(state)
 
     async def _complete_async(self, state, response):
+        if self._complete_without_run(state, response):
+            return
         response_id = getattr(response, "id", None)
         if not terminal(response):
             try:
@@ -783,39 +872,12 @@ class _Runtime:
             raise
 
     def invoke_sync(self, native, path, method, args, kwargs):
-        if self.mode == "disable":
-            self.status.rsi_capture = "disabled"
-            return method(*args, **kwargs)
         if args or base_path(path) == ("completions", "create") or (
             base_path(path)[0] == "responses" and kwargs.get("prompt") and not kwargs.get("input")
         ):
             self.status.rsi_capture = "unsupported"
             return method(*args, **kwargs)
-        self._guard_request(kwargs, path)
-        try:
-            decision = self._decide_sync(native, path, kwargs)
-        except Exception as exc:
-            if self.mode == "approval":
-                raise RSIDecisionUnavailable(str(exc)) from exc
-            self.status.rsi_capture = "decision_failed"
-            return method(*args, **kwargs)
-        if not decision["activate"]:
-            self.status.rsi_capture = "skipped"
-            return method(*args, **kwargs)
-        if self.mode == "approval":
-            raise RSIApprovalUnavailable("The configured CoSens service has no /v1/invocations approval endpoint")
-        if not decision["objective"].strip():
-            decision["objective"] = user_text(path, kwargs)
-        state, run = self._prepare_sync(decision, kwargs, path)
-        state["visible_input"] = user_text(path, kwargs)
-        before = self._snapshot_sync()
-        state["session_before_count"] = len(before.items) if before else 0
-        state["visible_input_in_session"] = self._input_in_snapshot(before, state["visible_input"])
-        self._save(state)
-        self._send_observable_sync(state, self._tool_output_events(state, kwargs))
-        updated = inject(path, kwargs, run)
-        state["state"] = "native_running"
-        self._save(state)
+        state, updated = self._preflight_sync(native, path, kwargs)
         try:
             response = method(**updated)
         except Exception as exc:
@@ -830,43 +892,16 @@ class _Runtime:
             self.status.rsi_capture = "streaming"
             return _GenerationStream(response, self, state, asynchronous=False)
         self._complete_sync(state, response)
-        self.status.rsi_capture = state["state"]
+        self.status.rsi_capture = state.get("capture") or state["state"]
         return response
 
     async def invoke_async(self, native, path, method, args, kwargs):
-        if self.mode == "disable":
-            self.status.rsi_capture = "disabled"
-            return await method(*args, **kwargs)
         if args or base_path(path) == ("completions", "create") or (
             base_path(path)[0] == "responses" and kwargs.get("prompt") and not kwargs.get("input")
         ):
             self.status.rsi_capture = "unsupported"
             return await method(*args, **kwargs)
-        self._guard_request(kwargs, path)
-        try:
-            decision = await self._decide_async(native, path, kwargs)
-        except Exception as exc:
-            if self.mode == "approval":
-                raise RSIDecisionUnavailable(str(exc)) from exc
-            self.status.rsi_capture = "decision_failed"
-            return await method(*args, **kwargs)
-        if not decision["activate"]:
-            self.status.rsi_capture = "skipped"
-            return await method(*args, **kwargs)
-        if self.mode == "approval":
-            raise RSIApprovalUnavailable("The configured CoSens service has no /v1/invocations approval endpoint")
-        if not decision["objective"].strip():
-            decision["objective"] = user_text(path, kwargs)
-        state, run = await self._prepare_async(decision, kwargs, path)
-        state["visible_input"] = user_text(path, kwargs)
-        before = await self._snapshot_async()
-        state["session_before_count"] = len(before.items) if before else 0
-        state["visible_input_in_session"] = self._input_in_snapshot(before, state["visible_input"])
-        self._save(state)
-        await self._send_observable_async(state, self._tool_output_events(state, kwargs))
-        updated = inject(path, kwargs, run)
-        state["state"] = "native_running"
-        self._save(state)
+        state, updated = await self._preflight_async(native, path, kwargs)
         try:
             response = await method(**updated)
         except Exception as exc:
@@ -881,7 +916,7 @@ class _Runtime:
             self.status.rsi_capture = "streaming"
             return _GenerationStream(response, self, state, asynchronous=True)
         await self._complete_async(state, response)
-        self.status.rsi_capture = state["state"]
+        self.status.rsi_capture = state.get("capture") or state["state"]
         return response
 
 

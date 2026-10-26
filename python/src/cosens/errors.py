@@ -17,6 +17,10 @@ class RSITransportError(RSIError):
     """The server response was unavailable or malformed."""
 
 
+class RSIRecallUnavailable(RSIError):
+    """The public standalone Recipe/Memory recall contract is not available yet."""
+
+
 class RSIDecisionUnavailable(RSIError):
     """The classifier could not make a required decision."""
 

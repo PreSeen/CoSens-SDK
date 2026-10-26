@@ -31,7 +31,7 @@ async def test_atomic_endpoints_send_the_documented_requests():
         }
         return httpx.Response(200, json=payloads[request.url.path])
 
-    async with CoSensClient(token="ordinary", admin_token="administrator", _http_transport=httpx.MockTransport(server)) as client:
+    async with CoSensClient(api_key="ordinary", _http_transport=httpx.MockTransport(server)) as client:
         artifact = await client.atoms.artifact(name="input.txt", content="hello")
         prepared = await client.atoms.prepare(objective="task", input_artifact_ids=[artifact.artifact_id], key="prepare-key")
         await client.atoms.get_run(prepared.run_id)
@@ -58,13 +58,13 @@ async def test_atomic_endpoints_send_the_documented_requests():
     assert requests[4][3] == {"artifact_ids": ["a1"]}
     assert requests[5][3] == {"data": {"summary": "done"}}
     assert requests[7][3] == {"data": {"reason": "fix"}}
-    assert requests[10][2]["authorization"] == "Bearer administrator"
+    assert requests[10][2]["authorization"] == "Bearer ordinary"
     assert all(r[2]["authorization"] == "Bearer ordinary" for r in requests[:10])
 
 
 def test_public_constructor_has_no_service_base_url():
     with pytest.raises(TypeError):
-        CoSensClient(token="ordinary", base_url="https://attacker.invalid")
+        CoSensClient(api_key="ordinary", base_url="https://attacker.invalid")
 
 
 @pytest.mark.asyncio
@@ -72,7 +72,7 @@ async def test_http_error_preserves_status_code_request_id_and_domain_code():
     def server(request):
         return httpx.Response(409, json={"error": {"code": "conflict", "message": "same key different body"}}, headers={"x-request-id": "req-1"})
 
-    async with CoSensClient(token="ordinary", _http_transport=httpx.MockTransport(server)) as client:
+    async with CoSensClient(api_key="ordinary", _http_transport=httpx.MockTransport(server)) as client:
         with pytest.raises(RSIHTTPError) as exc:
             await client.atoms.prepare(objective="task", key="same")
     assert exc.value.status_code == 409
@@ -81,10 +81,10 @@ async def test_http_error_preserves_status_code_request_id_and_domain_code():
 
 
 @pytest.mark.asyncio
-async def test_prepare_requires_stable_key_and_publish_requires_separate_admin_token():
-    client = CoSensClient(token="ordinary", _http_transport=httpx.MockTransport(lambda req: httpx.Response(200, json={})))
+async def test_prepare_requires_stable_key_and_publish_requires_reason():
+    client = CoSensClient(api_key="ordinary", _http_transport=httpx.MockTransport(lambda req: httpx.Response(200, json={})))
     with pytest.raises(ValueError):
         await client.atoms.prepare(objective="task", key="")
     with pytest.raises(ValueError):
-        await client.admin.atoms.publish("j1", expected_revision=None, reason="publish")
+        await client.admin.atoms.publish("j1", expected_revision=None, reason="")
     await client.aclose()
