@@ -313,8 +313,6 @@ class _DeferredAsyncManager:
 
 class _Runtime:
     def __init__(self, *, mode, decision_model, session, api_key, state_path, http_transport, asynchronous=False, decision_timeout=5, decision_max_output_tokens=256):
-        if mode in {"auto", "approval"} and not decision_model:
-            raise ValueError("decision_model is required for auto/approval")
         self.mode = mode
         self.asynchronous = asynchronous
         self.decision_model = decision_model
@@ -434,14 +432,21 @@ class _Runtime:
     def _no_run_decision(self, path, kwargs, capture):
         return {"activate": False, "objective": user_text(path, kwargs), "task_family": "general", "reason": capture, "capture": capture}
 
+    def _decision_model_for(self, kwargs):
+        model = self.decision_model or kwargs.get("model")
+        if not isinstance(model, str) or not model.strip():
+            raise RSIDecisionUnavailable("Set model on the native request so CoSens can use it for its decision")
+        return model
+
     def _decide_sync(self, native, path, kwargs):
         saved = self._saved_decision(kwargs, path)
         if saved:
             return saved
         if self.mode == "disable":
             return self._no_run_decision(path, kwargs, "disabled")
+        model = self._decision_model_for(kwargs)
         try:
-            decision = decide_sync(native, self.decision_model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens)
+            decision = decide_sync(native, model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens)
         except Exception as exc:
             if self.mode == "approval":
                 raise RSIDecisionUnavailable(str(exc)) from exc
@@ -454,8 +459,9 @@ class _Runtime:
             return saved
         if self.mode == "disable":
             return self._no_run_decision(path, kwargs, "disabled")
+        model = self._decision_model_for(kwargs)
         try:
-            decision = await decide_async(native, self.decision_model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens)
+            decision = await decide_async(native, model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens)
         except Exception as exc:
             if self.mode == "approval":
                 raise RSIDecisionUnavailable(str(exc)) from exc
@@ -952,7 +958,7 @@ class _ResourceProxy:
                     def async_manager(*args, **kwargs):
                         return _DeferredAsyncManager(self._root, value, path, args, kwargs, self._runtime)
                     return async_manager
-                if inspect.iscoroutinefunction(value):
+                if inspect.iscoroutinefunction(inspect.unwrap(value)):
                     @functools.wraps(value)
                     async def async_call(*args, **kwargs):
                         return await self._runtime.invoke_async(self._root, path, value, args, kwargs)

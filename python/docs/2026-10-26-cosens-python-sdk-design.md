@@ -20,6 +20,8 @@ Python 首版提供三层入口：
 
 鉴权以用户提供的 [网关鉴权指南](/Users/a1111/IdeaProjects/friday-rsi/docs/api/gateway-authentication.md) 为准，覆盖此前 `api-key` 自定义请求头及直连 Bearer 的设计：初始化传 `api_key`（只填 Friday 用户 Key 本身），所有网关业务请求携带唯一的 `Authorization: Bearer <key>`。可从 `RSI_API_KEY` 读取，兼容 `COSENS_API_KEY`；不再接收旧 `token/admin_token` 参数，也不读取后端服务令牌环境变量。后端服务令牌由网关注入，SDK 不调用内省接口。发布仍为显式管理员动作，使用用户 Key 经网关转发；当前网关文档没有承诺 RSI scope 或按账号隔离远端数据，SDK 不假定这两项已实现。
 
+密钥传输使用 HTTPS + Bearer，按 [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750#section-5.3) 由 TLS 加密请求头和正文，并保持证书校验开启。网关传输仅接受服务相对路径，拒绝绝对/外部 URL，不跟随重定向；Key 不放 URL、业务 JSON、日志或持久化状态。应用从环境变量或部署密钥管理服务读取 Key，不在源码硬编码；不自行对 Key 做 Base64、哈希或自定义加密，也不改变网关的认证协议。
+
 三个入口的共同要求是：**每个业务 turn 的首次业务模型调用前，从 RSI 服务取得本次 Recipe 和 Memory 上下文**，与是否自动提交 Run 无关。同一 turn 的工具循环、handoff 和模型续接复用这一份结果。已启动 Run 的原子流程可用 `POST /v1/runs/prepare` 返回的 `recipe/context` 加 `GET /v1/runs/{run_id}` 返回的完整 `snapshot` 完成召回；透明 `approval` 在获批后从协调器的 `prepared_context` 取得冻结上下文。**没有启动 Run 的 turn 仍需召回**，因此需要独立、公开、不会创建 Run 的 Recipe+Memory 召回接口；附件及已知旧部署未定义这样的接口，具体 HTTP 路径、鉴权、请求/响应和版本一致性须由后端补齐，SDK 不能虚构为已可调用。`/memory/internal/v1/recall` 仅召回内部 Memory 且需要内部凭证，不能冒充该公开接口。合法 `not_found`/空 Memory 可继续；召回失败不能伪装为空结果后调用业务模型。
 
 本设计不改变 RSI 算法、Memory 内部接口、模型工具执行权限、Agent 原始业务结果或服务端发布规则。`submit` 只记录结果，不能被解释为验收成功；`validated` 也不会自动发布。
@@ -39,16 +41,15 @@ Python 首版提供三层入口：
 ### 3.1 方式一：包装原始 OpenAI SDK
 
 ```python
+import os
 from openai import OpenAI
 from cosens import cosens
 
 native = OpenAI()
 client = cosens(
     native,
-    api_key="<Friday API Key>",
+    api_key=os.environ["RSI_API_KEY"],
     mode="auto",
-    decision_model="<configured-model>",
-    session=session,  # 应用提供可读取的聊天历史
 )
 
 response = client.responses.create(model="<application-model>", input="用户任务")
@@ -65,7 +66,7 @@ print(response.output_text)
 
 代理的“功能可用”不等于 Python 名义类型完全相同：包装现有实例后，`isinstance(wrapped, OpenAI)` 等身份检查可能不同。对此保留 `client.native` 访问原对象；任何通过 `native` 发起的调用都不会被 CoSens 拦截。若第三方库强制接收原始类实例，需要单独的兼容适配，不得宣称完全透明。
 
-模型判断使用传给 `cosens()` 的 `decision_model`；启用 `auto/approval` 时它是必填配置，不猜测应用调用中的 `model` 是否适合分类。判断请求经**未包装的** OpenAI 客户端发出，要求结构化结果：`activate: bool`、`objective`、`task_family`、`reason`。这是一次额外模型调用，会增加费用和首次响应延迟。首版默认只给分类器当前请求中可见的最近用户文本与工具名称，截取上限 8,000 字符；不发送文件正文、工具输出、系统/开发者指令或完整历史。可以通过显式采集策略扩大范围，但必须由应用配置且仍受授权约束。建议默认决策超时 5 秒、输出上限 256 token，均可配置。原始调用中的 `store`、`metadata`、`tools` 等不被改写为分类器的工具权限。
+基础入口只需 `native`、`api_key`、`mode`。启用 `auto/approval` 时，决策默认使用本次原生请求的 `model`，`decision_model` 仅为高级可选覆盖项。两者都未提供时在网络请求前返回明确配置错误。`session` 同样可选：不传时捕获当前调用可见的用户文本、模型回复和已适配工具事件，不能推断应用未提供的外部历史。判断请求经**未包装的** OpenAI 客户端的 Responses API 发出，要求该模型/服务支持结构化结果：`activate: bool`、`objective`、`task_family`、`reason`；不支持时按分类失败处理。这是一次额外模型调用，会增加费用和首次响应延迟。首版默认只给分类器当前请求中可见的最近用户文本与工具名称，截取上限 8,000 字符；不发送文件正文、工具输出、系统/开发者指令或完整历史。可以通过显式采集策略扩大范围，但必须由应用配置且仍受授权约束。建议默认决策超时 5 秒、输出上限 256 token，均可配置。原始调用中的 `store`、`metadata`、`tools` 等不被改写为分类器的工具权限。
 
 透明入口每个新 turn 均须在首次业务 `responses.create` 等模型请求之前取得 Recipe/Memory。`mode="disable"` 不调用分类器、不自动创建或提交 Run，但仍调用待定义的公开独立召回接口。`auto` 由分类器先判断是否自动提交 Run；当 `activate=false` 时仍独立召回，然后原生请求执行一次，不创建 RSI Run，消息游标不前进；当 `activate=true` 时读取 Session 中**尚未收到远端确认**的历史消息，以一次 `atoms.prepare` 和 `atoms.get_run` 取得本 turn 冻结的 Recipe/Memory，再增量上报，已确认的历史消息不再上传。两条路径都在原有 `instructions/input` 上附加有来源的片段，不删除或重排原指令、工具与内容。召回失败或请求形态无法安全注入时，必须在业务模型调用前报明确错误。分类失败、超时或无法解析时，`auto` 不自动提交 Run、游标不前进，但仍独立召回后执行原生请求，并通过本地状态和可选事件回调暴露 `decision_failed`；`approval` 则在原生执行前报 `RSIDecisionUnavailable`。这里的分类器属于前置决策模型；召回前置约束针对业务模型调用。
 

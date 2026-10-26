@@ -10,6 +10,8 @@ from .models import result
 
 
 def _decode(response):
+    if 300 <= response.status_code < 400:
+        raise RSIHTTPError(response.status_code, "CoSens gateway redirects are not followed", request_id=response.headers.get("x-request-id"))
     try:
         payload = response.json()
     except (json.JSONDecodeError, ValueError) as exc:
@@ -40,12 +42,20 @@ def _headers(api_key, key):
     return headers
 
 
+def _service_path(path):
+    url = httpx.URL(path)
+    if url.scheme or url.host or not path.startswith("/") or path.startswith("//"):
+        raise ValueError("CoSens requires a service-relative path; absolute or external URLs are not allowed")
+    return path
+
+
 class AsyncTransport:
     def __init__(self, *, api_key=None, transport=None, timeout=30.0):
         self.api_key = api_key
-        self.client = httpx.AsyncClient(base_url=SERVICE_URL, timeout=timeout, transport=transport)
+        self.client = httpx.AsyncClient(base_url=SERVICE_URL, timeout=timeout, transport=transport, verify=True, follow_redirects=False)
 
     async def request(self, method, path, *, body=None, key=None):
+        path = _service_path(path)
         headers = _headers(self.api_key, key)
         try:
             response = await self.client.request(method, path, json=body, headers=headers)
@@ -60,9 +70,10 @@ class AsyncTransport:
 class SyncTransport:
     def __init__(self, *, api_key=None, transport=None, timeout=30.0):
         self.api_key = api_key
-        self.client = httpx.Client(base_url=SERVICE_URL, timeout=timeout, transport=transport)
+        self.client = httpx.Client(base_url=SERVICE_URL, timeout=timeout, transport=transport, verify=True, follow_redirects=False)
 
     def request(self, method, path, *, body=None, key=None):
+        path = _service_path(path)
         headers = _headers(self.api_key, key)
         try:
             response = self.client.request(method, path, json=body, headers=headers)

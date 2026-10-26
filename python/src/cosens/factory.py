@@ -4,7 +4,7 @@ from .agents_adapter import CoSensAgentRunner
 from .openai_proxy import CoSensOpenAIProxy, _Runtime
 
 
-def cosens(native, *, mode="auto", decision_model=None, decision_timeout=5, decision_max_output_tokens=256, session=None, api_key=None, state_path=None, _http_transport=None, _runner=None):
+def cosens(native, *, api_key=None, mode="auto", decision_model=None, decision_timeout=5, decision_max_output_tokens=256, session=None, state_path=None, _http_transport=None, _runner=None):
     if mode not in {"auto", "approval", "disable"}:
         raise ValueError("mode must be auto, approval, or disable")
     if hasattr(native, "cosens") and hasattr(native, "native"):

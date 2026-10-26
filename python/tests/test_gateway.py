@@ -137,3 +137,48 @@ def test_rewrapping_agent_cannot_silently_ignore_a_different_gateway_identity(tm
             cosens(client, mode="disable", api_key="identity-b")
     finally:
         asyncio.run(client.aclose())
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.asyncio
+async def test_gateway_rejects_redirect_without_forwarding_key(asynchronous):
+    requests = []
+    def server(request):
+        requests.append(request)
+        return httpx.Response(307, headers={"location": "https://other.example/collect"}, json={"status": "ready"})
+    transport = (AsyncTransport if asynchronous else SyncTransport)(api_key="gateway-secret", transport=httpx.MockTransport(server))
+    try:
+        with pytest.raises(RSIHTTPError) as exc:
+            if asynchronous:
+                await transport.request("GET", "/v1/runs/r1")
+            else:
+                transport.request("GET", "/v1/runs/r1")
+        assert exc.value.status_code == 307
+        assert len(requests) == 1
+        assert requests[0].url.scheme == "https"
+        assert requests[0].url.host == "friday-rsi-cn.stardust-ai.com"
+    finally:
+        if asynchronous:
+            await transport.aclose()
+        else:
+            transport.close()
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("path", ["http://friday-rsi-cn.stardust-ai.com/api/v1/runs/r1", "https://other.example/collect", "//other.example/collect"])
+@pytest.mark.asyncio
+async def test_gateway_never_sends_key_to_absolute_or_external_paths(asynchronous, path):
+    requests = []
+    transport = (AsyncTransport if asynchronous else SyncTransport)(api_key="gateway-secret", transport=httpx.MockTransport(lambda r: (requests.append(r), httpx.Response(200, json={}))[1]))
+    try:
+        with pytest.raises(ValueError, match="path"):
+            if asynchronous:
+                await transport.request("GET", path)
+            else:
+                transport.request("GET", path)
+        assert requests == []
+    finally:
+        if asynchronous:
+            await transport.aclose()
+        else:
+            transport.close()

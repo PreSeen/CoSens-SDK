@@ -14,6 +14,8 @@ pip install './python[agents]'
 
 所有业务接口由内部地址 `https://friday-rsi-cn.stardust-ai.com/api` 转发。网关进程健康检查为域名根路径 `/healthz`，不属于 `/api` 业务前缀。鉴权依据见 [网关调用指南](/Users/a1111/IdeaProjects/friday-rsi/docs/api/gateway-authentication.md)。
 
+密钥采用 **HTTPS + Bearer**：Key 在应用进程中作为字符串使用，网络传输中的请求头和正文由 TLS 加密，SDK 保持证书验证开启。Key 只放在 Authorization 头，不放 URL 或业务 JSON；网关传输拒绝绝对/外部 URL，不跟随重定向。此方式遵循 [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750#section-5.3) 的 Bearer 传输要求，不对 Key 另做 Base64、哈希或自定义加密。示例从环境变量读取，生产环境可通过部署平台的密钥管理功能注入；不要将真实 Key 写入源码或日志。SDK 不自动加载 `.env` 文件，仓库已忽略 `.env` 与 `.env.*`（示例文件除外）。
+
 SDK 持久化游标与恢复记录默认写在 `~/.cosens/state.sqlite3`，也可传 `state_path` 指定本地文件。记录按服务及调用凭证摘要隔离，旧直连服务的 Run 和 ACK 不会自动迁移至网关。
 
 **当前实现状态**：网关传输、显式 Run、透明 `auto` 命中时的原子流程，以及每个 turn 的冻结上下文复用已实现并在本地测试。服务端尚未部署，未进行真实业务联调。独立召回的 HTTP 路径与 Schema 仍未提供；`atoms.recall_context(query=...)` 当前明确抛出 `RSIRecallUnavailable`，不会猜测接口。透明 `disable`、`auto` 未命中或分类失败均进入独立召回，因此当前也会在业务模型调用前报该错误。完整的“只召回、不发 Run”功能须在接口契约提供后补齐 HTTP 适配；本地适配测试不代表真实服务已可调用。
@@ -26,7 +28,7 @@ from openai import OpenAI
 from cosens import cosens
 
 native = OpenAI()
-client = cosens(native, api_key=os.environ["RSI_API_KEY"], mode="auto", decision_model="your-decision-model", session=session)
+client = cosens(native, api_key=os.environ["RSI_API_KEY"], mode="auto")
 response = client.responses.create(model="your-app-model", input="用户任务")
 print(response.output_text)
 
@@ -38,7 +40,9 @@ client.close()
 
 `mode` 只控制自动 Run：`auto` 由独立模型决定是否发送，`disable` 关闭自动发送。两者都要求每个 turn 首次业务模型调用前召回 Recipe/Memory，工具循环复用同一份结果；召回不推进消息上报游标。透明 `approval` 在协调器契约未核验时明确报错。非对话资源动态透传给原始 client；`client.native` 可取得原对象，直接从 `native` 发出的调用不会被 CoSens 捕获。原生 `with_options()`/`copy()` 返回仍带 CoSens 包装的 client。无法安全归一化的生成请求保持原生调用，并设置 `client.cosens.rsi_capture="unsupported"`。
 
-可用 `client.cosens.scope(session_id="...", turn_id="...")` 为一个逻辑 turn 指定边界。只有传入可读取的 Session，SDK 才能补发历史消息；Session 需提供稳定的 `session_id` 和 `get_items()`。建议应用在模型调用前将本次用户消息写入 Session，并保持稳定消息 ID；若调用后才以新 ID 写入此前由 SDK 合成的可见事件，当前通用 Session 协议无法证明两者是同一消息。同步 OpenAI client 与异步 `AsyncOpenAI` 均受支持。
+基础接入只需 `native`、`api_key`、`mode`。决策默认复用本次原生请求的 `model`，因此不额外指定决策模型；它会通过原客户端的 Responses API 发起一次结构化判断请求，增加一次模型调用费用和延迟。该模型/服务须支持 Responses 结构化输出；分类失败仍遵循上述独立召回规则。`decision_model` 保留为高级可选覆盖项。未指定决策模型且请求中也无 `model` 时，SDK 在网络请求前报明确配置错误。
+
+`session` 也是高级可选项：不传时仍捕获当前请求中可见的用户文本、模型回复和已适配的工具事件；但不能读取应用未传给 SDK 的历史。可用 `client.cosens.scope(session_id="...", turn_id="...")` 为一个逻辑 turn 指定边界。只有传入可读取的 Session，SDK 才能补发外部历史消息；Session 需提供稳定的 `session_id` 和 `get_items()`。建议应用在模型调用前将本次用户消息写入 Session，并保持稳定消息 ID；若调用后才以新 ID 写入此前由 SDK 合成的可见事件，当前通用 Session 协议无法证明两者是同一消息。同步 OpenAI client 与异步 `AsyncOpenAI` 均受支持。
 
 ## 方式二：显式执行 Agent
 
@@ -48,8 +52,8 @@ from agents import Agent
 from cosens import cosens
 
 agent = Agent(name="assistant", model="your-app-model", tools=tools)
-client = cosens(agent, api_key=os.environ["RSI_API_KEY"], mode="disable", session=session)
-result = await client.run(agent, "用户任务", session=session)
+client = cosens(agent, api_key=os.environ["RSI_API_KEY"], mode="disable")
+result = await client.run(agent, "用户任务")
 print(result.final_output)
 print(client.cosens.get_turn(client.cosens.last_turn_id))
 await client.aclose()
