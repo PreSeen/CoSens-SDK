@@ -1,0 +1,163 @@
+import json
+from types import SimpleNamespace
+
+import httpx
+import pytest
+from agents import Agent
+
+from cosens import cosens
+from cosens.errors import RSIRecoveryRequired, RSITransportError
+
+
+class Session:
+    session_id = "s1"
+
+    def __init__(self):
+        self.items = [{"id": "old", "role": "user", "content": "Earlier request"}]
+
+    async def get_items(self):
+        return self.items
+
+
+class Runner:
+    calls = 0
+    seen_agent = None
+
+    @classmethod
+    async def run(cls, agent, user_input, *, session=None, **options):
+        cls.calls += 1
+        cls.seen_agent = agent
+        session.items.extend([
+            {"id": "new-user", "role": "user", "content": user_input},
+            {"id": "new-assistant", "role": "assistant", "content": "done"},
+        ])
+        return SimpleNamespace(final_output="done")
+
+
+@pytest.mark.asyncio
+async def test_explicit_run_composes_atoms_around_one_native_runner_call(tmp_path):
+    calls = []
+
+    def server(request):
+        body = json.loads(request.content) if request.content else None
+        calls.append((request.url.path, body))
+        path = request.url.path
+        if path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {"summary": "Use checks"}, "context": {}})
+        if path == "/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {"wiki": "Source fact"}})
+        if path.endswith("/session-events"):
+            return httpx.Response(200, json={"durable_ack": [e["id"] for e in body["events"]]})
+        if path.endswith("/submit"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "completed", "evaluation": "inconclusive", "accepted": None})
+        raise AssertionError(path)
+
+    Runner.calls = 0
+    agent = Agent(name="assistant", instructions="Original instructions")
+    session = Session()
+    client = cosens(agent, mode="disable", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
+    result = await client.run(agent, "Current request", session=session)
+    assert result.final_output == "done"
+    assert Runner.calls == 1
+    assert agent.instructions == "Original instructions"
+    assert Runner.seen_agent is not agent
+    assert "Source fact" in Runner.seen_agent.instructions
+    assert [path for path, _ in calls] == [
+        "/v1/runs/prepare", "/v1/runs/r1", "/v1/runs/r1/session-events",
+        "/v1/runs/r1/session-events", "/v1/runs/r1/submit",
+    ]
+    assert [e["id"] for e in calls[2][1]["events"]] == ["chat:old"]
+    assert [e["id"] for e in calls[3][1]["events"]] == ["chat:new-user", "chat:new-assistant"]
+    assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "completed"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_pre_execution_event_failure_never_runs_agent_or_advances_cursor(tmp_path):
+    calls = []
+
+    def server(request):
+        calls.append(request.url.path)
+        if request.url.path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if request.url.path == "/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        return httpx.Response(503, json={"error": {"code": "unavailable", "message": "later"}})
+
+    Runner.calls = 0
+    session = Session()
+    agent = Agent(name="assistant")
+    client = cosens(agent, mode="disable", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
+    with pytest.raises(Exception):
+        await client.run(agent, "Current request", session=session)
+    assert Runner.calls == 0
+    assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "pre_execution_pending"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_execution_submit_failure_keeps_native_result_and_blocks_reexecution(tmp_path):
+    def server(request):
+        path = request.url.path
+        if path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        if path.endswith("/session-events"):
+            body = json.loads(request.content)
+            return httpx.Response(200, json={"durable_ack": [e["id"] for e in body["events"]]})
+        if path.endswith("/submit"):
+            return httpx.Response(503, json={"error": {"code": "unavailable", "message": "later"}})
+        raise AssertionError(path)
+
+    Runner.calls = 0
+    session = Session()
+    agent = Agent(name="assistant")
+    client = cosens(agent, mode="disable", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
+    result = await client.run(agent, "Current request", session=session)
+    assert result.final_output == "done"
+    assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "completion_pending"
+    with pytest.raises(RSIRecoveryRequired):
+        await client.run(agent, "Current request", session=session)
+    assert Runner.calls == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_streamed_run_submits_only_after_native_stream_finishes(tmp_path):
+    calls = []
+
+    def server(request):
+        path = request.url.path
+        calls.append(path)
+        if path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        if path.endswith("/session-events"):
+            body = json.loads(request.content)
+            return httpx.Response(200, json={"durable_ack": [e["id"] for e in body["events"]]})
+        if path.endswith("/submit"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "completed"})
+        raise AssertionError(path)
+
+    class Stream:
+        final_output = "streamed answer"
+        is_complete = True
+
+        async def stream_events(self):
+            yield "chunk"
+
+    class StreamingRunner:
+        @staticmethod
+        def run_streamed(agent, user_input, *, session=None, **options):
+            return Stream()
+
+    session = Session()
+    agent = Agent(name="assistant")
+    client = cosens(agent, mode="disable", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=StreamingRunner)
+    stream = await client.run_streamed(agent, "Current request", session=session)
+    assert "/v1/runs/r1/submit" not in calls
+    assert [event async for event in stream.stream_events()] == ["chunk"]
+    assert calls[-1] == "/v1/runs/r1/submit"
+    await client.aclose()
