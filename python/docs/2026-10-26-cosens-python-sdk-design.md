@@ -10,7 +10,7 @@ CoSens 在用户原有的 OpenAI 调用旁收集被授权的对话与执行证�
 
 Python 首版提供三层入口：
 
-1. **透明调用**：`cosens(OpenAI(), mode="auto")` 返回覆盖原始 OpenAI client **全部公开功能**的兼容代理；模型对话请求可触发 CoSens，应用不显式调用 CoSens 的 `run`。`auto` 由模型判断该次任务是否需要提交 RSI Run。
+1. **透明调用**：`cosens(OpenAI(), mode="auto")` 返回覆盖原始 OpenAI client **全部公开功能**的兼容代理；每个业务 turn 都在模型调用前召回 Recipe/Memory，应用不显式调用 CoSens 的 `run`。`auto` 由模型判断是否自动提交 RSI Run；`disable` 关闭这一自动提交，不关闭召回。
 2. **显式运行**：`cosens(agent, mode="disable").run(agent, user_input, session=...)`。`disable` 在这个入口关闭隐式触发判断；显式 `run` 本身是启动 RSI 的指令。SDK 在这一次 `run` 中直接拼接参考契约第 4.3 节的原子接口，不调用协调器。
 3. **原子调用**：`CoSensClient(...).atoms.*` 暴露参考契约第 6 节的九个原子操作，并为旧直连部署的 `session_events` 留出能力；应用自行决定步骤与执行时机。
 
@@ -18,7 +18,7 @@ Python 首版提供三层入口：
 
 三个入口均不向应用暴露 CoSens 服务的 `base_url` 参数。**目标网关前缀**由 SDK 内部传输层配置为 `https://friday-rsi-cn.stardust-ai.com/api`；附件中的服务端路径原样拼在此前缀后，例如 `POST /v1/runs/prepare` 发往 `https://friday-rsi-cn.stardust-ai.com/api/v1/runs/prepare`。网关转发 `/api` 后面的路径，不额外添加或删除 `/v1`、`/internal`、`/health`。原生 OpenAI client 的 `base_url` 仍只控制模型服务，与 CoSens 网关互不影响。**当前源码尚使用旧直连地址；本轮不修改实现，也不宣称已验证新网关。**
 
-三个入口在**实际启动 RSI 的 turn**中，共同要求：**首次业务模型调用前，必须从 RSI 服务取得本次冻结的 Recipe 和 Memory 上下文**。原子流程通过 `POST /v1/runs/prepare` 取得 `recipe/context`，再通过 `GET /v1/runs/{run_id}` 取得完整 `snapshot`；这两个请求共同构成业务侧的“召回”。同一 turn 的工具循环、handoff 和模型续接复用这一份冻结结果，不再次 prepare 或重新检索。若 Recipe 为 `not_found` 或 Memory 为空，保留真实空结果并可继续；若准备/读取失败，不能把失败伪装成空召回并继续发业务模型请求。透明 `auto` 的触发分类器属于前置决策模型，其调用先于 RSI 准备；未命中与透明 `disable` 不启动 RSI，因此不召回。透明 `approval` 若后端支持，则从获批后的协调器 `prepared_context` 取得同样的冻结上下文。`/memory/internal/v1/recall` 属于服务内部协议，三种 SDK 入口都不直接调用。
+三个入口的共同要求是：**每个业务 turn 的首次业务模型调用前，从 RSI 服务取得本次 Recipe 和 Memory 上下文**，与是否自动提交 Run 无关。同一 turn 的工具循环、handoff 和模型续接复用这一份结果。已启动 Run 的原子流程可用 `POST /v1/runs/prepare` 返回的 `recipe/context` 加 `GET /v1/runs/{run_id}` 返回的完整 `snapshot` 完成召回；透明 `approval` 在获批后从协调器的 `prepared_context` 取得冻结上下文。**没有启动 Run 的 turn 仍需召回**，因此需要独立、公开、不会创建 Run 的 Recipe+Memory 召回接口；附件及已知旧部署未定义这样的接口，具体 HTTP 路径、鉴权、请求/响应和版本一致性须由后端补齐，SDK 不能虚构为已可调用。`/memory/internal/v1/recall` 仅召回内部 Memory 且需要内部凭证，不能冒充该公开接口。合法 `not_found`/空 Memory 可继续；召回失败不能伪装为空结果后调用业务模型。
 
 本设计不改变 RSI 算法、Memory 内部接口、模型工具执行权限、Agent 原始业务结果或服务端发布规则。`submit` 只记录结果，不能被解释为验收成功；`validated` 也不会自动发布。
 
@@ -64,11 +64,11 @@ print(response.output_text)
 
 模型判断使用传给 `cosens()` 的 `decision_model`；启用 `auto/approval` 时它是必填配置，不猜测应用调用中的 `model` 是否适合分类。判断请求经**未包装的** OpenAI 客户端发出，要求结构化结果：`activate: bool`、`objective`、`task_family`、`reason`。这是一次额外模型调用，会增加费用和首次响应延迟。首版默认只给分类器当前请求中可见的最近用户文本与工具名称，截取上限 8,000 字符；不发送文件正文、工具输出、系统/开发者指令或完整历史。可以通过显式采集策略扩大范围，但必须由应用配置且仍受授权约束。建议默认决策超时 5 秒、输出上限 256 token，均可配置。原始调用中的 `store`、`metadata`、`tools` 等不被改写为分类器的工具权限。
 
-当 `activate=false`，原生 `responses.create` 执行一次，不请求 CoSens，不创建 RSI Run，消息游标不前进。当 `activate=true`，SDK 读取该 Session 中**尚未收到远端确认**的历史消息，先对本 turn 执行一次 `atoms.prepare` 和 `atoms.get_run`，取得完整冻结的 Recipe/Memory，再增量上报消息；已确认的历史消息不再上传。**这些步骤完成后才可发出首次业务 `responses.create` 等模型请求**。在原有 `instructions/input` 上附加有来源的 Recipe/Memory 片段，不得删除或重排原请求中的指令、工具与内容。若准备或读取失败、请求形态无法安全注入，必须在原生调用前报明确错误，而不是悄悄省略召回。分类失败、超时或无法解析时，`auto` **不向 CoSens 提交**、原生调用继续，消息游标不前进，并通过本地状态和可选事件回调暴露 `decision_failed`；`approval` 则在原生执行前报 `RSIDecisionUnavailable`。透明入口的 `disable` 不调用分类器，也不请求 CoSens。
+透明入口每个新 turn 均须在首次业务 `responses.create` 等模型请求之前取得 Recipe/Memory。`mode="disable"` 不调用分类器、不自动创建或提交 Run，但仍调用待定义的公开独立召回接口。`auto` 由分类器先判断是否自动提交 Run；当 `activate=false` 时仍独立召回，然后原生请求执行一次，不创建 RSI Run，消息游标不前进；当 `activate=true` 时读取 Session 中**尚未收到远端确认**的历史消息，以一次 `atoms.prepare` 和 `atoms.get_run` 取得本 turn 冻结的 Recipe/Memory，再增量上报，已确认的历史消息不再上传。两条路径都在原有 `instructions/input` 上附加有来源的片段，不删除或重排原指令、工具与内容。召回失败或请求形态无法安全注入时，必须在业务模型调用前报明确错误。分类失败、超时或无法解析时，`auto` 不自动提交 Run、游标不前进，但仍独立召回后执行原生请求，并通过本地状态和可选事件回调暴露 `decision_failed`；`approval` 则在原生执行前报 `RSIDecisionUnavailable`。这里的分类器属于前置决策模型；召回前置约束针对业务模型调用。
 
-一条 `responses.create` 不等于完整 Agent turn。首版以“已收到最终 assistant 消息、没有待处理的 function call，且响应完整结束”为自动终态；该响应之后的用户新输入开始新 turn。若应用用 `previous_response_id` 或 `conversation` 续接模型与工具循环，代理用服务返回的响应 ID 和原生引用关联同一逻辑 turn。关联到已有 turn 时，后续模型请求**复用已冻结的 Recipe/Memory**，不重新调用 prepare/get_run；新用户输入形成新 turn 时才重新召回。无法可靠关联时，不推断工具已执行或任务已完成；调用方可用可选 `client.cosens.scope(session_id=..., turn_id=...)` 显式给出边界。此 scope 不改变原生请求参数。仅有 function call、未见工具结果的响应保持 `awaiting_continuation`；若后续始终没有可关联调用，过期后标为 `incomplete`，不 submit。受限于原始 SDK 的可见性，应用在代理外执行的工具副作用、外部 Session 全量历史和人工审批，方式一不能保证自动捕获；需要完整轨迹时使用方式二。只有真正使用被包装 client 的请求会被拦截，其他 OpenAI client 不受影响。
+一条 `responses.create` 不等于完整 Agent turn。首版以“已收到最终 assistant 消息、没有待处理的 function call，且响应完整结束”为自动终态；该响应之后的用户新输入开始新 turn。若应用用 `previous_response_id` 或 `conversation` 续接模型与工具循环，代理用服务返回的响应 ID 和原生引用关联同一逻辑 turn。关联到已有 turn 时，后续模型请求**复用已取得的 Recipe/Memory**，不重复独立召回或 prepare/get_run；新用户输入形成新 turn 时才重新召回。无法可靠关联时，不推断工具已执行或任务已完成；调用方可用可选 `client.cosens.scope(session_id=..., turn_id=...)` 显式给出边界。此 scope 不改变原生请求参数。仅有 function call、未见工具结果的响应保持 `awaiting_continuation`；若后续始终没有可关联调用，过期后标为 `incomplete`，不 submit。受限于原始 SDK 的可见性，应用在代理外执行的工具副作用、外部 Session 全量历史和人工审批，方式一不能保证自动捕获；需要完整轨迹时使用方式二。只有真正使用被包装 client 的请求会被拦截，其他 OpenAI client 不受影响。
 
-所有原生流式调用保持事件次序和迭代/上下文管理器语义。对 `responses.create(stream=True)`，分类和准备发生在打开原生流之前；收到 `response.completed` 且对应逻辑 turn 已终结后才提交结果。其他生成流采用各自的真实完成事件，不拿首个 chunk 当终态。流取消、断线或只有工具请求时不伪造完成。异步版本遵循相同规则；不得把同步调用暗中切换成异步调用。原生异常原样传播，已产生的 RSI 资源与恢复信息保留。
+所有原生流式调用保持事件次序和迭代/上下文管理器语义。对 `responses.create(stream=True)`，本 turn 的召回在打开原生流之前完成；仅 `auto/approval` 运行触发分类，且仅需要创建 Run 的分支运行相应准备流程。收到 `response.completed` 且对应逻辑 turn 已终结后，才对已创建的 Run 提交结果。其他生成流采用各自的真实完成事件，不拿首个 chunk 当终态。流取消、断线或只有工具请求时不伪造完成。异步版本遵循相同规则；不得把同步调用暗中切换成异步调用。原生异常原样传播，已产生的 RSI 资源与恢复信息保留。
 
 ### 3.2 方式二：显式 `run` 包装 Agents SDK
 
@@ -110,6 +110,7 @@ await rsi.atoms.submit(run.run_id, data={"summary": output}, key="stable-submit-
 
 | SDK 方法 | 服务端接口 | 必要条件 |
 | --- | --- | --- |
+| `atoms.recall_context`（拟议） | **待后端定义公开接口** | 不创建 Run；返回有来源的 Recipe/Memory 与版本/快照标识，供不提交 Run 的 turn 在业务模型前使用；当前不能调用 |
 | `atoms.artifact` | `POST /v1/artifacts` | 文本材料；保存服务返回的 `artifact_id` 与 `content_hash` |
 | `atoms.prepare` | `POST /v1/runs/prepare` | 稳定 `Idempotency-Key`；只准备，不执行 Agent |
 | `atoms.get_run` | `GET /v1/runs/{run_id}` | 读取冻结的 Recipe/Memory 快照及哈希 |
@@ -121,18 +122,18 @@ await rsi.atoms.submit(run.run_id, data={"summary": output}, key="stable-submit-
 | `atoms.resume_improvement` | `POST /v1/improvements/{job_id}/resume` | 仅等待条件已补齐的 awaiting Job |
 | `admin.atoms.publish` | `POST /internal/admin/v1/improvements/{job_id}/publish` | 独立管理员 token、validated、`expected_revision` 与原因 |
 
-方式三不自动做模型触发判断、不自动运行 Agent、不自动发布。**原生调用方负责在每个新 turn 的首次业务模型调用前，按顺序调用一次 `atoms.prepare` 和 `atoms.get_run`，检查状态并注入返回的 Recipe/Memory；同一 turn 后续模型/工具循环复用该快照。**单独调用 `CoSensClient` 的构造器或其他原子方法，不会自动拦截应用的 OpenAI 调用。原子客户端可提供有界 `wait_improvement()` 辅助函数，但它只轮询已有 Job。`session_events` 是旧直连部署 OpenAPI 列出的第十个原子接口，供两种高层入口按消息游标上报；附件第 6 节的九接口清单反映另一版服务，不能用它推断新网关是否提供该接口。旧部署 OpenAPI 没把该接口的请求/响应字段展开，下文的事件格式和 ACK 规则来自仓库历史提交 `caaece4` 的同版服务源码与 `docs/RSI_WORKFLOW_API.md`，尚需用有权限的测试环境确认网关行为。
+方式三不自动做模型触发判断、不自动运行 Agent、不自动发布。**原生调用方负责在每个新 turn 的首次业务模型调用前召回 Recipe/Memory：若本 turn 明确创建 Run，按顺序调用一次 `atoms.prepare` 和 `atoms.get_run`；若只使用上下文、不创建 Run，则调用拟议的 `atoms.recall_context`。**两条路径的后续模型/工具循环都复用本 turn 的结果。`atoms.recall_context` 仅是 SDK 目标方法名，HTTP 契约尚未提供，不能宣称可用。单独调用 `CoSensClient` 的构造器或其他原子方法，不会自动拦截应用的 OpenAI 调用。原子客户端可提供有界 `wait_improvement()` 辅助函数，但它只轮询已有 Job。`session_events` 是旧直连部署 OpenAPI 列出的第十个原子接口，供两种高层入口按消息游标上报；附件第 6 节的九接口清单反映另一版服务，不能用它推断新网关是否提供该接口。旧部署 OpenAPI 没把该接口的请求/响应字段展开，下文的事件格式和 ACK 规则来自仓库历史提交 `caaece4` 的同版服务源码与 `docs/RSI_WORKFLOW_API.md`，尚需用有权限的测试环境确认网关行为。
 
 ## 4. 三种模式的统一语义
 
 | 入口与 `mode` | 决策与 CoSens 行为 | 原生执行 |
 | --- | --- | --- |
-| 透明调用，`auto` | prompt 判断是否激活；命中才上报 Session 增量并发起原子 RSI，未命中不发 CoSens 请求且游标不前进 | 照常执行一次 |
-| 透明调用，`approval` | prompt 判断是否激活；命中后走服务端审批流程 | RSI 准备获批之前暂停 |
-| 透明调用，`disable` | 不运行分类器、不提交 RSI 请求、不推进游标 | 原样执行一次 |
+| 透明调用，`auto` | 每个新 turn 均召回；prompt 判断是否自动提交 Run，命中才上报 Session 增量并发起原子 RSI，未命中只召回且游标不前进 | 注入召回内容后执行一次 |
+| 透明调用，`approval` | 每个新 turn 均须召回；命中需提交 Run 时走服务端审批流程 | RSI 准备获批之前暂停，获批后注入上下文执行 |
+| 透明调用，`disable` | 每个新 turn 均独立召回；不运行分类器、不自动创建/提交 Run、不推进上报游标 | 注入召回内容后执行一次 |
 | 显式 `client.run(...)`，`disable` | 跳过 prompt 判断；显式调用本身强制执行原子流程，并增量上报 Session | 本地 Runner 执行一次 |
 
-`mode` 控制隐式触发策略；显式 `run` 是更高优先级的启动指令。在显式 `run` 中，`mode="disable"` 表示“自动触发已关闭”，但用户明确调用 `run` 的意图仍要执行 RSI；这条优先级规则覆盖附件中“disable 不请求 RSI”的旧定义。`auto` 的模型判断是透明入口的前置门槛。若线上服务要求二次策略判断或审批，SDK 必须检查服务实际状态，不能凭本地决策越权。模型判断不是权限授权。
+`mode` **仅控制是否自动判断、创建和上报 RSI Run，不控制 Recipe/Memory 召回**；显式 `run` 是更高优先级的启动指令。在显式 `run` 中，`mode="disable"` 表示“自动触发已关闭”，但用户明确调用 `run` 仍执行 RSI 原子流程。`auto` 的模型判断是透明入口自动提交 Run 的前置门槛，不是召回门槛。若服务要求二次策略判断或审批，SDK 必须检查服务实际状态，不能凭本地决策越权。模型判断不是权限授权。
 
 附件目标版的审批模式使用 `POST /v1/invocations`（`phase=prepare`、`mode=approval`），收到 `awaiting_approval` 后保存 `invocation_id`、`approval_id`、`context_hash`、`plan_hash`、`resume_token`，在原生执行之前抛 `RSIApprovalRequired`。管理员决定后，原调用方用同一 invocation 的 resume 继续，从获批后的 `prepared_context` 读取冻结 Recipe/Memory，再启动首次业务模型调用；不重新分类或新建 Run。旧直连地址尚无这组接口，**新网关是否部署必须单独核验**；能力缺失时 `approval` 在执行前报“服务能力不支持”，不能假装已审批。`auto` 收到远端要求审批的状态也要停止。若部署策略预先声明强制审批，分类失败不能退化成原生执行。
 
@@ -151,7 +152,9 @@ await rsi.atoms.submit(run.run_id, data={"summary": output}, key="stable-submit-
 
 ### 4.1 原生执行时每个远端接口的调用时机
 
-下表只列服务端路径；目标完整 URL = `https://friday-rsi-cn.stardust-ai.com/api` + 表中路径，应用不传 CoSens 服务地址。例如 `GET /v1/runs/{run_id}` 对应 `GET https://friday-rsi-cn.stardust-ai.com/api/v1/runs/{run_id}`，`POST /internal/admin/v1/improvements/{job_id}/publish` 对应 `POST https://friday-rsi-cn.stardust-ai.com/api/internal/admin/v1/improvements/{job_id}/publish`，健康检查对应 `/api/health/live`。附件的其他路径及查询参数也按相同规则转发，不能重复拼出 `/api/api/...`。**显式 `run(mode="disable")` 从第 1 步直接开始；透明 `auto` 先做本地 prompt 判断，只有命中才进入第 1 步；方式三由应用显式调用第 1–3 步。**步骤按事件触发，没有后台定时上传全部历史。普通业务请求使用普通 RSI Bearer；实际参数与大小上限以附件第 8 节及网关部署版本为准。
+下表描述**创建 Run 的原子流程**，只列服务端路径；目标完整 URL = `https://friday-rsi-cn.stardust-ai.com/api` + 表中路径，应用不传 CoSens 服务地址。例如 `GET /v1/runs/{run_id}` 对应 `GET https://friday-rsi-cn.stardust-ai.com/api/v1/runs/{run_id}`，`POST /internal/admin/v1/improvements/{job_id}/publish` 对应 `POST https://friday-rsi-cn.stardust-ai.com/api/internal/admin/v1/improvements/{job_id}/publish`，健康检查对应 `/api/health/live`。附件的其他路径及查询参数也按相同规则转发，不能重复拼出 `/api/api/...`。**显式 `run(mode="disable")` 从第 1 步开始；透明 `auto` 只有判断命中才进入第 1 步；方式三在应用选择创建 Run 时显式调用第 1–3 步。**步骤按事件触发，没有后台定时上传全部历史。普通业务请求使用普通 RSI Bearer；实际参数与大小上限以附件第 8 节及网关部署版本为准。
+
+**不创建 Run 的流程**：透明 `disable`、透明 `auto` 未命中/判断失败，以及方式三只需上下文时，每个新 turn 调用一次待定义的公开 Recipe+Memory 召回接口 → 检查状态、记录来源/版本并注入业务请求 → 调用首次业务模型 → 工具循环复用本次上下文。此流程不调用 `prepare/get_run/session-events/submit`，也不推进消息上报游标。独立召回接口目前缺失，故该流程是**待后端提供接口后才能实现的目标行为**，不能以跳过召回或暗中创建 Run 代替。透明 `approval` 的未命中分支同样走独立召回；命中分支按协调器审批并在业务模型前读取获批上下文。
 
 | 顺序/时机 | 远端调用 | 发什么、保存什么 |
 | --- | --- | --- |
@@ -171,7 +174,7 @@ await rsi.atoms.submit(run.run_id, data={"summary": output}, key="stable-submit-
 | 13. 有缺失的真实初始文件，且 Run 尚可补充时 | `POST /v1/runs/{run_id}/initial-inputs` | 旧直连部署有此接口，网关待核验；上传 Artifact 后提供 1–100 个 ID，不能拿最终答案冒充原始输入；冻结后必须新建 Run |
 | 14. Job 已 validated 且管理员明确发布时 | `POST /internal/admin/v1/improvements/{job_id}/publish` | 独立管理员 token、`expected_revision` 和发布原因；不由 `client.run` 自动调用。新 Recipe 只进入后续 Run |
 
-第 4、6 步是旧直连地址 `1.0.0` 已观察到的路径，附件目标 `2.1.0` 没有列出。其字段与回执来自同版旧源码，旧 OpenAPI 未详细声明；**新网关是否提供这些路径、字段与 ACK 语义仍待核验**。SDK 应在初始化时按网关实际能力选择受支持的版本；如果没有 `session-events` 且没有等价入口，不能继续声称已完成 Session 消息上报。第 2–3 步的冻结上下文是业务模型调用前的必需条件，不能以第 4 步的事件上报或内部 Memory 路径替代。本设计的显式 `run` 不使用 `/v1/trigger/decide`、`/v1/invocations` 或管理端审批入口来替代原子编排。
+第 4、6 步是旧直连地址 `1.0.0` 已观察到的路径，附件目标 `2.1.0` 没有列出。其字段与回执来自同版旧源码，旧 OpenAPI 未详细声明；**新网关是否提供这些路径、字段与 ACK 语义仍待核验**。SDK 应在初始化时按网关实际能力选择受支持的版本；如果没有 `session-events` 且没有等价入口，不能继续声称已完成 Session 消息上报。第 2–3 步的冻结上下文是**创建 Run 的路径**在业务模型调用前的必需条件；不创建 Run 的路径需独立公开召回接口，两者都不能以事件上报或内部 Memory 路径替代。本设计的显式 `run` 不使用 `/v1/trigger/decide`、`/v1/invocations` 或管理端审批入口来替代原子编排。
 
 ## 5. Session 消息增量上报与游标
 
@@ -198,11 +201,11 @@ await rsi.atoms.submit(run.run_id, data={"summary": output}, key="stable-submit-
 }
 ```
 
-若透明 `auto` 连续几轮都不命中，游标保持原值；之后首次命中时，将这几轮中仍可从 Session 读取的未确认消息依序补发。SDK 不会因为某轮未触发而把它们标记为已发送。
+若透明 `auto` 连续几轮都不命中，游标保持原值；之后首次命中时，将这几轮中仍可从 Session 读取的未确认消息依序补发。SDK 不会因为某轮未触发而把它们标记为已发送。`disable` 与未命中 turn 的独立召回只读取所需上下文；召回请求及响应不代表聊天历史已上报，不能产生消息 ACK 或推进上报游标。
 
 游标跨 Run 生效：先前 Run 已 ACK 的旧消息不会在下次 Run 再上传，新的 Run 只收到新的消息。远端的事件去重仅在单个 Run 内，**跨 Run 不重发主要由 SDK 本地持久游标保证**；如果本地游标和恢复日志全部丢失，当前服务没有按 Session 全局查询/去重的接口，无法证明“绝不重发”。为保证宕机恢复，SDK 在发请求前保存 Run ID 与待发事件，收到 ACK 后以事务提交游标；重启先恢复未完成 Run，不先创建新 Run。若部署要求多实例共享游标或丢失本地状态后仍严格去重，需要服务端新增按 `(主体, session_id, message_id)` 的全局 ACK/查询能力。
 
-`user_input` 若尚未写入 Session，不作为“既有历史消息”提前伪造发送；它已经在本次 `prepare.objective` 中体现。原生调用后从 Session 的真实新增项采集并发送；若宿主不自动把新输入写入 Session，则由适配器从本次原生输入/输出建立有来源的事件，写入同一游标序列。透明入口如果只给 `previous_response_id` 或 `conversation`，没有可读 Session，无法凭远端引用拉取全部旧消息；此时只上报当前调用可见项，标识 `history.coverage=partial`。
+在创建 Run 的路径中，`user_input` 若尚未写入 Session，不作为“既有历史消息”提前伪造发送；它已经在本次 `prepare.objective` 中体现。原生调用后从 Session 的真实新增项采集并发送；若宿主不自动把新输入写入 Session，则由适配器从本次原生输入/输出建立有来源的事件，写入同一游标序列。未创建 Run 的路径不进行这些事件上报。透明入口如果只给 `previous_response_id` 或 `conversation`，没有可读 Session，无法凭远端引用拉取全部旧消息；此时只上报当前调用可见项，标识 `history.coverage=partial`。
 
 消息事件写入**不等于** Memory 已完成蒸馏，也不会自动发布 Recipe。旧直连部署的回执只保证 `coverage=observable_events` 的可观测证据持久化；反馈、改进与独立验证仍按第 4.1 节走后续接口。现有接口按 Run 绑定事件，不能在新 Run 的 prepare 之前直接写入尚未归属的旧消息；因此“模型调用前召回”指在模型请求前取得服务端**当时已有**的 Recipe/Memory，不能保证刚上报的历史消息已被蒸馏并进入本次冻结快照。原生 Agent 自己的 Session 仍按原方式提供历史。若产品要求“先蒸馏所有历史，再让同一次 prepare 召回这些新记忆”，后端还需会话级预摄取接口或等价能力，当前已知 API 无法保证。
 
@@ -210,7 +213,7 @@ await rsi.atoms.submit(run.run_id, data={"summary": output}, key="stable-submit-
 
 ## 6. 状态、恢复和错误
 
-每个逻辑 turn 的本地状态至少含：决策结果（显式 `run` 可记为 `forced`）、冻结任务参数、`turn_id`、准备请求键、`run_id`、Session 游标、待发/已 ACK 事件 ID、原生执行状态、原生结果引用、提交请求键、反馈/Job 句柄和最后错误。存储方式由实现者选择，但必须能在同进程重试和重启后防止重复执行模型/工具；无法判定原生副作用是否发生时返回 `RSIRecoveryRequired` 交宿主对账。
+每个逻辑 turn 的本地状态至少含：决策结果（显式 `run` 可记为 `forced`，透明 `disable` 记为不自动提交）、冻结任务参数、`turn_id`、召回状态及 Recipe/Memory 来源与版本、原生执行状态、原生结果引用和最后错误。创建 Run 的路径还保存准备请求键、`run_id`、Session 游标、待发/已 ACK 事件 ID、提交请求键和反馈/Job 句柄；未创建 Run 时这些 Run 绑定字段可为空，不得为召回伪造 Run ID。存储方式由实现者选择，但必须能在同进程重试和重启后防止重复执行模型/工具；无法判定原生副作用是否发生时返回 `RSIRecoveryRequired` 交宿主对账。
 
 当前原子流程区分 Run 的 `ready/completed`、事件的 `durable_ack`、Job 的 `queued/running/awaiting_*/validated/published/rejected/failed/deferred`。附件协调器的 `prepared/awaiting_approval/skipped` 属于另一个尚未部署的协议版本。`completed` 不等于验证通过；`validated` 需要管理员明确发布，且发布只影响后续新 Run。等待 Job 应有超时与退避，`resume_improvement` 仅用于指定 awaiting 状态。
 
@@ -222,16 +225,16 @@ Python 实现按职责拆为：`factory`（类型分派）、`responses_adapter`
 
 验收至少覆盖：
 
-1. 对已支持的 `openai` 包版本，`OpenAI/AsyncOpenAI`（及传入时的 Azure 变体）的公开资源和方法均可经代理调用；覆盖嵌套资源、`with_options/copy`、raw/streaming response、分页、文件、Realtime、上下文管理、关闭、自定义请求和原生异常。透明 `disable` 的 CoSens 与分类器请求数均为零。
-2. 透明 `auto` 的 prompt 判断否/是/失败三个分支；只有命中才增量上报并创建 Run，未命中不前进游标；工具续接不重复 prepare。
+1. 对已支持的 `openai` 包版本，`OpenAI/AsyncOpenAI`（及传入时的 Azure 变体）的公开资源和方法均可经代理调用；覆盖嵌套资源、`with_options/copy`、raw/streaming response、分页、文件、Realtime、上下文管理、关闭、自定义请求和原生异常。透明 `disable` 每个新 turn 有一次召回、分类器和自动 Run 请求数均为零。
+2. 透明 `auto` 的 prompt 判断否/是/失败三个分支均在业务模型前召回；只有命中才增量上报并创建 Run，未命中不前进游标；工具续接不重复召回或 prepare。
 3. 逐一验证被标为支持 RSI 的模型生成入口：普通、raw、流式、同步与异步调用均保持原生返回语义；不具备安全归一化能力的入口保留原功能并暴露 `rsi_capture=unsupported`。
 4. 显式 `run(mode="disable")` 不请求判断模型，仍执行输入 Artifact → prepare → GET Run → Session 增量事件 → 原生 Agent → 新增事件 → 输出 Artifact → submit → 真实 feedback/improve → GET Job；每个 RSI 调用都是 `atoms.*`。
 5. 同一 Session 多次 `run` 仅发送新消息；部分 ACK、同 Run 重试、重启恢复不丢消息或重复执行模型；历史截断/改写时明确报错。
 6. 在目标网关检查 `/api` 后的实际接口版本及路径：`/api/v1/runs/prepare`、`/api/v1/runs/{run_id}`、`/api/v1/runs/{run_id}/session-events`、`/api/v1/invocations`（若启用 approval）及 `/api/internal/admin/...`（仅管理员场景）；旧直连地址 `1.0.0` 的能力不能直接套用。`approval` 在能力缺失时明确报错；管理员发布单独授权。
 7. 原生完成后 HTTP 失败先对账再补交；无真实反馈不生成 `accepted`；未验证 Job 不发布；`observable_events` 不被误写成“Memory 已蒸馏完成”。
 8. `cosens(...)` 与 `CoSensClient(...)` 的公开初始化参数均不包含 CoSens 服务 `base_url`；三个入口共享内部传输配置，且不覆盖原生 OpenAI client 自己的 `base_url`。
-9. 用调用顺序记录验证三种入口：透明 `auto` 命中后、显式 `run` 启动后、原子调用方实际调用模型前，均已完成该 turn 的 `prepare → get_run` 并拿到 Recipe/Memory；同一 turn 的多次模型调用只召回一次，下一新 turn 重新召回。透明 `auto` 未命中/决策失败与透明 `disable` 不召回；准备/读取失败不能伪装成空结果发起业务模型调用；合法 `not_found`/空 Memory 可以继续。
-10. 验证所有附件服务路径均仅在内部网关前缀 `/api` 后拼接一次，鉴权、查询参数和幂等键保持原语义；三种入口均不直接请求 `/memory/internal/v1/recall`。在网关未验证前，这些是待实现的验收项，不能视为当前 SDK 已通过。
+9. 用调用顺序记录验证三种入口：每个新 turn 的首次业务模型前均取得 Recipe/Memory；创建 Run 时用 `prepare → get_run`，不创建 Run 时用待定义的独立公开召回接口；同一 turn 的多次模型调用只召回一次，下一新 turn 重新召回。`auto` 未命中/决策失败与透明 `disable` **仍召回**且不自动创建 Run；召回失败不能伪装成空结果发起业务模型调用；合法 `not_found`/空 Memory 可以继续。
+10. 验证所有附件服务路径均仅在内部网关前缀 `/api` 后拼接一次，鉴权、查询参数和幂等键保持原语义；三种入口均不直接请求 `/memory/internal/v1/recall`。独立召回接口的路径及契约经后端确认后再加入网关映射。在网关未验证前，这些是待实现的验收项，不能视为当前 SDK 已通过。
 
 ## 8. TypeScript 预留
 
@@ -243,6 +246,7 @@ Python 实现按职责拆为：`factory`（类型分派）、`responses_adapter`
 2. 若要求跨 Run、跨实例、丢失本地状态后仍绝对不重发消息，后端需要 Session 级全局消息 ID 去重和 ACK 查询；已知旧部署只对同一 Run 的事件去重，新网关待核验。
 3. 若要求“刚上传的历史消息立即影响本次 prepare 的 Memory 召回”，后端需要 prepare 前的会话级摄取；已知 `session-events` 只能在获得 run_id 后调用。当前设计保证调用业务模型前召回服务端已有内容，不保证新历史在同次 prepare 前完成蒸馏。
 4. 透明 `approval` 需要网关部署附件协调器，并扩展 `openai_responses_sdk` 的 SessionContext 来源；旧直连地址不能执行该模式，网关能力待核验。
+5. **优先补齐独立公开召回接口**：支持不创建 Run 地同时返回 Recipe、Memory、来源与版本/快照标识，定义请求上下文、普通 SDK 凭证、空结果、失败与重试语义。现有 `prepare/get_run` 会创建 Run，不能满足 `disable` 和 `auto` 未命中仍召回但不自动发 Run；内部 `/memory/internal/v1/recall` 既非公开 SDK 契约，也不能单独提供 Recipe。接口未落实前，三种模式的完整目标行为均不能宣称已实现。
 
 ## 10. 官方参考
 
