@@ -120,10 +120,11 @@ class SyncAtoms:
 
 
 class CoSensClient:
-    def __init__(self, token=None, *, admin_token=None, state_path=None, _http_transport=None):
-        self._transport = AsyncTransport(token or os.getenv("COSENS_RSI_TOKEN"), transport=_http_transport)
-        self._admin_transport = AsyncTransport(admin_token or os.getenv("COSENS_RSI_ADMIN_TOKEN"), transport=_http_transport)
-        self._sync_transport = SyncTransport(token or os.getenv("COSENS_RSI_TOKEN"), transport=_http_transport)
+    def __init__(self, token=None, *, api_key=None, admin_token=None, state_path=None, _http_transport=None):
+        api_key = api_key if api_key is not None else os.getenv("COSENS_API_KEY")
+        self._transport = AsyncTransport(token or os.getenv("COSENS_RSI_TOKEN"), api_key=api_key, transport=_http_transport)
+        self._admin_transport = AsyncTransport(admin_token or os.getenv("COSENS_RSI_ADMIN_TOKEN"), api_key=api_key, transport=_http_transport)
+        self._sync_transport = SyncTransport(token or os.getenv("COSENS_RSI_TOKEN"), api_key=api_key, transport=_http_transport)
         self.atoms = AsyncAtoms(self._transport)
         self.sync_atoms = SyncAtoms(self._sync_transport)
         self.admin = _AdminClient(self._admin_transport)

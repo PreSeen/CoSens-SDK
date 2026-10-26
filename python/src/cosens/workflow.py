@@ -2,8 +2,26 @@
 
 import asyncio
 import time
+from copy import deepcopy
 
 from .errors import RSIRecoveryRequired
+from .models import result
+
+
+def freeze_run_context(prepared, run):
+    """Validate the complete prepared context before allowing native execution."""
+    if not isinstance(prepared, dict) or not isinstance(prepared.get("recipe"), dict):
+        raise RSIRecoveryRequired("Prepared Recipe is missing or invalid")
+    if not isinstance(prepared.get("context"), dict):
+        raise RSIRecoveryRequired("Prepared context is missing or invalid")
+    if not isinstance(run, dict) or run.get("run_id") != prepared.get("run_id") or run.get("status") != "ready":
+        raise RSIRecoveryRequired("Run does not match the ready prepared context")
+    if not isinstance(run.get("snapshot"), dict):
+        raise RSIRecoveryRequired("Run Memory snapshot is missing or invalid")
+    frozen = deepcopy(run)
+    frozen["recipe"] = deepcopy(prepared["recipe"])
+    frozen["context"] = deepcopy(prepared["context"])
+    return result(frozen)
 
 
 def _delay(reply):

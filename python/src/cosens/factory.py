@@ -4,7 +4,7 @@ from .agents_adapter import CoSensAgentRunner
 from .openai_proxy import CoSensOpenAIProxy, _Runtime
 
 
-def cosens(native, *, mode="auto", decision_model=None, decision_timeout=5, decision_max_output_tokens=256, session=None, token=None, state_path=None, _http_transport=None, _runner=None):
+def cosens(native, *, mode="auto", decision_model=None, decision_timeout=5, decision_max_output_tokens=256, session=None, token=None, api_key=None, state_path=None, _http_transport=None, _runner=None):
     if mode not in {"auto", "approval", "disable"}:
         raise ValueError("mode must be auto, approval, or disable")
     if hasattr(native, "cosens") and hasattr(native, "native"):
@@ -12,6 +12,7 @@ def cosens(native, *, mode="auto", decision_model=None, decision_timeout=5, deci
         if isinstance(native, CoSensOpenAIProxy):
             same = same and (decision_model is None or decision_model == native._runtime.decision_model)
             same = same and (token is None or token == native._runtime.client._transport.token)
+            same = same and (api_key is None or api_key == native._runtime.client._transport.api_key)
         if same:
             return native
         raise ValueError("CoSens proxy is already configured differently")
@@ -22,7 +23,7 @@ def cosens(native, *, mode="auto", decision_model=None, decision_timeout=5, deci
     if Agent is not None and isinstance(native, Agent):
         return CoSensAgentRunner(
             native, mode=mode, session=session, token=token,
-            state_path=state_path, http_transport=_http_transport, runner=_runner,
+            api_key=api_key, state_path=state_path, http_transport=_http_transport, runner=_runner,
         )
     try:
         from openai import OpenAI, AsyncOpenAI, AzureOpenAI, AsyncAzureOpenAI
@@ -31,7 +32,7 @@ def cosens(native, *, mode="auto", decision_model=None, decision_timeout=5, deci
     if OpenAI is not None and isinstance(native, (OpenAI, AsyncOpenAI, AzureOpenAI, AsyncAzureOpenAI)):
         runtime = _Runtime(
             mode=mode, decision_model=decision_model, session=session, token=token,
-            state_path=state_path, http_transport=_http_transport,
+            api_key=api_key, state_path=state_path, http_transport=_http_transport,
             asynchronous=isinstance(native, AsyncOpenAI),
             decision_timeout=decision_timeout, decision_max_output_tokens=decision_max_output_tokens,
         )

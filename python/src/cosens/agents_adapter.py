@@ -10,7 +10,8 @@ from .atoms import CoSensClient
 from .errors import RSIRecoveryRequired
 from .session_cursor import CursorStore
 from .state import TurnStore
-from .workflow import prepare_ready_async
+from .models import result
+from .workflow import freeze_run_context, prepare_ready_async
 
 
 def _stable(value):
@@ -94,11 +95,11 @@ class _StreamResult:
 
 
 class CoSensAgentRunner:
-    def __init__(self, agent, *, mode, session, token, state_path, http_transport, runner):
+    def __init__(self, agent, *, mode, session, token, api_key, state_path, http_transport, runner):
         self.native = agent
-        self._client = CoSensClient(token=token, state_path=state_path, _http_transport=http_transport)
-        self._cursor = CursorStore(state_path, principal=self._client._transport.token or "anonymous")
-        self._turns = TurnStore(state_path)
+        self._client = CoSensClient(token=token, api_key=api_key, state_path=state_path, _http_transport=http_transport)
+        self._cursor = CursorStore(state_path, principal=[self._client._transport.api_key, self._client._transport.token])
+        self._turns = TurnStore(state_path, principal=[self._client._transport.api_key, self._client._transport.token])
         if runner is None:
             try:
                 from agents import Runner
@@ -223,7 +224,7 @@ class CoSensAgentRunner:
         resumable = previous if previous and previous.get("state") == "pre_execution_pending" else None
         turn_id = resumable["turn_id"] if resumable else str(uuid.uuid4())
         self.cosens.last_turn_id = turn_id
-        state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "run_id": resumable.get("run_id") if resumable else None, "prepared": resumable.get("prepared") if resumable else None, "input_artifacts": input_artifacts if input_artifacts is not None else resumable.get("input_artifacts", []) if resumable else [], "input_refs": resumable.get("input_refs", []) if resumable else []}
+        state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "run_id": resumable.get("run_id") if resumable else None, "prepared": resumable.get("prepared") if resumable else None, "frozen_context": resumable.get("frozen_context") if resumable else None, "input_artifacts": input_artifacts if input_artifacts is not None else resumable.get("input_artifacts", []) if resumable else [], "input_refs": resumable.get("input_refs", []) if resumable else []}
         self._save(logical_key, state)
         try:
             if state["run_id"]:
@@ -237,7 +238,11 @@ class CoSensAgentRunner:
                 state["run_id"] = prepared.run_id
                 state["prepared"] = dict(prepared)
                 self._save(logical_key, state)
-            run = await self._client.atoms.get_run(state["run_id"])
+            if state.get("frozen_context") is None:
+                remote = await self._client.atoms.get_run(state["run_id"])
+                state["frozen_context"] = freeze_run_context(state["prepared"], remote)
+                self._save(logical_key, state)
+            run = result(state["frozen_context"])
             await self._send_pending(state["run_id"], session)
             active_agent = self._with_context(agent, prepared, run)
         except Exception as exc:
@@ -275,7 +280,9 @@ class CoSensAgentRunner:
         if not state or state.get("state") != "awaiting_native_approval":
             raise RSIRecoveryRequired("Turn has no pending native tool approval")
         from agents import RunState
-        run = await self._client.atoms.get_run(state["run_id"])
+        if state.get("frozen_context") is None:
+            raise RSIRecoveryRequired("Saved turn has no frozen context; cannot safely resume")
+        run = result(state["frozen_context"])
         active_agent = self._with_context(agent, state["prepared"], run)
         return await RunState.from_json(active_agent, state["native_state"])
 
@@ -286,7 +293,9 @@ class CoSensAgentRunner:
             if not state or state.get("state") != "awaiting_native_approval":
                 raise RSIRecoveryRequired("Turn is not awaiting native tool approval")
             logical_key = state["logical_key"]
-            run = await self._client.atoms.get_run(state["run_id"])
+            if state.get("frozen_context") is None:
+                raise RSIRecoveryRequired("Saved turn has no frozen context; cannot safely resume")
+            run = result(state["frozen_context"])
             active_agent = self._with_context(agent, state["prepared"], run)
             state["state"] = "native_running"
             self._save(logical_key, state)
@@ -374,7 +383,7 @@ class CoSensAgentRunner:
         resumable = previous if previous and previous.get("state") == "pre_execution_pending" else None
         turn_id = resumable["turn_id"] if resumable else str(uuid.uuid4())
         self.cosens.last_turn_id = turn_id
-        state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "run_id": resumable.get("run_id") if resumable else None, "prepared": resumable.get("prepared") if resumable else None, "input_artifacts": input_artifacts if input_artifacts is not None else resumable.get("input_artifacts", []) if resumable else [], "input_refs": resumable.get("input_refs", []) if resumable else []}
+        state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "run_id": resumable.get("run_id") if resumable else None, "prepared": resumable.get("prepared") if resumable else None, "frozen_context": resumable.get("frozen_context") if resumable else None, "input_artifacts": input_artifacts if input_artifacts is not None else resumable.get("input_artifacts", []) if resumable else [], "input_refs": resumable.get("input_refs", []) if resumable else []}
         self._save(logical_key, state)
         try:
             if state["run_id"]:
@@ -388,7 +397,11 @@ class CoSensAgentRunner:
                 state["run_id"] = prepared.run_id
                 state["prepared"] = dict(prepared)
                 self._save(logical_key, state)
-            run = await self._client.atoms.get_run(state["run_id"])
+            if state.get("frozen_context") is None:
+                remote = await self._client.atoms.get_run(state["run_id"])
+                state["frozen_context"] = freeze_run_context(state["prepared"], remote)
+                self._save(logical_key, state)
+            run = result(state["frozen_context"])
             await self._send_pending(state["run_id"], session)
             active_agent = self._with_context(agent, prepared, run)
         except Exception as exc:

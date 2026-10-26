@@ -17,7 +17,8 @@ from .errors import RSIApprovalUnavailable, RSIDecisionUnavailable, RSIRecoveryR
 from .responses_adapter import SUPPORTED, base_path, inject, summary, terminal, tool_names, user_text
 from .session_cursor import CursorStore
 from .state import TurnStore
-from .workflow import prepare_ready_async, prepare_ready_sync
+from .models import result
+from .workflow import freeze_run_context, prepare_ready_async, prepare_ready_sync
 
 
 def _resource(value):
@@ -288,11 +289,7 @@ class _DeferredAsyncManager:
             return await self._manager.__aenter__()
         runtime._guard_request(self._kwargs, self._path)
         try:
-            decision = await decide_async(
-                self._client, runtime.decision_model,
-                user_text(self._path, self._kwargs), tool_names(self._kwargs),
-                timeout=runtime.decision_timeout, max_output_tokens=runtime.decision_max_output_tokens,
-            )
+            decision = await runtime._decide_async(self._client, self._path, self._kwargs)
         except Exception as exc:
             if runtime.mode == "approval":
                 raise RSIDecisionUnavailable(str(exc)) from exc
@@ -334,7 +331,7 @@ class _DeferredAsyncManager:
 
 
 class _Runtime:
-    def __init__(self, *, mode, decision_model, session, token, state_path, http_transport, asynchronous=False, decision_timeout=5, decision_max_output_tokens=256):
+    def __init__(self, *, mode, decision_model, session, token, api_key, state_path, http_transport, asynchronous=False, decision_timeout=5, decision_max_output_tokens=256):
         if mode in {"auto", "approval"} and not decision_model:
             raise ValueError("decision_model is required for auto/approval")
         self.mode = mode
@@ -345,9 +342,9 @@ class _Runtime:
         self.decision_timeout = decision_timeout
         self.decision_max_output_tokens = decision_max_output_tokens
         self.session = session
-        self.client = CoSensClient(token=token, state_path=state_path, _http_transport=http_transport)
-        self.cursor = CursorStore(state_path, principal=self.client._transport.token or "anonymous")
-        self.turns = TurnStore(state_path)
+        self.client = CoSensClient(token=token, api_key=api_key, state_path=state_path, _http_transport=http_transport)
+        self.cursor = CursorStore(state_path, principal=[self.client._transport.api_key, self.client._transport.token])
+        self.turns = TurnStore(state_path, principal=[self.client._transport.api_key, self.client._transport.token])
         self.status = _Status(self)
         self._owner_lock = threading.Lock()
         self._owners = 0
@@ -396,19 +393,66 @@ class _Runtime:
         scope = self.status._scope.get()
         return self.turns.get(scope[1]) if scope and scope[1] else self.turns.get(self._request_key(kwargs, path))
 
+    def _conversation_key(self, kwargs):
+        conversation = kwargs.get("conversation")
+        if isinstance(conversation, dict):
+            conversation = conversation.get("id")
+        if not conversation:
+            return None
+        session_id = getattr(self.session, "session_id", None)
+        return "conversation:" + hashlib.sha256(json.dumps([session_id, conversation], default=str).encode()).hexdigest()
+
+    def _continuation_state(self, kwargs):
+        scope = self.status._scope.get()
+        if scope and scope[1]:
+            state = self.turns.get(scope[1])
+        else:
+            response_id = kwargs.get("previous_response_id")
+            alias = self.turns.get("response:" + str(response_id)) if response_id else None
+            inputs = kwargs.get("input")
+            tool_output = isinstance(inputs, list) and any(isinstance(item, dict) and item.get("type") == "function_call_output" for item in inputs)
+            key = self._conversation_key(kwargs)
+            if alias is None and key and tool_output:
+                alias = self.turns.get(key)
+            state = self.turns.get(alias.get("turn_ref", alias.get("turn_id"))) if alias else None
+        return state if state and state.get("state") == "awaiting_continuation" else None
+
     def _guard_request(self, kwargs, path):
         existing = self._existing_request(kwargs, path)
+        if existing and existing.get("state") == "awaiting_continuation":
+            continuation = self._continuation_state(kwargs)
+            if continuation and self._request_key(kwargs, path) not in existing.get("request_keys", []):
+                return
         if existing and existing.get("state") not in {"pre_execution_pending", "completed"}:
             raise RSIRecoveryRequired(f"Turn {existing['turn_id']} may have executed; reconcile without repeating the model request")
         scope = self.status._scope.get()
         if existing and existing.get("state") == "completed" and scope and scope[1]:
             raise RSIRecoveryRequired(f"Turn {existing['turn_id']} is already completed")
 
+    def _saved_decision(self, kwargs, path):
+        state = self._continuation_state(kwargs) or self._existing_request(kwargs, path)
+        if state and state.get("state") in {"awaiting_continuation", "pre_execution_pending"}:
+            return state.get("decision")
+        return None
+
+    def _decide_sync(self, native, path, kwargs):
+        return self._saved_decision(kwargs, path) or decide_sync(
+            native, self.decision_model, user_text(path, kwargs), tool_names(kwargs),
+            timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens,
+        )
+
+    async def _decide_async(self, native, path, kwargs):
+        saved = self._saved_decision(kwargs, path)
+        if saved:
+            return saved
+        return await decide_async(
+            native, self.decision_model, user_text(path, kwargs), tool_names(kwargs),
+            timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens,
+        )
+
     def _new_state(self, objective, task_family, kwargs, path):
         request_key = self._request_key(kwargs, path)
-        previous_response_id = kwargs.get("previous_response_id")
-        alias = self.turns.get("response:" + str(previous_response_id)) if previous_response_id else None
-        previous = self.turns.get(alias.get("turn_ref", alias.get("turn_id"))) if alias else None
+        previous = self._continuation_state(kwargs)
         if previous and previous.get("state") == "awaiting_continuation":
             state = previous
         else:
@@ -423,6 +467,7 @@ class _Runtime:
             else:
                 turn_id = scope[1] if scope and scope[1] else str(uuid.uuid4())
                 state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "task_family": task_family, "run_id": None}
+        state["conversation_key"] = self._conversation_key(kwargs) or state.get("conversation_key")
         keys = state.setdefault("request_keys", [])
         if request_key not in keys:
             keys.append(request_key)
@@ -430,6 +475,8 @@ class _Runtime:
         return state
 
     def _save(self, state):
+        if state.get("conversation_key"):
+            self.turns.put(state["conversation_key"], {"turn_ref": state["turn_id"]})
         self.turns.put(state["turn_id"], state)
         for request_key in state.get("request_keys", []):
             self.turns.put(request_key, state)
@@ -577,19 +624,20 @@ class _Runtime:
 
     def _prepare_sync(self, decision, kwargs, path):
         state = self._new_state(decision["objective"], decision["task_family"], kwargs, path)
+        state["decision"] = decision
         self._save(state)
         try:
-            if state["run_id"]:
+            if "frozen_context" not in state:
+                if not state["run_id"]:
+                    prepared = prepare_ready_sync(self.client.sync_atoms, objective=state["objective"], task_family=state["task_family"] or "general", key=state["turn_id"])
+                    state["run_id"] = prepared.run_id
+                    state["prepared"] = dict(prepared)
+                    self._save(state)
                 run = self.client.sync_atoms.get_run(state["run_id"])
-            else:
-                prepared = prepare_ready_sync(self.client.sync_atoms, objective=state["objective"], task_family=state["task_family"] or "general", key=state["turn_id"])
-                state["run_id"] = prepared.run_id
+                state["frozen_context"] = freeze_run_context(state.get("prepared"), run)
                 self._save(state)
-                run = self.client.sync_atoms.get_run(prepared.run_id)
-                run["recipe"] = prepared.get("recipe")
-                run["context"] = prepared.get("context")
             self._send_sync(state["run_id"])
-            return state, run
+            return state, result(state["frozen_context"])
         except Exception as exc:
             state["last_error"] = str(exc)
             self._save(state)
@@ -597,19 +645,20 @@ class _Runtime:
 
     async def _prepare_async(self, decision, kwargs, path):
         state = self._new_state(decision["objective"], decision["task_family"], kwargs, path)
+        state["decision"] = decision
         self._save(state)
         try:
-            if state["run_id"]:
+            if "frozen_context" not in state:
+                if not state["run_id"]:
+                    prepared = await prepare_ready_async(self.client.atoms, objective=state["objective"], task_family=state["task_family"] or "general", key=state["turn_id"])
+                    state["run_id"] = prepared.run_id
+                    state["prepared"] = dict(prepared)
+                    self._save(state)
                 run = await self.client.atoms.get_run(state["run_id"])
-            else:
-                prepared = await prepare_ready_async(self.client.atoms, objective=state["objective"], task_family=state["task_family"] or "general", key=state["turn_id"])
-                state["run_id"] = prepared.run_id
+                state["frozen_context"] = freeze_run_context(state.get("prepared"), run)
                 self._save(state)
-                run = await self.client.atoms.get_run(prepared.run_id)
-                run["recipe"] = prepared.get("recipe")
-                run["context"] = prepared.get("context")
             await self._send_async(state["run_id"])
-            return state, run
+            return state, result(state["frozen_context"])
         except Exception as exc:
             state["last_error"] = str(exc)
             self._save(state)
@@ -744,7 +793,7 @@ class _Runtime:
             return method(*args, **kwargs)
         self._guard_request(kwargs, path)
         try:
-            decision = decide_sync(native, self.decision_model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens)
+            decision = self._decide_sync(native, path, kwargs)
         except Exception as exc:
             if self.mode == "approval":
                 raise RSIDecisionUnavailable(str(exc)) from exc
@@ -795,7 +844,7 @@ class _Runtime:
             return await method(*args, **kwargs)
         self._guard_request(kwargs, path)
         try:
-            decision = await decide_async(native, self.decision_model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens)
+            decision = await self._decide_async(native, path, kwargs)
         except Exception as exc:
             if self.mode == "approval":
                 raise RSIDecisionUnavailable(str(exc)) from exc

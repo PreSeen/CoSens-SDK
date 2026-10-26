@@ -13,6 +13,8 @@ def _decode(response):
     try:
         payload = response.json()
     except (json.JSONDecodeError, ValueError) as exc:
+        if response.status_code >= 400:
+            raise RSIHTTPError(response.status_code, response.reason_phrase, request_id=response.headers.get("x-request-id")) from exc
         raise RSITransportError(f"CoSens returned invalid JSON (HTTP {response.status_code})") from exc
     if response.status_code >= 400:
         error = payload.get("error", {}) if isinstance(payload, dict) else {}
@@ -30,14 +32,17 @@ def _decode(response):
 
 
 class AsyncTransport:
-    def __init__(self, token: str | None, *, transport=None, timeout=30.0):
+    def __init__(self, token: str | None, *, api_key=None, transport=None, timeout=30.0):
         self.token = token
+        self.api_key = api_key
         self.client = httpx.AsyncClient(base_url=SERVICE_URL, timeout=timeout, transport=transport)
 
     async def request(self, method, path, *, body=None, key=None):
-        if not self.token:
-            raise ValueError("A CoSens bearer token is required")
-        headers = {"Authorization": f"Bearer {self.token}"}
+        if not self.api_key:
+            raise ValueError("CoSens api_key or COSENS_API_KEY is required")
+        headers = {"api-key": self.api_key}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
         if key:
             headers["Idempotency-Key"] = key
         try:
@@ -51,14 +56,17 @@ class AsyncTransport:
 
 
 class SyncTransport:
-    def __init__(self, token: str | None, *, transport=None, timeout=30.0):
+    def __init__(self, token: str | None, *, api_key=None, transport=None, timeout=30.0):
         self.token = token
+        self.api_key = api_key
         self.client = httpx.Client(base_url=SERVICE_URL, timeout=timeout, transport=transport)
 
     def request(self, method, path, *, body=None, key=None):
-        if not self.token:
-            raise ValueError("A CoSens bearer token is required")
-        headers = {"Authorization": f"Bearer {self.token}"}
+        if not self.api_key:
+            raise ValueError("CoSens api_key or COSENS_API_KEY is required")
+        headers = {"api-key": self.api_key}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
         if key:
             headers["Idempotency-Key"] = key
         try:
