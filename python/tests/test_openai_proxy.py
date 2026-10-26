@@ -202,6 +202,25 @@ def test_auto_true_prepares_injects_context_and_submits_after_response(tmp_path)
     assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "completed"
 
 
+def test_current_input_already_in_session_is_not_reported_twice(tmp_path):
+    native = OpenAI(api_key="test")
+    calls = []
+    session = Session()
+    session.items = [{"id": "current", "role": "user", "content": "current"}]
+
+    def create(**kwargs):
+        if kwargs["model"] == "decision":
+            return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+        return SimpleNamespace(id="resp-1", status="completed", output_text="done", output=[SimpleNamespace(type="message", role="assistant")])
+
+    native.responses.create = create
+    client = cosens(native, mode="auto", decision_model="decision", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    client.responses.create(model="app", input="current")
+    user_events = [event for path, body in calls if path.endswith("/session-events") for event in body["events"] if event["kind"] == "user_prompt"]
+    assert len(user_events) == 1
+    assert user_events[0]["id"] == "chat:current"
+
+
 def test_classifier_failure_does_not_block_native_call_or_advance_history(tmp_path):
     native = OpenAI(api_key="test")
     calls = []

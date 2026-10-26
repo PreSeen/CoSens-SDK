@@ -311,6 +311,7 @@ class _DeferredAsyncManager:
         state["visible_input"] = user_text(self._path, self._kwargs)
         before = await runtime._snapshot_async()
         state["session_before_count"] = len(before.items) if before else 0
+        state["visible_input_in_session"] = runtime._input_in_snapshot(before, state["visible_input"])
         runtime._save(state)
         await runtime._send_observable_async(state, runtime._tool_output_events(state, self._kwargs))
         updated = inject(self._path, self._kwargs, run)
@@ -481,7 +482,7 @@ class _Runtime:
         recent = snapshot.items[state.get("session_before_count", 0):] if snapshot else ()
         roles = {item.get("role") for item in recent}
         events = []
-        if "user" not in roles and state.get("visible_input"):
+        if "user" not in roles and state.get("visible_input") and not state.get("visible_input_in_session"):
             events.append({
                 "id": f"visible:{state['turn_id']}:input", "kind": "user_prompt",
                 "payload": {"session_id": snapshot.session_id if snapshot else None, "role": "user", "content": state["visible_input"], "source_revision": "native_request"},
@@ -492,6 +493,13 @@ class _Runtime:
                 "payload": {"session_id": snapshot.session_id if snapshot else None, "role": "assistant", "content": summary(response), "source_revision": "native_response"},
             })
         return events
+
+    @staticmethod
+    def _input_in_snapshot(snapshot, visible_input):
+        if not snapshot or not visible_input or not snapshot.items:
+            return False
+        latest = snapshot.items[-1]
+        return latest.get("role") == "user" and latest.get("content") == visible_input
 
     @staticmethod
     def _tool_output_events(state, kwargs):
@@ -753,6 +761,7 @@ class _Runtime:
         state["visible_input"] = user_text(path, kwargs)
         before = self._snapshot_sync()
         state["session_before_count"] = len(before.items) if before else 0
+        state["visible_input_in_session"] = self._input_in_snapshot(before, state["visible_input"])
         self._save(state)
         self._send_observable_sync(state, self._tool_output_events(state, kwargs))
         updated = inject(path, kwargs, run)
@@ -803,6 +812,7 @@ class _Runtime:
         state["visible_input"] = user_text(path, kwargs)
         before = await self._snapshot_async()
         state["session_before_count"] = len(before.items) if before else 0
+        state["visible_input_in_session"] = self._input_in_snapshot(before, state["visible_input"])
         self._save(state)
         await self._send_observable_async(state, self._tool_output_events(state, kwargs))
         updated = inject(path, kwargs, run)

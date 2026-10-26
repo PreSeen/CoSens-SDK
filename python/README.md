@@ -31,7 +31,7 @@ client.close()
 
 `mode="auto"` 先由独立模型决定是否启动 RSI；未命中、分类失败或 `mode="disable"` 时照常调用原生方法。`mode="approval"` 在当前服务端缺少 `/v1/invocations` 时会明确报错，不会假装完成审批。非对话资源动态透传给原始 client；`client.native` 可取得原对象，直接从 `native` 发出的调用不会被 CoSens 捕获。原生 `with_options()`/`copy()` 返回仍带 CoSens 包装的 client。无法安全归一化的生成请求保持原生调用，并设置 `client.cosens.rsi_capture="unsupported"`。
 
-可用 `client.cosens.scope(session_id="...", turn_id="...")` 为一个逻辑 turn 指定边界。只有传入可读取的 Session，SDK 才能补发历史消息；Session 需提供稳定的 `session_id` 和 `get_items()`。同步 OpenAI client 与异步 `AsyncOpenAI` 均受支持。
+可用 `client.cosens.scope(session_id="...", turn_id="...")` 为一个逻辑 turn 指定边界。只有传入可读取的 Session，SDK 才能补发历史消息；Session 需提供稳定的 `session_id` 和 `get_items()`。建议应用在模型调用前将本次用户消息写入 Session，并保持稳定消息 ID；若调用后才以新 ID 写入此前由 SDK 合成的可见事件，当前通用 Session 协议无法证明两者是同一消息。同步 OpenAI client 与异步 `AsyncOpenAI` 均受支持。
 
 ## 方式二：显式执行 Agent
 
