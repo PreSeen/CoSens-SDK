@@ -1,6 +1,6 @@
 # CoSens Python SDK 三种接入方式设计
 
-状态：设计稿，待确认；本文件不代表 SDK 已实现。远端基准地址：`http://27.221.10.54:41011`。
+状态：设计稿，待确认；本文件不代表 SDK 已实现。CoSens 服务地址由 SDK 内部传输层管理，不作为公开初始化参数。
 
 参考契约：[RSI_WORKFLOW_API(1).md](/Users/a1111/Desktop/RSI_WORKFLOW_API(1).md)，尤其是第 3、4.3、5、6、8 节。本设计以用户后续澄清为准，覆盖参考契约第 1.1、2、4.1、4.2 节中的旧 SDK 入口定义。2026-10-26 只读查询远端 `/health/live` 返回 200；`/openapi.json` 标为 `1.0.0`，与附件 2.1.0 并不一致。下文将标明哪些接口已在该地址公开，哪些仅见于附件；本仓库当前没有 SDK 源码。
 
@@ -15,6 +15,8 @@ Python 首版提供三层入口：
 3. **原子调用**：`CoSensClient(...).atoms.*` 暴露参考契约第 6 节的九个原子操作，并对当前远端增加 `session_events`；应用自行决定步骤与执行时机。
 
 三个入口共用认证、传输、数据模型、幂等键、Session 消息游标、恢复记录与错误模型。项目根目录按语言划分为 `python/` 和 `typescript/`；当前仅整理文档，不开发任何 SDK 代码。
+
+三个入口均不向应用暴露 CoSens 服务的 `base_url` 参数。SDK 内部传输层统一使用当前部署地址 `http://27.221.10.54:41011`，后续地址变更由 SDK 内部配置与版本管理处理。传入的原生 OpenAI client 若已有自己的 `base_url`，仍按其原有语义连接模型服务；CoSens 的服务地址与它互不影响。
 
 本设计不改变 RSI 算法、Memory 内部接口、模型工具执行权限、Agent 原始业务结果或服务端发布规则。`submit` 只记录结果，不能被解释为验收成功；`validated` 也不会自动发布。
 
@@ -42,7 +44,6 @@ client = cosens(
     mode="auto",
     decision_model="<configured-model>",
     session=session,  # 应用提供可读取的聊天历史
-    base_url="http://27.221.10.54:41011",
 )
 
 response = client.responses.create(model="<application-model>", input="用户任务")
@@ -74,7 +75,7 @@ from agents import Agent
 from cosens import cosens
 
 agent = Agent(name="assistant", model="<application-model>", tools=tools)
-client = cosens(agent, mode="disable", base_url="http://27.221.10.54:41011")
+client = cosens(agent, mode="disable")
 result = await client.run(agent, user_input, session=session)
 print(result.final_output)
 ```
@@ -92,7 +93,7 @@ print(result.final_output)
 ```python
 from cosens import CoSensClient
 
-rsi = CoSensClient(base_url="http://27.221.10.54:41011", token="<ordinary-token>")
+rsi = CoSensClient(token="<ordinary-token>")
 source = await rsi.atoms.artifact(name="input.txt", content="...")
 prepared = await rsi.atoms.prepare(
     objective="...", input_artifact_ids=[source.artifact_id], key="stable-turn-key"
@@ -147,7 +148,7 @@ await rsi.atoms.submit(run.run_id, data={"summary": "..."}, key="stable-submit-k
 
 ### 4.1 原生执行时每个远端接口的调用时机
 
-以下 URL 均以 `http://27.221.10.54:41011` 为前缀。**显式 `run(mode="disable")` 从第 1 步直接开始；透明 `auto` 先做本地 prompt 判断，只有命中才进入第 1 步。**步骤按事件触发，没有后台定时上传全部历史。普通业务请求使用普通 RSI Bearer；实际参数与大小上限以附件第 8 节及当前远端版本为准。
+下表只列服务端路径；完整 URL 由 SDK 内部传输层拼接，应用不传 CoSens 服务地址。**显式 `run(mode="disable")` 从第 1 步直接开始；透明 `auto` 先做本地 prompt 判断，只有命中才进入第 1 步。**步骤按事件触发，没有后台定时上传全部历史。普通业务请求使用普通 RSI Bearer；实际参数与大小上限以附件第 8 节及当前远端版本为准。
 
 | 顺序/时机 | 远端调用 | 发什么、保存什么 |
 | --- | --- | --- |
@@ -171,7 +172,7 @@ await rsi.atoms.submit(run.run_id, data={"summary": "..."}, key="stable-submit-k
 
 ## 5. Session 消息增量上报与游标
 
-游标由 SDK 持久化，键为 `(base_url, RSI 调用主体, session_id, session_incarnation)`，值至少有 `acked_index`、`acked_message_id`、该项内容哈希、会话来源版本、最近一次 `run_id` 和待确认事件批次。`session_incarnation` 用于区分同名 Session 被清空重建。不同 Session 独立并发；同一个 Session 的读取、上传、ACK 和游标提交必须串行，或以 compare-and-swap 防止旧请求倒退游标。
+游标由 SDK 持久化，键为 `(内部 CoSens 服务标识, RSI 调用主体, session_id, session_incarnation)`，值至少有 `acked_index`、`acked_message_id`、该项内容哈希、会话来源版本、最近一次 `run_id` 和待确认事件批次。内部服务标识随 SDK 管理的服务配置确定，不由应用传入；服务迁移时必须避免把旧服务的 ACK 游标误用于新服务。`session_incarnation` 用于区分同名 Session 被清空重建。不同 Session 独立并发；同一个 Session 的读取、上传、ACK 和游标提交必须串行，或以 compare-and-swap 防止旧请求倒退游标。
 
 每次显式 `run`，或透明 `auto` 的 prompt 判断为“需要提交 RSI”后，SDK 读取当前 `session.get_items()`。只有索引大于 `acked_index` 的消息才形成待发批次；若宿主 Session 已有稳定消息 ID，使用它；否则用 `(session_id, session_incarnation, 原始索引, 规范化消息哈希)` 派生稳定 ID。必须验证游标之前的消息前缀仍与保存的 ID/哈希一致；若历史被截断、修改或重排，报 `SessionHistoryChanged`，要求宿主提供新 incarnation 或显式对账，不能悄悄从某个位置继续。
 
@@ -225,6 +226,7 @@ HTTP 层保存状态码、领域错误码、detail 和请求 ID。线上 `1.0.0`
 5. 同一 Session 多次 `run` 仅发送新消息；部分 ACK、同 Run 重试、重启恢复不丢消息或重复执行模型；历史截断/改写时明确报错。
 6. 当前远端 `1.0.0` 的 `session-events` 路径可用，而附件 `2.1.0` 的协调器不可用；`approval` 在能力缺失时明确报错；管理员发布单独授权。
 7. 原生完成后 HTTP 失败先对账再补交；无真实反馈不生成 `accepted`；未验证 Job 不发布；`observable_events` 不被误写成“Memory 已蒸馏完成”。
+8. `cosens(...)` 与 `CoSensClient(...)` 的公开初始化参数均不包含 CoSens 服务 `base_url`；三个入口共享内部传输配置，且不覆盖原生 OpenAI client 自己的 `base_url`。
 
 ## 8. TypeScript 预留
 
