@@ -14,7 +14,7 @@ Python 首版提供三层入口：
 2. **显式运行**：`cosens(agent, mode="disable").run(agent, user_input, session=...)`。`disable` 在这个入口关闭隐式触发判断；显式 `run` 本身是启动 RSI 的指令。SDK 在这一次 `run` 中直接拼接参考契约第 4.3 节的原子接口，不调用协调器。
 3. **原子调用**：`CoSensClient(...).atoms.*` 暴露参考契约第 6 节的九个原子操作，并对当前远端增加 `session_events`；应用自行决定步骤与执行时机。
 
-三个入口共用认证、传输、数据模型、幂等键、Session 消息游标、恢复记录与错误模型。TypeScript 只保留未来协议与目录规划，本轮不开发 TypeScript，也不实现任何 SDK 代码。
+三个入口共用认证、传输、数据模型、幂等键、Session 消息游标、恢复记录与错误模型。项目根目录按语言划分为 `python/` 和 `typescript/`；当前仅整理文档，不开发任何 SDK 代码。
 
 本设计不改变 RSI 算法、Memory 内部接口、模型工具执行权限、Agent 原始业务结果或服务端发布规则。`submit` 只记录结果，不能被解释为验收成功；`validated` 也不会自动发布。
 
@@ -228,7 +228,7 @@ HTTP 层保存状态码、领域错误码、detail 和请求 ID。线上 `1.0.0`
 
 ## 8. TypeScript 预留
 
-未来 TypeScript SDK 使用相同的 `mode`、`turn_id`、Session 消息 ID/游标、原子资源字段、幂等键和审批状态语义。可规划 `sdk/typescript/` 与独立的 Responses/Agent 适配器，但本轮不创建目录、不安装依赖、不承诺已有 TypeScript Agents SDK 的具体 API。跨语言协议以实际服务端 OpenAPI、附件契约与本设计中已确认的行为为准。
+未来 TypeScript SDK 使用相同的 `mode`、`turn_id`、Session 消息 ID/游标、原子资源字段、幂等键和审批状态语义。根目录的 `typescript/` 目前只有预留说明；本轮不安装依赖、不编写 TypeScript 代码，也不承诺已有 TypeScript Agents SDK 的具体 API。跨语言协议以实际服务端 OpenAPI、附件契约与本设计中已确认的行为为准。
 
 ## 9. 待产品/后端确认的接口决策
 
