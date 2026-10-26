@@ -45,7 +45,7 @@ async def test_explicit_run_composes_atoms_around_one_native_runner_call(tmp_pat
         path = request.url.path
         if path.endswith("/prepare"):
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {"summary": "Use checks"}, "context": {}})
-        if path == "/v1/runs/r1":
+        if path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {"wiki": "Source fact"}})
         if path.endswith("/session-events"):
             return httpx.Response(200, json={"durable_ack": [e["id"] for e in body["events"]]})
@@ -64,8 +64,8 @@ async def test_explicit_run_composes_atoms_around_one_native_runner_call(tmp_pat
     assert Runner.seen_agent is not agent
     assert "Source fact" in Runner.seen_agent.instructions
     assert [path for path, _ in calls] == [
-        "/v1/runs/prepare", "/v1/runs/r1", "/v1/runs/r1/session-events",
-        "/v1/runs/r1/session-events", "/v1/runs/r1/submit",
+        "/api/v1/runs/prepare", "/api/v1/runs/r1", "/api/v1/runs/r1/session-events",
+        "/api/v1/runs/r1/session-events", "/api/v1/runs/r1/submit",
     ]
     assert [e["id"] for e in calls[2][1]["events"]] == ["chat:old"]
     assert [e["id"] for e in calls[3][1]["events"]] == ["chat:new-user", "chat:new-assistant"]
@@ -81,7 +81,7 @@ async def test_pre_execution_event_failure_never_runs_agent_or_advances_cursor(t
         calls.append(request.url.path)
         if request.url.path.endswith("/prepare"):
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
-        if request.url.path == "/v1/runs/r1":
+        if request.url.path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
         return httpx.Response(503, json={"error": {"code": "unavailable", "message": "later"}})
 
@@ -102,7 +102,7 @@ async def test_post_execution_submit_failure_keeps_native_result_and_blocks_reex
         path = request.url.path
         if path.endswith("/prepare"):
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
-        if path == "/v1/runs/r1":
+        if path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
         if path.endswith("/session-events"):
             body = json.loads(request.content)
@@ -133,7 +133,7 @@ async def test_streamed_run_submits_only_after_native_stream_finishes(tmp_path):
         calls.append(path)
         if path.endswith("/prepare"):
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
-        if path == "/v1/runs/r1":
+        if path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
         if path.endswith("/session-events"):
             body = json.loads(request.content)
@@ -158,9 +158,9 @@ async def test_streamed_run_submits_only_after_native_stream_finishes(tmp_path):
     agent = Agent(name="assistant")
     client = cosens(agent, mode="disable", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=StreamingRunner)
     stream = await client.run_streamed(agent, "Current request", session=session)
-    assert "/v1/runs/r1/submit" not in calls
+    assert "/api/v1/runs/r1/submit" not in calls
     assert [event async for event in stream.stream_events()] == ["chunk"]
-    assert calls[-1] == "/v1/runs/r1/submit"
+    assert calls[-1] == "/api/v1/runs/r1/submit"
     await client.aclose()
 
 
@@ -175,7 +175,7 @@ async def test_processing_prepare_retries_with_same_key_before_native_run(tmp_pa
             if len(prepare_keys) == 1:
                 return httpx.Response(200, json={"status": "processing", "retry_after_seconds": 0})
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
-        if path == "/v1/runs/r1":
+        if path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
         if path.endswith("/session-events"):
             body = json.loads(request.content)
@@ -205,7 +205,7 @@ async def test_retry_after_pre_execution_failure_reuses_run_and_frozen_recipe(tm
         if path.endswith("/prepare"):
             counts["prepare"] += 1
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {"summary": "Frozen recipe"}, "context": {}})
-        if path == "/v1/runs/r1":
+        if path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
         if path.endswith("/session-events"):
             counts["events"] += 1
@@ -241,7 +241,7 @@ async def test_reconcile_lost_submit_response_uses_server_result_without_rerunni
         path = request.url.path
         if path.endswith("/prepare"):
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
-        if path == "/v1/runs/r1":
+        if path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "completed" if server_completed else "ready", "snapshot": {}, "result": submitted_data})
         if path.endswith("/session-events"):
             body = json.loads(request.content)
@@ -274,12 +274,12 @@ async def test_explicit_run_uploads_real_input_and_output_artifacts(tmp_path):
         path = request.url.path
         body = json.loads(request.content) if request.content else None
         calls.append((path, body))
-        if path == "/v1/artifacts":
+        if path == "/api/v1/artifacts":
             upload_count += 1
             return httpx.Response(200, json={"artifact_id": f"a{upload_count}", "content_hash": f"h{upload_count}", "name": body["name"], "size_bytes": len(body["content"])})
         if path.endswith("/prepare"):
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
-        if path == "/v1/runs/r1":
+        if path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
         if path.endswith("/session-events"):
             return httpx.Response(200, json={"durable_ack": [e["id"] for e in body["events"]]})
@@ -296,7 +296,7 @@ async def test_explicit_run_uploads_real_input_and_output_artifacts(tmp_path):
     client = cosens(agent, mode="disable", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=FileRunner)
     await client.run(agent, "Current request", input_artifacts=[{"name": "input.txt", "content": "facts"}])
     assert [path for path, _ in calls] == [
-        "/v1/artifacts", "/v1/runs/prepare", "/v1/runs/r1", "/v1/artifacts", "/v1/runs/r1/submit",
+        "/api/v1/artifacts", "/api/v1/runs/prepare", "/api/v1/runs/r1", "/api/v1/artifacts", "/api/v1/runs/r1/submit",
     ]
     assert calls[1][1]["input_artifact_ids"] == ["a1"]
     assert calls[-1][1]["data"]["files"] == [{"artifact_id": "a2", "content_hash": "h2"}]
@@ -312,9 +312,9 @@ async def test_lost_output_artifact_receipt_is_not_blindly_uploaded_again(tmp_pa
         path = request.url.path
         if path.endswith("/prepare"):
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
-        if path == "/v1/runs/r1":
+        if path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
-        if path == "/v1/artifacts":
+        if path == "/api/v1/artifacts":
             uploads += 1
             return httpx.Response(503, json={"error": {"code": "unknown", "message": "receipt lost"}})
         raise AssertionError(path)
@@ -344,7 +344,7 @@ async def test_concurrent_runs_for_same_session_serialize_history_uploads(tmp_pa
         if path.endswith("/prepare"):
             run_number += 1
             return httpx.Response(200, json={"run_id": f"r{run_number}", "status": "ready", "recipe": {}, "context": {}})
-        if path in {"/v1/runs/r1", "/v1/runs/r2"}:
+        if path in {"/api/v1/runs/r1", "/api/v1/runs/r2"}:
             return httpx.Response(200, json={"run_id": path.rsplit("/", 1)[1], "status": "ready", "snapshot": {}})
         if path.endswith("/session-events"):
             await asyncio.sleep(0.01)
@@ -384,7 +384,7 @@ async def test_native_failure_is_not_retried_automatically_after_possible_tool_e
         path = request.url.path
         if path.endswith("/prepare"):
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
-        if path == "/v1/runs/r1":
+        if path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
         raise AssertionError(path)
 
@@ -415,7 +415,7 @@ async def test_completed_identical_user_request_starts_a_new_run(tmp_path):
         if path.endswith("/prepare"):
             prepared += 1
             return httpx.Response(200, json={"run_id": f"r{prepared}", "status": "ready", "recipe": {}, "context": {}})
-        if path in {"/v1/runs/r1", "/v1/runs/r2"}:
+        if path in {"/api/v1/runs/r1", "/api/v1/runs/r2"}:
             return httpx.Response(200, json={"run_id": path.rsplit("/", 1)[-1], "status": "ready", "snapshot": {}})
         if path.endswith("/submit"):
             return httpx.Response(200, json={"run_id": path.split("/")[3], "status": "completed"})
@@ -452,7 +452,7 @@ async def test_native_approval_interruptions_pause_submit_and_resume_same_run(tm
         if path.endswith("/prepare"):
             prepared += 1
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
-        if path == "/v1/runs/r1":
+        if path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
         if path.endswith("/submit"):
             submitted += 1
@@ -495,7 +495,7 @@ async def test_streamed_native_approval_interruptions_do_not_submit(tmp_path):
         path = request.url.path
         if path.endswith("/prepare"):
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
-        if path == "/v1/runs/r1":
+        if path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
         if path.endswith("/submit"):
             submitted += 1

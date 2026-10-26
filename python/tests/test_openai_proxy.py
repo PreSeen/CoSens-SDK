@@ -27,7 +27,7 @@ def rsi_server(calls):
         calls.append((path, body))
         if path.endswith("/prepare"):
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {"summary": "Check facts"}, "context": {}})
-        if path == "/v1/runs/r1":
+        if path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {"wiki": "Frozen source"}})
         if path.endswith("/session-events"):
             return httpx.Response(200, json={"durable_ack": [e["id"] for e in body["events"]]})
@@ -99,7 +99,7 @@ def test_auto_retry_after_prepare_receipt_loss_reuses_turn_and_blocks_uncertain_
             if attempts == 1:
                 raise httpx.ReadError("receipt lost")
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
-        if request.url.path == "/v1/runs/r1":
+        if request.url.path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
         raise AssertionError(request.url.path)
 
@@ -193,8 +193,8 @@ def test_auto_true_prepares_injects_context_and_submits_after_response(tmp_path)
     result = client.responses.create(model="app", instructions="Original", input="current")
     assert result.output_text == "done"
     assert [c[0] for c in rsi_calls] == [
-        "/v1/runs/prepare", "/v1/runs/r1", "/v1/runs/r1/session-events",
-        "/v1/runs/r1/session-events", "/v1/runs/r1/submit",
+        "/api/v1/runs/prepare", "/api/v1/runs/r1", "/api/v1/runs/r1/session-events",
+        "/api/v1/runs/r1/session-events", "/api/v1/runs/r1/submit",
     ]
     assert [e["id"] for e in rsi_calls[2][1]["events"]] == ["chat:old"]
     assert [e["kind"] for e in rsi_calls[3][1]["events"]] == ["user_prompt", "agent_action"]
@@ -297,7 +297,7 @@ async def test_async_openai_generation_uses_same_atomic_flow(tmp_path):
     client = cosens(native, mode="auto", decision_model="decision", session=Session(), token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
     result = await client.responses.create(model="app", input="current")
     assert result.output_text == "done"
-    assert calls[-1][0] == "/v1/runs/r1/submit"
+    assert calls[-1][0] == "/api/v1/runs/r1/submit"
 
 
 def test_raw_response_is_returned_with_parse_hook_and_original_headers(tmp_path):
@@ -310,11 +310,11 @@ def test_raw_response_is_returned_with_parse_hook_and_original_headers(tmp_path)
     client = cosens(native, mode="auto", decision_model="decision", session=Session(), token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
     wrapped = client.responses.with_raw_response.create(model="app", input="current")
     assert wrapped.headers is raw.headers
-    assert "/v1/runs/r1/submit" not in [path for path, _ in calls]
+    assert "/api/v1/runs/r1/submit" not in [path for path, _ in calls]
     assert wrapped.parse() is parsed
     assert wrapped.parse() is parsed
-    assert [path for path, _ in calls].count("/v1/runs/r1/submit") == 1
-    assert calls[-1][0] == "/v1/runs/r1/submit"
+    assert [path for path, _ in calls].count("/api/v1/runs/r1/submit") == 1
+    assert calls[-1][0] == "/api/v1/runs/r1/submit"
 
 
 def test_stream_true_submits_after_completed_event_and_preserves_iterator(tmp_path):
@@ -330,9 +330,9 @@ def test_stream_true_submits_after_completed_event_and_preserves_iterator(tmp_pa
     native.responses.create = create
     client = cosens(native, mode="auto", decision_model="decision", session=Session(), token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
     stream = client.responses.create(model="app", input="current", stream=True)
-    assert "/v1/runs/r1/submit" not in [path for path, _ in calls]
+    assert "/api/v1/runs/r1/submit" not in [path for path, _ in calls]
     assert [event.type for event in stream] == ["response.created", "response.completed"]
-    assert calls[-1][0] == "/v1/runs/r1/submit"
+    assert calls[-1][0] == "/api/v1/runs/r1/submit"
 
 
 def test_context_managed_stream_keeps_completed_state_after_exit(tmp_path):
@@ -379,7 +379,7 @@ async def test_async_stream_manager_prepares_on_enter_and_submits_on_completion(
     client = cosens(native, mode="auto", decision_model="decision", session=Session(), token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
     async with client.responses.stream(model="app", input="current") as stream:
         assert [event.type async for event in stream] == ["response.completed"]
-    assert calls[-1][0] == "/v1/runs/r1/submit"
+    assert calls[-1][0] == "/api/v1/runs/r1/submit"
 
 
 def test_chat_completions_keeps_original_messages_in_order_and_adds_context(tmp_path):
@@ -407,7 +407,7 @@ def test_chat_completions_keeps_original_messages_in_order_and_adds_context(tmp_
     assert model_calls[1]["messages"][2]["role"] == "developer"
     assert "Current question" in model_calls[0]["input"]
     assert "Original policy" not in model_calls[0]["input"]
-    assert calls[-1][0] == "/v1/runs/r1/submit"
+    assert calls[-1][0] == "/api/v1/runs/r1/submit"
 
 
 def test_function_call_continuation_reuses_one_run_and_submits_only_final_message(tmp_path):
@@ -422,10 +422,10 @@ def test_function_call_continuation_reuses_one_run_and_submits_only_final_messag
     )
     client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
     client.responses.create(model="app", input="Call a tool")
-    assert "/v1/runs/r1/submit" not in [path for path, _ in calls]
+    assert "/api/v1/runs/r1/submit" not in [path for path, _ in calls]
     client.responses.create(model="app", previous_response_id="tool-response", input=[{"type": "function_call_output", "call_id": "c1", "output": "tool result"}])
-    assert [path for path, _ in calls].count("/v1/runs/prepare") == 1
-    assert [path for path, _ in calls].count("/v1/runs/r1/submit") == 1
+    assert [path for path, _ in calls].count("/api/v1/runs/prepare") == 1
+    assert [path for path, _ in calls].count("/api/v1/runs/r1/submit") == 1
     reported = [event for path, body in calls if path.endswith("/session-events") for event in body["events"]]
     assert any(event["kind"] == "user_prompt" and event["payload"]["content"] == "Call a tool" for event in reported)
     assert any(event["kind"] == "agent_action" and event["payload"].get("source_revision") == "native_function_call" for event in reported)
@@ -449,7 +449,7 @@ def test_openai_reconcile_completed_run_does_not_call_native_again(tmp_path):
         path = request.url.path
         if path.endswith("/prepare"):
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
-        if path == "/v1/runs/r1":
+        if path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "completed" if submitted else "ready", "snapshot": {}, "result": submitted})
         if path.endswith("/session-events"):
             body = json.loads(request.content)
@@ -489,7 +489,7 @@ def test_unresolved_turn_blocks_passthrough_after_classifier_change(tmp_path, se
         path = request.url.path
         if path.endswith("/prepare"):
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
-        if path == "/v1/runs/r1":
+        if path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
         if path.endswith("/session-events"):
             body = json.loads(request.content)
@@ -523,7 +523,7 @@ def test_repeated_continuation_cannot_reexecute_after_uncertain_submit(tmp_path)
         path = request.url.path
         if path.endswith("/prepare"):
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
-        if path == "/v1/runs/r1":
+        if path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
         if path.endswith("/session-events"):
             body = json.loads(request.content)
@@ -561,7 +561,7 @@ def test_chat_stream_chunk_events_submit_after_final_stop_chunk(tmp_path):
     client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
     with client.chat.completions.stream(model="app", messages=[{"role": "user", "content": "task"}]) as stream:
         assert len(list(stream)) == 2
-    assert calls[-1][0] == "/v1/runs/r1/submit"
+    assert calls[-1][0] == "/api/v1/runs/r1/submit"
     assert calls[-1][1]["data"]["summary"] == "hello world"
 
 
@@ -590,7 +590,7 @@ def test_stream_get_final_response_also_records_completion(tmp_path):
     with client.responses.stream(model="app", input="current") as stream:
         assert stream.get_final_response() is final
         assert len(list(stream)) == 1
-    assert [path for path, _ in calls].count("/v1/runs/r1/submit") == 1
+    assert [path for path, _ in calls].count("/api/v1/runs/r1/submit") == 1
 
 
 @pytest.mark.parametrize("raw_mode", ["with_raw_response", "with_streaming_response"])
@@ -628,7 +628,7 @@ def test_real_openai_raw_stream_parse_supports_next_and_records_terminal_event(t
         assert next(stream).type == "response.completed"
         stream.close()
     assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "completed"
-    assert [path for path, _ in rsi_calls].count("/v1/runs/r1/submit") == 1
+    assert [path for path, _ in rsi_calls].count("/api/v1/runs/r1/submit") == 1
 
 
 @pytest.mark.asyncio
@@ -668,7 +668,7 @@ async def test_real_async_openai_raw_stream_parse_supports_anext(tmp_path, raw_m
         assert (await anext(stream)).type == "response.completed"
         await stream.close()
     assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "completed"
-    assert [path for path, _ in rsi_calls].count("/v1/runs/r1/submit") == 1
+    assert [path for path, _ in rsi_calls].count("/api/v1/runs/r1/submit") == 1
     await client.close()
 
 

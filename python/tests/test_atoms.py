@@ -17,17 +17,17 @@ async def test_atomic_endpoints_send_the_documented_requests():
         body = json.loads(request.content) if request.content else None
         requests.append((request.method, request.url.path, dict(request.headers), body))
         payloads = {
-            "/v1/artifacts": {"artifact_id": "a1", "content_hash": "h1", "name": "input.txt", "size_bytes": 5},
-            "/v1/runs/prepare": {"run_id": "r1", "status": "ready", "recipe": {}, "context": {}},
-            "/v1/runs/r1": {"run_id": "r1", "status": "ready", "snapshot": {}},
-            "/v1/runs/r1/session-events": {"durable_ack": ["e1"]},
-            "/v1/runs/r1/initial-inputs": {"run_id": "r1", "status": "ready"},
-            "/v1/runs/r1/submit": {"run_id": "r1", "status": "completed", "evaluation": "inconclusive", "accepted": None},
-            "/v1/runs/r1/feedback": {"feedback_id": "f1", "status": "recorded"},
-            "/v1/runs/r1/improvements": {"job_id": "j1", "status": "queued"},
-            "/v1/improvements/j1": {"job_id": "j1", "status": "validated"},
-            "/v1/improvements/j1/resume": {"job_id": "j1", "status": "queued"},
-            "/internal/admin/v1/improvements/j1/publish": {"release_id": "rel1", "status": "published"},
+            "/api/v1/artifacts": {"artifact_id": "a1", "content_hash": "h1", "name": "input.txt", "size_bytes": 5},
+            "/api/v1/runs/prepare": {"run_id": "r1", "status": "ready", "recipe": {}, "context": {}},
+            "/api/v1/runs/r1": {"run_id": "r1", "status": "ready", "snapshot": {}},
+            "/api/v1/runs/r1/session-events": {"durable_ack": ["e1"]},
+            "/api/v1/runs/r1/initial-inputs": {"run_id": "r1", "status": "ready"},
+            "/api/v1/runs/r1/submit": {"run_id": "r1", "status": "completed", "evaluation": "inconclusive", "accepted": None},
+            "/api/v1/runs/r1/feedback": {"feedback_id": "f1", "status": "recorded"},
+            "/api/v1/runs/r1/improvements": {"job_id": "j1", "status": "queued"},
+            "/api/v1/improvements/j1": {"job_id": "j1", "status": "validated"},
+            "/api/v1/improvements/j1/resume": {"job_id": "j1", "status": "queued"},
+            "/api/internal/admin/v1/improvements/j1/publish": {"release_id": "rel1", "status": "published"},
         }
         return httpx.Response(200, json=payloads[request.url.path])
 
@@ -47,10 +47,10 @@ async def test_atomic_endpoints_send_the_documented_requests():
     assert artifact.content_hash == "h1"
     assert submitted.accepted is None
     assert [r[1] for r in requests] == [
-        "/v1/artifacts", "/v1/runs/prepare", "/v1/runs/r1", "/v1/runs/r1/session-events",
-        "/v1/runs/r1/initial-inputs", "/v1/runs/r1/submit", "/v1/runs/r1/feedback", "/v1/runs/r1/improvements",
-        "/v1/improvements/j1", "/v1/improvements/j1/resume",
-        "/internal/admin/v1/improvements/j1/publish",
+        "/api/v1/artifacts", "/api/v1/runs/prepare", "/api/v1/runs/r1", "/api/v1/runs/r1/session-events",
+        "/api/v1/runs/r1/initial-inputs", "/api/v1/runs/r1/submit", "/api/v1/runs/r1/feedback", "/api/v1/runs/r1/improvements",
+        "/api/v1/improvements/j1", "/api/v1/improvements/j1/resume",
+        "/api/internal/admin/v1/improvements/j1/publish",
     ]
     assert requests[1][2]["idempotency-key"] == "prepare-key"
     assert requests[1][3] == {"objective": "task", "task_family": "general", "input_artifact_ids": ["a1"]}
