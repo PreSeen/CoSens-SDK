@@ -161,3 +161,103 @@ async def test_streamed_run_submits_only_after_native_stream_finishes(tmp_path):
     assert [event async for event in stream.stream_events()] == ["chunk"]
     assert calls[-1] == "/v1/runs/r1/submit"
     await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_processing_prepare_retries_with_same_key_before_native_run(tmp_path):
+    prepare_keys = []
+
+    def server(request):
+        path = request.url.path
+        if path.endswith("/prepare"):
+            prepare_keys.append(request.headers["idempotency-key"])
+            if len(prepare_keys) == 1:
+                return httpx.Response(200, json={"status": "processing", "retry_after_seconds": 0})
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        if path.endswith("/session-events"):
+            body = json.loads(request.content)
+            return httpx.Response(200, json={"durable_ack": [e["id"] for e in body["events"]]})
+        if path.endswith("/submit"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "completed"})
+        raise AssertionError(path)
+
+    Runner.calls = 0
+    session = Session()
+    agent = Agent(name="assistant")
+    client = cosens(agent, mode="disable", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
+    result = await client.run(agent, "Current request", session=session)
+    assert result.final_output == "done"
+    assert len(prepare_keys) == 2
+    assert prepare_keys[0] == prepare_keys[1]
+    assert Runner.calls == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_retry_after_pre_execution_failure_reuses_run_and_frozen_recipe(tmp_path):
+    counts = {"prepare": 0, "events": 0}
+
+    def server(request):
+        path = request.url.path
+        if path.endswith("/prepare"):
+            counts["prepare"] += 1
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {"summary": "Frozen recipe"}, "context": {}})
+        if path == "/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        if path.endswith("/session-events"):
+            counts["events"] += 1
+            if counts["events"] == 1:
+                return httpx.Response(503, json={"error": {"code": "unavailable", "message": "later"}})
+            body = json.loads(request.content)
+            return httpx.Response(200, json={"durable_ack": [e["id"] for e in body["events"]]})
+        if path.endswith("/submit"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "completed"})
+        raise AssertionError(path)
+
+    Runner.calls = 0
+    session = Session()
+    agent = Agent(name="assistant", instructions="Original")
+    client = cosens(agent, mode="disable", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
+    with pytest.raises(Exception):
+        await client.run(agent, "Current request", session=session)
+    result = await client.run(agent, "Current request", session=session)
+    assert result.final_output == "done"
+    assert counts["prepare"] == 1
+    assert Runner.calls == 1
+    assert "Frozen recipe" in Runner.seen_agent.instructions
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_lost_submit_response_uses_server_result_without_rerunning_agent(tmp_path):
+    server_completed = False
+    submitted_data = None
+
+    def server(request):
+        nonlocal server_completed, submitted_data
+        path = request.url.path
+        if path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "completed" if server_completed else "ready", "snapshot": {}, "result": submitted_data})
+        if path.endswith("/session-events"):
+            body = json.loads(request.content)
+            return httpx.Response(200, json={"durable_ack": [e["id"] for e in body["events"]]})
+        if path.endswith("/submit"):
+            submitted_data = json.loads(request.content)["data"]
+            server_completed = True
+            return httpx.Response(503, json={"error": {"code": "response_lost", "message": "unknown"}})
+        raise AssertionError(path)
+
+    Runner.calls = 0
+    session = Session()
+    agent = Agent(name="assistant")
+    client = cosens(agent, mode="disable", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
+    await client.run(agent, "Current request", session=session)
+    turn_id = client.cosens.last_turn_id
+    assert client.cosens.get_turn(turn_id)["state"] == "completion_pending"
+    assert (await client.cosens.reconcile(turn_id))["state"] == "completed"
+    assert Runner.calls == 1
+    await client.aclose()

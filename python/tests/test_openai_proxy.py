@@ -274,3 +274,39 @@ def test_function_call_continuation_reuses_one_run_and_submits_only_final_messag
     assert any(event["kind"] == "user_prompt" and event["payload"]["content"] == "Call a tool" for event in reported)
     assert any(event["kind"] == "agent_action" and event["payload"].get("source_revision") == "native_function_call" for event in reported)
     assert any(event["kind"] == "tool_result" and event["payload"]["content"] == "tool result" for event in reported)
+
+
+def test_openai_reconcile_completed_run_does_not_call_native_again(tmp_path):
+    native = OpenAI(api_key="test")
+    native_calls = 0
+    submitted = None
+
+    def create(**kwargs):
+        nonlocal native_calls
+        if kwargs["model"] == "decision":
+            return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+        native_calls += 1
+        return SimpleNamespace(id="resp-1", status="completed", output_text="done", output=[SimpleNamespace(type="message", role="assistant")])
+
+    def server(request):
+        nonlocal submitted
+        path = request.url.path
+        if path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "completed" if submitted else "ready", "snapshot": {}, "result": submitted})
+        if path.endswith("/session-events"):
+            body = json.loads(request.content)
+            return httpx.Response(200, json={"durable_ack": [e["id"] for e in body["events"]]})
+        if path.endswith("/submit"):
+            submitted = json.loads(request.content)["data"]
+            return httpx.Response(503, json={"error": {"code": "response_lost", "message": "unknown"}})
+        raise AssertionError(path)
+
+    native.responses.create = create
+    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
+    assert client.responses.create(model="app", input="current").output_text == "done"
+    turn_id = client.cosens.last_turn_id
+    assert client.cosens.get_turn(turn_id)["state"] == "completion_pending"
+    assert client.cosens.reconcile(turn_id)["state"] == "completed"
+    assert native_calls == 1

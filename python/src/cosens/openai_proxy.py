@@ -14,6 +14,7 @@ from .errors import RSIApprovalUnavailable, RSIDecisionUnavailable, RSIRecoveryR
 from .responses_adapter import SUPPORTED, base_path, inject, summary, terminal, tool_names, user_text
 from .session_cursor import CursorStore
 from .state import TurnStore
+from .workflow import prepare_ready_async, prepare_ready_sync
 
 
 def _resource(value):
@@ -32,6 +33,11 @@ class _Status:
 
     def get_turn(self, turn_id):
         return self._runtime.turns.get(turn_id)
+
+    def reconcile(self, turn_id):
+        if self._runtime.asynchronous:
+            return self._runtime.reconcile_async(turn_id)
+        return self._runtime.reconcile_sync(turn_id)
 
     @contextlib.contextmanager
     def scope(self, *, session_id=None, turn_id=None):
@@ -225,10 +231,11 @@ class _DeferredAsyncManager:
 
 
 class _Runtime:
-    def __init__(self, *, mode, decision_model, session, token, state_path, http_transport):
+    def __init__(self, *, mode, decision_model, session, token, state_path, http_transport, asynchronous=False):
         if mode in {"auto", "approval"} and not decision_model:
             raise ValueError("decision_model is required for auto/approval")
         self.mode = mode
+        self.asynchronous = asynchronous
         self.decision_model = decision_model
         self.session = session
         self.client = CoSensClient(token=token, state_path=state_path, _http_transport=http_transport)
@@ -391,9 +398,7 @@ class _Runtime:
             if state["run_id"]:
                 run = self.client.sync_atoms.get_run(state["run_id"])
             else:
-                prepared = self.client.sync_atoms.prepare(objective=state["objective"], task_family=state["task_family"] or "general", key=state["turn_id"])
-                if prepared.status == "processing":
-                    raise RSIRecoveryRequired("Run preparation is still processing")
+                prepared = prepare_ready_sync(self.client.sync_atoms, objective=state["objective"], task_family=state["task_family"] or "general", key=state["turn_id"])
                 state["run_id"] = prepared.run_id
                 self._save(state)
                 run = self.client.sync_atoms.get_run(prepared.run_id)
@@ -413,9 +418,7 @@ class _Runtime:
             if state["run_id"]:
                 run = await self.client.atoms.get_run(state["run_id"])
             else:
-                prepared = await self.client.atoms.prepare(objective=state["objective"], task_family=state["task_family"] or "general", key=state["turn_id"])
-                if prepared.status == "processing":
-                    raise RSIRecoveryRequired("Run preparation is still processing")
+                prepared = await prepare_ready_async(self.client.atoms, objective=state["objective"], task_family=state["task_family"] or "general", key=state["turn_id"])
                 state["run_id"] = prepared.run_id
                 self._save(state)
                 run = await self.client.atoms.get_run(prepared.run_id)
@@ -491,6 +494,60 @@ class _Runtime:
             state["state"] = "completion_pending"
             state["last_error"] = str(exc)
         self._save(state)
+
+    def reconcile_sync(self, turn_id):
+        state = self.turns.get(turn_id)
+        if not state or state.get("state") not in {"native_completed", "completion_pending"}:
+            raise RSIRecoveryRequired("Turn has no completed native result to reconcile")
+        try:
+            self._send_sync(state["run_id"])
+            self._send_observable_sync(state, [])
+            remote = self.client.sync_atoms.get_run(state["run_id"])
+            if remote.status == "completed":
+                if remote.get("result") != state.get("result"):
+                    raise RSIRecoveryRequired("Remote completed Run result differs from locally saved result")
+            elif remote.status == "ready":
+                receipt = self.client.sync_atoms.submit(state["run_id"], data=state["result"])
+                if receipt.status != "completed":
+                    raise RSIRecoveryRequired("CoSens did not confirm recovered submit")
+            else:
+                raise RSIRecoveryRequired(f"Run {state['run_id']} is {remote.status}; cannot safely submit")
+            state["state"] = "completed"
+            state.pop("last_error", None)
+            self._save(state)
+            return state
+        except Exception as exc:
+            state["state"] = "completion_pending"
+            state["last_error"] = str(exc)
+            self._save(state)
+            raise
+
+    async def reconcile_async(self, turn_id):
+        state = self.turns.get(turn_id)
+        if not state or state.get("state") not in {"native_completed", "completion_pending"}:
+            raise RSIRecoveryRequired("Turn has no completed native result to reconcile")
+        try:
+            await self._send_async(state["run_id"])
+            await self._send_observable_async(state, [])
+            remote = await self.client.atoms.get_run(state["run_id"])
+            if remote.status == "completed":
+                if remote.get("result") != state.get("result"):
+                    raise RSIRecoveryRequired("Remote completed Run result differs from locally saved result")
+            elif remote.status == "ready":
+                receipt = await self.client.atoms.submit(state["run_id"], data=state["result"])
+                if receipt.status != "completed":
+                    raise RSIRecoveryRequired("CoSens did not confirm recovered submit")
+            else:
+                raise RSIRecoveryRequired(f"Run {state['run_id']} is {remote.status}; cannot safely submit")
+            state["state"] = "completed"
+            state.pop("last_error", None)
+            self._save(state)
+            return state
+        except Exception as exc:
+            state["state"] = "completion_pending"
+            state["last_error"] = str(exc)
+            self._save(state)
+            raise
 
     def invoke_sync(self, native, path, method, args, kwargs):
         if self.mode == "disable":

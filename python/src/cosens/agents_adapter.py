@@ -9,6 +9,7 @@ from .atoms import CoSensClient
 from .errors import RSIRecoveryRequired
 from .session_cursor import CursorStore
 from .state import TurnStore
+from .workflow import prepare_ready_async
 
 
 def _stable(value):
@@ -24,6 +25,9 @@ class _Status:
 
     def get_turn(self, turn_id):
         return self._owner._turns.get(turn_id)
+
+    async def reconcile(self, turn_id, *, session=None):
+        return await self._owner.reconcile(turn_id, session=session)
 
 
 class _StreamResult:
@@ -130,16 +134,15 @@ class CoSensAgentRunner:
             raise RSIRecoveryRequired(f"Turn {previous['turn_id']} may have executed; reconcile without rerunning Agent")
         turn_id = previous["turn_id"] if previous and previous.get("state") == "pre_execution_pending" else str(uuid.uuid4())
         self.cosens.last_turn_id = turn_id
-        state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "run_id": previous.get("run_id") if previous else None}
+        state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "run_id": previous.get("run_id") if previous else None, "prepared": previous.get("prepared") if previous else None}
         self._save(logical_key, state)
         try:
             if state["run_id"]:
-                prepared = {"run_id": state["run_id"], "recipe": {}, "context": {}}
+                prepared = state["prepared"] or {"run_id": state["run_id"], "recipe": {}, "context": {}}
             else:
-                prepared = await self._client.atoms.prepare(objective=objective, key=turn_id)
-                if prepared.status == "processing":
-                    raise RSIRecoveryRequired("Run preparation is still processing; retry this turn")
+                prepared = await prepare_ready_async(self._client.atoms, objective=objective, key=turn_id)
                 state["run_id"] = prepared.run_id
+                state["prepared"] = dict(prepared)
                 self._save(logical_key, state)
             run = await self._client.atoms.get_run(state["run_id"])
             await self._send_pending(state["run_id"], session)
@@ -173,8 +176,36 @@ class CoSensAgentRunner:
         return native_result
 
     def _save(self, logical_key, state):
+        state["logical_key"] = logical_key
         self._turns.put(state["turn_id"], state)
         self._turns.put(logical_key, state)
+
+    async def reconcile(self, turn_id, *, session=None):
+        state = self._turns.get(turn_id)
+        if not state or state.get("state") not in {"native_completed", "completion_pending"}:
+            raise RSIRecoveryRequired("Turn has no completed native result available for reconciliation")
+        session = session if session is not None else self.cosens.session
+        try:
+            await self._send_pending(state["run_id"], session)
+            remote = await self._client.atoms.get_run(state["run_id"])
+            if remote.status == "completed":
+                if remote.get("result") != state.get("result"):
+                    raise RSIRecoveryRequired("Remote completed Run result differs from locally saved result")
+            elif remote.status == "ready":
+                receipt = await self._client.atoms.submit(state["run_id"], data=state["result"])
+                if receipt.status != "completed":
+                    raise RSIRecoveryRequired("CoSens did not confirm the recovered submit")
+            else:
+                raise RSIRecoveryRequired(f"Run {state['run_id']} is {remote.status}; cannot safely submit")
+            state["state"] = "completed"
+            state.pop("last_error", None)
+            self._save(state.get("logical_key", "logical:" + turn_id), state)
+            return state
+        except Exception as exc:
+            state["state"] = "completion_pending"
+            state["last_error"] = str(exc)
+            self._save(state.get("logical_key", "logical:" + turn_id), state)
+            raise
 
     def run_sync(self, agent, user_input, *, session=None, **native_options):
         return asyncio.run(self.run(agent, user_input, session=session, **native_options))
@@ -188,16 +219,15 @@ class CoSensAgentRunner:
             raise RSIRecoveryRequired(f"Turn {previous['turn_id']} may have executed; reconcile without rerunning Agent")
         turn_id = previous["turn_id"] if previous and previous.get("state") == "pre_execution_pending" else str(uuid.uuid4())
         self.cosens.last_turn_id = turn_id
-        state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "run_id": previous.get("run_id") if previous else None}
+        state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "run_id": previous.get("run_id") if previous else None, "prepared": previous.get("prepared") if previous else None}
         self._save(logical_key, state)
         try:
             if state["run_id"]:
-                prepared = {"run_id": state["run_id"], "recipe": {}, "context": {}}
+                prepared = state["prepared"] or {"run_id": state["run_id"], "recipe": {}, "context": {}}
             else:
-                prepared = await self._client.atoms.prepare(objective=objective, key=turn_id)
-                if prepared.status == "processing":
-                    raise RSIRecoveryRequired("Run preparation is still processing; retry this turn")
+                prepared = await prepare_ready_async(self._client.atoms, objective=objective, key=turn_id)
                 state["run_id"] = prepared.run_id
+                state["prepared"] = dict(prepared)
                 self._save(logical_key, state)
             run = await self._client.atoms.get_run(state["run_id"])
             await self._send_pending(state["run_id"], session)
