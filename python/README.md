@@ -47,7 +47,7 @@ print(client.cosens.get_turn(client.cosens.last_turn_id))
 await client.aclose()
 ```
 
-这里的 `disable` 关闭自动决策；显式 `run()` 本身强制执行 RSI 原子编排。原生 Agent、工具和 handoff 仍由 Agents SDK 在本地执行。还提供 `run_sync()`、`run_streamed()`。`input_artifacts=[{"name": "...", "content": "..."}]` 上传确实存在的初始文本材料；原生 `final_output` 若为含 `files` 列表的字典，会上传实际输出文本文件。完成后的真实反馈和改进可根据 `get_turn()` 返回的 `run_id`，调用下述原子接口；没有反馈不会自动生成改进任务。
+这里的 `disable` 关闭自动决策；显式 `run()` 本身强制执行 RSI 原子编排。原生 Agent、工具和 handoff 仍由 Agents SDK 在本地执行。还提供 `run_sync()`、`run_streamed()`。原生工具审批中断时不提交 RSI 结果；通过 `await client.pending_state(agent, turn_id)` 取得原生 `RunState`，按 Agents SDK 的 `approve()`/`reject()` 处理后调用 `await client.resume(agent, turn_id, native_state, session=session)`，继续同一 RSI Run。`input_artifacts=[{"name": "...", "content": "..."}]` 上传确实存在的初始文本材料；原生 `final_output` 若为含 `files` 列表的字典，会上传实际输出文本文件。完成后的真实反馈和改进可根据 `get_turn()` 返回的 `run_id`，调用下述原子接口；没有反馈不会自动生成改进任务。
 
 ## 方式三：直接调用原子接口
 

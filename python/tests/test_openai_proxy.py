@@ -449,6 +449,80 @@ def test_openai_reconcile_completed_run_does_not_call_native_again(tmp_path):
     assert native_calls == 1
 
 
+@pytest.mark.parametrize("second_decision", ["failed", "negative"])
+def test_unresolved_turn_blocks_passthrough_after_classifier_change(tmp_path, second_decision):
+    native = OpenAI(api_key="test")
+    decision_calls = 0
+    native_calls = 0
+
+    def create(**kwargs):
+        nonlocal decision_calls, native_calls
+        if kwargs["model"] == "decision":
+            decision_calls += 1
+            if decision_calls > 1 and second_decision == "failed":
+                raise TimeoutError("decision unavailable")
+            active = decision_calls == 1
+            return SimpleNamespace(output_text=json.dumps({"activate": active, "objective": "task", "task_family": "general", "reason": "needed"}))
+        native_calls += 1
+        return SimpleNamespace(id="resp-1", status="completed", output_text="done", output=[SimpleNamespace(type="message", role="assistant")])
+
+    def server(request):
+        path = request.url.path
+        if path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        if path.endswith("/session-events"):
+            body = json.loads(request.content)
+            return httpx.Response(200, json={"durable_ack": [event["id"] for event in body["events"]]})
+        if path.endswith("/submit"):
+            return httpx.Response(503, json={"error": {"message": "receipt unknown"}})
+        raise AssertionError(path)
+
+    native.responses.create = create
+    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
+    client.responses.create(model="app", input="current")
+    with pytest.raises(RSIRecoveryRequired):
+        client.responses.create(model="app", input="current")
+    assert (decision_calls, native_calls) == (1, 1)
+
+
+def test_repeated_continuation_cannot_reexecute_after_uncertain_submit(tmp_path):
+    native = OpenAI(api_key="test")
+    native_calls = 0
+
+    def create(**kwargs):
+        nonlocal native_calls
+        if kwargs["model"] == "decision":
+            return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+        native_calls += 1
+        if not kwargs.get("previous_response_id"):
+            return SimpleNamespace(id="tool-response", status="completed", output_text="", output=[SimpleNamespace(type="function_call")])
+        return SimpleNamespace(id="final-response", status="completed", output_text="done", output=[SimpleNamespace(type="message", role="assistant")])
+
+    def server(request):
+        path = request.url.path
+        if path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        if path.endswith("/session-events"):
+            body = json.loads(request.content)
+            return httpx.Response(200, json={"durable_ack": [event["id"] for event in body["events"]]})
+        if path.endswith("/submit"):
+            return httpx.Response(503, json={"error": {"message": "receipt unknown"}})
+        raise AssertionError(path)
+
+    native.responses.create = create
+    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
+    client.responses.create(model="app", input="use tool")
+    continuation = {"model": "app", "previous_response_id": "tool-response", "input": [{"type": "function_call_output", "call_id": "c1", "output": "result"}]}
+    client.responses.create(**continuation)
+    with pytest.raises(RSIRecoveryRequired):
+        client.responses.create(**continuation)
+    assert native_calls == 2
+
+
 def test_chat_stream_chunk_events_submit_after_final_stop_chunk(tmp_path):
     native = OpenAI(api_key="test")
     calls = []
@@ -500,6 +574,105 @@ def test_stream_get_final_response_also_records_completion(tmp_path):
     assert [path for path, _ in calls].count("/v1/runs/r1/submit") == 1
 
 
+@pytest.mark.parametrize("raw_mode", ["with_raw_response", "with_streaming_response"])
+def test_real_openai_raw_stream_parse_supports_next_and_records_terminal_event(tmp_path, raw_mode):
+    rsi_calls = []
+    sse = (
+        'event: response.completed\n'
+        'data: {"type":"response.completed","response":{"id":"resp-1","status":"completed",'
+        '"output":[{"type":"message","id":"msg-1","status":"completed","role":"assistant",'
+        '"content":[{"type":"output_text","text":"done","annotations":[]}]}],'
+        '"model":"m","object":"response","created_at":0,"parallel_tool_calls":false,'
+        '"tool_choice":"auto","tools":[]}}\n\ndata: [DONE]\n\n'
+    )
+    def model_server(request):
+        body = json.loads(request.content)
+        if body["model"] == "decision":
+            decision = '{"activate":true,"objective":"task","task_family":"general","reason":"needed"}'
+            return httpx.Response(200, json={
+                "id": "decision-1", "created_at": 0, "model": "decision", "object": "response", "status": "completed",
+                "parallel_tool_calls": False, "tool_choice": "auto", "tools": [],
+                "output": [{"type": "message", "id": "decision-message", "status": "completed", "role": "assistant", "content": [{"type": "output_text", "text": decision, "annotations": []}]}],
+            })
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=sse)
+
+    model_http = httpx.Client(transport=httpx.MockTransport(model_server))
+    native = OpenAI(api_key="test", base_url="https://model.example/v1", http_client=model_http)
+    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(rsi_calls))
+    raw = getattr(client.responses, raw_mode).create(model="m", input="task", stream=True)
+    if raw_mode == "with_streaming_response":
+        with raw as response:
+            stream = response.parse()
+            assert next(stream).type == "response.completed"
+    else:
+        stream = raw.parse()
+        assert next(stream).type == "response.completed"
+        stream.close()
+    assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "completed"
+    assert [path for path, _ in rsi_calls].count("/v1/runs/r1/submit") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw_mode", ["with_raw_response", "with_streaming_response"])
+async def test_real_async_openai_raw_stream_parse_supports_anext(tmp_path, raw_mode):
+    rsi_calls = []
+    sse = (
+        'event: response.completed\n'
+        'data: {"type":"response.completed","response":{"id":"resp-1","status":"completed",'
+        '"output":[{"type":"message","id":"msg-1","status":"completed","role":"assistant",'
+        '"content":[{"type":"output_text","text":"done","annotations":[]}]}],'
+        '"model":"m","object":"response","created_at":0,"parallel_tool_calls":false,'
+        '"tool_choice":"auto","tools":[]}}\n\ndata: [DONE]\n\n'
+    )
+
+    def model_server(request):
+        body = json.loads(request.content)
+        if body["model"] == "decision":
+            decision = '{"activate":true,"objective":"task","task_family":"general","reason":"needed"}'
+            return httpx.Response(200, json={
+                "id": "decision-1", "created_at": 0, "model": "decision", "object": "response", "status": "completed",
+                "parallel_tool_calls": False, "tool_choice": "auto", "tools": [],
+                "output": [{"type": "message", "id": "decision-message", "status": "completed", "role": "assistant", "content": [{"type": "output_text", "text": decision, "annotations": []}]}],
+            })
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=sse)
+
+    model_http = httpx.AsyncClient(transport=httpx.MockTransport(model_server))
+    native = AsyncOpenAI(api_key="test", base_url="https://model.example/v1", http_client=model_http)
+    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(rsi_calls))
+    if raw_mode == "with_streaming_response":
+        async with client.responses.with_streaming_response.create(model="m", input="task", stream=True) as response:
+            stream = await response.parse()
+            assert (await anext(stream)).type == "response.completed"
+    else:
+        raw = await client.responses.with_raw_response.create(model="m", input="task", stream=True)
+        stream = raw.parse()
+        assert (await anext(stream)).type == "response.completed"
+        await stream.close()
+    assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "completed"
+    assert [path for path, _ in rsi_calls].count("/v1/runs/r1/submit") == 1
+    await client.close()
+
+
+def test_unparsed_streaming_response_closure_marks_turn_incomplete(tmp_path):
+    native = OpenAI(api_key="test")
+    calls = []
+    native.responses.create = lambda **kwargs: SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+
+    class Manager:
+        def __enter__(self):
+            return SimpleNamespace()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    native.responses.with_streaming_response.create = lambda **kwargs: Manager()
+    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    with client.responses.with_streaming_response.create(model="m", input="task", stream=True):
+        pass
+    assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "incomplete"
+    assert not any(path.endswith("/submit") for path, _ in calls)
+
+
 def test_legacy_completion_prompt_without_roles_is_explicitly_unsupported_for_rsi(tmp_path):
     native = OpenAI(api_key="test")
     decision_calls = 0
@@ -515,4 +688,13 @@ def test_legacy_completion_prompt_without_roles_is_explicitly_unsupported_for_rs
     client = cosens(native, mode="auto", decision_model="decision", state_path=tmp_path / "state.sqlite3")
     assert client.completions.create(model="legacy", prompt="system-like instructions and user text") is original
     assert decision_calls == 0
+
+
+def test_unknown_generation_method_clears_prior_capture_status(tmp_path):
+    native = OpenAI(api_key="test")
+    native.responses.future_generate = lambda **kwargs: "native-result"
+    client = cosens(native, mode="disable", state_path=tmp_path / "state.sqlite3")
+    client.cosens.rsi_capture = "completed"
+    assert client.responses.future_generate(model="m") == "native-result"
+    assert client.cosens.rsi_capture == "unsupported"
     assert client.cosens.rsi_capture == "unsupported"

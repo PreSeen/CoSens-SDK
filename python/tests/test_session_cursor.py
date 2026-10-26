@@ -1,6 +1,6 @@
 import pytest
 
-from cosens.errors import SessionHistoryChanged
+from cosens.errors import RSIRecoveryRequired, SessionHistoryChanged
 from cosens.session_cursor import CursorStore
 from cosens.state import TurnStore
 
@@ -77,3 +77,59 @@ def test_turn_state_survives_restart(tmp_path):
     reopened = TurnStore(path)
     assert reopened.get("turn-1")["result"]["summary"] == "done"
     reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_batch_cannot_ack_next_message(tmp_path):
+    session = Session([{"id": "a", "role": "user", "content": "A"}, {"id": "b", "role": "user", "content": "B"}])
+    store = CursorStore(tmp_path / "state.sqlite3", principal="p")
+    snapshot = await store.snapshot(session)
+    stale = store.pending(snapshot, max_events=1)
+    store.begin_batch("run-1", snapshot, stale)
+    assert store.ack(snapshot, {"durable_ack": ["chat:a"]}) == 1
+    with pytest.raises(RSIRecoveryRequired):
+        store.begin_batch("run-2", snapshot, stale)
+    assert [event["id"] for event in store.pending(snapshot)] == ["chat:b"]
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_mutation_before_ack_does_not_redefine_acknowledged_payload(tmp_path):
+    session = Session([{"id": "a", "role": "user", "content": "original"}])
+    store = CursorStore(tmp_path / "state.sqlite3", principal="p")
+    snapshot = await store.snapshot(session)
+    events = store.pending(snapshot)
+    store.begin_batch("run-1", snapshot, events)
+    session.items[0]["content"] = "rewritten"
+    assert store.ack(snapshot, {"durable_ack": ["chat:a"]}) == 1
+    with pytest.raises(SessionHistoryChanged):
+        store.pending(await store.snapshot(session))
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_recovered_batch_checks_current_history(tmp_path):
+    session = Session([{"id": "a", "role": "user", "content": "original"}])
+    store = CursorStore(tmp_path / "state.sqlite3", principal="p")
+    snapshot = await store.snapshot(session)
+    store.begin_batch("run-1", snapshot, store.pending(snapshot))
+    session.items[0]["content"] = "rewritten"
+    with pytest.raises(SessionHistoryChanged):
+        store.recover_batch(await store.snapshot(session))
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_two_cursor_instances_cannot_replace_another_runs_pending_batch(tmp_path):
+    path = tmp_path / "state.sqlite3"
+    session = Session([{"id": "a", "role": "user", "content": "A"}])
+    first = CursorStore(path, principal="p")
+    second = CursorStore(path, principal="p")
+    first_snapshot = await first.snapshot(session)
+    second_snapshot = await second.snapshot(session)
+    first.begin_batch("run-1", first_snapshot, first.pending(first_snapshot))
+    with pytest.raises(RSIRecoveryRequired):
+        second.begin_batch("run-2", second_snapshot, second.pending(second_snapshot))
+    assert first.recover_batch(first_snapshot).run_id == "run-1"
+    first.close()
+    second.close()

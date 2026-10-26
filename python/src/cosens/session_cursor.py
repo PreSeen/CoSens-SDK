@@ -1,5 +1,6 @@
 """Durable per-Session cursor for incremental, ACK-driven event reporting."""
 
+import copy
 import hashlib
 import inspect
 import json
@@ -77,7 +78,32 @@ class CursorStore:
         if not isinstance(items, (list, tuple)):
             raise TypeError("Session.get_items() must return a list")
         key = _hash([SERVICE_ID, self._principal, str(session_id), str(incarnation)])
-        return SessionSnapshot(key, str(session_id), tuple(_plain(item) for item in items))
+        return SessionSnapshot(key, str(session_id), tuple(copy.deepcopy(_plain(item)) for item in items))
+
+    @staticmethod
+    def _event(snapshot, position):
+        item = snapshot.items[position]
+        role = str(item.get("role", item.get("type", "unknown")))
+        message_id = str(item.get("id") or _hash([snapshot.key, position, item]))
+        kind = {"user": "user_prompt", "assistant": "agent_action", "tool": "tool_result"}.get(role, "context_delivery")
+        return {
+            "id": f"chat:{message_id}",
+            "kind": kind,
+            "payload": {
+                "session_id": snapshot.session_id,
+                "message_id": message_id,
+                "index": position,
+                "role": role,
+                "content": item.get("content", item),
+                "source_revision": item.get("source_revision"),
+            },
+        }
+
+    def _validate_batch(self, snapshot, events, start_index):
+        for offset, event in enumerate(events):
+            position = start_index + offset
+            if position >= len(snapshot.items) or event != self._event(snapshot, position):
+                raise SessionHistoryChanged("Pending Session event differs from current history")
 
     def _row(self, key):
         row = self._db.execute(
@@ -96,22 +122,7 @@ class CursorStore:
             events = []
             size = 0
             for position in range(index + 1, len(snapshot.items)):
-                item = snapshot.items[position]
-                role = str(item.get("role", item.get("type", "unknown")))
-                message_id = str(item.get("id") or _hash([snapshot.session_id, position, item]))
-                kind = {"user": "user_prompt", "assistant": "agent_action", "tool": "tool_result"}.get(role, "context_delivery")
-                event = {
-                    "id": f"chat:{message_id}",
-                    "kind": kind,
-                    "payload": {
-                        "session_id": snapshot.session_id,
-                        "message_id": message_id,
-                        "index": position,
-                        "role": role,
-                        "content": item.get("content", item),
-                        "source_revision": item.get("source_revision"),
-                    },
-                }
+                event = self._event(snapshot, position)
                 encoded_size = len(_json(event).encode("utf-8"))
                 if encoded_size > max_bytes:
                     raise ValueError("One Session event exceeds the server batch size")
@@ -124,23 +135,40 @@ class CursorStore:
     def begin_batch(self, run_id, snapshot, events):
         if not events:
             return
-        with self._lock, self._db:
-            acked_index, prefix_hash, old_run_id, pending_json = self._row(snapshot.key)
-            self._validate(snapshot, acked_index, prefix_hash)
-            if pending_json and old_run_id != run_id:
-                raise RSIRecoveryRequired(f"Pending Session events belong to Run {old_run_id}")
-            self._db.execute(
-                "INSERT INTO cursors(key,acked_index,prefix_hash,run_id,pending_events) VALUES(?,?,?,?,?) "
-                "ON CONFLICT(key) DO UPDATE SET run_id=excluded.run_id,pending_events=excluded.pending_events",
-                (snapshot.key, acked_index, prefix_hash, run_id, _json(events)),
-            )
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                acked_index, prefix_hash, old_run_id, pending_json = self._row(snapshot.key)
+                self._validate(snapshot, acked_index, prefix_hash)
+                if pending_json:
+                    if old_run_id != run_id:
+                        raise RSIRecoveryRequired(f"Pending Session events belong to Run {old_run_id}")
+                    if events != json.loads(pending_json):
+                        raise RSIRecoveryRequired("Pending Session batch changed during recovery")
+                else:
+                    try:
+                        self._validate_batch(snapshot, events, acked_index + 1)
+                    except SessionHistoryChanged as exc:
+                        raise RSIRecoveryRequired("Session batch was built from a stale cursor or changed history") from exc
+                self._db.execute(
+                    "INSERT INTO cursors(key,acked_index,prefix_hash,run_id,pending_events) VALUES(?,?,?,?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET run_id=excluded.run_id,pending_events=excluded.pending_events",
+                    (snapshot.key, acked_index, prefix_hash, run_id, _json(events)),
+                )
+                self._db.commit()
+            except BaseException:
+                self._db.rollback()
+                raise
 
     def recover_batch(self, snapshot):
         with self._lock:
-            _, _, run_id, pending_json = self._row(snapshot.key)
+            acked_index, prefix_hash, run_id, pending_json = self._row(snapshot.key)
+            self._validate(snapshot, acked_index, prefix_hash)
             if not pending_json:
                 return None
-            return PendingBatch(run_id, json.loads(pending_json))
+            events = json.loads(pending_json)
+            self._validate_batch(snapshot, events, acked_index + 1)
+            return PendingBatch(run_id, events)
 
     def ack(self, snapshot, receipt):
         acknowledged = receipt.get("durable_ack")
@@ -155,6 +183,7 @@ class CursorStore:
             if not pending_json:
                 raise RSIRecoveryRequired("No pending Session event batch to acknowledge")
             pending = json.loads(pending_json)
+            self._validate_batch(snapshot, pending, old_index + 1)
             advanced = 0
             for event in pending:
                 if event["id"] not in ack_set:
@@ -166,17 +195,18 @@ class CursorStore:
             updated = self._db.execute(
                 "UPDATE cursors SET acked_index=?,prefix_hash=?,pending_events=?,"
                 "acked_message_id=?,acked_item_hash=?,source_revision=? "
-                "WHERE key=? AND acked_index=? AND run_id=?",
+                "WHERE key=? AND acked_index=? AND run_id=? AND pending_events=?",
                 (
                     new_index,
                     _hash(snapshot.items[: new_index + 1]) if new_index >= 0 else None,
                     _json(remaining) if remaining else None,
-                    str(item.get("id") or _hash([snapshot.session_id, new_index, item])) if new_index >= 0 else None,
+                    str(item.get("id") or _hash([snapshot.key, new_index, item])) if new_index >= 0 else None,
                     _hash(item) if new_index >= 0 else None,
                     item.get("source_revision"),
                     snapshot.key,
                     old_index,
                     run_id,
+                    pending_json,
                 ),
             )
             if updated.rowcount != 1:

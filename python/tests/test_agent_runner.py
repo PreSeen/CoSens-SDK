@@ -438,4 +438,94 @@ async def test_completed_identical_user_request_starts_a_new_run(tmp_path):
     assert first_turn != second_turn
     assert client.cosens.get_turn(first_turn)["run_id"] == "r1"
     assert client.cosens.get_turn(second_turn)["run_id"] == "r2"
+
+
+@pytest.mark.asyncio
+async def test_native_approval_interruptions_pause_submit_and_resume_same_run(tmp_path):
+    prepared = 0
+    submitted = 0
+    native_calls = 0
+
+    def server(request):
+        nonlocal prepared, submitted
+        path = request.url.path
+        if path.endswith("/prepare"):
+            prepared += 1
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        if path.endswith("/submit"):
+            submitted += 1
+            return httpx.Response(200, json={"run_id": "r1", "status": "completed"})
+        raise AssertionError(path)
+
+    class NativeState:
+        def to_json(self):
+            return {"approval": "pending"}
+
+    class RunnerStub:
+        @staticmethod
+        async def run(agent, user_input, *, session=None, **options):
+            nonlocal native_calls
+            native_calls += 1
+            if isinstance(user_input, str):
+                return SimpleNamespace(interruptions=["approval"], to_state=NativeState, final_output=None)
+            assert isinstance(user_input, NativeState)
+            return SimpleNamespace(interruptions=[], final_output="approved result")
+
+    agent = Agent(name="assistant")
+    client = cosens(agent, mode="disable", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=RunnerStub)
+    await client.run(agent, "task")
+    turn_id = client.cosens.last_turn_id
+    assert client.cosens.get_turn(turn_id)["state"] == "awaiting_native_approval"
+    assert submitted == 0
+    with pytest.raises(RSIRecoveryRequired):
+        await client.run(agent, "task")
+    await client.resume(agent, turn_id, NativeState())
+    assert (prepared, submitted, native_calls) == (1, 1, 2)
+    assert client.cosens.get_turn(turn_id)["state"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_streamed_native_approval_interruptions_do_not_submit(tmp_path):
+    submitted = 0
+
+    def server(request):
+        nonlocal submitted
+        path = request.url.path
+        if path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        if path.endswith("/submit"):
+            submitted += 1
+            return httpx.Response(200, json={"run_id": "r1", "status": "completed"})
+        raise AssertionError(path)
+
+    class NativeState:
+        def to_json(self):
+            return {"approval": "pending"}
+
+    class NativeStream:
+        is_complete = True
+        interruptions = ["approval"]
+        final_output = None
+
+        async def stream_events(self):
+            yield "approval-event"
+
+        def to_state(self):
+            return NativeState()
+
+    class RunnerStub:
+        @staticmethod
+        def run_streamed(agent, user_input, *, session=None, **options):
+            return NativeStream()
+
+    agent = Agent(name="assistant")
+    client = cosens(agent, mode="disable", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=RunnerStub)
+    stream = await client.run_streamed(agent, "task")
+    assert [event async for event in stream.stream_events()] == ["approval-event"]
+    assert submitted == 0
+    assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "awaiting_native_approval"
     await client.aclose()

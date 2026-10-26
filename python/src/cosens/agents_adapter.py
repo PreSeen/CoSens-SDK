@@ -56,6 +56,9 @@ class _StreamResult:
                 self._state["state"] = "incomplete"
                 self._owner._save(self._logical_key, self._state)
                 return
+            if getattr(self._native, "interruptions", None):
+                self._owner._save_interrupted(self._logical_key, self._state, self._native)
+                return
             self._state["state"] = "native_completed"
             self._state["result"] = self._owner._result_data(self._native.final_output)
             self._state["output_files"] = self._owner._output_files(self._native.final_output)
@@ -215,7 +218,7 @@ class CoSensAgentRunner:
         objective = user_input if isinstance(user_input, str) else json.dumps(user_input, ensure_ascii=False, default=str)
         logical_key = "logical:" + _stable([getattr(session, "session_id", None), agent.name, objective])
         previous = self._turns.get(logical_key)
-        if previous and previous.get("state") in {"native_running", "native_failed", "native_completed", "completion_pending", "incomplete"}:
+        if previous and previous.get("state") in {"native_running", "native_failed", "native_completed", "completion_pending", "incomplete", "awaiting_native_approval"}:
             raise RSIRecoveryRequired(f"Turn {previous['turn_id']} may have executed; reconcile without rerunning Agent")
         resumable = previous if previous and previous.get("state") == "pre_execution_pending" else None
         turn_id = resumable["turn_id"] if resumable else str(uuid.uuid4())
@@ -250,6 +253,57 @@ class CoSensAgentRunner:
             state["last_error"] = str(exc)
             self._save(logical_key, state)
             raise
+        if getattr(native_result, "interruptions", None):
+            self._save_interrupted(logical_key, state, native_result)
+            return native_result
+        await self._complete_result(logical_key, state, native_result, session)
+        return native_result
+
+    def _save(self, logical_key, state):
+        state["logical_key"] = logical_key
+        self._turns.put(state["turn_id"], state)
+        self._turns.put(logical_key, state)
+
+    def _save_interrupted(self, logical_key, state, native_result):
+        state["native_state"] = native_result.to_state().to_json()
+        state["interruption_count"] = len(native_result.interruptions)
+        state["state"] = "awaiting_native_approval"
+        self._save(logical_key, state)
+
+    async def pending_state(self, agent, turn_id):
+        state = self._turns.get(turn_id)
+        if not state or state.get("state") != "awaiting_native_approval":
+            raise RSIRecoveryRequired("Turn has no pending native tool approval")
+        from agents import RunState
+        run = await self._client.atoms.get_run(state["run_id"])
+        active_agent = self._with_context(agent, state["prepared"], run)
+        return await RunState.from_json(active_agent, state["native_state"])
+
+    async def resume(self, agent, turn_id, native_state, *, session=None, **native_options):
+        active_session = session if session is not None else self.cosens.session
+        async with self._session_lock(active_session):
+            state = self._turns.get(turn_id)
+            if not state or state.get("state") != "awaiting_native_approval":
+                raise RSIRecoveryRequired("Turn is not awaiting native tool approval")
+            logical_key = state["logical_key"]
+            run = await self._client.atoms.get_run(state["run_id"])
+            active_agent = self._with_context(agent, state["prepared"], run)
+            state["state"] = "native_running"
+            self._save(logical_key, state)
+            try:
+                native_result = await self._runner.run(active_agent, native_state, session=active_session, **native_options)
+            except Exception as exc:
+                state["state"] = "native_failed"
+                state["last_error"] = str(exc)
+                self._save(logical_key, state)
+                raise
+            if getattr(native_result, "interruptions", None):
+                self._save_interrupted(logical_key, state, native_result)
+                return native_result
+            await self._complete_result(logical_key, state, native_result, active_session)
+            return native_result
+
+    async def _complete_result(self, logical_key, state, native_result, session):
         state["state"] = "native_completed"
         state["result"] = self._result_data(native_result.final_output)
         state["output_files"] = self._output_files(native_result.final_output)
@@ -265,12 +319,6 @@ class CoSensAgentRunner:
             state["state"] = "completion_pending"
             state["last_error"] = str(exc)
         self._save(logical_key, state)
-        return native_result
-
-    def _save(self, logical_key, state):
-        state["logical_key"] = logical_key
-        self._turns.put(state["turn_id"], state)
-        self._turns.put(logical_key, state)
 
     async def reconcile(self, turn_id, *, session=None):
         state = self._turns.get(turn_id)
@@ -321,7 +369,7 @@ class CoSensAgentRunner:
         objective = user_input if isinstance(user_input, str) else json.dumps(user_input, ensure_ascii=False, default=str)
         logical_key = "logical:" + _stable([getattr(session, "session_id", None), agent.name, objective])
         previous = self._turns.get(logical_key)
-        if previous and previous.get("state") in {"native_running", "native_failed", "native_completed", "completion_pending", "incomplete"}:
+        if previous and previous.get("state") in {"native_running", "native_failed", "native_completed", "completion_pending", "incomplete", "awaiting_native_approval"}:
             raise RSIRecoveryRequired(f"Turn {previous['turn_id']} may have executed; reconcile without rerunning Agent")
         resumable = previous if previous and previous.get("state") == "pre_execution_pending" else None
         turn_id = resumable["turn_id"] if resumable else str(uuid.uuid4())

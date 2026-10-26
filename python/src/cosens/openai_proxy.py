@@ -68,11 +68,29 @@ class _RawResponse:
         self._asynchronous = asynchronous
 
     def __getattr__(self, name):
+        if name == "close":
+            closer = getattr(self._native, name)
+            if inspect.iscoroutinefunction(closer):
+                async def async_close():
+                    try:
+                        return await closer()
+                    finally:
+                        self._incomplete()
+                return async_close
+            def sync_close():
+                try:
+                    return closer()
+                finally:
+                    self._incomplete()
+            return sync_close
         if name == "parse":
             parse = getattr(self._native, name)
             if inspect.iscoroutinefunction(parse):
                 async def async_parse(*args, **kwargs):
                     value = await parse(*args, **kwargs)
+                    from openai import AsyncStream
+                    if isinstance(value, AsyncStream):
+                        return _GenerationStream(value, self._runtime, self._state, asynchronous=True)
                     if self._state["state"] == "native_running":
                         await self._runtime._complete_async(self._state, value)
                     return value
@@ -80,25 +98,39 @@ class _RawResponse:
 
             def sync_parse(*args, **kwargs):
                 value = parse(*args, **kwargs)
+                from openai import AsyncStream, Stream
+                if isinstance(value, (Stream, AsyncStream)):
+                    return _GenerationStream(value, self._runtime, self._state, asynchronous=isinstance(value, AsyncStream))
                 if self._state["state"] == "native_running":
                     self._runtime._complete_sync(self._state, value)
                 return value
             return sync_parse
         return getattr(self._native, name)
 
+    def _incomplete(self):
+        if self._state["state"] == "native_running":
+            self._state["state"] = "incomplete"
+            self._runtime._save(self._state)
+
     def __enter__(self):
         entered = self._native.__enter__()
         return _RawResponse(entered, self._runtime, self._state, asynchronous=False)
 
     def __exit__(self, exc_type, exc, tb):
-        return self._native.__exit__(exc_type, exc, tb)
+        try:
+            return self._native.__exit__(exc_type, exc, tb)
+        finally:
+            self._incomplete()
 
     async def __aenter__(self):
         entered = await self._native.__aenter__()
         return _RawResponse(entered, self._runtime, self._state, asynchronous=True)
 
     async def __aexit__(self, exc_type, exc, tb):
-        return await self._native.__aexit__(exc_type, exc, tb)
+        try:
+            return await self._native.__aexit__(exc_type, exc, tb)
+        finally:
+            self._incomplete()
 
 
 class _GenerationStream:
@@ -110,6 +142,8 @@ class _GenerationStream:
         self._complete_response = None
         self._finished = False
         self._text = []
+        self._iterator = None
+        self._async_iterator = None
 
     def __getattr__(self, name):
         value = getattr(self._native, name)
@@ -164,31 +198,57 @@ class _GenerationStream:
             self._runtime._save(self._state)
 
     def __iter__(self):
+        return self
+
+    def __next__(self):
         try:
-            for event in self._native:
-                self._inspect_event(event)
-                yield event
+            if self._iterator is None:
+                self._iterator = iter(self._native)
+            event = next(self._iterator)
+        except StopIteration:
+            self._incomplete()
+            raise
         except BaseException:
             self._incomplete()
             raise
+        self._inspect_event(event)
         if self._complete_response is not None and self._state["state"] == "native_running":
             self._runtime._complete_sync(self._state, self._complete_response)
             self._finished = True
-        elif self._complete_response is None:
-            self._incomplete()
+        return event
 
-    async def __aiter__(self):
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
         try:
-            async for event in self._native:
-                self._inspect_event(event)
-                yield event
+            if self._async_iterator is None:
+                self._async_iterator = self._native.__aiter__()
+            event = await anext(self._async_iterator)
+        except StopAsyncIteration:
+            self._incomplete()
+            raise
         except BaseException:
             self._incomplete()
             raise
+        self._inspect_event(event)
         if self._complete_response is not None and self._state["state"] == "native_running":
             await self._runtime._complete_async(self._state, self._complete_response)
             self._finished = True
-        elif self._complete_response is None:
+        return event
+
+    def close(self):
+        closer = self._native.close
+        if inspect.iscoroutinefunction(closer):
+            async def async_close():
+                try:
+                    return await closer()
+                finally:
+                    self._incomplete()
+            return async_close()
+        try:
+            return closer()
+        finally:
             self._incomplete()
 
     def __enter__(self):
@@ -226,6 +286,7 @@ class _DeferredAsyncManager:
             runtime.status.rsi_capture = "disabled" if runtime.mode == "disable" else "unsupported"
             self._manager = self._method(*self._args, **self._kwargs)
             return await self._manager.__aenter__()
+        runtime._guard_request(self._kwargs, self._path)
         try:
             decision = await decide_async(
                 self._client, runtime.decision_model,
@@ -323,18 +384,35 @@ class _Runtime:
                 self.cursor.close()
                 self.turns.close()
 
+    def _request_key(self, kwargs, path):
+        scope = self.status._scope.get()
+        session_id = (scope[0] if scope and scope[0] else None) or getattr(self.session, "session_id", None) or getattr(self.session, "id", None)
+        incarnation = getattr(self.session, "session_incarnation", None) or getattr(self.session, "incarnation", "0")
+        signature = json.dumps([str(session_id), str(incarnation), path, kwargs], sort_keys=True, default=str, ensure_ascii=False)
+        return "request:" + hashlib.sha256(signature.encode()).hexdigest()
+
+    def _existing_request(self, kwargs, path):
+        scope = self.status._scope.get()
+        return self.turns.get(scope[1]) if scope and scope[1] else self.turns.get(self._request_key(kwargs, path))
+
+    def _guard_request(self, kwargs, path):
+        existing = self._existing_request(kwargs, path)
+        if existing and existing.get("state") not in {"pre_execution_pending", "completed"}:
+            raise RSIRecoveryRequired(f"Turn {existing['turn_id']} may have executed; reconcile without repeating the model request")
+        scope = self.status._scope.get()
+        if existing and existing.get("state") == "completed" and scope and scope[1]:
+            raise RSIRecoveryRequired(f"Turn {existing['turn_id']} is already completed")
+
     def _new_state(self, objective, task_family, kwargs, path):
+        request_key = self._request_key(kwargs, path)
         previous_response_id = kwargs.get("previous_response_id")
-        previous = self.turns.get("response:" + str(previous_response_id)) if previous_response_id else None
+        alias = self.turns.get("response:" + str(previous_response_id)) if previous_response_id else None
+        previous = self.turns.get(alias.get("turn_ref", alias.get("turn_id"))) if alias else None
         if previous and previous.get("state") == "awaiting_continuation":
             state = previous
         else:
             scope = self.status._scope.get()
-            session_id = (scope[0] if scope and scope[0] else None) or getattr(self.session, "session_id", None) or getattr(self.session, "id", None)
-            incarnation = getattr(self.session, "session_incarnation", None) or getattr(self.session, "incarnation", "0")
-            signature = json.dumps([str(session_id), str(incarnation), path, kwargs], sort_keys=True, default=str, ensure_ascii=False)
-            request_key = "request:" + hashlib.sha256(signature.encode()).hexdigest()
-            existing = self.turns.get(scope[1]) if scope and scope[1] else self.turns.get(request_key)
+            existing = self._existing_request(kwargs, path)
             if existing and existing.get("state") == "pre_execution_pending":
                 state = existing
             elif existing and existing.get("state") != "completed":
@@ -343,14 +421,17 @@ class _Runtime:
                 raise RSIRecoveryRequired(f"Turn {existing['turn_id']} is already completed")
             else:
                 turn_id = scope[1] if scope and scope[1] else str(uuid.uuid4())
-                state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "task_family": task_family, "run_id": None, "request_key": request_key}
+                state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "task_family": task_family, "run_id": None}
+        keys = state.setdefault("request_keys", [])
+        if request_key not in keys:
+            keys.append(request_key)
         self.status.last_turn_id = state["turn_id"]
         return state
 
     def _save(self, state):
         self.turns.put(state["turn_id"], state)
-        if state.get("request_key"):
-            self.turns.put(state["request_key"], state)
+        for request_key in state.get("request_keys", []):
+            self.turns.put(request_key, state)
 
     def _snapshot_sync(self):
         if self.session is None:
@@ -541,7 +622,7 @@ class _Runtime:
             state["state"] = "awaiting_continuation"
             self._save(state)
             if response_id:
-                self.turns.put("response:" + str(response_id), state)
+                self.turns.put("response:" + str(response_id), {"turn_ref": state["turn_id"]})
             return
         state["state"] = "native_completed"
         state["result"] = {"summary": summary(response), "outcome": "completed"}
@@ -573,7 +654,7 @@ class _Runtime:
             state["state"] = "awaiting_continuation"
             self._save(state)
             if response_id:
-                self.turns.put("response:" + str(response_id), state)
+                self.turns.put("response:" + str(response_id), {"turn_ref": state["turn_id"]})
             return
         state["state"] = "native_completed"
         state["result"] = {"summary": summary(response), "outcome": "completed"}
@@ -653,6 +734,7 @@ class _Runtime:
         ):
             self.status.rsi_capture = "unsupported"
             return method(*args, **kwargs)
+        self._guard_request(kwargs, path)
         try:
             decision = decide_sync(native, self.decision_model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens)
         except Exception as exc:
@@ -702,6 +784,7 @@ class _Runtime:
         ):
             self.status.rsi_capture = "unsupported"
             return await method(*args, **kwargs)
+        self._guard_request(kwargs, path)
         try:
             decision = await decide_async(native, self.decision_model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens)
         except Exception as exc:
@@ -780,7 +863,19 @@ class _ResourceProxy:
                 def sync_call(*args, **kwargs):
                     return self._runtime.invoke_sync(self._root, path, value, args, kwargs)
                 return sync_call
-            return value
+            capture = "unsupported" if base_path(path)[0] in {"responses", "chat", "completions", "realtime", "batches"} else "not_applicable"
+            if inspect.iscoroutinefunction(value):
+                @functools.wraps(value)
+                async def async_passthrough(*args, **kwargs):
+                    self._runtime.status.rsi_capture = capture
+                    return await value(*args, **kwargs)
+                return async_passthrough
+
+            @functools.wraps(value)
+            def passthrough(*args, **kwargs):
+                self._runtime.status.rsi_capture = capture
+                return value(*args, **kwargs)
+            return passthrough
         if _resource(value):
             return _ResourceProxy(value, self._runtime, path, self._root)
         return value
