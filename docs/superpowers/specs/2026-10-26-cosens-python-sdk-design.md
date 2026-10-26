@@ -10,7 +10,7 @@ CoSens 在用户原有的 OpenAI 调用旁收集被授权的对话与执行证�
 
 Python 首版提供三层入口：
 
-1. **透明调用**：`cosens(OpenAI(), mode="auto")` 返回代理，拦截 `responses.create`。应用不显式调用 CoSens 的 `run`。`auto` 由模型判断该次任务是否需要提交 RSI Run。
+1. **透明调用**：`cosens(OpenAI(), mode="auto")` 返回覆盖原始 OpenAI client **全部公开功能**的兼容代理；模型对话请求可触发 CoSens，应用不显式调用 CoSens 的 `run`。`auto` 由模型判断该次任务是否需要提交 RSI Run。
 2. **显式运行**：`cosens(agent, mode="disable").run(agent, user_input, session=...)`。`disable` 在这个入口关闭隐式触发判断；显式 `run` 本身是启动 RSI 的指令。SDK 在这一次 `run` 中直接拼接参考契约第 4.3 节的原子接口，不调用协调器。
 3. **原子调用**：`CoSensClient(...).atoms.*` 暴露参考契约第 6 节的九个原子操作，并对当前远端增加 `session_events`；应用自行决定步骤与执行时机。
 
@@ -23,7 +23,7 @@ Python 首版提供三层入口：
 | 候选方案 | 适用性与取舍 | 决定 |
 | --- | --- | --- |
 | 只包装 `agents.Runner` | 能准确看到一个 Agent turn、工具和 Session，但不满足第一种“封装原始 OpenAI SDK、拦截 `responses.create`”的要求 | 不作为第一种；用于第二种 |
-| 只包装 `openai.OpenAI` | 改动少；一次 API 调用只能看到请求和响应，无法天然知道应用工具何时执行、整轮任务何时结束 | 作为第一种，明确能力边界 |
+| 只包装 `openai.OpenAI` | 可覆盖原始客户端全部公开功能；单个 API 调用无法天然知道应用工具何时执行、整轮任务何时结束 | 作为第一种，明确运行边界 |
 | 一个工厂按对象类型分派到两个代理，并共用原子客户端 | 同时满足透明接入和完整 Agent 编排；维护两套边界采集器 | 采用 |
 
 `cosens()` 不修改传入对象，也不对 `openai` 或 `agents` 做全局 monkey patch。再次包装同一代理且配置一致时返回原代理；配置冲突时报错，避免一条响应被重复上报。
@@ -49,7 +49,15 @@ response = client.responses.create(model="<application-model>", input="用户任
 print(response.output_text)
 ```
 
-公开入口为同步 `OpenAI` 与异步 `AsyncOpenAI` 的 `responses.create`。原有参数和返回值保持 OpenAI SDK 语义；未拦截的方法委托给原客户端。代理额外提供 `client.cosens.get_turn(turn_id)` 查询 RSI 状态。只构造 `client` 不发送请求；只有调用被支持的 `responses.create` 才进入流程。若应用持有可读取的 Session，显式交给 `cosens(..., session=session)` 或本次 scope；原始 `OpenAI` 客户端自身不提供 `agents.Session`，SDK 无法凭 client 推断之前的聊天消息。
+公开入口至少接收 `OpenAI` 与 `AsyncOpenAI` 客户端；若传入 `AzureOpenAI/AsyncAzureOpenAI`，也必须保留其原有资源、认证与 API 版本语义。代理额外提供 `client.cosens.get_turn(turn_id)` 查询 RSI 状态。只构造 `client` 不发送请求。若应用持有可读取的 Session，显式交给 `cosens(..., session=session)` 或本次 scope；原始 `OpenAI` 客户端自身不提供 `agents.Session`，SDK 无法凭 client 推断之前的聊天消息。
+
+**完整 SDK 兼容契约**：`cosens(client)` 返回的对象必须让原 client 的所有公开资源树、方法、属性和调用链继续可用，而不能只实现一个 `responses.create` 门面。包括 `responses`、`chat`、`completions`、`files`、`audio`、`images`、`embeddings`、`batches`、`models`、`moderations`、`vector_stores`、`fine_tuning`、`realtime`、`beta`，以及当前所安装 OpenAI SDK 版本新增的公开资源。正常委托调用须保留位置/关键字参数、默认值、返回模型、异常类型、请求选项、重试、分页、文件与二进制传输、同步/异步和流式生命周期。`client.with_options(...)`/`copy(...)` 派生出的客户端仍保持 CoSens 包装及同一 Session 游标；`client.close()`、上下文管理器、异步上下文管理器按原生客户端语义释放资源。`with_raw_response`、`with_streaming_response` 及资源下的同名调用链也必须可达，不能因代理少了一层属性而失败。通用 `client.get/post/...` 自定义请求同样透传。
+
+实现上使用递归资源代理与显式的模型请求适配器；SDK 每次按原生资源对象动态委托，不能手写一个随 OpenAI SDK 更新而过期的固定方法清单。对需要 CoSens 的模型生成调用，在请求发出前和结果实际完成后挂钩；非对话资源仍原样调用，不凭文件上传、模型列表或管理操作创建 RSI Run。`responses.create`、`responses.parse/stream`、`chat.completions.create/parse/stream`、旧式 `completions.create` 及其 raw/streaming 变体属于需要逐一验证的生成调用入口。对输入或输出无法安全归一化的生成变体，调用保持原生可用，并明确记录 `rsi_capture=unsupported`，不能静默宣称已经上报。批量任务和 Realtime 长连接同样要保持原功能；它们的 RSI 边界需有独立适配规则，不能把建立连接或创建 Batch 当作一次完成的聊天 Run。
+
+兼容目标以 SDK 明确支持的 `openai` Python 包版本为单位验收：记录该版本的公开资源/方法清单，逐项验证代理存在、签名可调用、原生返回和错误可传递；升级 `openai` 包时重复此检查。动态委托可让新增方法仍可调用，但未经适配与验收的新模型生成方法不得被标为“已完成 RSI 采集”。CoSens 的方法仅放在 `client.cosens` 命名空间，避免覆盖原生属性。
+
+代理的“功能可用”不等于 Python 名义类型完全相同：包装现有实例后，`isinstance(wrapped, OpenAI)` 等身份检查可能不同。对此保留 `client.native` 访问原对象；任何通过 `native` 发起的调用都不会被 CoSens 拦截。若第三方库强制接收原始类实例，需要单独的兼容适配，不得宣称完全透明。
 
 模型判断使用传给 `cosens()` 的 `decision_model`；启用 `auto/approval` 时它是必填配置，不猜测应用调用中的 `model` 是否适合分类。判断请求经**未包装的** OpenAI 客户端发出，要求结构化结果：`activate: bool`、`objective`、`task_family`、`reason`。这是一次额外模型调用，会增加费用和首次响应延迟。首版默认只给分类器当前请求中可见的最近用户文本与工具名称，截取上限 8,000 字符；不发送文件正文、工具输出、系统/开发者指令或完整历史。可以通过显式采集策略扩大范围，但必须由应用配置且仍受授权约束。建议默认决策超时 5 秒、输出上限 256 token，均可配置。原始调用中的 `store`、`metadata`、`tools` 等不被改写为分类器的工具权限。
 
@@ -57,7 +65,7 @@ print(response.output_text)
 
 一条 `responses.create` 不等于完整 Agent turn。首版以“已收到最终 assistant 消息、没有待处理的 function call，且响应完整结束”为自动终态；该响应之后的用户新输入开始新 turn。若应用用 `previous_response_id` 或 `conversation` 续接模型与工具循环，代理用服务返回的响应 ID 和原生引用关联同一逻辑 turn。无法可靠关联时，不推断工具已执行或任务已完成；调用方可用可选 `client.cosens.scope(session_id=..., turn_id=...)` 显式给出边界。此 scope 不改变原生请求参数。仅有 function call、未见工具结果的响应保持 `awaiting_continuation`；若后续始终没有可关联调用，过期后标为 `incomplete`，不 submit。受限于原始 SDK 的可见性，应用在代理外执行的工具副作用、外部 Session 全量历史和人工审批，方式一不能保证自动捕获；需要完整轨迹时使用方式二。只有真正使用被包装 client 的请求会被拦截，其他 OpenAI client 不受影响。
 
-流式调用保持原生事件次序。分类和准备发生在打开原生流之前；收到 `response.completed` 且对应逻辑 turn 已终结后才提交结果。流取消、断线或只有工具请求时不伪造完成。异步版本遵循相同规则；不得把同步调用暗中切换成异步调用。原生异常原样传播，已产生的 RSI 资源与恢复信息保留。
+所有原生流式调用保持事件次序和迭代/上下文管理器语义。对 `responses.create(stream=True)`，分类和准备发生在打开原生流之前；收到 `response.completed` 且对应逻辑 turn 已终结后才提交结果。其他生成流采用各自的真实完成事件，不拿首个 chunk 当终态。流取消、断线或只有工具请求时不伪造完成。异步版本遵循相同规则；不得把同步调用暗中切换成异步调用。原生异常原样传播，已产生的 RSI 资源与恢复信息保留。
 
 ### 3.2 方式二：显式 `run` 包装 Agents SDK
 
@@ -148,7 +156,7 @@ await rsi.atoms.submit(run.run_id, data={"summary": "..."}, key="stable-submit-k
 | 2. 每个新 RSI turn 一次 | `POST /v1/runs/prepare` | `objective/task_family/input_artifact_ids/...`，稳定 `Idempotency-Key`；返回 `run_id/recipe/context`。`processing` 按服务 `retry_after_seconds`（附件示例 2 秒）同键重试，不新建 Run |
 | 3. prepare 成功且需要完整冻结快照时 | `GET /v1/runs/{run_id}` | 读取 `snapshot/task_package_hash/snapshot_hash/recipe_revision`；据此给本次原生模型/Agent 注入有来源的 Recipe/Memory |
 | 4. 原生模型/Agent 开始前 | `POST /v1/runs/{run_id}/session-events` | 只发送 Session 游标后的历史消息，1–200 条/批、每批最多 1 MB；逐条稳定 `id`；收到 `durable_ack` 后才前进游标。没有增量消息则不调用 |
-| 5. 本地执行 | **无 RSI HTTP** | 第一种调用原始 `responses.create`；第二种调用原生 `Runner.run`。同一 turn 的工具循环不重复 prepare |
+| 5. 本地执行 | **无 RSI HTTP** | 第一种调用对应的原生 OpenAI 模型方法（例如 `responses.create` 或 `chat.completions.create`）；第二种调用原生 `Runner.run`。同一 turn 的工具循环不重复 prepare |
 | 6. 原生新消息或工具结果实际产生后 | `POST /v1/runs/{run_id}/session-events` | 仅上报新增项，如 `agent_action/tool_result/session_end`；流式在事件完整且可持久化时分批上报，取消时不发完成事件。收到 ACK 再前进游标 |
 | 7. 有文本交付物时 | `POST /v1/artifacts` | 上传实际输出文件并保存服务返回哈希；没有文件就不调用 |
 | 8. 原生任务真正终止、结果已本地保存后 | `POST /v1/runs/{run_id}/submit` | `data` 包括真实 outcome/summary/输出 Artifact 引用；成功只表示结果记录，`evaluation=inconclusive`，不代表验收成功 |
@@ -210,12 +218,13 @@ HTTP 层保存状态码、领域错误码、detail 和请求 ID。线上 `1.0.0`
 
 验收至少覆盖：
 
-1. `OpenAI` 与 `AsyncOpenAI` 的 `responses.create` 同步/异步、普通/流式行为；透明 `disable` 的 CoSens 与分类器请求数均为零。
+1. 对已支持的 `openai` 包版本，`OpenAI/AsyncOpenAI`（及传入时的 Azure 变体）的公开资源和方法均可经代理调用；覆盖嵌套资源、`with_options/copy`、raw/streaming response、分页、文件、Realtime、上下文管理、关闭、自定义请求和原生异常。透明 `disable` 的 CoSens 与分类器请求数均为零。
 2. 透明 `auto` 的 prompt 判断否/是/失败三个分支；只有命中才增量上报并创建 Run，未命中不前进游标；工具续接不重复 prepare。
-3. 显式 `run(mode="disable")` 不请求判断模型，仍执行输入 Artifact → prepare → GET Run → Session 增量事件 → 原生 Agent → 新增事件 → 输出 Artifact → submit → 真实 feedback/improve → GET Job；每个 RSI 调用都是 `atoms.*`。
-4. 同一 Session 多次 `run` 仅发送新消息；部分 ACK、同 Run 重试、重启恢复不丢消息或重复执行模型；历史截断/改写时明确报错。
-5. 当前远端 `1.0.0` 的 `session-events` 可用，而附件 `2.1.0` 的协调器不可用；`approval` 在能力缺失时明确报错；管理员发布单独授权。
-6. 原生完成后 HTTP 失败只补交结果；无真实反馈不生成 `accepted`；未验证 Job 不发布；`observable_events` 不被误写成“Memory 已蒸馏完成”。
+3. 逐一验证被标为支持 RSI 的模型生成入口：普通、raw、流式、同步与异步调用均保持原生返回语义；不具备安全归一化能力的入口保留原功能并暴露 `rsi_capture=unsupported`。
+4. 显式 `run(mode="disable")` 不请求判断模型，仍执行输入 Artifact → prepare → GET Run → Session 增量事件 → 原生 Agent → 新增事件 → 输出 Artifact → submit → 真实 feedback/improve → GET Job；每个 RSI 调用都是 `atoms.*`。
+5. 同一 Session 多次 `run` 仅发送新消息；部分 ACK、同 Run 重试、重启恢复不丢消息或重复执行模型；历史截断/改写时明确报错。
+6. 当前远端 `1.0.0` 的 `session-events` 路径可用，而附件 `2.1.0` 的协调器不可用；`approval` 在能力缺失时明确报错；管理员发布单独授权。
+7. 原生完成后 HTTP 失败先对账再补交；无真实反馈不生成 `accepted`；未验证 Job 不发布；`observable_events` 不被误写成“Memory 已蒸馏完成”。
 
 ## 8. TypeScript 预留
 
@@ -231,6 +240,7 @@ HTTP 层保存状态码、领域错误码、detail 和请求 ID。线上 `1.0.0`
 ## 10. 官方参考
 
 - [OpenAI Python Agents SDK 运行循环](https://openai.github.io/openai-agents-python/running_agents/)
+- [OpenAI Python SDK 公开客户端及调用方式](https://github.com/openai/openai-python/blob/main/README.md)
 - [OpenAI Responses API 的结构化输出](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=responses)
 - [OpenAI Responses API 流式事件](https://developers.openai.com/api/docs/guides/streaming-responses)
 - [OpenAI Responses API 会话状态](https://developers.openai.com/api/docs/guides/conversation-state)
