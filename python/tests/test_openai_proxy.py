@@ -7,6 +7,7 @@ import pytest
 from openai import AsyncOpenAI, OpenAI
 
 from cosens import cosens
+from cosens.errors import RSIApprovalUnavailable, RSIDecisionUnavailable, RSIRecoveryRequired, RSITransportError
 
 
 class Session:
@@ -52,6 +53,68 @@ def test_disable_preserves_native_calls_and_full_resource_tree(tmp_path):
     assert client.with_options(timeout=3).cosens is not None
 
 
+def test_close_releases_cosens_resources_after_last_derived_client(tmp_path):
+    native = OpenAI(api_key="test")
+    client = cosens(native, mode="disable", state_path=tmp_path / "state.sqlite3")
+    derived = client.with_options(timeout=3)
+    transport = client._runtime.client._sync_transport.client
+    client.close()
+    assert not transport.is_closed
+    derived.close()
+    assert transport.is_closed
+
+
+@pytest.mark.asyncio
+async def test_sync_openai_client_can_read_session_inside_running_event_loop(tmp_path):
+    native = OpenAI(api_key="test")
+
+    def create(**kwargs):
+        if kwargs["model"] == "decision":
+            return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+        return SimpleNamespace(id="resp-1", status="completed", output_text="done", output=[SimpleNamespace(type="message", role="assistant")])
+
+    native.responses.create = create
+    client = cosens(native, mode="auto", decision_model="decision", session=Session(), token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server([]))
+    assert client.responses.create(model="app", input="hello").output_text == "done"
+
+
+def test_auto_retry_after_prepare_receipt_loss_reuses_turn_and_blocks_uncertain_native_retry(tmp_path):
+    native = OpenAI(api_key="test")
+    prepared_keys = []
+    native_calls = 0
+    attempts = 0
+
+    def create(**kwargs):
+        nonlocal native_calls
+        if kwargs["model"] == "decision":
+            return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+        native_calls += 1
+        raise RuntimeError("model request outcome unknown")
+
+    def server(request):
+        nonlocal attempts
+        if request.url.path.endswith("/prepare"):
+            prepared_keys.append(request.headers["Idempotency-Key"])
+            attempts += 1
+            if attempts == 1:
+                raise httpx.ReadError("receipt lost")
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if request.url.path == "/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        raise AssertionError(request.url.path)
+
+    native.responses.create = create
+    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
+    with pytest.raises(RSITransportError):
+        client.responses.create(model="app", input="hello")
+    with pytest.raises(RuntimeError, match="outcome unknown"):
+        client.responses.create(model="app", input="hello")
+    with pytest.raises(RSIRecoveryRequired):
+        client.responses.create(model="app", input="hello")
+    assert prepared_keys == [prepared_keys[0], prepared_keys[0]]
+    assert native_calls == 1
+
+
 def test_public_openai_resource_tree_is_discoverable_and_signatures_delegate(tmp_path):
     native = OpenAI(api_key="test")
     client = cosens(native, mode="disable", state_path=tmp_path / "state.sqlite3")
@@ -64,6 +127,35 @@ def test_public_openai_resource_tree_is_discoverable_and_signatures_delegate(tmp
         assert getattr(client, resource) is not None
     assert inspect.signature(client.responses.create) == inspect.signature(native.responses.create)
     assert inspect.signature(client.chat.completions.create) == inspect.signature(native.chat.completions.create)
+
+
+def test_rewrapping_same_proxy_rejects_conflicting_decision_model(tmp_path):
+    native = OpenAI(api_key="test")
+    client = cosens(native, mode="auto", decision_model="classifier-a", state_path=tmp_path / "state.sqlite3")
+    assert cosens(client, mode="auto", decision_model="classifier-a") is client
+    with pytest.raises(ValueError):
+        cosens(client, mode="auto", decision_model="classifier-b")
+
+
+def test_disable_delegates_real_openai_sdk_http_and_return_models(tmp_path):
+    model_requests = []
+
+    def model_server(request):
+        model_requests.append(request.url.path)
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"object": "list", "data": [{"id": "m1", "object": "model", "created": 0, "owned_by": "owner"}]})
+        if request.url.path == "/v1/responses":
+            return httpx.Response(200, json={
+                "id": "resp-1", "created_at": 0, "model": "m1", "object": "response", "output": [],
+                "parallel_tool_calls": False, "tool_choice": "auto", "tools": [], "status": "completed",
+            })
+        raise AssertionError(request.url.path)
+
+    native = OpenAI(api_key="test", base_url="https://model.example/v1", http_client=httpx.Client(transport=httpx.MockTransport(model_server)))
+    client = cosens(native, mode="disable", state_path=tmp_path / "state.sqlite3")
+    assert client.models.list().data[0].id == "m1"
+    assert client.responses.create(model="m1", input="hello").id == "resp-1"
+    assert model_requests == ["/v1/models", "/v1/responses"]
 
 
 def test_auto_false_calls_native_once_and_never_contacts_cosens(tmp_path):
@@ -125,6 +217,51 @@ def test_classifier_failure_does_not_block_native_call_or_advance_history(tmp_pa
     assert client.responses.create(model="app", input="current").output_text == "native"
     assert calls == ["decision", "app"]
     assert client.cosens.rsi_capture == "decision_failed"
+
+
+def test_approval_mode_stops_before_native_execution_when_endpoint_is_absent(tmp_path):
+    native = OpenAI(api_key="test")
+    native_app_calls = 0
+    rsi_calls = []
+
+    def create(**kwargs):
+        nonlocal native_app_calls
+        if kwargs["model"] == "decision":
+            return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+        native_app_calls += 1
+        return SimpleNamespace(output_text="unexpected")
+
+    native.responses.create = create
+    client = cosens(native, mode="approval", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(rsi_calls))
+    with pytest.raises(RSIApprovalUnavailable):
+        client.responses.create(model="app", input="current")
+    assert native_app_calls == 0
+    assert rsi_calls == []
+
+
+def test_approval_decision_failure_is_fail_closed(tmp_path):
+    native = OpenAI(api_key="test")
+    native.responses.create = lambda **kwargs: (_ for _ in ()).throw(TimeoutError("classifier timeout"))
+    client = cosens(native, mode="approval", decision_model="decision", state_path=tmp_path / "state.sqlite3")
+    with pytest.raises(RSIDecisionUnavailable):
+        client.responses.create(model="app", input="current")
+
+
+def test_decision_timeout_and_output_limit_are_configurable(tmp_path):
+    native = OpenAI(api_key="test")
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        if kwargs["model"] == "decision":
+            return SimpleNamespace(output_text='{"activate":false,"objective":"","task_family":"general","reason":"routine"}')
+        return SimpleNamespace(output_text="answer")
+
+    native.responses.create = create
+    client = cosens(native, mode="auto", decision_model="decision", decision_timeout=1.5, decision_max_output_tokens=64, state_path=tmp_path / "state.sqlite3")
+    client.responses.create(model="app", input="hello")
+    assert calls[0]["timeout"] == 1.5
+    assert calls[0]["max_output_tokens"] == 64
 
 
 @pytest.mark.asyncio
@@ -310,3 +447,72 @@ def test_openai_reconcile_completed_run_does_not_call_native_again(tmp_path):
     assert client.cosens.get_turn(turn_id)["state"] == "completion_pending"
     assert client.cosens.reconcile(turn_id)["state"] == "completed"
     assert native_calls == 1
+
+
+def test_chat_stream_chunk_events_submit_after_final_stop_chunk(tmp_path):
+    native = OpenAI(api_key="test")
+    calls = []
+    native.responses.create = lambda **kwargs: SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+
+    class Manager:
+        def __enter__(self):
+            return iter([
+                SimpleNamespace(type="chunk", chunk=SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="hello"), finish_reason=None)])),
+                SimpleNamespace(type="chunk", chunk=SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=" world"), finish_reason="stop")])),
+            ])
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    native.chat.completions.stream = lambda **kwargs: Manager()
+    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    with client.chat.completions.stream(model="app", messages=[{"role": "user", "content": "task"}]) as stream:
+        assert len(list(stream)) == 2
+    assert calls[-1][0] == "/v1/runs/r1/submit"
+    assert calls[-1][1]["data"]["summary"] == "hello world"
+
+
+def test_stream_get_final_response_also_records_completion(tmp_path):
+    native = OpenAI(api_key="test")
+    calls = []
+    final = SimpleNamespace(id="resp-1", status="completed", output_text="done", output=[SimpleNamespace(type="message", role="assistant")])
+    native.responses.create = lambda **kwargs: SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+
+    class Stream:
+        def get_final_response(self):
+            return final
+
+        def __iter__(self):
+            yield SimpleNamespace(type="response.completed", response=final)
+
+    class Manager:
+        def __enter__(self):
+            return Stream()
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    native.responses.stream = lambda **kwargs: Manager()
+    client = cosens(native, mode="auto", decision_model="decision", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    with client.responses.stream(model="app", input="current") as stream:
+        assert stream.get_final_response() is final
+        assert len(list(stream)) == 1
+    assert [path for path, _ in calls].count("/v1/runs/r1/submit") == 1
+
+
+def test_legacy_completion_prompt_without_roles_is_explicitly_unsupported_for_rsi(tmp_path):
+    native = OpenAI(api_key="test")
+    decision_calls = 0
+
+    def decide(**kwargs):
+        nonlocal decision_calls
+        decision_calls += 1
+        return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+
+    native.responses.create = decide
+    original = SimpleNamespace(choices=[SimpleNamespace(text="answer", finish_reason="stop")])
+    native.completions.create = lambda **kwargs: original
+    client = cosens(native, mode="auto", decision_model="decision", state_path=tmp_path / "state.sqlite3")
+    assert client.completions.create(model="legacy", prompt="system-like instructions and user text") is original
+    assert decision_calls == 0
+    assert client.cosens.rsi_capture == "unsupported"

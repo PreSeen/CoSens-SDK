@@ -58,6 +58,10 @@ class CursorStore:
             "CREATE TABLE IF NOT EXISTS cursors (key TEXT PRIMARY KEY, acked_index INTEGER NOT NULL, "
             "prefix_hash TEXT, run_id TEXT, pending_events TEXT)"
         )
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(cursors)")}
+        for column in ("acked_message_id", "acked_item_hash", "source_revision"):
+            if column not in columns:
+                self._db.execute(f"ALTER TABLE cursors ADD COLUMN {column} TEXT")
         self._db.commit()
         self._principal = _hash(principal)
         self._lock = threading.RLock()
@@ -158,16 +162,36 @@ class CursorStore:
                 advanced += 1
             new_index = old_index + advanced
             remaining = pending[advanced:]
-            self._db.execute(
-                "UPDATE cursors SET acked_index=?,prefix_hash=?,pending_events=? WHERE key=?",
+            item = snapshot.items[new_index] if new_index >= 0 else {}
+            updated = self._db.execute(
+                "UPDATE cursors SET acked_index=?,prefix_hash=?,pending_events=?,"
+                "acked_message_id=?,acked_item_hash=?,source_revision=? "
+                "WHERE key=? AND acked_index=? AND run_id=?",
                 (
                     new_index,
                     _hash(snapshot.items[: new_index + 1]) if new_index >= 0 else None,
                     _json(remaining) if remaining else None,
+                    str(item.get("id") or _hash([snapshot.session_id, new_index, item])) if new_index >= 0 else None,
+                    _hash(item) if new_index >= 0 else None,
+                    item.get("source_revision"),
                     snapshot.key,
+                    old_index,
+                    run_id,
                 ),
             )
+            if updated.rowcount != 1:
+                raise RSIRecoveryRequired("Session cursor changed concurrently; reread before ACK")
             return advanced
+
+    def last_ack(self, snapshot):
+        with self._lock:
+            row = self._db.execute(
+                "SELECT acked_index,acked_message_id,acked_item_hash,source_revision,run_id "
+                "FROM cursors WHERE key=?", (snapshot.key,),
+            ).fetchone()
+            if row is None:
+                return None
+            return dict(zip(("index", "message_id", "item_hash", "source_revision", "run_id"), row))
 
     def close(self):
         self._db.close()

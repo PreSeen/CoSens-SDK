@@ -1,3 +1,4 @@
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -260,4 +261,181 @@ async def test_reconcile_lost_submit_response_uses_server_result_without_rerunni
     assert client.cosens.get_turn(turn_id)["state"] == "completion_pending"
     assert (await client.cosens.reconcile(turn_id))["state"] == "completed"
     assert Runner.calls == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_explicit_run_uploads_real_input_and_output_artifacts(tmp_path):
+    calls = []
+    upload_count = 0
+
+    def server(request):
+        nonlocal upload_count
+        path = request.url.path
+        body = json.loads(request.content) if request.content else None
+        calls.append((path, body))
+        if path == "/v1/artifacts":
+            upload_count += 1
+            return httpx.Response(200, json={"artifact_id": f"a{upload_count}", "content_hash": f"h{upload_count}", "name": body["name"], "size_bytes": len(body["content"])})
+        if path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        if path.endswith("/session-events"):
+            return httpx.Response(200, json={"durable_ack": [e["id"] for e in body["events"]]})
+        if path.endswith("/submit"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "completed"})
+        raise AssertionError(path)
+
+    class FileRunner:
+        @staticmethod
+        async def run(agent, user_input, *, session=None, **options):
+            return SimpleNamespace(final_output={"summary": "done", "files": [{"name": "out.txt", "content": "answer"}]})
+
+    agent = Agent(name="assistant")
+    client = cosens(agent, mode="disable", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=FileRunner)
+    await client.run(agent, "Current request", input_artifacts=[{"name": "input.txt", "content": "facts"}])
+    assert [path for path, _ in calls] == [
+        "/v1/artifacts", "/v1/runs/prepare", "/v1/runs/r1", "/v1/artifacts", "/v1/runs/r1/submit",
+    ]
+    assert calls[1][1]["input_artifact_ids"] == ["a1"]
+    assert calls[-1][1]["data"]["files"] == [{"artifact_id": "a2", "content_hash": "h2"}]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_lost_output_artifact_receipt_is_not_blindly_uploaded_again(tmp_path):
+    uploads = 0
+
+    def server(request):
+        nonlocal uploads
+        path = request.url.path
+        if path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        if path == "/v1/artifacts":
+            uploads += 1
+            return httpx.Response(503, json={"error": {"code": "unknown", "message": "receipt lost"}})
+        raise AssertionError(path)
+
+    class FileRunner:
+        @staticmethod
+        async def run(agent, user_input, *, session=None, **options):
+            return SimpleNamespace(final_output={"summary": "done", "files": [{"name": "out.txt", "content": "answer"}]})
+
+    agent = Agent(name="assistant")
+    client = cosens(agent, mode="disable", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=FileRunner)
+    await client.run(agent, "Current request")
+    with pytest.raises(RSIRecoveryRequired):
+        await client.cosens.reconcile(client.cosens.last_turn_id)
+    assert uploads == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_runs_for_same_session_serialize_history_uploads(tmp_path):
+    reported = []
+    run_number = 0
+
+    async def server(request):
+        nonlocal run_number
+        path = request.url.path
+        if path.endswith("/prepare"):
+            run_number += 1
+            return httpx.Response(200, json={"run_id": f"r{run_number}", "status": "ready", "recipe": {}, "context": {}})
+        if path in {"/v1/runs/r1", "/v1/runs/r2"}:
+            return httpx.Response(200, json={"run_id": path.rsplit("/", 1)[1], "status": "ready", "snapshot": {}})
+        if path.endswith("/session-events"):
+            await asyncio.sleep(0.01)
+            body = json.loads(request.content)
+            reported.extend(event["id"] for event in body["events"])
+            return httpx.Response(200, json={"durable_ack": [e["id"] for e in body["events"]]})
+        if path.endswith("/submit"):
+            return httpx.Response(200, json={"run_id": path.split("/")[3], "status": "completed"})
+        raise AssertionError(path)
+
+    class SlowRunner:
+        @staticmethod
+        async def run(agent, user_input, *, session=None, **options):
+            await asyncio.sleep(0.01)
+            session.items.append({"id": user_input, "role": "user", "content": user_input})
+            return SimpleNamespace(final_output=user_input)
+
+    agent = Agent(name="assistant")
+    session = Session()
+    client = cosens(agent, mode="disable", session=session, token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=SlowRunner)
+    first, second = await asyncio.gather(
+        client.run(agent, "one", session=session),
+        client.run(agent, "two", session=session),
+    )
+    assert {first.final_output, second.final_output} == {"one", "two"}
+    assert reported.count("chat:old") == 1
+    assert reported.count("chat:one") == 1
+    assert reported.count("chat:two") == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_native_failure_is_not_retried_automatically_after_possible_tool_effects(tmp_path):
+    calls = 0
+
+    def server(request):
+        path = request.url.path
+        if path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        raise AssertionError(path)
+
+    class FailingRunner:
+        @staticmethod
+        async def run(agent, user_input, *, session=None, **options):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("tool may have run")
+
+    agent = Agent(name="assistant")
+    client = cosens(agent, mode="disable", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=FailingRunner)
+    with pytest.raises(RuntimeError):
+        await client.run(agent, "Current request")
+    with pytest.raises(RSIRecoveryRequired):
+        await client.run(agent, "Current request")
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_completed_identical_user_request_starts_a_new_run(tmp_path):
+    prepared = 0
+    native_calls = 0
+
+    def server(request):
+        nonlocal prepared
+        path = request.url.path
+        if path.endswith("/prepare"):
+            prepared += 1
+            return httpx.Response(200, json={"run_id": f"r{prepared}", "status": "ready", "recipe": {}, "context": {}})
+        if path in {"/v1/runs/r1", "/v1/runs/r2"}:
+            return httpx.Response(200, json={"run_id": path.rsplit("/", 1)[-1], "status": "ready", "snapshot": {}})
+        if path.endswith("/submit"):
+            return httpx.Response(200, json={"run_id": path.split("/")[3], "status": "completed"})
+        raise AssertionError(path)
+
+    class RunnerStub:
+        @staticmethod
+        async def run(agent, user_input, *, session=None, **options):
+            nonlocal native_calls
+            native_calls += 1
+            return SimpleNamespace(final_output="done")
+
+    agent = Agent(name="assistant")
+    client = cosens(agent, mode="disable", token="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=RunnerStub)
+    await client.run(agent, "same task")
+    first_turn = client.cosens.last_turn_id
+    await client.run(agent, "same task")
+    second_turn = client.cosens.last_turn_id
+    assert (prepared, native_calls) == (2, 2)
+    assert first_turn != second_turn
+    assert client.cosens.get_turn(first_turn)["run_id"] == "r1"
+    assert client.cosens.get_turn(second_turn)["run_id"] == "r2"
     await client.aclose()

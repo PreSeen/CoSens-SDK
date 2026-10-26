@@ -18,7 +18,7 @@ class Session:
 @pytest.mark.asyncio
 async def test_acknowledged_messages_are_not_resent_across_runs_or_restarts(tmp_path):
     path = tmp_path / "state.sqlite3"
-    session = Session([{"id": "u1", "role": "user", "content": "hello"}])
+    session = Session([{"id": "u1", "role": "user", "content": "hello", "source_revision": "rev-1"}])
     store = CursorStore(path, principal="principal-a")
     first = await store.snapshot(session)
     events = store.pending(first)
@@ -26,6 +26,9 @@ async def test_acknowledged_messages_are_not_resent_across_runs_or_restarts(tmp_
     assert events[0]["id"] == "chat:u1"
     store.begin_batch("run-1", first, events)
     assert store.ack(first, {"durable_ack": ["chat:u1"]}) == 1
+    assert store.last_ack(first)["message_id"] == "u1"
+    assert store.last_ack(first)["source_revision"] == "rev-1"
+    assert store.last_ack(first)["item_hash"]
     store.close()
 
     reopened = CursorStore(path, principal="principal-a")

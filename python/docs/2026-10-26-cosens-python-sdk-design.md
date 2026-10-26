@@ -1,8 +1,8 @@
 # CoSens Python SDK 三种接入方式设计
 
-状态：设计稿，待确认；本文件不代表 SDK 已实现。CoSens 服务地址由 SDK 内部传输层管理，不作为公开初始化参数。
+状态：实现依据；Python 首版源码位于 `python/src/cosens/`，实际可运行范围与待核验项见 `python/README.md`。CoSens 服务地址由 SDK 内部传输层管理，不作为公开初始化参数。
 
-参考契约：[RSI_WORKFLOW_API(1).md](/Users/a1111/Desktop/RSI_WORKFLOW_API(1).md)，尤其是第 3、4.3、5、6、8 节。本设计以用户后续澄清为准，覆盖参考契约第 1.1、2、4.1、4.2 节中的旧 SDK 入口定义。2026-10-26 只读查询远端 `/health/live` 返回 200；`/openapi.json` 标为 `1.0.0`，与附件 2.1.0 并不一致。下文将标明哪些接口已在该地址公开，哪些仅见于附件；本仓库当前没有 SDK 源码。
+参考契约：[RSI_WORKFLOW_API(1).md](/Users/a1111/Desktop/RSI_WORKFLOW_API(1).md)，尤其是第 3、4.3、5、6、8 节。本设计以用户后续澄清为准，覆盖参考契约第 1.1、2、4.1、4.2 节中的旧 SDK 入口定义。2026-10-26 只读查询远端 `/health/live` 返回 200；`/openapi.json` 标为 `1.0.0`，与附件 2.1.0 并不一致。下文标明哪些接口已在该地址公开，哪些仅见于附件。
 
 ## 1. 目标与边界
 
@@ -14,7 +14,7 @@ Python 首版提供三层入口：
 2. **显式运行**：`cosens(agent, mode="disable").run(agent, user_input, session=...)`。`disable` 在这个入口关闭隐式触发判断；显式 `run` 本身是启动 RSI 的指令。SDK 在这一次 `run` 中直接拼接参考契约第 4.3 节的原子接口，不调用协调器。
 3. **原子调用**：`CoSensClient(...).atoms.*` 暴露参考契约第 6 节的九个原子操作，并对当前远端增加 `session_events`；应用自行决定步骤与执行时机。
 
-三个入口共用认证、传输、数据模型、幂等键、Session 消息游标、恢复记录与错误模型。项目根目录按语言划分为 `python/` 和 `typescript/`；当前仅整理文档，不开发任何 SDK 代码。
+三个入口共用认证、传输、数据模型、幂等键、Session 消息游标、恢复记录与错误模型。项目根目录按语言划分为 `python/` 和 `typescript/`；当前仅开发 Python SDK。
 
 三个入口均不向应用暴露 CoSens 服务的 `base_url` 参数。SDK 内部传输层统一使用当前部署地址 `http://27.221.10.54:41011`，后续地址变更由 SDK 内部配置与版本管理处理。传入的原生 OpenAI client 若已有自己的 `base_url`，仍按其原有语义连接模型服务；CoSens 的服务地址与它互不影响。
 
@@ -215,7 +215,7 @@ HTTP 层保存状态码、领域错误码、detail 和请求 ID。线上 `1.0.0`
 
 ## 7. Python 模块划分与验收
 
-后续实施时可按职责拆为：`factory`（类型分派）、`responses_adapter`、`agents_adapter`、`decision`、`session_cursor`、`session_events`、`atoms/http`、`approval`、`state`、`errors`。这些是设计上的模块边界，本轮不创建包目录或代码。
+Python 实现按职责拆为：`factory`（类型分派）、`responses_adapter`、`agents_adapter`、`decision`、`session_cursor`、`atoms/http`、`state`、`errors`；尚未部署的审批协调能力保留在设计中，当前 `approval` 明确报服务能力不支持。
 
 验收至少覆盖：
 

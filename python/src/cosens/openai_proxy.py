@@ -1,11 +1,14 @@
 """Dynamic OpenAI resource proxy with narrow RSI generation hooks."""
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import contextvars
 import functools
+import hashlib
 import inspect
 import json
+import threading
 import uuid
 
 from .atoms import CoSensClient
@@ -20,6 +23,15 @@ from .workflow import prepare_ready_async, prepare_ready_sync
 def _resource(value):
     module = type(value).__module__
     return module.startswith("openai.resources") or module.startswith("openai._response")
+
+
+def _sync_await(coroutine_factory):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine_factory())
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(lambda: asyncio.run(coroutine_factory())).result()
 
 
 class _Status:
@@ -100,13 +112,40 @@ class _GenerationStream:
         self._text = []
 
     def __getattr__(self, name):
-        return getattr(self._native, name)
+        value = getattr(self._native, name)
+        if name not in {"get_final_response", "get_final_completion", "until_done"}:
+            return value
+        if inspect.iscoroutinefunction(value):
+            async def async_final(*args, **kwargs):
+                result = await value(*args, **kwargs)
+                final = result
+                if name == "until_done":
+                    getter = getattr(self._native, "get_final_response", None) or getattr(self._native, "get_final_completion", None)
+                    final = await getter() if getter else None
+                if self._state["state"] == "native_running" and final is not None and terminal(final):
+                    await self._runtime._complete_async(self._state, final)
+                    self._finished = True
+                return self if name == "until_done" else result
+            return async_final
+
+        def sync_final(*args, **kwargs):
+            result = value(*args, **kwargs)
+            final = result
+            if name == "until_done":
+                getter = getattr(self._native, "get_final_response", None) or getattr(self._native, "get_final_completion", None)
+                final = getter() if getter else None
+            if self._state["state"] == "native_running" and final is not None and terminal(final):
+                self._runtime._complete_sync(self._state, final)
+                self._finished = True
+            return self if name == "until_done" else result
+        return sync_final
 
     def _inspect_event(self, event):
         event_type = getattr(event, "type", None)
         if event_type == "response.completed":
             self._complete_response = getattr(event, "response", None)
-        for choice in getattr(event, "choices", []) or []:
+        chunk = getattr(event, "chunk", event)
+        for choice in getattr(chunk, "choices", []) or []:
             delta = getattr(choice, "delta", None)
             content = getattr(delta, "content", None)
             if content:
@@ -114,7 +153,7 @@ class _GenerationStream:
             if getattr(choice, "finish_reason", None) not in {None, "tool_calls", "function_call"}:
                 from types import SimpleNamespace
                 self._complete_response = SimpleNamespace(
-                    id=getattr(event, "id", None),
+                    id=getattr(chunk, "id", None),
                     status="completed",
                     choices=[SimpleNamespace(finish_reason=choice.finish_reason, message=SimpleNamespace(content="".join(self._text)))],
                 )
@@ -132,10 +171,10 @@ class _GenerationStream:
         except BaseException:
             self._incomplete()
             raise
-        if self._complete_response is not None:
+        if self._complete_response is not None and self._state["state"] == "native_running":
             self._runtime._complete_sync(self._state, self._complete_response)
             self._finished = True
-        else:
+        elif self._complete_response is None:
             self._incomplete()
 
     async def __aiter__(self):
@@ -146,10 +185,10 @@ class _GenerationStream:
         except BaseException:
             self._incomplete()
             raise
-        if self._complete_response is not None:
+        if self._complete_response is not None and self._state["state"] == "native_running":
             await self._runtime._complete_async(self._state, self._complete_response)
             self._finished = True
-        else:
+        elif self._complete_response is None:
             self._incomplete()
 
     def __enter__(self):
@@ -191,6 +230,7 @@ class _DeferredAsyncManager:
             decision = await decide_async(
                 self._client, runtime.decision_model,
                 user_text(self._path, self._kwargs), tool_names(self._kwargs),
+                timeout=runtime.decision_timeout, max_output_tokens=runtime.decision_max_output_tokens,
             )
         except Exception as exc:
             if runtime.mode == "approval":
@@ -206,11 +246,12 @@ class _DeferredAsyncManager:
             raise RSIApprovalUnavailable("The configured CoSens service has no /v1/invocations approval endpoint")
         if not decision["objective"].strip():
             decision["objective"] = user_text(self._path, self._kwargs)
-        state, run = await runtime._prepare_async(decision, self._kwargs)
+        state, run = await runtime._prepare_async(decision, self._kwargs, self._path)
         state["visible_input"] = user_text(self._path, self._kwargs)
         before = await runtime._snapshot_async()
         state["session_before_count"] = len(before.items) if before else 0
         runtime._save(state)
+        await runtime._send_observable_async(state, runtime._tool_output_events(state, self._kwargs))
         updated = inject(self._path, self._kwargs, run)
         state["state"] = "native_running"
         runtime._save(state)
@@ -231,36 +272,90 @@ class _DeferredAsyncManager:
 
 
 class _Runtime:
-    def __init__(self, *, mode, decision_model, session, token, state_path, http_transport, asynchronous=False):
+    def __init__(self, *, mode, decision_model, session, token, state_path, http_transport, asynchronous=False, decision_timeout=5, decision_max_output_tokens=256):
         if mode in {"auto", "approval"} and not decision_model:
             raise ValueError("decision_model is required for auto/approval")
         self.mode = mode
         self.asynchronous = asynchronous
         self.decision_model = decision_model
+        if decision_timeout <= 0 or decision_max_output_tokens <= 0:
+            raise ValueError("Decision timeout and output token limit must be positive")
+        self.decision_timeout = decision_timeout
+        self.decision_max_output_tokens = decision_max_output_tokens
         self.session = session
         self.client = CoSensClient(token=token, state_path=state_path, _http_transport=http_transport)
         self.cursor = CursorStore(state_path, principal=self.client._transport.token or "anonymous")
         self.turns = TurnStore(state_path)
         self.status = _Status(self)
+        self._owner_lock = threading.Lock()
+        self._owners = 0
+        self._closed = False
 
-    def _new_state(self, objective, task_family, previous_response_id=None):
+    def acquire(self):
+        with self._owner_lock:
+            if self._closed:
+                raise RuntimeError("CoSens client is closed")
+            self._owners += 1
+
+    def _drop_owner(self):
+        with self._owner_lock:
+            if self._owners <= 0:
+                return False
+            self._owners -= 1
+            if self._owners or self._closed:
+                return False
+            self._closed = True
+            return True
+
+    async def release_async(self):
+        if self._drop_owner():
+            try:
+                await self.client.aclose()
+            finally:
+                self.cursor.close()
+                self.turns.close()
+
+    def release_sync(self):
+        if self._drop_owner():
+            try:
+                _sync_await(self.client.aclose)
+            finally:
+                self.cursor.close()
+                self.turns.close()
+
+    def _new_state(self, objective, task_family, kwargs, path):
+        previous_response_id = kwargs.get("previous_response_id")
         previous = self.turns.get("response:" + str(previous_response_id)) if previous_response_id else None
         if previous and previous.get("state") == "awaiting_continuation":
             state = previous
         else:
             scope = self.status._scope.get()
-            turn_id = scope[1] if scope and scope[1] else str(uuid.uuid4())
-            state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "task_family": task_family, "run_id": None}
+            session_id = (scope[0] if scope and scope[0] else None) or getattr(self.session, "session_id", None) or getattr(self.session, "id", None)
+            incarnation = getattr(self.session, "session_incarnation", None) or getattr(self.session, "incarnation", "0")
+            signature = json.dumps([str(session_id), str(incarnation), path, kwargs], sort_keys=True, default=str, ensure_ascii=False)
+            request_key = "request:" + hashlib.sha256(signature.encode()).hexdigest()
+            existing = self.turns.get(scope[1]) if scope and scope[1] else self.turns.get(request_key)
+            if existing and existing.get("state") == "pre_execution_pending":
+                state = existing
+            elif existing and existing.get("state") != "completed":
+                raise RSIRecoveryRequired(f"Turn {existing['turn_id']} may have executed; reconcile without repeating the model request")
+            elif existing and scope and scope[1]:
+                raise RSIRecoveryRequired(f"Turn {existing['turn_id']} is already completed")
+            else:
+                turn_id = scope[1] if scope and scope[1] else str(uuid.uuid4())
+                state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "task_family": task_family, "run_id": None, "request_key": request_key}
         self.status.last_turn_id = state["turn_id"]
         return state
 
     def _save(self, state):
         self.turns.put(state["turn_id"], state)
+        if state.get("request_key"):
+            self.turns.put(state["request_key"], state)
 
     def _snapshot_sync(self):
         if self.session is None:
             return None
-        return asyncio.run(self.cursor.snapshot(self.session))
+        return _sync_await(lambda: self.cursor.snapshot(self.session))
 
     async def _snapshot_async(self):
         if self.session is None:
@@ -391,8 +486,8 @@ class _Runtime:
         snapshot = await self._snapshot_async()
         await self._send_observable_async(state, self._visible_events(state, response, snapshot))
 
-    def _prepare_sync(self, decision, kwargs):
-        state = self._new_state(decision["objective"], decision["task_family"], kwargs.get("previous_response_id"))
+    def _prepare_sync(self, decision, kwargs, path):
+        state = self._new_state(decision["objective"], decision["task_family"], kwargs, path)
         self._save(state)
         try:
             if state["run_id"]:
@@ -411,8 +506,8 @@ class _Runtime:
             self._save(state)
             raise
 
-    async def _prepare_async(self, decision, kwargs):
-        state = self._new_state(decision["objective"], decision["task_family"], kwargs.get("previous_response_id"))
+    async def _prepare_async(self, decision, kwargs, path):
+        state = self._new_state(decision["objective"], decision["task_family"], kwargs, path)
         self._save(state)
         try:
             if state["run_id"]:
@@ -553,11 +648,13 @@ class _Runtime:
         if self.mode == "disable":
             self.status.rsi_capture = "disabled"
             return method(*args, **kwargs)
-        if args:
+        if args or base_path(path) == ("completions", "create") or (
+            base_path(path)[0] == "responses" and kwargs.get("prompt") and not kwargs.get("input")
+        ):
             self.status.rsi_capture = "unsupported"
             return method(*args, **kwargs)
         try:
-            decision = decide_sync(native, self.decision_model, user_text(path, kwargs), tool_names(kwargs))
+            decision = decide_sync(native, self.decision_model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens)
         except Exception as exc:
             if self.mode == "approval":
                 raise RSIDecisionUnavailable(str(exc)) from exc
@@ -570,7 +667,7 @@ class _Runtime:
             raise RSIApprovalUnavailable("The configured CoSens service has no /v1/invocations approval endpoint")
         if not decision["objective"].strip():
             decision["objective"] = user_text(path, kwargs)
-        state, run = self._prepare_sync(decision, kwargs)
+        state, run = self._prepare_sync(decision, kwargs, path)
         state["visible_input"] = user_text(path, kwargs)
         before = self._snapshot_sync()
         state["session_before_count"] = len(before.items) if before else 0
@@ -600,11 +697,13 @@ class _Runtime:
         if self.mode == "disable":
             self.status.rsi_capture = "disabled"
             return await method(*args, **kwargs)
-        if args:
+        if args or base_path(path) == ("completions", "create") or (
+            base_path(path)[0] == "responses" and kwargs.get("prompt") and not kwargs.get("input")
+        ):
             self.status.rsi_capture = "unsupported"
             return await method(*args, **kwargs)
         try:
-            decision = await decide_async(native, self.decision_model, user_text(path, kwargs), tool_names(kwargs))
+            decision = await decide_async(native, self.decision_model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens)
         except Exception as exc:
             if self.mode == "approval":
                 raise RSIDecisionUnavailable(str(exc)) from exc
@@ -617,7 +716,7 @@ class _Runtime:
             raise RSIApprovalUnavailable("The configured CoSens service has no /v1/invocations approval endpoint")
         if not decision["objective"].strip():
             decision["objective"] = user_text(path, kwargs)
-        state, run = await self._prepare_async(decision, kwargs)
+        state, run = await self._prepare_async(decision, kwargs, path)
         state["visible_input"] = user_text(path, kwargs)
         before = await self._snapshot_async()
         state["session_before_count"] = len(before.items) if before else 0
@@ -692,6 +791,18 @@ class CoSensOpenAIProxy(_ResourceProxy):
         super().__init__(native, runtime, (), native)
         self.native = native
         self.cosens = runtime.status
+        self._closed = False
+        runtime.acquire()
+
+    def _release_sync(self):
+        if not self._closed:
+            self._closed = True
+            self._runtime.release_sync()
+
+    async def _release_async(self):
+        if not self._closed:
+            self._closed = True
+            await self._runtime.release_async()
 
     def __getattr__(self, name):
         if name in {"copy", "with_options"}:
@@ -701,8 +812,18 @@ class CoSensOpenAIProxy(_ResourceProxy):
                 return CoSensOpenAIProxy(method(*args, **kwargs), self._runtime)
             return derive
         if name == "close":
+            if inspect.iscoroutinefunction(self.native.close):
+                async def async_close():
+                    try:
+                        return await self.native.close()
+                    finally:
+                        await self._release_async()
+                return async_close
             def close():
-                return self.native.close()
+                try:
+                    return self.native.close()
+                finally:
+                    self._release_sync()
             return close
         return super().__getattr__(name)
 
@@ -711,11 +832,17 @@ class CoSensOpenAIProxy(_ResourceProxy):
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        return self.native.__exit__(exc_type, exc, tb)
+        try:
+            return self.native.__exit__(exc_type, exc, tb)
+        finally:
+            self._release_sync()
 
     async def __aenter__(self):
         await self.native.__aenter__()
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        return await self.native.__aexit__(exc_type, exc, tb)
+        try:
+            return await self.native.__aexit__(exc_type, exc, tb)
+        finally:
+            await self._release_async()

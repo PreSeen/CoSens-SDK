@@ -21,6 +21,7 @@ async def test_atomic_endpoints_send_the_documented_requests():
             "/v1/runs/prepare": {"run_id": "r1", "status": "ready", "recipe": {}, "context": {}},
             "/v1/runs/r1": {"run_id": "r1", "status": "ready", "snapshot": {}},
             "/v1/runs/r1/session-events": {"durable_ack": ["e1"]},
+            "/v1/runs/r1/initial-inputs": {"run_id": "r1", "status": "ready"},
             "/v1/runs/r1/submit": {"run_id": "r1", "status": "completed", "evaluation": "inconclusive", "accepted": None},
             "/v1/runs/r1/feedback": {"feedback_id": "f1", "status": "recorded"},
             "/v1/runs/r1/improvements": {"job_id": "j1", "status": "queued"},
@@ -35,6 +36,7 @@ async def test_atomic_endpoints_send_the_documented_requests():
         prepared = await client.atoms.prepare(objective="task", input_artifact_ids=[artifact.artifact_id], key="prepare-key")
         await client.atoms.get_run(prepared.run_id)
         await client.atoms.session_events("r1", [{"id": "e1", "kind": "user_prompt", "payload": {}}])
+        await client.atoms.initial_inputs("r1", ["a1"])
         submitted = await client.atoms.submit("r1", data={"summary": "done"}, key="submit-key")
         await client.atoms.feedback("r1", data={"type": "correction", "comment": "fix"})
         await client.atoms.improve("r1", reason="fix", key="improve-key")
@@ -46,17 +48,18 @@ async def test_atomic_endpoints_send_the_documented_requests():
     assert submitted.accepted is None
     assert [r[1] for r in requests] == [
         "/v1/artifacts", "/v1/runs/prepare", "/v1/runs/r1", "/v1/runs/r1/session-events",
-        "/v1/runs/r1/submit", "/v1/runs/r1/feedback", "/v1/runs/r1/improvements",
+        "/v1/runs/r1/initial-inputs", "/v1/runs/r1/submit", "/v1/runs/r1/feedback", "/v1/runs/r1/improvements",
         "/v1/improvements/j1", "/v1/improvements/j1/resume",
         "/internal/admin/v1/improvements/j1/publish",
     ]
     assert requests[1][2]["idempotency-key"] == "prepare-key"
     assert requests[1][3] == {"objective": "task", "task_family": "general", "input_artifact_ids": ["a1"]}
     assert requests[3][3] == {"events": [{"id": "e1", "kind": "user_prompt", "payload": {}}]}
-    assert requests[4][3] == {"data": {"summary": "done"}}
-    assert requests[6][3] == {"data": {"reason": "fix"}}
-    assert requests[9][2]["authorization"] == "Bearer administrator"
-    assert all(r[2]["authorization"] == "Bearer ordinary" for r in requests[:9])
+    assert requests[4][3] == {"artifact_ids": ["a1"]}
+    assert requests[5][3] == {"data": {"summary": "done"}}
+    assert requests[7][3] == {"data": {"reason": "fix"}}
+    assert requests[10][2]["authorization"] == "Bearer administrator"
+    assert all(r[2]["authorization"] == "Bearer ordinary" for r in requests[:10])
 
 
 def test_public_constructor_has_no_service_base_url():

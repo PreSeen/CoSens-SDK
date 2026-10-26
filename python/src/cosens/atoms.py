@@ -37,6 +37,9 @@ class AsyncAtoms:
     async def session_events(self, run_id, events):
         return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/session-events", body={"events": events})
 
+    async def initial_inputs(self, run_id, artifact_ids):
+        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/initial-inputs", body={"artifact_ids": artifact_ids})
+
     async def submit(self, run_id, *, data=None, key=None):
         return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/submit", body={"data": data or {}}, key=_key(key) if key else None)
 
@@ -108,6 +111,9 @@ class SyncAtoms:
 
     def session_events(self, run_id, events):
         return self._http.request("POST", f"/v1/runs/{_part(run_id)}/session-events", body={"events": events})
+
+    def initial_inputs(self, run_id, artifact_ids):
+        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/initial-inputs", body={"artifact_ids": artifact_ids})
 
     def submit(self, run_id, *, data=None, key=None):
         return self._http.request("POST", f"/v1/runs/{_part(run_id)}/submit", body={"data": data or {}}, key=_key(key) if key else None)

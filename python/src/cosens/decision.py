@@ -43,25 +43,25 @@ def parse_decision(response):
         raise RSIDecisionUnavailable("Decision model returned invalid structured output") from exc
 
 
-def decide_sync(native, model, user_text, tool_names):
+def decide_sync(native, model, user_text, tool_names, *, timeout=5, max_output_tokens=256):
     response = native.responses.create(
         model=model,
         input=decision_prompt(user_text, tool_names),
         text={"format": _FORMAT},
-        max_output_tokens=256,
-        timeout=5,
+        max_output_tokens=max_output_tokens,
+        timeout=timeout,
         store=False,
     )
     return parse_decision(response)
 
 
-async def decide_async(native, model, user_text, tool_names):
+async def decide_async(native, model, user_text, tool_names, *, timeout=5, max_output_tokens=256):
     response = await native.responses.create(
         model=model,
         input=decision_prompt(user_text, tool_names),
         text={"format": _FORMAT},
-        max_output_tokens=256,
-        timeout=5,
+        max_output_tokens=max_output_tokens,
+        timeout=timeout,
         store=False,
     )
     return parse_decision(response)
