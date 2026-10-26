@@ -413,6 +413,11 @@ class _Runtime:
     def _saved_decision(self, kwargs, path):
         state = self._continuation_state(kwargs) or self._existing_request(kwargs, path)
         if state and state.get("state") in {"awaiting_continuation", "pre_execution_pending"}:
+            if state.get("mode") != self.mode:
+                raise RSIRecoveryRequired(
+                    f"Turn {state['turn_id']} has a different or unknown originating mode; "
+                    "recover using its original mode before continuing"
+                )
             return state.get("decision")
         return None
 
@@ -473,7 +478,7 @@ class _Runtime:
                 raise RSIRecoveryRequired(f"Turn {existing['turn_id']} is already completed")
             else:
                 turn_id = scope[1] if scope and scope[1] else str(uuid.uuid4())
-                state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "task_family": task_family, "run_id": None}
+                state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "task_family": task_family, "run_id": None, "mode": self.mode}
         state["conversation_key"] = self._conversation_key(kwargs) or state.get("conversation_key")
         keys = state.setdefault("request_keys", [])
         if request_key not in keys:

@@ -216,6 +216,8 @@ await rsi.atoms.submit(run.run_id, data={"summary": output}, key="stable-submit-
 
 ## 6. 状态、恢复和错误
 
+透明入口须持久化 turn 创建时的 `mode`。重试及工具续接只能在同一模式下复用决策；模式变化或旧记录缺少模式时抛出 `RSIRecoveryRequired`，在模型调用和远端写入前停止，防止旧 `auto` 决策绕过 `disable` 或 `approval`。
+
 每个逻辑 turn 的本地状态至少含：决策结果（显式 `run` 可记为 `forced`，透明 `disable` 记为不自动提交）、冻结任务参数、`turn_id`、召回状态及 Recipe/Memory 来源与版本、原生执行状态、原生结果引用和最后错误。创建 Run 的路径还保存准备请求键、`run_id`、Session 游标、待发/已 ACK 事件 ID、提交请求键和反馈/Job 句柄；未创建 Run 时这些 Run 绑定字段可为空，不得为召回伪造 Run ID。存储方式由实现者选择，但必须能在同进程重试和重启后防止重复执行模型/工具；无法判定原生副作用是否发生时返回 `RSIRecoveryRequired` 交宿主对账。
 
 当前原子流程区分 Run 的 `ready/completed`、事件的 `durable_ack`、Job 的 `queued/running/awaiting_*/validated/published/rejected/failed/deferred`。附件协调器的 `prepared/awaiting_approval/skipped` 属于另一个尚未部署的协议版本。`completed` 不等于验证通过；`validated` 需要管理员明确发布，且发布只影响后续新 Run。等待 Job 应有超时与退避，`resume_improvement` 仅用于指定 awaiting 状态。

@@ -74,6 +74,6 @@ async with CoSensClient(api_key=os.environ["RSI_API_KEY"]) as rsi:
 
 ## 恢复与服务端边界
 
-Session 事件只在收到 `durable_ack` 后推进本地游标。失败后可查 `client.cosens.get_turn(turn_id)`；原生执行已完成但提交回执不明时用 `client.cosens.reconcile(turn_id)` 对账，不重新执行模型或工具。原生执行结果不明时抛 `RSIRecoveryRequired`，由宿主确认实际执行情况。请持久化 `state_path`；丢失本地状态后，当前服务端不能保证跨 Run 的消息全局去重。
+Session 事件只在收到 `durable_ack` 后推进本地游标。失败后可查 `client.cosens.get_turn(turn_id)`；原生执行已完成但提交回执不明时用 `client.cosens.reconcile(turn_id)` 对账，不重新执行模型或工具。原生执行结果不明时抛 `RSIRecoveryRequired`，由宿主确认实际执行情况。透明调用的重试及工具续接必须保持 turn 创建时的 `mode`；模式变化或旧记录缺少模式时，SDK 会在模型调用和远端写入前拒绝隐式恢复。请持久化 `state_path`；丢失本地状态后，当前服务端不能保证跨 Run 的消息全局去重。
 
 旧直连地址的 OpenAPI 标识为 1.0.0，附件参考契约为 2.1.0；这些观测不能证明新网关已部署相同接口。服务部署后还需验证写接口响应、事件 ACK 和审批协调能力。本仓库测试使用模拟 HTTP 传输；独立召回成功路径用测试适配器验证，没有向服务写入数据。详细时机与限制见 [设计文档](docs/2026-10-26-cosens-python-sdk-design.md)。

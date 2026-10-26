@@ -38,6 +38,67 @@ def model_reply(index):
     return SimpleNamespace(id="final-response", status="completed", output_text="done", output=[SimpleNamespace(type="message")])
 
 
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("new_mode", ["disable", "approval"])
+@pytest.mark.parametrize("interrupted_at", ["prepare", "tool_call"])
+@pytest.mark.asyncio
+async def test_recovery_cannot_reuse_auto_decision_under_another_mode(tmp_path, asynchronous, new_mode, interrupted_at):
+    calls, business, decisions = [], [], []
+    request = {"model": "app", "input": "task"}
+
+    def create(**kwargs):
+        if kwargs["model"] == "decision":
+            decisions.append(kwargs)
+            return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+        business.append(kwargs)
+        return model_reply(len(business))
+
+    async def acreate(**kwargs):
+        return create(**kwargs)
+
+    def fail_prepare(request):
+        calls.append(request.url.path)
+        raise httpx.ReadError("prepare receipt unknown")
+
+    def wrap(mode, transport):
+        native = AsyncOpenAI(api_key="model") if asynchronous else OpenAI(api_key="model")
+        native.responses.create = acreate if asynchronous else create
+        return cosens(native, mode=mode, decision_model="decision", api_key="gateway-test",
+                      state_path=tmp_path / "state.sqlite3", _http_transport=transport)
+
+    async def invoke(client, kwargs):
+        if asynchronous:
+            return await client.responses.create(**kwargs)
+        return client.responses.create(**kwargs)
+
+    async def close(client):
+        if asynchronous:
+            await client.close()
+        else:
+            client.close()
+
+    first = wrap("auto", httpx.MockTransport(fail_prepare) if interrupted_at == "prepare" else service(calls))
+    try:
+        if interrupted_at == "prepare":
+            with pytest.raises(RSITransportError):
+                await invoke(first, request)
+        else:
+            await invoke(first, request)
+            request = {"model": "app", "previous_response_id": "tool-response",
+                       "input": [{"type": "function_call_output", "call_id": "c1", "output": "result"}]}
+    finally:
+        await close(first)
+
+    before = (len(calls), len(business), len(decisions))
+    restored = wrap(new_mode, service(calls))
+    try:
+        with pytest.raises(RSIRecoveryRequired, match="mode"):
+            await invoke(restored, request)
+        assert (len(calls), len(business), len(decisions)) == before
+    finally:
+        await close(restored)
+
+
 @pytest.mark.parametrize("reference", ["previous_response_id", "scope", "conversation"])
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.asyncio
