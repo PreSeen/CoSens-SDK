@@ -2,10 +2,11 @@
 
 import asyncio
 import os
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from .http import AsyncTransport, SyncTransport
-from .errors import RSIRecallUnavailable
+from .errors import RSIRecoveryRequired
+from .models import result
 
 
 def _part(value):
@@ -20,13 +21,60 @@ def _key(value):
     return value
 
 
+def _recall_context(recipe, memory, query, task_family):
+    if not isinstance(recipe, dict) or recipe.get("status") not in {"matched", "not_found"}:
+        raise RSIRecoveryRequired("Standalone Recipe lookup returned an invalid status")
+    if recipe["status"] == "matched" and (not recipe.get("recipe_id") or not isinstance(recipe.get("bundle"), dict)):
+        raise RSIRecoveryRequired("Standalone Recipe bundle is missing")
+    if not isinstance(memory, dict) or not isinstance(memory.get("items"), list) or not all(isinstance(item, dict) for item in memory["items"]):
+        raise RSIRecoveryRequired("Standalone Memory recall items are missing or invalid")
+    return result({"recipe": recipe, "context": {"query": query, "task_family": task_family, "source": "public_recipe_and_memory"},
+                   "snapshot": {"evidence": memory["items"], "memory_recall": memory}})
+
+
 class AsyncAtoms:
     def __init__(self, transport):
         self._http = transport
 
-    async def recall_context(self, *, query):
-        """Standalone recall boundary; the public HTTP contract is pending."""
-        raise RSIRecallUnavailable("Standalone Recipe/Memory recall HTTP contract is not configured; no Run was created")
+    async def recall_context(self, *, query, task_family="general", token_budget=1000):
+        """Read Recipe and Memory without creating a Run; freeze per turn upstream."""
+        recipe = await self.get_active_recipe(task_family=task_family)
+        memory = await self.memory_recall(query=query, token_budget=token_budget)
+        return _recall_context(recipe, memory, query, task_family)
+
+    async def get_active_recipe(self, *, task_family="general"):
+        return await self._http.request("GET", "/v1/recipes/active?" + urlencode({"task_family": task_family}))
+
+    async def memory_recall(self, *, query, token_budget=1000):
+        return await self._http.request("POST", "/v1/memory/recall", body={"query": query, "token_budget": token_budget})
+
+    async def memory_ingest(self, *, content, request_key, source_kind="decision", durable=True):
+        return await self._http.request("POST", "/v1/memory/ingest", body={"content": content, "request_key": _key(request_key), "source_kind": source_kind, "durable": durable})
+
+    async def get_memory_job(self, job_id):
+        return await self._http.request("GET", f"/v1/memory/jobs/{_part(job_id)}")
+
+    async def get_memory_experience(self, experience_id, *, revision=None):
+        suffix = "?" + urlencode({"revision": revision}) if revision is not None else ""
+        return await self._http.request("GET", f"/v1/memory/experiences/{_part(experience_id)}" + suffix)
+
+    async def get_memory(self):
+        return await self._http.request("GET", "/v1/memory")
+
+    async def get_recipe_step(self, run_id, node_id):
+        return await self._http.request("GET", f"/v1/runs/{_part(run_id)}/recipe/steps/{_part(node_id)}")
+
+    async def guidance(self, run_id, *, data):
+        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/guidance", body={"data": data})
+
+    async def checkpoint(self, run_id, *, data):
+        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/checkpoint", body={"data": data})
+
+    async def get_decision(self, run_id, decision_id):
+        return await self._http.request("GET", f"/v1/runs/{_part(run_id)}/decisions/{_part(decision_id)}")
+
+    async def get_trace(self, run_id):
+        return await self._http.request("GET", f"/v1/runs/{_part(run_id)}/trace")
 
     async def artifact(self, *, name, content):
         return await self._http.request("POST", "/v1/artifacts", body={"name": name, "content": content})
@@ -81,6 +129,15 @@ class AdminAtoms:
     def __init__(self, transport):
         self._http = transport
 
+    async def bootstrap_bundle(self, *, task_family, bundle, reason):
+        return await self._http.request("POST", "/internal/admin/v1/recipes/bootstrap-bundle", body={"task_family": task_family, "bundle": bundle, "reason": reason})
+
+    async def evaluate_decision(self, run_id, decision_id, *, evaluation):
+        return await self._http.request("POST", f"/internal/admin/v1/runs/{_part(run_id)}/decisions/{_part(decision_id)}/evaluations", body=evaluation)
+
+    async def evaluate_recipe(self, run_id, *, record, artifact_id, content_hash):
+        return await self._http.request("POST", f"/internal/admin/v1/runs/{_part(run_id)}/recipe-evaluation", body={"record": record, "artifact_id": artifact_id, "content_hash": content_hash})
+
     async def publish(self, job_id, *, expected_revision, reason):
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("reason is required")
@@ -101,9 +158,45 @@ class SyncAtoms:
     def __init__(self, transport):
         self._http = transport
 
-    def recall_context(self, *, query):
-        """Standalone recall boundary; the public HTTP contract is pending."""
-        raise RSIRecallUnavailable("Standalone Recipe/Memory recall HTTP contract is not configured; no Run was created")
+    def recall_context(self, *, query, task_family="general", token_budget=1000):
+        """Read Recipe and Memory without creating a Run; freeze per turn upstream."""
+        recipe = self.get_active_recipe(task_family=task_family)
+        memory = self.memory_recall(query=query, token_budget=token_budget)
+        return _recall_context(recipe, memory, query, task_family)
+
+    def get_active_recipe(self, *, task_family="general"):
+        return self._http.request("GET", "/v1/recipes/active?" + urlencode({"task_family": task_family}))
+
+    def memory_recall(self, *, query, token_budget=1000):
+        return self._http.request("POST", "/v1/memory/recall", body={"query": query, "token_budget": token_budget})
+
+    def memory_ingest(self, *, content, request_key, source_kind="decision", durable=True):
+        return self._http.request("POST", "/v1/memory/ingest", body={"content": content, "request_key": _key(request_key), "source_kind": source_kind, "durable": durable})
+
+    def get_memory_job(self, job_id):
+        return self._http.request("GET", f"/v1/memory/jobs/{_part(job_id)}")
+
+    def get_memory_experience(self, experience_id, *, revision=None):
+        suffix = "?" + urlencode({"revision": revision}) if revision is not None else ""
+        return self._http.request("GET", f"/v1/memory/experiences/{_part(experience_id)}" + suffix)
+
+    def get_memory(self):
+        return self._http.request("GET", "/v1/memory")
+
+    def get_recipe_step(self, run_id, node_id):
+        return self._http.request("GET", f"/v1/runs/{_part(run_id)}/recipe/steps/{_part(node_id)}")
+
+    def guidance(self, run_id, *, data):
+        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/guidance", body={"data": data})
+
+    def checkpoint(self, run_id, *, data):
+        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/checkpoint", body={"data": data})
+
+    def get_decision(self, run_id, decision_id):
+        return self._http.request("GET", f"/v1/runs/{_part(run_id)}/decisions/{_part(decision_id)}")
+
+    def get_trace(self, run_id):
+        return self._http.request("GET", f"/v1/runs/{_part(run_id)}/trace")
 
     def artifact(self, *, name, content):
         return self._http.request("POST", "/v1/artifacts", body={"name": name, "content": content})

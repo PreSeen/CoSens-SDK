@@ -1,0 +1,14 @@
+{
+  "model_execution": "local fake only",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/api/v1/recipes/active",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "10a3b676e8ef12c8939f39552ddf20c7"
+    }
+  ],
+  "result": "failed",
+  "error": "RSITransportError: The read operation timed out"
+}

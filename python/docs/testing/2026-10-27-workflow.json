@@ -1,0 +1,276 @@
+{
+  "started_at": "2026-10-27T02:25:15.935950+00:00",
+  "gateway": "https://friday-rsi-cn.stardust-ai.com/api",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/api/health/ready",
+      "http_status": 200,
+      "request_id": "0af9599bd70c186404266eaf47ab720e",
+      "identity_header_sent": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/recipes/active?task_family=general",
+      "http_status": 200,
+      "request_id": "d1fbd19c551310b5a6c4516792f88dc2",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/memory/recall",
+      "http_status": 200,
+      "request_id": "dcd3bea6fbe0349c5af715be598e8b1f",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/internal/admin/v1/recipes/bootstrap-bundle",
+      "http_status": 200,
+      "request_id": "6854837598afbee70c47cd0a3bccdf19",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/memory/ingest",
+      "http_status": 200,
+      "request_id": "ec305db76a690984a292f4b15fc31226",
+      "identity_header_sent": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/memory/jobs/b867760c-10d5-44c8-a908-59acb529bb91",
+      "http_status": 200,
+      "request_id": "de85654885de73261f17bd09f24ab158",
+      "identity_header_sent": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/memory/jobs/b867760c-10d5-44c8-a908-59acb529bb91",
+      "http_status": 200,
+      "request_id": "235487d233916ed9994e7654f50c7f09",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/memory/recall",
+      "http_status": 200,
+      "request_id": "94db61c761c2d31b50bfab8580c8248e",
+      "identity_header_sent": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/memory",
+      "http_status": 200,
+      "request_id": "db0a2112927d51c208b877a309079e65",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/artifacts",
+      "http_status": 200,
+      "request_id": "87f1db6456d70676e4c8d28bc913aefa",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/prepare",
+      "http_status": 200,
+      "request_id": "577947150ee7d67f1202a67aab2f82c1",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/prepare",
+      "http_status": 200,
+      "request_id": "45e1386719a2f895fa52dfde6dadf7c2",
+      "identity_header_sent": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/run_9152c7fa23da42eba4db79ea3e0d6dea",
+      "http_status": 200,
+      "request_id": "c9d8f77e9f6a9aaeadd5030090945910",
+      "identity_header_sent": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/run_9152c7fa23da42eba4db79ea3e0d6dea/recipe/steps/prepare",
+      "http_status": 200,
+      "request_id": "ad107cadacc8f26a2a135a009e8d19e2",
+      "identity_header_sent": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/run_9152c7fa23da42eba4db79ea3e0d6dea/recipe/steps/produce",
+      "http_status": 200,
+      "request_id": "92692c9e3ce089aa567e77d69b332f6a",
+      "identity_header_sent": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/run_9152c7fa23da42eba4db79ea3e0d6dea/recipe/steps/verify",
+      "http_status": 200,
+      "request_id": "1e6cee411616597a49d7ab4db96979c0",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/run_9152c7fa23da42eba4db79ea3e0d6dea/guidance",
+      "http_status": 200,
+      "request_id": "5aeddea678b741d555c846d25fad66b4",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/run_9152c7fa23da42eba4db79ea3e0d6dea/session-events",
+      "http_status": 200,
+      "request_id": "8fb078b94bbe7cffa2db54ba7579bb45",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/run_9152c7fa23da42eba4db79ea3e0d6dea/session-events",
+      "http_status": 200,
+      "request_id": "95d5c0150dee53aa313b945f63e1b9e5",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/run_9152c7fa23da42eba4db79ea3e0d6dea/checkpoint",
+      "http_status": 200,
+      "request_id": "01aeafb2d541799223ef77d5d39c8a19",
+      "identity_header_sent": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/run_9152c7fa23da42eba4db79ea3e0d6dea/decisions/decision_f5fe719e17da43a7a9ddf35a7aa73614",
+      "http_status": 200,
+      "request_id": "74f33ebfc0e139cdca74fb8883d06eae",
+      "identity_header_sent": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/memory/experiences/exp_f5fe719e17da43a7a9ddf35a7aa73614",
+      "http_status": 200,
+      "request_id": "00ba99371fe0f69847ffb5f18bdcefaf",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/artifacts",
+      "http_status": 200,
+      "request_id": "e586af1506975717ab9636762e17a493",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/run_9152c7fa23da42eba4db79ea3e0d6dea/submit",
+      "http_status": 200,
+      "request_id": "2320b3f06c5f69078294ef1357e91e33",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/artifacts",
+      "http_status": 200,
+      "request_id": "198146a0e768526583b976bd8f4669c7",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/run_9152c7fa23da42eba4db79ea3e0d6dea/feedback",
+      "http_status": 200,
+      "request_id": "f51c8abc29cb2abf4a7bbc5527a190c0",
+      "identity_header_sent": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/memory/experiences/exp_f5fe719e17da43a7a9ddf35a7aa73614",
+      "http_status": 200,
+      "request_id": "d413818a62a3d68dad70f3135a57d8bc",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/internal/admin/v1/runs/run_9152c7fa23da42eba4db79ea3e0d6dea/decisions/decision_f5fe719e17da43a7a9ddf35a7aa73614/evaluations",
+      "http_status": 200,
+      "request_id": "67d7658d115ec5fc3749e6e054e86ca7",
+      "identity_header_sent": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/memory/experiences/exp_f5fe719e17da43a7a9ddf35a7aa73614",
+      "http_status": 200,
+      "request_id": "59e9b79540d6a5f55736b6fee2972fe5",
+      "identity_header_sent": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/memory/experiences/exp_f5fe719e17da43a7a9ddf35a7aa73614",
+      "http_status": 200,
+      "request_id": "8f9dc546e0dee4b2aa25979c3ae0dda0",
+      "identity_header_sent": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/memory/experiences/exp_f5fe719e17da43a7a9ddf35a7aa73614?revision=1",
+      "http_status": 200,
+      "request_id": "e13c96711b5216bfa732d05d37f48301",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/artifacts",
+      "http_status": 200,
+      "request_id": "39f1e3141b17353d160e17f5c227caa4",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/internal/admin/v1/runs/run_9152c7fa23da42eba4db79ea3e0d6dea/recipe-evaluation",
+      "http_status": 200,
+      "request_id": "8e4781f8b76808937d78b273eaf56982",
+      "identity_header_sent": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/run_9152c7fa23da42eba4db79ea3e0d6dea/trace",
+      "http_status": 200,
+      "request_id": "1c663348739497dffecd204a1dc5068d",
+      "identity_header_sent": false
+    }
+  ],
+  "gateway_memory_project_present": true,
+  "standalone_recall": "passed",
+  "test_tag": "sdk-gateway-20261027T022516Z-9b326a",
+  "recipe_id": "recipe_d3a7108e99ad431d8e14a5cbf8042b90",
+  "memory_job": {
+    "job_id": "b867760c-10d5-44c8-a908-59acb529bb91",
+    "status": "committed"
+  },
+  "run_id": "run_9152c7fa23da42eba4db79ea3e0d6dea",
+  "experience_id": "exp_f5fe719e17da43a7a9ddf35a7aa73614",
+  "experience_revision": 2,
+  "evaluation": {
+    "action": "daily_aggregate",
+    "passed": false,
+    "reward": -1
+  },
+  "recipe_evaluation": {
+    "outbox_id": "recipe_outbox_0b1639283eef4d789f5eeb155b2640e8",
+    "status": "recorded"
+  },
+  "trace_keys": [
+    "run",
+    "events",
+    "learning",
+    "tools",
+    "session_events",
+    "decisions"
+  ],
+  "prepare_idempotency": "passed",
+  "durable_ack_replay": "passed",
+  "run_context_validation": "passed",
+  "result": "passed"
+}

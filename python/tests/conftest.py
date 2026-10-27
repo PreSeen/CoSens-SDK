@@ -13,10 +13,10 @@ def empty_recall(monkeypatch):
     from cosens.atoms import AsyncAtoms, SyncAtoms
     from cosens.models import result
     queries = []
-    def recall(self, *, query):
+    def recall(self, *, query, task_family="general"):
         queries.append(query)
         return result({"recipe": {}, "context": {}, "snapshot": {}})
-    async def arecall(self, *, query):
+    async def arecall(self, *, query, task_family="general"):
         return recall(self, query=query)
     monkeypatch.setattr(SyncAtoms, "recall_context", recall)
     monkeypatch.setattr(AsyncAtoms, "recall_context", arecall)

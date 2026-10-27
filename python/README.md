@@ -18,7 +18,7 @@ pip install './python[agents]'
 
 SDK 持久化游标与恢复记录默认写在 `~/.cosens/state.sqlite3`，也可传 `state_path` 指定本地文件。记录按服务及调用凭证摘要隔离，旧直连服务的 Run 和 ACK 不会自动迁移至网关。
 
-**当前实现状态**：网关传输、显式 Run、透明 `auto` 命中时的原子流程，以及每个 turn 的冻结上下文复用已实现并在本地测试。服务端尚未部署，未进行真实业务联调。独立召回的 HTTP 路径与 Schema 仍未提供；`atoms.recall_context(query=...)` 当前明确抛出 `RSIRecallUnavailable`，不会猜测接口。透明 `disable`、`auto` 未命中或分类失败均进入独立召回，因此当前也会在业务模型调用前报该错误。完整的“只召回、不发 Run”功能须在接口契约提供后补齐 HTTP 适配；本地适配测试不代表真实服务已可调用。
+**当前实现状态（2026-10-27）**：国内网关真实联调已覆盖 Memory 写入/召回、Recipe、Run、guidance/checkpoint、消息 ACK、反馈及经验评估。`atoms.recall_context(query=...)` 组合公开的 Recipe 查询与 Memory 召回，不创建 Run；透明 `disable`、`auto` 未命中/分类失败均可使用。每个 turn 冻结一次结果。网关自动注入 `X-User-Id`，SDK 不提供也不发送该身份头。验收范围与真实请求记录见 [网关联调报告](docs/2026-10-27-gateway-validation.md)。
 
 ## 方式一：透明包装 OpenAI SDK
 
@@ -74,10 +74,48 @@ async with CoSensClient(api_key=os.environ["RSI_API_KEY"]) as rsi:
     await rsi.atoms.submit(prepared.run_id, data={"summary": "实际结果", "outcome": "completed"})
 ```
 
-`rsi.atoms` 提供 `artifact`、`prepare`、`get_run`、`session_events`、`initial_inputs`、`submit`、`feedback`、`improve`、`get_improvement`、`resume_improvement` 和有界 `wait_improvement`。原子调用方须在首次业务模型调用前完成 `prepare/get_run`，并在工具循环中复用结果；不创建 Run 的独立召回适配仍待契约。管理员发布须显式使用 `rsi.admin.atoms.publish`，仍携带同一 Friday 用户 Key，由网关及后端校验；SDK 不自动发布，也不持有内部服务令牌。
+`rsi.atoms` 提供 `artifact`、`prepare`、`get_run`、`session_events`、`initial_inputs`、`submit`、`feedback`、`improve`、`get_improvement`、`resume_improvement` 和有界 `wait_improvement`。原子调用方须在首次业务模型调用前完成 `prepare/get_run`，并在工具循环中复用结果；不创建 Run 时使用 `await rsi.atoms.recall_context(query="任务", task_family="general")`，同一 turn 复用返回结果。管理员发布须显式使用 `rsi.admin.atoms.publish`，仍携带同一 Friday 用户 Key，由网关及后端校验；SDK 不自动发布，也不持有内部服务令牌。
 
 ## 恢复与服务端边界
 
 Session 事件只在收到 `durable_ack` 后推进本地游标。失败后可查 `client.cosens.get_turn(turn_id)`；原生执行已完成但提交回执不明时用 `client.cosens.reconcile(turn_id)` 对账，不重新执行模型或工具。原生执行结果不明时抛 `RSIRecoveryRequired`，由宿主确认实际执行情况。透明调用的重试及工具续接必须保持 turn 创建时的 `mode`；模式变化或旧记录缺少模式时，SDK 会在模型调用和远端写入前拒绝隐式恢复。请持久化 `state_path`；丢失本地状态后，当前服务端不能保证跨 Run 的消息全局去重。
 
-旧直连地址的 OpenAPI 标识为 1.0.0，附件参考契约为 2.1.0；这些观测不能证明新网关已部署相同接口。服务部署后还需验证写接口响应、事件 ACK 和审批协调能力。本仓库测试使用模拟 HTTP 传输；独立召回成功路径用测试适配器验证，没有向服务写入数据。详细时机与限制见 [设计文档](docs/2026-10-26-cosens-python-sdk-design.md)。
+网关 OpenAPI 当前标识为 1.0.0；以本次 curl 附件、网关实际返回和联调报告为准。审批协调器 `/v1/invocations` 仍未确认，透明 `approval` 命中时保持明确报错。单元测试使用模拟 HTTP；真实网关联调使用独立测试标识并写入合成测试数据，模型执行用本地替身验证编排，未调用真实模型或银行系统。详细时机与限制见 [设计文档](docs/2026-10-26-cosens-python-sdk-design.md)。
+
+## curl 文档对应的新增原子能力
+
+普通原子接口（`atoms` 异步，`sync_atoms` 提供新增接口的同步形式）：
+
+| SDK 方法 | 网关 `/api` 后的路径 |
+| --- | --- |
+| `get_active_recipe(task_family=...)` | `GET /v1/recipes/active?task_family=...` |
+| `memory_ingest(content=..., request_key=...)` | `POST /v1/memory/ingest` |
+| `memory_recall(query=..., token_budget=1000)` | `POST /v1/memory/recall` |
+| `get_memory_job(job_id)` | `GET /v1/memory/jobs/{job_id}` |
+| `get_memory_experience(experience_id, revision=...)` | `GET /v1/memory/experiences/{experience_id}` |
+| `get_memory()` | `GET /v1/memory` |
+| `get_recipe_step(run_id, node_id)` | `GET /v1/runs/{run_id}/recipe/steps/{node_id}` |
+| `guidance(run_id, data=...)` | `POST /v1/runs/{run_id}/guidance` |
+| `checkpoint(run_id, data=...)` | `POST /v1/runs/{run_id}/checkpoint` |
+| `get_decision(run_id, decision_id)` | `GET /v1/runs/{run_id}/decisions/{decision_id}` |
+| `get_trace(run_id)` | `GET /v1/runs/{run_id}/trace` |
+
+`admin.atoms` 新增显式调用：`bootstrap_bundle`、`evaluate_decision`、`evaluate_recipe`，对应附件的 Recipe 注册、决策评估、Recipe 评估接口。它们不会由透明包装自动触发；调用者须提交实际执行和评估证据。`feedback` 不等于经验已经 verified，异步写入需轮询 Job/经验版本确认。
+
+`recall_context` 顺序读取 Recipe 和 Memory 后冻结本地结果，服务端未承诺两个独立读取拥有同一个事务快照。`disable` 使用 `general` 任务族；`auto` 未命中时使用分类结果的任务族。Recipe `not_found` 或 Memory 空列表是合法结果，HTTP 错误和缺失字段仍阻止业务模型调用。
+
+## 复现网关联调
+
+先由运行环境注入 `RSI_API_KEY`（没有设置时脚本隐藏输入 Key），在仓库根目录运行：
+
+```bash
+# 只读验证：健康状态和无 Run 召回
+python python/examples/validate_gateway.py --output /tmp/cosens-readonly.json
+
+# 会写入合成 Recipe、Memory、Run 和评估记录
+python python/examples/validate_gateway.py --write \
+  --transcript /path/to/FULL_CURL_TRANSCRIPT.md --output /tmp/cosens-workflow.json
+
+# 真实网关 + 本地模型/Agent 替身；会创建测试 Run，需要 agents 可选依赖
+python python/examples/validate_wrapped_gateway.py --output /tmp/cosens-wrapped.json
+```

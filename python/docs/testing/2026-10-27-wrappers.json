@@ -1,0 +1,167 @@
+{
+  "model_execution": "local fake only",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/api/v1/recipes/active",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "ae9f7c6559829c0f1c9536d85574045d"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/memory/recall",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "66409595b5a20eb66e51f054afce71a4"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/recipes/active",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "0f02faf99adff4797e5445af62c7912f"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/memory/recall",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "77a49fa612cf5282591fdf46b4633782"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/prepare",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "000ecb856ffeb5d21fc2203fe0a169af"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/run_20a41f5069474bc1a1e3319b8ca58603",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "91ff883a9ae9786b5df78bc42b4c28dc"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/run_20a41f5069474bc1a1e3319b8ca58603/session-events",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "b6b29169cecb1d64f68fd818899bf975"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/run_20a41f5069474bc1a1e3319b8ca58603/submit",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "9b7a3268f0bcf543021fb0b9a622d2d7"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/recipes/active",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "cc4dace01ad7709e54addb6179ead840"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/memory/recall",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "8d833c25e3bb3a04d94a4752855c001f"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/recipes/active",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "ac6a693f9ea68598c88043ad10f3237d"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/memory/recall",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "1d8129a25747a4b7d6d6f835fb401ff7"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/prepare",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "ea7543d04abd3299d84d23fc86134332"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/run_7d94c270870945259a0e79b44f3e1c4f",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "926d133c8d4ebbceb0211e64e68254c8"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/run_7d94c270870945259a0e79b44f3e1c4f/session-events",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "fa0ff09f861d2d13e54991c91fa3bdbb"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/run_7d94c270870945259a0e79b44f3e1c4f/submit",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "8f06e9cfc3f6126d6cabb12fe9b33bde"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/prepare",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "afc9b8dfb5f44f12012f3bfeb4585b03"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/run_3b97edd02fda41dbacd6c2192802a24a",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "5f75d6ac9b72112932f41bd0fa4b1203"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/run_3b97edd02fda41dbacd6c2192802a24a/submit",
+      "http_status": 200,
+      "identity_header_sent": false,
+      "request_id": "f5468a3c05e06fafc32b40f2139c83d3"
+    }
+  ],
+  "disable_sync": {
+    "status": "passed",
+    "run_id": null
+  },
+  "auto_false_sync": {
+    "status": "passed",
+    "run_id": null
+  },
+  "auto_true_sync": {
+    "status": "passed",
+    "run_id": "run_20a41f5069474bc1a1e3319b8ca58603"
+  },
+  "disable_async": {
+    "status": "passed",
+    "run_id": null
+  },
+  "auto_false_async": {
+    "status": "passed",
+    "run_id": null
+  },
+  "auto_true_async": {
+    "status": "passed",
+    "run_id": "run_7d94c270870945259a0e79b44f3e1c4f"
+  },
+  "explicit_run": {
+    "status": "passed",
+    "run_id": "run_3b97edd02fda41dbacd6c2192802a24a"
+  },
+  "result": "passed"
+}

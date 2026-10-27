@@ -19,7 +19,7 @@ def context():
 @pytest.mark.parametrize("mode", ["disable", "auto_false", "auto_failure"])
 @pytest.mark.parametrize("asynchronous", [False, True])
 @pytest.mark.asyncio
-async def test_missing_recall_contract_blocks_business_model_without_creating_run(tmp_path, mode, asynchronous):
+async def test_failed_recall_http_blocks_business_model_without_creating_run(tmp_path, mode, asynchronous):
     business, requests = [], []
     native = AsyncOpenAI(api_key="model") if asynchronous else OpenAI(api_key="model")
     def create(**kwargs):
@@ -34,13 +34,14 @@ async def test_missing_recall_contract_blocks_business_model_without_creating_ru
     native.responses.create = acreate if asynchronous else create
     client = cosens(native, mode="disable" if mode == "disable" else "auto", decision_model="decision", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(lambda r: (requests.append(r), httpx.Response(500))[1]))
     try:
-        with pytest.raises(RSIError, match="recall"):
+        with pytest.raises(RSIError):
             if asynchronous:
                 await client.responses.create(model="business", input="task")
             else:
                 client.responses.create(model="business", input="task")
         assert business == []
-        assert requests == []
+        assert len(requests) == 1
+        assert requests[0].url.path == "/api/v1/recipes/active"
     finally:
         if asynchronous:
             await client.close()
@@ -49,15 +50,18 @@ async def test_missing_recall_contract_blocks_business_model_without_creating_ru
 
 
 @pytest.mark.asyncio
-async def test_atomic_recall_boundary_reports_missing_contract_without_fabricated_http():
+async def test_atomic_recall_allows_legitimate_empty_matches_without_run():
     requests = []
-    async with CoSensClient(_http_transport=httpx.MockTransport(lambda r: (requests.append(r), httpx.Response(500))[1])) as client:
-        assert callable(getattr(client.atoms, "recall_context", None))
-        with pytest.raises(RSIError, match="recall"):
-            await client.atoms.recall_context(query="task")
-        with pytest.raises(RSIError, match="recall"):
-            client.sync_atoms.recall_context(query="task")
-    assert requests == []
+    def server(request):
+        requests.append(request)
+        return httpx.Response(200, json={"status": "not_found"} if request.method == "GET" else {"query": "task", "items": []})
+    async with CoSensClient(_http_transport=httpx.MockTransport(server)) as client:
+        asynchronous = await client.atoms.recall_context(query="task")
+        synchronous = client.sync_atoms.recall_context(query="task")
+        assert asynchronous == synchronous
+        assert asynchronous["snapshot"]["evidence"] == []
+    assert len(requests) == 4
+    assert all("/runs" not in r.url.path for r in requests)
 
 
 @pytest.mark.parametrize("mode", ["disable", "auto_false", "auto_failure"])
@@ -65,10 +69,10 @@ async def test_atomic_recall_boundary_reports_missing_contract_without_fabricate
 @pytest.mark.asyncio
 async def test_independent_context_is_injected_once_per_turn_without_run_events(tmp_path, monkeypatch, mode, asynchronous):
     recalls, business, decisions, requests = [], [], [], []
-    def recall(self, *, query):
+    def recall(self, *, query, task_family="general"):
         recalls.append(query)
         return context()
-    async def arecall(self, *, query):
+    async def arecall(self, *, query, task_family="general"):
         return recall(self, query=query)
     monkeypatch.setattr(SyncAtoms, "recall_context", recall, raising=False)
     monkeypatch.setattr(AsyncAtoms, "recall_context", arecall, raising=False)
@@ -112,7 +116,7 @@ async def test_independent_context_is_injected_once_per_turn_without_run_events(
 
 
 def test_failed_independent_recall_never_calls_model(tmp_path, monkeypatch):
-    def fail(self, *, query):
+    def fail(self, *, query, task_family="general"):
         raise RSITransportError("recall offline")
     monkeypatch.setattr(SyncAtoms, "recall_context", fail, raising=False)
     native = OpenAI(api_key="model")
@@ -132,10 +136,10 @@ def test_failed_independent_recall_never_calls_model(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_native_raw_stream_recall_precedes_model_and_never_sends_run(tmp_path, monkeypatch, asynchronous, raw_mode):
     order, rsi_requests = [], []
-    def recall(self, *, query):
+    def recall(self, *, query, task_family="general"):
         order.append("recall")
         return context()
-    async def arecall(self, *, query):
+    async def arecall(self, *, query, task_family="general"):
         return recall(self, query=query)
     monkeypatch.setattr(SyncAtoms, "recall_context", recall)
     monkeypatch.setattr(AsyncAtoms, "recall_context", arecall)

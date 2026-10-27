@@ -1,0 +1,29 @@
+{
+  "run_id": "run_9152c7fa23da42eba4db79ea3e0d6dea",
+  "run_status": "completed",
+  "persisted_event_counts": {
+    "sdk-gateway-20261027T022516Z-9b326a:plan": 1,
+    "sdk-gateway-20261027T022516Z-9b326a:result": 1
+  },
+  "experience_id": "exp_f5fe719e17da43a7a9ddf35a7aa73614",
+  "revision": 2,
+  "outcome": {
+    "evaluation_id": "sdk-gateway-20261027T022516Z-9b326a:oracle",
+    "evidence_content_hash": "sha256:8e192d0f30a0a65b967ae015cdfe6a1c8df42fccb15dc74fd42df1e401bb60c0",
+    "evidence_ref": "artifact_247fa27fb05c4f9aa1ed5c8432fdedba",
+    "reward_spec": "verified-decision-return-v1",
+    "status": "verified",
+    "value": -1
+  },
+  "eligible_for_runtime": true,
+  "decision_writes": [
+    {
+      "kind": "upsert",
+      "state": "done"
+    },
+    {
+      "kind": "outcome",
+      "state": "done"
+    }
+  ]
+}

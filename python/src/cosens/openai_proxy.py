@@ -689,7 +689,7 @@ class _Runtime:
         self._save(state)
         try:
             if "frozen_context" not in state:
-                recalled = self.client.sync_atoms.recall_context(query=state["objective"])
+                recalled = self.client.sync_atoms.recall_context(query=state["objective"], task_family=state["task_family"] or "general")
                 state["frozen_context"] = freeze_recall_context(recalled)
                 self._save(state)
             return state, result(state["frozen_context"])
@@ -705,7 +705,7 @@ class _Runtime:
         self._save(state)
         try:
             if "frozen_context" not in state:
-                recalled = await self.client.atoms.recall_context(query=state["objective"])
+                recalled = await self.client.atoms.recall_context(query=state["objective"], task_family=state["task_family"] or "general")
                 state["frozen_context"] = freeze_recall_context(recalled)
                 self._save(state)
             return state, result(state["frozen_context"])
