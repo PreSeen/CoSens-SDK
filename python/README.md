@@ -1,26 +1,47 @@
 # CoSens Python SDK
 
-首版 Python SDK 实现三种入口：透明包装 OpenAI client、显式执行 Agents SDK Agent，以及直接调用 RSI 原子接口。当前服务端地址由 SDK 内部管理，公开初始化参数没有 CoSens `base_url`。
+在现有 OpenAI 应用中加入 Recipe、Memory 召回，以及 RSI 任务消息与结果上报。业务任务由你的 OpenAI 客户端或 Agents SDK 执行，CoSens 负责上下文与经验流程。
+
+[安装](#安装) · [配置](#配置) · [快速开始](#快速开始) · [三种可运行示例](#三种可运行示例) · [常见问题](#常见问题) · [API 参考](docs/api-reference.md)
 
 ## 安装
 
+要求 **Python 3.10+**。当前支持 `openai` 2.54.x，Agent 接入使用 `openai-agents` 0.20.x。以下命令均从 **CoSens-SDK 仓库根目录**执行：
+
 ```bash
-pip install ./python
-# 使用 Agents SDK 时：
-pip install './python[agents]'
+python3 -m venv python/.venv
+source python/.venv/bin/activate
+python -m pip install -e "./python[examples]"
 ```
 
-要求 Python 3.10+、`openai` 2.54.x；可选 Agents SDK 为 0.20.x。当前测试环境为 `openai==2.54.0`、`openai-agents==0.20.0`。通过初始化参数 `api_key` 或环境变量 `RSI_API_KEY` 提供 Friday 用户 API Key；也兼容 `COSENS_API_KEY`，优先级为显式参数、`RSI_API_KEY`、`COSENS_API_KEY`。只填 Key 本身，SDK 自动生成 `Authorization: Bearer <key>`，不使用 `api-key` 或 `X-API-Key` 请求头，也不需要后端服务令牌。旧的 `token`、`admin_token` 参数已移除，统一使用 `api_key`。CoSens Key 不传给 OpenAI 模型服务。
+Windows 激活命令为 `python\.venv\Scripts\activate`。`examples` 安装三个示例所需的 Agents SDK 和 dotenv。仅使用透明包装可安装 `python -m pip install ./python`；仅增加 Agent 支持可安装 `"./python[agents]"`。这里使用源码安装，不依赖同名 PyPI 包是否已发布。
 
-所有业务接口由内部地址 `https://friday-rsi-cn.stardust-ai.com/api` 转发。网关进程健康检查为域名根路径 `/healthz`，不属于 `/api` 业务前缀。鉴权依据见 [网关调用指南](/Users/a1111/IdeaProjects/friday-rsi/docs/api/gateway-authentication.md)。
+## 配置
 
-密钥采用 **HTTPS + Bearer**：Key 在应用进程中作为字符串使用，网络传输中的请求头和正文由 TLS 加密，SDK 保持证书验证开启。Key 只放在 Authorization 头，不放 URL 或业务 JSON；网关传输拒绝绝对/外部 URL，不跟随重定向。此方式遵循 [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750#section-5.3) 的 Bearer 传输要求，不对 Key 另做 Base64、哈希或自定义加密。示例从环境变量读取，生产环境可通过部署平台的密钥管理功能注入；不要将真实 Key 写入源码或日志。SDK 不自动加载 `.env` 文件，仓库已忽略 `.env` 与 `.env.*`（示例文件除外）。
+复制 [.env.example](.env.example) 为同目录的 `python/.env`，填写：
 
-SDK 持久化游标与恢复记录默认写在 `~/.cosens/state.sqlite3`，也可传 `state_path` 指定本地文件。记录按服务及调用凭证摘要隔离，旧直连服务的 Run 和 ACK 不会自动迁移至网关。
+```dotenv
+OPENAI_API_KEY=your-openai-key
+OPENAI_MODEL=your-model-name
+RSI_API_KEY=your-friday-key
+```
 
-**当前实现状态（2026-10-27）**：国内网关真实联调已覆盖 Memory 写入/召回、Recipe、Run、guidance/checkpoint、消息 ACK、反馈及经验评估。`atoms.recall_context(query=...)` 组合公开的 Recipe 查询与 Memory 召回，不创建 Run；透明 `disable`、`auto` 未命中/分类失败均可使用。每个 turn 冻结一次结果。网关自动注入 `X-User-Id`，SDK 不提供也不发送该身份头。验收范围与真实请求记录见 [网关联调报告](docs/2026-10-27-gateway-validation.md)。
+| 配置项 | 用途 | 必填 |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | OpenAI 或兼容模型服务的凭证 | 是 |
+| `OPENAI_MODEL` | 你有权限调用的模型名，示例使用 Responses API | 是 |
+| `RSI_API_KEY` | Friday 用户 Key，用于 CoSens 网关 | 是 |
+| `OPENAI_BASE_URL` | 自定义兼容模型服务地址；不填使用 OpenAI 默认地址 | 否 |
+| `COSENS_MODE` | 透明示例的模式，默认 `auto`，可改为 `disable` | 否 |
+| `COSENS_INPUT` | 示例任务文字，不填使用内置集成测试问题 | 否 |
 
-## 方式一：透明包装 OpenAI SDK
+三个示例自动读取 `python/.env`，已有进程环境变量优先。**SDK 本身不自动读取 `.env`**；你自己的应用可使用环境变量或 `load_dotenv()`。
+
+CoSens 网关固定为 `https://friday-rsi-cn.stardust-ai.com/api`，由 SDK 内部配置。无需传入 CoSens `base_url` 或 `X_User_Id`，用户身份由网关注入。`OPENAI_BASE_URL` 仅配置模型服务。
+
+Friday Key 经 HTTPS 通过 `Authorization: Bearer <key>` 发送，证书验证保持开启，不跟随重定向。它不会传给 OpenAI。请使用环境变量或部署平台密钥管理；`.env` 已被 Git 忽略。不要把真实 Key 写入提交到仓库的源码。
+
+## 快速开始
 
 ```python
 import os
@@ -29,93 +50,147 @@ from cosens import cosens
 
 native = OpenAI()
 client = cosens(native, api_key=os.environ["RSI_API_KEY"], mode="auto")
-response = client.responses.create(model="your-app-model", input="用户任务")
-print(response.output_text)
-
-turn_id = client.cosens.last_turn_id
-if turn_id:
-    print(client.cosens.get_turn(turn_id))
-client.close()
+try:
+    response = client.responses.create(
+        model=os.environ["OPENAI_MODEL"],
+        input="请帮我总结这次任务中可以复用的经验。",
+    )
+    print(response.output_text)
+finally:
+    client.close()
 ```
 
-`mode` 只控制自动 Run：`auto` 由独立模型决定是否发送，`disable` 关闭自动发送。两者都要求每个 turn 首次业务模型调用前召回 Recipe/Memory，工具循环复用同一份结果；召回不推进消息上报游标。透明 `approval` 在协调器契约未核验时明确报错。非对话资源动态透传给原始 client；`client.native` 可取得原对象，直接从 `native` 发出的调用不会被 CoSens 捕获。原生 `with_options()`/`copy()` 返回仍带 CoSens 包装的 client。无法安全归一化的生成请求保持原生调用，并设置 `client.cosens.rsi_capture="unsupported"`。
+接入只需 `native`、`api_key`、`mode`。SDK 默认复用业务请求的模型做提交判断，无需额外填写 `decision_model` 或 `session`。Friday Key 也可省略参数从环境读取，优先级为显式 `api_key` → `RSI_API_KEY` → `COSENS_API_KEY`。
 
-基础接入只需 `native`、`api_key`、`mode`。决策默认复用本次原生请求的 `model`，因此不额外指定决策模型；它会通过原客户端的 Responses API 发起一次结构化判断请求，增加一次模型调用费用和延迟。该模型/服务须支持 Responses 结构化输出；分类失败仍遵循上述独立召回规则。`decision_model` 保留为高级可选覆盖项。未指定决策模型且请求中也无 `model` 时，SDK 在网络请求前报明确配置错误。
+## 三种可运行示例
 
-`session` 也是高级可选项：不传时仍捕获当前请求中可见的用户文本、模型回复和已适配的工具事件；但不能读取应用未传给 SDK 的历史。可用 `client.cosens.scope(session_id="...", turn_id="...")` 为一个逻辑 turn 指定边界。只有传入可读取的 Session，SDK 才能补发外部历史消息；Session 需提供稳定的 `session_id` 和 `get_items()`。建议应用在模型调用前将本次用户消息写入 Session，并保持稳定消息 ID；若调用后才以新 ID 写入此前由 SDK 合成的可见事件，当前通用 Session 协议无法证明两者是同一消息。同步 OpenAI client 与异步 `AsyncOpenAI` 均受支持。
+在 PyCharm / IntelliJ Python 插件 / VS Code 中，把解释器选为本项目的 **`python/.venv/bin/python`**（Windows 为 `python\.venv\Scripts\python.exe`）。完成 `.env` 配置后，打开对应文件点击 **Run Python File / Run**。也可从仓库根目录运行下列命令。
 
-## 方式二：显式执行 Agent
+### 1. 透明包装 OpenAI
 
-```python
-import os
-from agents import Agent
-from cosens import cosens
-
-agent = Agent(name="assistant", model="your-app-model", tools=tools)
-client = cosens(agent, api_key=os.environ["RSI_API_KEY"], mode="disable")
-result = await client.run(agent, "用户任务")
-print(result.final_output)
-print(client.cosens.get_turn(client.cosens.last_turn_id))
-await client.aclose()
-```
-
-这里的 `disable` 关闭自动决策；显式 `run()` 本身强制执行 RSI 原子编排。原生 Agent、工具和 handoff 仍由 Agents SDK 在本地执行。还提供 `run_sync()`、`run_streamed()`。原生工具审批中断时不提交 RSI 结果；通过 `await client.pending_state(agent, turn_id)` 取得原生 `RunState`，按 Agents SDK 的 `approve()`/`reject()` 处理后调用 `await client.resume(agent, turn_id, native_state, session=session)`，继续同一 RSI Run。`input_artifacts=[{"name": "...", "content": "..."}]` 上传确实存在的初始文本材料；原生 `final_output` 若为含 `files` 列表的字典，会上传实际输出文本文件。完成后的真实反馈和改进可根据 `get_turn()` 返回的 `run_id`，调用下述原子接口；没有反馈不会自动生成改进任务。
-
-## 方式三：直接调用原子接口
-
-```python
-import os
-from cosens import CoSensClient
-
-async with CoSensClient(api_key=os.environ["RSI_API_KEY"]) as rsi:
-    prepared = await rsi.atoms.prepare(objective="用户任务", key="stable-request-key")
-    run = await rsi.atoms.get_run(prepared.run_id)
-    # 使用 prepared.recipe/context 与 run.snapshot，在应用内执行任务。
-    await rsi.atoms.submit(prepared.run_id, data={"summary": "实际结果", "outcome": "completed"})
-```
-
-`rsi.atoms` 提供 `artifact`、`prepare`、`get_run`、`session_events`、`initial_inputs`、`submit`、`feedback`、`improve`、`get_improvement`、`resume_improvement` 和有界 `wait_improvement`。原子调用方须在首次业务模型调用前完成 `prepare/get_run`，并在工具循环中复用结果；不创建 Run 时使用 `await rsi.atoms.recall_context(query="任务", task_family="general")`，同一 turn 复用返回结果。管理员发布须显式使用 `rsi.admin.atoms.publish`，仍携带同一 Friday 用户 Key，由网关及后端校验；SDK 不自动发布，也不持有内部服务令牌。
-
-## 恢复与服务端边界
-
-Session 事件只在收到 `durable_ack` 后推进本地游标。失败后可查 `client.cosens.get_turn(turn_id)`；原生执行已完成但提交回执不明时用 `client.cosens.reconcile(turn_id)` 对账，不重新执行模型或工具。原生执行结果不明时抛 `RSIRecoveryRequired`，由宿主确认实际执行情况。透明调用的重试及工具续接必须保持 turn 创建时的 `mode`；模式变化或旧记录缺少模式时，SDK 会在模型调用和远端写入前拒绝隐式恢复。请持久化 `state_path`；丢失本地状态后，当前服务端不能保证跨 Run 的消息全局去重。
-
-网关 OpenAPI 当前标识为 1.0.0；以本次 curl 附件、网关实际返回和联调报告为准。审批协调器 `/v1/invocations` 仍未确认，透明 `approval` 命中时保持明确报错。单元测试使用模拟 HTTP；真实网关联调使用独立测试标识并写入合成测试数据，模型执行用本地替身验证编排，未调用真实模型或银行系统。详细时机与限制见 [设计文档](docs/2026-10-26-cosens-python-sdk-design.md)。
-
-## curl 文档对应的新增原子能力
-
-普通原子接口（`atoms` 异步，`sync_atoms` 提供新增接口的同步形式）：
-
-| SDK 方法 | 网关 `/api` 后的路径 |
-| --- | --- |
-| `get_active_recipe(task_family=...)` | `GET /v1/recipes/active?task_family=...` |
-| `memory_ingest(content=..., request_key=...)` | `POST /v1/memory/ingest` |
-| `memory_recall(query=..., token_budget=1000)` | `POST /v1/memory/recall` |
-| `get_memory_job(job_id)` | `GET /v1/memory/jobs/{job_id}` |
-| `get_memory_experience(experience_id, revision=...)` | `GET /v1/memory/experiences/{experience_id}` |
-| `get_memory()` | `GET /v1/memory` |
-| `get_recipe_step(run_id, node_id)` | `GET /v1/runs/{run_id}/recipe/steps/{node_id}` |
-| `guidance(run_id, data=...)` | `POST /v1/runs/{run_id}/guidance` |
-| `checkpoint(run_id, data=...)` | `POST /v1/runs/{run_id}/checkpoint` |
-| `get_decision(run_id, decision_id)` | `GET /v1/runs/{run_id}/decisions/{decision_id}` |
-| `get_trace(run_id)` | `GET /v1/runs/{run_id}/trace` |
-
-`admin.atoms` 新增显式调用：`bootstrap_bundle`、`evaluate_decision`、`evaluate_recipe`，对应附件的 Recipe 注册、决策评估、Recipe 评估接口。它们不会由透明包装自动触发；调用者须提交实际执行和评估证据。`feedback` 不等于经验已经 verified，异步写入需轮询 Job/经验版本确认。
-
-`recall_context` 顺序读取 Recipe 和 Memory 后冻结本地结果，服务端未承诺两个独立读取拥有同一个事务快照。`disable` 使用 `general` 任务族；`auto` 未命中时使用分类结果的任务族。Recipe `not_found` 或 Memory 空列表是合法结果，HTTP 错误和缺失字段仍阻止业务模型调用。
-
-## 复现网关联调
-
-先由运行环境注入 `RSI_API_KEY`（没有设置时脚本隐藏输入 Key），在仓库根目录运行：
+**[打开 01_transparent.py](examples/01_transparent.py)**
 
 ```bash
-# 只读验证：健康状态和无 Run 召回
-python python/examples/validate_gateway.py --output /tmp/cosens-readonly.json
-
-# 会写入合成 Recipe、Memory、Run 和评估记录
-python python/examples/validate_gateway.py --write \
-  --transcript /path/to/FULL_CURL_TRANSCRIPT.md --output /tmp/cosens-workflow.json
-
-# 真实网关 + 本地模型/Agent 替身；会创建测试 Run，需要 agents 可选依赖
-python python/examples/validate_wrapped_gateway.py --output /tmp/cosens-wrapped.json
+python python/examples/01_transparent.py
 ```
+
+核心调用仍为原生 OpenAI 形式，不显式调用 CoSens `run()`：
+
+```python
+client = cosens(native, api_key=friday_key, mode="auto")
+response = client.responses.create(model=model, input=user_input)
+print(response.output_text)
+```
+
+`auto` 先用模型判断是否需要 RSI Run；命中则准备 Run、获取冻结上下文，再执行业务模型、上报消息和提交结果。不命中或分类失败时，通过公开 Recipe + Memory 接口召回，不创建 Run。`disable` 跳过自动判断和自动 Run，但仍然召回。
+
+运行会输出答案、capture、turn_id、run_id 和本地 state。**auto 没有创建 Run 是合法结果**；不要将 `run_id: None` 直接视为失败。`auto` 的决策请求增加一次模型调用，模型服务需支持 Responses 结构化输出。高级参数 `decision_model` 可覆盖默认选择。
+
+### 2. 显式调用 run
+
+**[打开 02_explicit_run.py](examples/02_explicit_run.py)**
+
+```bash
+python python/examples/02_explicit_run.py
+```
+
+```python
+agent = Agent(name="assistant", model=model, tools=[])
+client = cosens(agent, api_key=friday_key, mode="disable")
+result = await client.run(agent, user_input, session=session)
+print(result.final_output)
+```
+
+完整文件使用 `OpenAIResponsesModel` 绑定真实 `AsyncOpenAI`，因此你配置的模型 Key 和模型地址会被实际使用。`disable` 关闭自动触发，显式 `run()` 仍组合原子步骤完成 RSI 流程；不会再调用分类模型。
+
+示例使用 Agents SDK 的 `SQLiteSession` 保存聊天历史，数据库位于 `~/.cosens/example-sessions.sqlite3`，控制台打印 session_id。每次点击生成一个新会话；连续聊天应复用同一个 Session。历史中已获得 `durable_ack` 的事件不重复上报。示例关闭 Agents tracing，避免额外发送 tracing 数据；可按应用需要自行开启。
+
+### 3. 直接编排原子接口
+
+**[打开 03_atomic.py](examples/03_atomic.py)**
+
+```bash
+python python/examples/03_atomic.py
+```
+
+完整文件展开以下主要流程：
+
+```text
+上传输入 artifact
+  → prepare（processing 时以同一 key 有界轮询）
+  → get_run，冻结 Recipe / Context / Snapshot
+  → session_events，确认用户消息 ACK
+  → 应用调用真实 OpenAI 模型，使用冻结上下文
+  → session_events，确认助手回复 ACK
+  → 上传输出 artifact → submit → get_trace
+```
+
+这里不调用包装器 `run()`，应用自己组织原子方法。服务端召回发生在模型调用前，工具循环应复用冻结结果。示例是单任务演示：每次运行生成新的 key；打印的 key、run_id 和实际输出须用于失败后的对账，不能直接重跑代替恢复。
+
+有决策分支的任务可加入 `guidance` / `checkpoint`；只有拿到真实反馈后才调用 `feedback` / `improve`，发布需显式调用管理员原子接口。完整方法与调用时机见 [API 参考](docs/api-reference.md)。生产应用还需持久化原子流程自身的任务状态和 ACK 游标。
+
+## 模式与兼容性
+
+| 入口 / 模式 | 模型调用前召回 | 创建 RSI Run | 执行者 |
+| --- | --- | --- | --- |
+| 透明 `auto` | 每 turn 一次 | 由模型判断 | 原始 OpenAI client |
+| 透明 `disable` | 每 turn 一次 | 不自动创建 | 原始 OpenAI client |
+| 显式 `run()` + `disable` | 每 turn 一次 | 显式创建 | OpenAI Agents SDK |
+| 原子接口 | 由应用在模型前调用 | 应用显式 prepare | 应用自己的模型/工具代码 |
+
+当前透明 `approval` 协调器契约未确认，命中审批流程会明确报错；不要用于这些示例。
+
+同步 `OpenAI`、异步 `AsyncOpenAI` 均可包装。对话生成适配 Responses / Chat Completions 的 create、parse、stream；文件、向量库等其他资源方法透传，原生返回值保持原形。`with_options()` / `copy()` 仍返回包装对象。对于无法安全捕获的生成请求，SDK 保留原生调用，设置 `rsi_capture="unsupported"`，此时不保证 RSI 召回与上报。直接调用 `client.native` 会绕过包装。
+
+## Session 与故障恢复
+
+不传 Session 的透明调用只能捕获本次请求可见的消息，无法读取应用未提供的旧聊天。外部历史、稳定 turn 边界和工具循环的进阶接入见 [Session 说明](docs/api-reference.md#session工具和恢复)。
+
+CoSens 默认把状态和 ACK 游标写入 `~/.cosens/state.sqlite3`，可用高级参数 `state_path` 指定。记录按服务及凭证摘要隔离；部署时应持久化该文件。只有远端 ACK 确认后才推进消息游标，丢失本地状态后不能保证跨 Run 全局去重。
+
+```python
+turn_id = client.cosens.last_turn_id
+state = client.cosens.get_turn(turn_id)
+```
+
+如果模型结果已经返回，但 state 为 `completion_pending`，不要直接重新执行模型或工具。保留原 Session、状态文件和 turn_id，透明同步客户端使用 `client.cosens.reconcile(turn_id)` 对账，异步 OpenAI 客户端使用 `await`。显式 Agent 示例把 Session 传给了 `run()`，恢复时也必须传入同一个 Session：
+
+```python
+# 重启后用控制台记录的原 session_id 和同一数据库重新创建 SQLiteSession。
+await client.cosens.reconcile(turn_id, session=session)
+```
+
+原生执行结果不明或抛出 `RSIRecoveryRequired` 时，需要应用先核实实际执行情况。详见 [恢复边界](docs/api-reference.md#恢复与服务端边界)。
+
+## 常见问题
+
+| 现象 | 处理方式 |
+| --- | --- |
+| `ModuleNotFoundError: cosens / agents / dotenv` | 确认 IDE 使用安装过 `./python[examples]` 的解释器 |
+| 提示缺少配置 | 将 `.env.example` 复制到 `python/.env`，填写三个必填值；检查 IDE 环境变量是否覆盖它 |
+| 模型 401 / 403 / 404 | 核对 OpenAI Key、模型访问权限、模型名与模型服务地址 |
+| 网关 401 / 403 | 核对 Friday 用户 Key 及网关权限，无需自己填写 X_User_Id |
+| 召回失败、未调用业务模型 | 检查网关连通性与返回契约；SDK 不把错误静默当成空召回 |
+| 模型有答案、RSI 未完成 | 保存 turn_id / run_id，按恢复流程处理，避免重复执行 |
+| 想验证每次都创建 Run | 运行显式 run 或原子示例；auto 的创建与否由模型决策 |
+
+示例错误只输出类型、HTTP 状态和 request_id，不输出远端错误正文。请结合上述信息和服务端日志定位。
+
+## 开发与测试
+
+```bash
+python -m pip install -e "./python[examples,test]"
+python -m pytest python/tests
+python -m build python
+```
+
+`tests/test_runnable_examples.py` 从不同工作目录执行三个脚本，使用真实 OpenAI SDK、真实 Agents Runner 和本地状态存储，仅模拟 HTTP 服务，验证召回顺序、上下文注入、消息上报和凭证隔离。它不会消耗真实模型额度。
+
+`examples/validate_gateway.py` 与 `examples/validate_wrapped_gateway.py` 是独立网关联调脚本，后者使用本地模型替身；它们与上述真实模型示例用途不同。复现方式、已验证范围见 [网关联调报告](docs/2026-10-27-gateway-validation.md) 和 [API 参考](docs/api-reference.md#复现网关联调)。
+
+## 进一步阅读
+
+- [设计文档与每步调用时机](docs/2026-10-26-cosens-python-sdk-design.md)
+- [原子 API 与恢复边界](docs/api-reference.md)
+- [OpenAI Python SDK](https://github.com/openai/openai-python)
+- [OpenAI Agents SDK](https://github.com/openai/openai-agents-python)
