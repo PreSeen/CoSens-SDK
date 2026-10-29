@@ -21,20 +21,29 @@ class Settings:
     base_url: str | None
     mode: str
     prompt: str
+    region: str
 
 
 def settings():
     load_dotenv(ENV_FILE, override=False)
-    required = ("OPENAI_API_KEY", "RSI_API_KEY", "OPENAI_MODEL")
+    region = os.getenv("COSENS_REGION", "cn").strip().lower()
+    if region not in {"cn", "us"}:
+        raise ConfigurationError("COSENS_REGION 仅支持 cn 或 us。")
+    regional_key = os.getenv("RSI_API_KEY_" + region.upper(), "").strip()
+    rsi_key = regional_key or os.getenv("RSI_API_KEY", "")
+    required = ("OPENAI_API_KEY", "OPENAI_MODEL")
     missing = [name for name in required if not os.getenv(name, "").strip() or os.environ[name].startswith("your-")]
+    if not rsi_key.strip() or rsi_key.startswith("your-"):
+        missing.append("RSI_API_KEY_" + region.upper() + " 或 RSI_API_KEY")
     if missing:
         raise ConfigurationError(f"请在 {ENV_FILE} 配置 {', '.join(missing)}；可复制同目录的 .env.example。")
     mode = os.getenv("COSENS_MODE", "auto").strip()
     if mode not in {"auto", "disable"}:
         raise ConfigurationError("COSENS_MODE 仅支持 auto 或 disable。")
-    return Settings(os.environ["OPENAI_API_KEY"], os.environ["RSI_API_KEY"],
+    print(f"CoSens region: {region}")
+    return Settings(os.environ["OPENAI_API_KEY"], rsi_key,
                     os.environ["OPENAI_MODEL"], os.getenv("OPENAI_BASE_URL") or None,
-                    mode, os.getenv("COSENS_INPUT") or "请用三点说明如何为 Python API 编写可重复运行的集成测试。")
+                    mode, os.getenv("COSENS_INPUT") or "请用三点说明如何为 Python API 编写可重复运行的集成测试。", region)
 
 
 def show_turn(client):

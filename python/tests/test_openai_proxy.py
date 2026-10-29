@@ -38,6 +38,62 @@ def rsi_server(calls):
     return httpx.MockTransport(server)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+async def test_observable_ack_rejects_unsent_event_id(tmp_path, async_mode):
+    malformed = True
+    counts = {"model": 0, "submit": 0}
+
+    def server(request):
+        nonlocal malformed
+        path = request.url.path
+        if path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/api/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        if path.endswith("/session-events"):
+            ids = [event["id"] for event in json.loads(request.content)["events"]]
+            return httpx.Response(200, json={"durable_ack": ids + ["future-unsent-event"] if malformed else ids})
+        if path.endswith("/submit"):
+            counts["submit"] += 1
+            return httpx.Response(200, json={"status": "completed"})
+        raise AssertionError(path)
+
+    def response(kwargs):
+        if kwargs["model"] == "decision":
+            return SimpleNamespace(output_text='{"activate":true,"objective":"hello","task_family":"general","reason":"needed"}')
+        counts["model"] += 1
+        return SimpleNamespace(id="resp-final", status="completed", output_text="answer", output=[SimpleNamespace(type="message", role="assistant")])
+
+    native = AsyncOpenAI(api_key="test") if async_mode else OpenAI(api_key="test")
+    if async_mode:
+        async def create(**kwargs):
+            return response(kwargs)
+    else:
+        def create(**kwargs):
+            return response(kwargs)
+    native.responses.create = create
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
+    if async_mode:
+        await client.responses.create(model="app", input="hello")
+    else:
+        client.responses.create(model="app", input="hello")
+    turn_id = client.cosens.last_turn_id
+    pending = client.cosens.get_turn(turn_id)
+    assert pending["state"] == "completion_pending"
+    assert len(pending["observable_pending"]) == 2
+    assert pending.get("observable_acked_ids", []) == []
+    assert counts == {"model": 1, "submit": 0}
+    malformed = False
+    reconciled = await client.cosens.reconcile(turn_id) if async_mode else client.cosens.reconcile(turn_id)
+    assert reconciled["state"] == "completed"
+    assert counts == {"model": 1, "submit": 1}
+    if async_mode:
+        await client.close()
+    else:
+        client.close()
+
+
 def test_disable_preserves_native_calls_and_full_resource_tree(tmp_path, empty_recall):
     native = OpenAI(api_key="test", base_url="https://model.example/v1")
     original = SimpleNamespace(output_text="native")
@@ -76,6 +132,102 @@ async def test_sync_openai_client_can_read_session_inside_running_event_loop(tmp
     native.responses.create = create
     client = cosens(native, mode="auto", decision_model="decision", session=Session(), api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server([]))
     assert client.responses.create(model="app", input="hello").output_text == "done"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+async def test_active_transparent_turn_reads_session_before_prepare(tmp_path, async_mode):
+    session = Session()
+    session.reads = 0
+    batches = []
+    original_get_items = session.get_items
+
+    async def tracked_get_items():
+        session.reads += 1
+        return await original_get_items()
+
+    session.get_items = tracked_get_items
+
+    def server(request):
+        path = request.url.path
+        if path.endswith("/prepare"):
+            assert session.reads > 0
+            session.items.append({"id": "late", "role": "user", "content": "during prepare"})
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/api/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        if path.endswith("/session-events"):
+            events = json.loads(request.content)["events"]
+            ids = [event["id"] for event in events]
+            batches.append(ids)
+            return httpx.Response(200, json={"durable_ack": ids})
+        if path.endswith("/submit"):
+            return httpx.Response(200, json={"status": "completed"})
+        raise AssertionError(path)
+
+    def result_for(kwargs):
+        if kwargs["model"] == "decision":
+            return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+        return SimpleNamespace(id="resp-1", status="completed", output_text="done", output=[SimpleNamespace(type="message", role="assistant")])
+
+    native = AsyncOpenAI(api_key="test") if async_mode else OpenAI(api_key="test")
+    if async_mode:
+        async def create(**kwargs):
+            return result_for(kwargs)
+    else:
+        def create(**kwargs):
+            return result_for(kwargs)
+    native.responses.create = create
+    client = cosens(native, mode="auto", decision_model="decision", session=session, api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
+    if async_mode:
+        await client.responses.create(model="app", input="hello")
+        await client.close()
+    else:
+        client.responses.create(model="app", input="hello")
+        client.close()
+    assert batches[:2] == [["chat:old"], ["chat:late"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+async def test_incomplete_native_response_without_tool_call_is_not_a_continuation(tmp_path, async_mode):
+    calls = []
+
+    def result_for(kwargs):
+        if kwargs["model"] == "decision":
+            return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+        return SimpleNamespace(id="resp-incomplete", status="incomplete", output=[SimpleNamespace(type="message", role="assistant")])
+
+    native = AsyncOpenAI(api_key="test") if async_mode else OpenAI(api_key="test")
+    if async_mode:
+        async def create(**kwargs):
+            return result_for(kwargs)
+    else:
+        def create(**kwargs):
+            return result_for(kwargs)
+    native.responses.create = create
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    if async_mode:
+        await client.responses.create(model="app", input="hello")
+        state = client.cosens.get_turn(client.cosens.last_turn_id)
+        await client.close()
+    else:
+        client.responses.create(model="app", input="hello")
+        state = client.cosens.get_turn(client.cosens.last_turn_id)
+        client.close()
+    assert state["state"] == "incomplete"
+    assert all(not path.endswith("/submit") for path, _ in calls)
+
+
+def test_incomplete_no_run_response_is_not_a_continuation(tmp_path, empty_recall):
+    native = OpenAI(api_key="test")
+    native.responses.create = lambda **_kwargs: SimpleNamespace(
+        id="resp-incomplete", status="incomplete", output=[SimpleNamespace(type="message", role="assistant")]
+    )
+    client = cosens(native, mode="disable", api_key="ordinary", state_path=tmp_path / "state.sqlite3")
+    client.responses.create(model="app", input="hello")
+    assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "incomplete"
+    client.close()
 
 
 def test_auto_retry_after_prepare_receipt_loss_reuses_turn_and_blocks_uncertain_native_retry(tmp_path):
@@ -411,6 +563,77 @@ def test_chat_completions_keeps_original_messages_in_order_and_adds_context(tmp_
     assert calls[-1][0] == "/api/v1/runs/r1/submit"
 
 
+def test_chat_tool_call_id_continues_one_run_and_reports_tool_events(tmp_path):
+    native = OpenAI(api_key="test")
+    calls = []
+    decisions = []
+    model_calls = []
+
+    def decide(**kwargs):
+        decisions.append(kwargs)
+        return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+
+    def complete(**kwargs):
+        model_calls.append(kwargs)
+        if len(model_calls) == 1:
+            return SimpleNamespace(id="chat-call", choices=[SimpleNamespace(finish_reason="tool_calls", message=SimpleNamespace(
+                role="assistant", content=None, tool_calls=[{"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]
+            ))])
+        return SimpleNamespace(id="chat-final", choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(role="assistant", content="done"))])
+
+    native.responses.create = decide
+    native.chat.completions.create = complete
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    client.chat.completions.create(model="app", messages=[{"role": "user", "content": "hello"}])
+    assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "awaiting_continuation"
+    client.chat.completions.create(model="app", messages=[
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "found"},
+    ])
+    assert len(decisions) == 1
+    assert [path for path, _ in calls].count("/api/v1/runs/prepare") == 1
+    assert [path for path, _ in calls].count("/api/v1/runs/r1/submit") == 1
+    events = [event for path, body in calls if path.endswith("/session-events") for event in body["events"]]
+    assert any(event["id"].endswith(":call:c1") and event["kind"] == "agent_action" for event in events)
+    assert any(event["id"].endswith(":tool:c1") and event["kind"] == "tool_result" for event in events)
+    client.chat.completions.create(model="app", messages=[
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "found"},
+        {"role": "user", "content": "next question"},
+    ])
+    assert len(decisions) == 2
+    assert [path for path, _ in calls].count("/api/v1/runs/prepare") == 2
+    events = [event for path, body in calls if path.endswith("/session-events") for event in body["events"]]
+    assert sum(event["id"].endswith(":tool:c1") for event in events) == 1
+    client.close()
+
+
+def test_chat_tool_call_id_continues_without_run(tmp_path, empty_recall):
+    native = OpenAI(api_key="test")
+    business = []
+
+    def complete(**kwargs):
+        business.append(kwargs)
+        if len(business) == 1:
+            return SimpleNamespace(id="chat-call", choices=[SimpleNamespace(finish_reason="tool_calls", message=SimpleNamespace(
+                role="assistant", content=None, tool_calls=[{"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]
+            ))])
+        return SimpleNamespace(id="chat-final", choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(role="assistant", content="done"))])
+
+    native.chat.completions.create = complete
+    client = cosens(native, mode="disable", state_path=tmp_path / "state.sqlite3")
+    client.chat.completions.create(model="app", messages=[{"role": "user", "content": "hello"}])
+    turn_id = client.cosens.last_turn_id
+    assert client.cosens.get_turn(turn_id)["state"] == "awaiting_continuation"
+    client.chat.completions.create(model="app", messages=[{"role": "tool", "tool_call_id": "c1", "content": "found"}])
+    assert client.cosens.last_turn_id == turn_id
+    assert client.cosens.get_turn(turn_id)["state"] == "completed"
+    assert len(business) == 2
+    client.close()
+
+
 def test_function_call_continuation_reuses_one_run_and_submits_only_final_message(tmp_path):
     native = OpenAI(api_key="test")
     calls = []
@@ -431,6 +654,361 @@ def test_function_call_continuation_reuses_one_run_and_submits_only_final_messag
     assert any(event["kind"] == "user_prompt" and event["payload"]["content"] == "Call a tool" for event in reported)
     assert any(event["kind"] == "agent_action" and event["payload"].get("source_revision") == "native_function_call" for event in reported)
     assert any(event["kind"] == "tool_result" and event["payload"]["content"] == "tool result" for event in reported)
+
+
+def test_partial_function_call_ack_can_reconcile_and_continue_same_run(tmp_path):
+    native = OpenAI(api_key="test")
+    model_calls = 0
+    event_posts = 0
+    submit_calls = 0
+    persisted_at_post = None
+    alias_at_post = None
+
+    def create(**kwargs):
+        nonlocal model_calls
+        if kwargs["model"] == "decision":
+            return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+        model_calls += 1
+        if model_calls == 1:
+            return SimpleNamespace(id="tool-response", status="completed", output_text="", output=[SimpleNamespace(type="function_call", call_id="c1")])
+        return SimpleNamespace(id="final-response", status="completed", output_text="done", output=[SimpleNamespace(type="message", role="assistant")])
+
+    def server(request):
+        nonlocal event_posts, submit_calls, persisted_at_post, alias_at_post
+        path = request.url.path
+        if path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/api/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        if path.endswith("/session-events"):
+            event_posts += 1
+            if event_posts == 1:
+                persisted_at_post = client.cosens.get_turn(client.cosens.last_turn_id)
+                alias_at_post = client.cosens.get_turn("response:tool-response")
+            body = json.loads(request.content)
+            return httpx.Response(200, json={"durable_ack": [] if event_posts == 1 else [event["id"] for event in body["events"]]})
+        if path.endswith("/submit"):
+            submit_calls += 1
+            return httpx.Response(200, json={"run_id": "r1", "status": "completed"})
+        raise AssertionError(path)
+
+    native.responses.create = create
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
+    client.responses.create(model="app", input="use tool")
+    turn_id = client.cosens.last_turn_id
+    assert persisted_at_post["state"] == "observability_pending"
+    assert persisted_at_post["observable_pending"]
+    assert alias_at_post["turn_ref"] == turn_id
+    assert client.cosens.get_turn(turn_id)["state"] == "observability_pending"
+    assert client.cosens.reconcile(turn_id)["state"] == "awaiting_continuation"
+    assert (model_calls, event_posts, submit_calls) == (1, 2, 0)
+    client.responses.create(model="app", previous_response_id="tool-response", input=[{"type": "function_call_output", "call_id": "c1", "output": "found"}])
+    assert client.cosens.get_turn(turn_id)["state"] == "completed"
+    assert (model_calls, submit_calls) == (2, 1)
+
+
+def test_responses_conversation_reference_links_tool_output_to_same_run(tmp_path):
+    native = OpenAI(api_key="test")
+    calls = []
+    model_calls = 0
+    decision_calls = 0
+
+    def create(**kwargs):
+        nonlocal model_calls, decision_calls
+        if kwargs["model"] == "decision":
+            decision_calls += 1
+            return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+        model_calls += 1
+        if model_calls == 1:
+            return SimpleNamespace(id="tool-response", status="completed", output_text="", output=[SimpleNamespace(type="function_call", call_id="c1")])
+        return SimpleNamespace(id="final-response", status="completed", output_text="done", output=[SimpleNamespace(type="message", role="assistant")])
+
+    native.responses.create = create
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    client.responses.create(model="app", conversation={"id": "conv-1"}, input="use tool")
+    client.responses.create(model="app", conversation={"id": "conv-1"}, input=[{"type": "function_call_output", "call_id": "c1", "output": "found"}])
+    assert (decision_calls, model_calls) == (1, 2)
+    assert [path for path, _ in calls].count("/api/v1/runs/prepare") == 1
+    assert [path for path, _ in calls].count("/api/v1/runs/r1/submit") == 1
+
+
+def test_response_supplied_conversation_reference_links_tool_output(tmp_path):
+    native = OpenAI(api_key="test")
+    calls = []
+    model_calls = 0
+    decision_calls = 0
+
+    def create(**kwargs):
+        nonlocal model_calls, decision_calls
+        if kwargs["model"] == "decision":
+            decision_calls += 1
+            return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+        model_calls += 1
+        if model_calls == 1:
+            return SimpleNamespace(id="tool-response", conversation={"id": "conv-1"}, status="completed", output_text="", output=[SimpleNamespace(type="function_call", call_id="c1")])
+        return SimpleNamespace(id="final-response", status="completed", output_text="done", output=[SimpleNamespace(type="message", role="assistant")])
+
+    native.responses.create = create
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    client.responses.create(model="app", input="use tool")
+    client.responses.create(model="app", conversation={"id": "conv-1"}, input=[{"type": "function_call_output", "call_id": "c1", "output": "found"}])
+    assert (decision_calls, model_calls) == (1, 2)
+    assert [path for path, _ in calls].count("/api/v1/runs/prepare") == 1
+
+
+@pytest.mark.asyncio
+async def test_async_partial_function_call_ack_can_reconcile_and_continue_same_run(tmp_path):
+    native = AsyncOpenAI(api_key="test")
+    model_calls = 0
+    event_posts = 0
+    submit_calls = 0
+    persisted_at_post = None
+    alias_at_post = None
+
+    async def create(**kwargs):
+        nonlocal model_calls
+        if kwargs["model"] == "decision":
+            return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+        model_calls += 1
+        if model_calls == 1:
+            return SimpleNamespace(id="tool-response", status="completed", output_text="", output=[SimpleNamespace(type="function_call", call_id="c1")])
+        return SimpleNamespace(id="final-response", status="completed", output_text="done", output=[SimpleNamespace(type="message", role="assistant")])
+
+    def server(request):
+        nonlocal event_posts, submit_calls, persisted_at_post, alias_at_post
+        path = request.url.path
+        if path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/api/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        if path.endswith("/session-events"):
+            event_posts += 1
+            if event_posts == 1:
+                persisted_at_post = client.cosens.get_turn(client.cosens.last_turn_id)
+                alias_at_post = client.cosens.get_turn("response:tool-response")
+            body = json.loads(request.content)
+            return httpx.Response(200, json={"durable_ack": [] if event_posts == 1 else [event["id"] for event in body["events"]]})
+        if path.endswith("/submit"):
+            submit_calls += 1
+            return httpx.Response(200, json={"run_id": "r1", "status": "completed"})
+        raise AssertionError(path)
+
+    native.responses.create = create
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
+    await client.responses.create(model="app", input="use tool")
+    turn_id = client.cosens.last_turn_id
+    assert persisted_at_post["state"] == "observability_pending"
+    assert persisted_at_post["observable_pending"]
+    assert alias_at_post["turn_ref"] == turn_id
+    assert client.cosens.get_turn(turn_id)["state"] == "observability_pending"
+    assert (await client.cosens.reconcile(turn_id))["state"] == "awaiting_continuation"
+    assert (model_calls, event_posts, submit_calls) == (1, 2, 0)
+    await client.responses.create(model="app", previous_response_id="tool-response", input=[{"type": "function_call_output", "call_id": "c1", "output": "found"}])
+    assert client.cosens.get_turn(turn_id)["state"] == "completed"
+    assert (model_calls, submit_calls) == (2, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+async def test_tool_call_can_reconcile_after_session_read_fails_before_observable_send(tmp_path, async_mode):
+    class FlakySession:
+        session_id = "tool-recovery"
+        reads = 0
+
+        async def get_items(self):
+            self.reads += 1
+            if self.reads == 2:
+                raise RuntimeError("Session temporarily unavailable")
+            return []
+
+    session = FlakySession()
+    counts = {"model": 0, "events": 0, "submit": 0}
+    gateway_calls = 0
+
+    def produce(kwargs):
+        if kwargs["model"] == "decision":
+            return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+        counts["model"] += 1
+        if counts["model"] == 1:
+            return SimpleNamespace(id="tool-response", status="completed", output_text="", output=[SimpleNamespace(type="function_call", call_id="c1")])
+        return SimpleNamespace(id="final-response", status="completed", output_text="done", output=[SimpleNamespace(type="message", role="assistant")])
+
+    def server(request):
+        nonlocal gateway_calls
+        gateway_calls += 1
+        path = request.url.path
+        if path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/api/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        if path.endswith("/session-events"):
+            counts["events"] += 1
+            return httpx.Response(200, json={"durable_ack": [item["id"] for item in json.loads(request.content)["events"]]})
+        if path.endswith("/submit"):
+            counts["submit"] += 1
+            return httpx.Response(200, json={"run_id": "r1", "status": "completed"})
+        raise AssertionError(path)
+
+    native = AsyncOpenAI(api_key="test") if async_mode else OpenAI(api_key="test")
+    if async_mode:
+        async def create(**kwargs):
+            return produce(kwargs)
+    else:
+        def create(**kwargs):
+            return produce(kwargs)
+    native.responses.create = create
+
+    def wrap(active_session=session):
+        return cosens(native, mode="auto", decision_model="decision", session=active_session, api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
+
+    client = wrap()
+    if async_mode:
+        await client.responses.create(model="app", input="use tool")
+    else:
+        client.responses.create(model="app", input="use tool")
+    turn_id = client.cosens.last_turn_id
+    assert client.cosens.get_turn(turn_id)["state"] == "observability_pending"
+    assert client.cosens.get_turn("response:tool-response")["turn_ref"] == turn_id
+    assert counts == {"model": 1, "events": 0, "submit": 0}
+    if async_mode:
+        await client.close()
+    else:
+        client.close()
+
+    class OtherSession:
+        def __init__(self, session_id, incarnation="0"):
+            self.session_id = session_id
+            self.session_incarnation = incarnation
+
+        async def get_items(self):
+            return []
+
+    continuation = {"model": "app", "previous_response_id": "tool-response", "input": [{"type": "function_call_output", "call_id": "c1", "output": "found"}]}
+    before_unreconciled = gateway_calls
+    for pending_session in (session, OtherSession("another-session"), OtherSession("tool-recovery", "new-incarnation")):
+        pending = wrap(pending_session)
+        with pytest.raises(RSIRecoveryRequired):
+            if async_mode:
+                await pending.responses.create(**continuation)
+            else:
+                pending.responses.create(**continuation)
+        assert (counts["model"], gateway_calls) == (1, before_unreconciled)
+        if async_mode:
+            await pending.close()
+        else:
+            pending.close()
+
+    restarted = wrap()
+    repaired = await restarted.cosens.reconcile(turn_id) if async_mode else restarted.cosens.reconcile(turn_id)
+    assert repaired["state"] == "awaiting_continuation"
+    assert counts["events"] == 1
+    if async_mode:
+        await restarted.responses.create(**continuation)
+        await restarted.close()
+    else:
+        restarted.responses.create(**continuation)
+        restarted.close()
+    assert (counts["model"], counts["submit"]) == (2, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_mode", [False, True])
+async def test_final_result_reconcile_sends_unsent_visible_events_before_submit(tmp_path, async_mode):
+    class FlakySession:
+        session_id = "final-recovery"
+        reads = 0
+
+        async def get_items(self):
+            self.reads += 1
+            if self.reads == 2:
+                raise RuntimeError("Session temporarily unavailable")
+            return []
+
+    session = FlakySession()
+    counts = {"model": 0, "submit": 0}
+    sent = []
+    gateway_calls = 0
+
+    def produce(kwargs):
+        if kwargs["model"] == "decision":
+            return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+        counts["model"] += 1
+        return SimpleNamespace(id="final-response", status="completed", output_text="answer", output=[SimpleNamespace(type="message", role="assistant")])
+
+    def server(request):
+        nonlocal gateway_calls
+        gateway_calls += 1
+        path = request.url.path
+        if path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/api/v1/runs/r1":
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        if path.endswith("/session-events"):
+            events = json.loads(request.content)["events"]
+            sent.extend(events)
+            return httpx.Response(200, json={"durable_ack": [item["id"] for item in events]})
+        if path.endswith("/submit"):
+            counts["submit"] += 1
+            return httpx.Response(200, json={"run_id": "r1", "status": "completed"})
+        raise AssertionError(path)
+
+    native = AsyncOpenAI(api_key="test") if async_mode else OpenAI(api_key="test")
+    if async_mode:
+        async def create(**kwargs):
+            return produce(kwargs)
+    else:
+        def create(**kwargs):
+            return produce(kwargs)
+    native.responses.create = create
+
+    def wrap(active_session=session):
+        return cosens(native, mode="auto", decision_model="decision", session=active_session, api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server))
+
+    client = wrap()
+    if async_mode:
+        await client.responses.create(model="app", input="hello")
+    else:
+        client.responses.create(model="app", input="hello")
+    turn_id = client.cosens.last_turn_id
+    assert client.cosens.get_turn(turn_id)["state"] == "completion_pending"
+    assert counts == {"model": 1, "submit": 0}
+    assert sent == []
+    if async_mode:
+        await client.close()
+    else:
+        client.close()
+
+    class OtherSession:
+        def __init__(self, session_id, incarnation="0"):
+            self.session_id = session_id
+            self.session_incarnation = incarnation
+
+        async def get_items(self):
+            return []
+
+    before_wrong_session = gateway_calls
+    for wrong_session in (OtherSession("another-session"), OtherSession("final-recovery", "new-incarnation")):
+        wrong = wrap(wrong_session)
+        with pytest.raises(RSIRecoveryRequired, match="Session"):
+            if async_mode:
+                await wrong.cosens.reconcile(turn_id)
+            else:
+                wrong.cosens.reconcile(turn_id)
+        assert gateway_calls == before_wrong_session
+        if async_mode:
+            await wrong.close()
+        else:
+            wrong.close()
+
+    restarted = wrap()
+    repaired = await restarted.cosens.reconcile(turn_id) if async_mode else restarted.cosens.reconcile(turn_id)
+    assert repaired["state"] == "completed"
+    assert [event["id"] for event in sent] == [f"visible:{turn_id}:input", f"visible:{turn_id}:output"]
+    assert counts == {"model": 1, "submit": 1}
+    if async_mode:
+        await restarted.close()
+    else:
+        restarted.close()
 
 
 def test_openai_reconcile_completed_run_does_not_call_native_again(tmp_path):
@@ -564,6 +1142,47 @@ def test_chat_stream_chunk_events_submit_after_final_stop_chunk(tmp_path):
         assert len(list(stream)) == 2
     assert calls[-1][0] == "/api/v1/runs/r1/submit"
     assert calls[-1][1]["data"]["summary"] == "hello world"
+
+
+def test_chat_stream_tool_call_fragments_continue_one_run(tmp_path):
+    native = OpenAI(api_key="test")
+    calls = []
+    decisions = []
+    business = []
+
+    def decide(**kwargs):
+        decisions.append(kwargs)
+        return SimpleNamespace(output_text='{"activate":true,"objective":"task","task_family":"general","reason":"needed"}')
+
+    def complete(**kwargs):
+        business.append(kwargs)
+        return SimpleNamespace(id="chat-final", choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content="done"))])
+
+    class Manager:
+        def __enter__(self):
+            return iter([
+                SimpleNamespace(id="chat-call", choices=[SimpleNamespace(index=0, delta=SimpleNamespace(tool_calls=[SimpleNamespace(index=0, id="c1", type="function", function=SimpleNamespace(name="lookup", arguments="{"))]), finish_reason=None)]),
+                SimpleNamespace(id="chat-call", choices=[SimpleNamespace(index=0, delta=SimpleNamespace(tool_calls=[SimpleNamespace(index=0, id=None, type=None, function=SimpleNamespace(name=None, arguments="}"))]), finish_reason="tool_calls")]),
+            ])
+
+        def __exit__(self, *_):
+            return None
+
+    native.responses.create = decide
+    native.chat.completions.create = complete
+    native.chat.completions.stream = lambda **kwargs: Manager()
+    client = cosens(native, mode="auto", decision_model="decision", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=rsi_server(calls))
+    with client.chat.completions.stream(model="app", messages=[{"role": "user", "content": "hello"}]) as stream:
+        assert len(list(stream)) == 2
+    turn_id = client.cosens.last_turn_id
+    assert client.cosens.get_turn(turn_id)["state"] == "awaiting_continuation"
+    client.chat.completions.create(model="app", messages=[{"role": "tool", "tool_call_id": "c1", "content": "found"}])
+    assert (len(decisions), len(business)) == (1, 1)
+    assert [path for path, _ in calls].count("/api/v1/runs/prepare") == 1
+    events = [event for path, body in calls if path.endswith("/session-events") for event in body["events"]]
+    assert any(event["id"].endswith(":call:c1") and event["payload"]["content"]["function"]["arguments"] == "{}" for event in events)
+    assert any(event["id"].endswith(":tool:c1") for event in events)
+    client.close()
 
 
 def test_stream_get_final_response_also_records_completion(tmp_path):

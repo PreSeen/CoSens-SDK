@@ -13,18 +13,26 @@ FILES = ["01_transparent.py", "02_explicit_run.py", "03_atomic.py"]
 @pytest.fixture
 def example_env(monkeypatch, tmp_path):
     monkeypatch.syspath_prepend(str(EXAMPLES))
+    import _common
+    monkeypatch.setattr(_common, "ENV_FILE", tmp_path / ".env")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "model-test-secret")
     monkeypatch.setenv("RSI_API_KEY", "gateway-test-secret")
     monkeypatch.setenv("OPENAI_MODEL", "test-model")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://model.example/v1")
     monkeypatch.setenv("COSENS_MODE", "auto")
+    monkeypatch.setenv("COSENS_REGION", "cn")
+    monkeypatch.delenv("RSI_API_KEY_CN", raising=False)
+    monkeypatch.delenv("RSI_API_KEY_US", raising=False)
     # Keep the real SDK persistence, isolated from the developer's state.
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
 
 
+@pytest.mark.parametrize("region", ["cn", "us"])
 @pytest.mark.parametrize("filename,mode", [(name, "auto") for name in FILES] + [(FILES[0], "disable")])
-def test_click_run_uses_real_sdks_and_recalls_before_model(filename, mode, example_env, monkeypatch, capsys):
+def test_click_run_uses_real_sdks_and_recalls_before_model(filename, mode, region, example_env, monkeypatch, capsys):
+    monkeypatch.setenv("COSENS_REGION", region)
+    monkeypatch.setenv("RSI_API_KEY_US", "us-test-secret")
     monkeypatch.setenv("COSENS_MODE", mode)
     calls = []
 
@@ -38,8 +46,8 @@ def test_click_run_uses_real_sdks_and_recalls_before_model(filename, mode, examp
             output = json.dumps({"activate": True, "objective": "demo", "task_family": "general", "reason": "reusable"}) if decision else "示例回答完成"
             data = {"id": "resp-demo", "object": "response", "created_at": 0, "model": "test-model", "status": "completed", "output": [{"id": "msg-demo", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": output, "annotations": []}]}], "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "input_tokens_details": {"cached_tokens": 0}, "output_tokens_details": {"reasoning_tokens": 0}}}
         else:
-            assert request.url.host == "friday-rsi-cn.stardust-ai.com"
-            assert request.headers["authorization"] == "Bearer gateway-test-secret"
+            assert request.url.host == ("rsi.cosens.ai" if region == "us" else "friday-rsi-cn.stardust-ai.com")
+            assert request.headers["authorization"] == ("Bearer us-test-secret" if region == "us" else "Bearer gateway-test-secret")
             path = request.url.path
             if path.endswith("/recipes/active"):
                 data = {"status": "matched", "recipe_id": "recipe-demo", "bundle": {"summary": "RECALLED_FACT"}}
@@ -128,3 +136,25 @@ def test_example_errors_do_not_dump_remote_validation_payload(example_env, capsy
     output = capsys.readouterr().err
     assert "ValueError" in output
     assert "secret-from-response" not in output
+
+
+def test_us_example_accepts_region_key_without_shared_key(example_env, monkeypatch):
+    import _common
+    monkeypatch.setenv("COSENS_REGION", "us")
+    monkeypatch.setenv("RSI_API_KEY", "")
+    monkeypatch.setenv("RSI_API_KEY_US", "only-us-key")
+    assert _common.settings().rsi_key == "only-us-key"
+
+
+@pytest.mark.parametrize("filename", FILES)
+def test_us_placeholder_stops_before_network_even_with_cn_fallback(filename, example_env, monkeypatch, capsys):
+    monkeypatch.setenv("COSENS_REGION", "us")
+    monkeypatch.setenv("RSI_API_KEY_US", "your-us-friday-key")
+    def forbidden(*args, **kwargs):
+        pytest.fail("A regional placeholder must not fall back to another region's key")
+    monkeypatch.setattr(httpx.Client, "send", forbidden)
+    monkeypatch.setattr(httpx.AsyncClient, "send", forbidden)
+    with pytest.raises(SystemExit) as error:
+        runpy.run_path(str(EXAMPLES / filename), run_name="__main__")
+    assert error.value.code == 1
+    assert "RSI_API_KEY_US" in capsys.readouterr().err

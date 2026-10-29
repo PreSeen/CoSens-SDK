@@ -56,6 +56,32 @@ async def test_partial_ack_keeps_unconfirmed_suffix_for_same_run(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_ack_rejects_unsent_or_duplicate_ids_without_advancing(tmp_path):
+    store = CursorStore(tmp_path / "state.sqlite3", principal="p")
+    snapshot = await store.snapshot(Session([{"id": "a", "role": "user", "content": "a"}]))
+    store.begin_batch("run-1", snapshot, store.pending(snapshot))
+    with pytest.raises(RSIRecoveryRequired):
+        store.ack(snapshot, {"durable_ack": ["chat:a", "chat:future"]})
+    with pytest.raises(RSIRecoveryRequired):
+        store.ack(snapshot, {"durable_ack": ["chat:a", "chat:a"]})
+    assert [event["id"] for event in store.recover_batch(snapshot).events] == ["chat:a"]
+    assert store.ack(snapshot, {"durable_ack": ["chat:a"]}) == 1
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_session_message_ids_are_rejected_before_sending(tmp_path):
+    session = Session([
+        {"id": "same", "role": "user", "content": "first"},
+        {"id": "same", "role": "assistant", "content": "second"},
+    ])
+    store = CursorStore(tmp_path / "state.sqlite3", principal="p")
+    with pytest.raises(SessionHistoryChanged):
+        await store.snapshot(session)
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_rewriting_acknowledged_history_raises_instead_of_skipping(tmp_path):
     session = Session([{"id": "u1", "role": "user", "content": "original"}])
     store = CursorStore(tmp_path / "state.sqlite3", principal="p")

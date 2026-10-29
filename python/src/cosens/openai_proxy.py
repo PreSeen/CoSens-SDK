@@ -10,11 +10,12 @@ import inspect
 import json
 import threading
 import uuid
+from types import SimpleNamespace
 
 from .atoms import CoSensClient
 from .decision import decide_async, decide_sync
 from .errors import RSIApprovalUnavailable, RSIDecisionUnavailable, RSIRecoveryRequired
-from .responses_adapter import SUPPORTED, base_path, inject, summary, terminal, tool_names, user_text
+from .responses_adapter import SUPPORTED, base_path, inject, summary, terminal, tool_continuation, tool_names, user_text
 from .session_cursor import CursorStore
 from .state import TurnStore
 from .models import result
@@ -143,6 +144,7 @@ class _GenerationStream:
         self._complete_response = None
         self._finished = False
         self._text = []
+        self._chat_choices = {}
         self._iterator = None
         self._async_iterator = None
 
@@ -157,7 +159,7 @@ class _GenerationStream:
                 if name == "until_done":
                     getter = getattr(self._native, "get_final_response", None) or getattr(self._native, "get_final_completion", None)
                     final = await getter() if getter else None
-                if self._state["state"] == "native_running" and final is not None and terminal(final):
+                if self._state["state"] == "native_running" and final is not None and (terminal(final) or tool_continuation(final)):
                     await self._runtime._complete_async(self._state, final)
                     self._finished = True
                 return self if name == "until_done" else result
@@ -169,7 +171,7 @@ class _GenerationStream:
             if name == "until_done":
                 getter = getattr(self._native, "get_final_response", None) or getattr(self._native, "get_final_completion", None)
                 final = getter() if getter else None
-            if self._state["state"] == "native_running" and final is not None and terminal(final):
+            if self._state["state"] == "native_running" and final is not None and (terminal(final) or tool_continuation(final)):
                 self._runtime._complete_sync(self._state, final)
                 self._finished = True
             return self if name == "until_done" else result
@@ -181,17 +183,42 @@ class _GenerationStream:
             self._complete_response = getattr(event, "response", None)
         chunk = getattr(event, "chunk", event)
         for choice in getattr(chunk, "choices", []) or []:
+            index = getattr(choice, "index", 0)
+            current = self._chat_choices.setdefault(index, {"content": "", "finish_reason": None, "tool_calls": {}})
             delta = getattr(choice, "delta", None)
             content = getattr(delta, "content", None)
-            if content:
+            if isinstance(content, str):
                 self._text.append(content)
-            if getattr(choice, "finish_reason", None) not in {None, "tool_calls", "function_call"}:
-                from types import SimpleNamespace
-                self._complete_response = SimpleNamespace(
-                    id=getattr(chunk, "id", None),
-                    status="completed",
-                    choices=[SimpleNamespace(finish_reason=choice.finish_reason, message=SimpleNamespace(content="".join(self._text)))],
-                )
+                current["content"] += content
+            for fragment in getattr(delta, "tool_calls", None) or []:
+                call_index = getattr(fragment, "index", None)
+                if not isinstance(call_index, int) or call_index < 0:
+                    continue
+                call = current["tool_calls"].setdefault(call_index, {"function": {"name": "", "arguments": ""}})
+                if isinstance(getattr(fragment, "id", None), str):
+                    call["id"] = fragment.id
+                if isinstance(getattr(fragment, "type", None), str):
+                    call["type"] = fragment.type
+                function = getattr(fragment, "function", None)
+                if isinstance(getattr(function, "name", None), str):
+                    call["function"]["name"] += function.name
+                if isinstance(getattr(function, "arguments", None), str):
+                    call["function"]["arguments"] += function.arguments
+            if getattr(choice, "finish_reason", None) is not None:
+                current["finish_reason"] = choice.finish_reason
+        if self._chat_choices and all(item["finish_reason"] for item in self._chat_choices.values()):
+            self._complete_response = SimpleNamespace(
+                id=getattr(chunk, "id", None),
+                status="completed",
+                choices=[SimpleNamespace(
+                    index=index,
+                    finish_reason=current["finish_reason"],
+                    message=SimpleNamespace(
+                        content=current["content"],
+                        tool_calls=[call for _, call in sorted(current["tool_calls"].items())],
+                    ),
+                ) for index, current in sorted(self._chat_choices.items())],
+            )
 
     def _incomplete(self):
         if not self._finished and self._state["state"] == "native_running":
@@ -322,8 +349,8 @@ class _Runtime:
         self.decision_max_output_tokens = decision_max_output_tokens
         self.session = session
         self.client = CoSensClient(api_key=api_key, state_path=state_path, _http_transport=http_transport)
-        self.cursor = CursorStore(state_path, principal=self.client._transport.api_key)
-        self.turns = TurnStore(state_path, principal=self.client._transport.api_key)
+        self.cursor = CursorStore(state_path, principal=self.client._transport.api_key, service_id=self.client._service.identity)
+        self.turns = TurnStore(state_path, principal=self.client._transport.api_key, service_id=self.client._service.identity)
         self.status = _Status(self)
         self._owner_lock = threading.Lock()
         self._owners = 0
@@ -368,18 +395,44 @@ class _Runtime:
         signature = json.dumps([str(session_id), str(incarnation), path, kwargs], sort_keys=True, default=str, ensure_ascii=False)
         return "request:" + hashlib.sha256(signature.encode()).hexdigest()
 
+    def _session_identity(self):
+        scope = self.status._scope.get()
+        raw_id = (scope[0] if scope and scope[0] else None) or getattr(self.session, "session_id", None) or getattr(self.session, "id", None)
+        session_id = None if raw_id is None else str(raw_id)
+        incarnation = str(getattr(self.session, "session_incarnation", None) or getattr(self.session, "incarnation", "0"))
+        return session_id, incarnation
+
+    def _require_session(self, state):
+        session_id, incarnation = self._session_identity()
+        if state.get("session_id") != session_id or state.get("session_incarnation") != incarnation:
+            raise RSIRecoveryRequired("Turn belongs to a different or unknown Session incarnation")
+
     def _existing_request(self, kwargs, path):
         scope = self.status._scope.get()
         return self.turns.get(scope[1]) if scope and scope[1] else self.turns.get(self._request_key(kwargs, path))
 
     def _conversation_key(self, kwargs):
-        conversation = kwargs.get("conversation")
+        return self._conversation_key_from_value(kwargs.get("conversation"))
+
+    def _conversation_key_from_value(self, conversation):
         if isinstance(conversation, dict):
             conversation = conversation.get("id")
+        elif not isinstance(conversation, str):
+            conversation = getattr(conversation, "id", None)
         if not conversation:
             return None
         session_id = getattr(self.session, "session_id", None)
         return "conversation:" + hashlib.sha256(json.dumps([session_id, conversation], default=str).encode()).hexdigest()
+
+    def _tool_call_key(self, call_id, state=None):
+        scope = self.status._scope.get()
+        session_id = (scope[0] if scope and scope[0] else None) or getattr(self.session, "session_id", None) or getattr(self.session, "id", None)
+        incarnation = getattr(self.session, "session_incarnation", None) or getattr(self.session, "incarnation", "0")
+        if state is not None:
+            session_id = state.get("session_id", session_id)
+            incarnation = state.get("session_incarnation", incarnation)
+        signature = json.dumps([str(session_id), str(incarnation), str(call_id)], ensure_ascii=False)
+        return "tool-call:" + hashlib.sha256(signature.encode()).hexdigest()
 
     def _continuation_state(self, kwargs):
         scope = self.status._scope.get()
@@ -393,7 +446,21 @@ class _Runtime:
             key = self._conversation_key(kwargs)
             if alias is None and key and tool_output:
                 alias = self.turns.get(key)
+            if alias is None and isinstance(kwargs.get("messages"), list):
+                refs = [self.turns.get(self._tool_call_key(item["tool_call_id"])) for item in kwargs["messages"]
+                        if isinstance(item, dict) and item.get("role") == "tool" and isinstance(item.get("tool_call_id"), str)]
+                refs = [ref for ref in refs if ref]
+                if len({ref.get("turn_ref", ref.get("turn_id")) for ref in refs}) > 1:
+                    raise RSIRecoveryRequired("Chat tool results refer to different CoSens turns")
+                alias = refs[0] if refs else None
             state = self.turns.get(alias.get("turn_ref", alias.get("turn_id"))) if alias else None
+        tool_output = (isinstance(kwargs.get("input"), list) and bool(kwargs["input"]) and isinstance(kwargs["input"][-1], dict) and kwargs["input"][-1].get("type") == "function_call_output") or (
+            isinstance(kwargs.get("messages"), list) and bool(kwargs["messages"]) and isinstance(kwargs["messages"][-1], dict) and kwargs["messages"][-1].get("role") == "tool"
+        )
+        if state and tool_output:
+            self._require_session(state)
+            if state.get("state") != "awaiting_continuation":
+                raise RSIRecoveryRequired(f"Turn {state['turn_id']} requires reconciliation before tool continuation")
         return state if state and state.get("state") == "awaiting_continuation" else None
 
     def _guard_request(self, kwargs, path):
@@ -485,7 +552,13 @@ class _Runtime:
             else:
                 turn_id = scope[1] if scope and scope[1] else str(uuid.uuid4())
                 state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "task_family": task_family, "run_id": None, "mode": self.mode}
-        state["conversation_key"] = self._conversation_key(kwargs) or state.get("conversation_key")
+        if "session_id" in state or "session_incarnation" in state:
+            self._require_session(state)
+        conversation_key = self._conversation_key(kwargs)
+        if state.get("conversation_key") and conversation_key and conversation_key != state["conversation_key"]:
+            raise RSIRecoveryRequired("Turn conversation changed during continuation")
+        state["conversation_key"] = conversation_key or state.get("conversation_key")
+        state["session_id"], state["session_incarnation"] = self._session_identity()
         keys = state.setdefault("request_keys", [])
         if request_key not in keys:
             keys.append(request_key)
@@ -493,11 +566,13 @@ class _Runtime:
         return state
 
     def _save(self, state):
+        entries = []
         if state.get("conversation_key"):
-            self.turns.put(state["conversation_key"], {"turn_ref": state["turn_id"]})
-        self.turns.put(state["turn_id"], state)
-        for request_key in state.get("request_keys", []):
-            self.turns.put(request_key, state)
+            entries.append((state["conversation_key"], {"turn_ref": state["turn_id"]}))
+        entries.extend((key, {"turn_ref": state["turn_id"]}) for key in state.get("continuation_keys", []))
+        entries.append((state["turn_id"], state))
+        entries.extend((request_key, state) for request_key in state.get("request_keys", []))
+        self.turns.put_many(entries)
 
     def _snapshot_sync(self):
         if self.session is None:
@@ -509,8 +584,8 @@ class _Runtime:
             return None
         return await self.cursor.snapshot(self.session)
 
-    def _send_sync(self, run_id):
-        snapshot = self._snapshot_sync()
+    def _send_sync(self, run_id, initial_snapshot=None):
+        snapshot = initial_snapshot if initial_snapshot is not None else self._snapshot_sync()
         if snapshot is None:
             return
         recovery = self.cursor.recover_batch(snapshot)
@@ -526,8 +601,8 @@ class _Runtime:
                 raise RSIRecoveryRequired("Session event batch lacks a leading durable ACK")
             recovery = self.cursor.recover_batch(snapshot)
 
-    async def _send_async(self, run_id):
-        snapshot = await self._snapshot_async()
+    async def _send_async(self, run_id, initial_snapshot=None):
+        snapshot = initial_snapshot if initial_snapshot is not None else await self._snapshot_async()
         if snapshot is None:
             return
         recovery = self.cursor.recover_batch(snapshot)
@@ -566,18 +641,26 @@ class _Runtime:
         latest = snapshot.items[-1]
         return latest.get("role") == "user" and latest.get("content") == visible_input
 
-    @staticmethod
-    def _tool_output_events(state, kwargs):
+    def _tool_output_events(self, state, kwargs):
         value = kwargs.get("input")
-        if not isinstance(value, list):
-            return []
         events = []
-        for position, item in enumerate(value):
-            if isinstance(item, dict) and item.get("type") == "function_call_output":
-                call_id = str(item.get("call_id") or position)
+        if isinstance(value, list):
+            for position, item in enumerate(value):
+                if isinstance(item, dict) and item.get("type") == "function_call_output":
+                    call_id = str(item.get("call_id") or position)
+                    events.append({
+                        "id": f"visible:{state['turn_id']}:tool:{call_id}", "kind": "tool_result",
+                        "payload": {"role": "tool", "content": item.get("output"), "call_id": call_id, "source_revision": "native_function_call_output"},
+                    })
+        for item in kwargs.get("messages") or []:
+            if isinstance(item, dict) and item.get("role") == "tool" and isinstance(item.get("tool_call_id"), str):
+                call_id = item["tool_call_id"]
+                alias = self.turns.get(self._tool_call_key(call_id, state))
+                if not alias or alias.get("turn_ref", alias.get("turn_id")) != state["turn_id"]:
+                    continue
                 events.append({
                     "id": f"visible:{state['turn_id']}:tool:{call_id}", "kind": "tool_result",
-                    "payload": {"role": "tool", "content": item.get("output"), "call_id": call_id, "source_revision": "native_function_call_output"},
+                    "payload": {"role": "tool", "content": item.get("content"), "call_id": call_id, "source_revision": "native_chat_tool_message"},
                 })
         return events
 
@@ -594,7 +677,41 @@ class _Runtime:
                 "id": f"visible:{state['turn_id']}:call:{call_id}", "kind": "agent_action",
                 "payload": {"role": "assistant", "content": content, "call_id": call_id, "source_revision": "native_function_call"},
             })
+        for choice in getattr(response, "choices", None) or []:
+            message = getattr(choice, "message", None)
+            for item in getattr(message, "tool_calls", None) or []:
+                content = item if isinstance(item, dict) else item.model_dump(mode="json") if hasattr(item, "model_dump") else vars(item)
+                call_id = content.get("id")
+                if not isinstance(call_id, str):
+                    continue
+                events.append({
+                    "id": f"visible:{state['turn_id']}:call:{call_id}", "kind": "agent_action",
+                    "payload": {"role": "assistant", "content": content, "call_id": call_id, "source_revision": "native_chat_tool_call"},
+                })
         return events
+
+    def _tool_alias_keys(self, state, response):
+        keys = []
+        for choice in getattr(response, "choices", None) or []:
+            message = getattr(choice, "message", None)
+            for item in getattr(message, "tool_calls", None) or []:
+                call_id = item.get("id") if isinstance(item, dict) else getattr(item, "id", None)
+                if isinstance(call_id, str):
+                    keys.append(self._tool_call_key(call_id, state))
+        return keys
+
+    def _record_tool_continuation(self, state, response):
+        keys = set(state.get("continuation_keys", []))
+        response_id = getattr(response, "id", None)
+        if response_id:
+            keys.add("response:" + str(response_id))
+        keys.update(self._tool_alias_keys(state, response))
+        state["continuation_keys"] = sorted(keys)
+        if not state.get("conversation_key"):
+            state["conversation_key"] = self._conversation_key_from_value(getattr(response, "conversation", None))
+        state["tool_call_events"] = self._function_call_events(state, response)
+        state["state"] = "observability_pending" if state.get("run_id") else "awaiting_continuation"
+        self._save(state)
 
     def _send_observable_sync(self, state, events):
         acked = set(state.get("observable_acked_ids", []))
@@ -607,6 +724,7 @@ class _Runtime:
         ids = receipt.get("durable_ack")
         if not isinstance(ids, list):
             raise RSIRecoveryRequired("Observable model events have no durable ACK list")
+        self._validate_observable_ack(ids, pending)
         acked.update(ids)
         state["observable_acked_ids"] = sorted(acked)
         state["observable_pending"] = [event for event in pending if event["id"] not in acked]
@@ -625,12 +743,22 @@ class _Runtime:
         ids = receipt.get("durable_ack")
         if not isinstance(ids, list):
             raise RSIRecoveryRequired("Observable model events have no durable ACK list")
+        self._validate_observable_ack(ids, pending)
         acked.update(ids)
         state["observable_acked_ids"] = sorted(acked)
         state["observable_pending"] = [event for event in pending if event["id"] not in acked]
         self._save(state)
         if state["observable_pending"]:
             raise RSIRecoveryRequired("Observable model events received partial ACK")
+
+    @staticmethod
+    def _validate_observable_ack(ids, pending):
+        pending_ids = {event["id"] for event in pending}
+        received = set()
+        for event_id in ids:
+            if not isinstance(event_id, str) or event_id not in pending_ids or event_id in received:
+                raise RSIRecoveryRequired("Observable model event ACK contains an unsent or duplicate event ID")
+            received.add(event_id)
 
     def _send_visible_sync(self, state, response):
         snapshot = self._snapshot_sync()
@@ -645,6 +773,7 @@ class _Runtime:
         state["decision"] = decision
         self._save(state)
         try:
+            initial_snapshot = self._snapshot_sync()
             if "frozen_context" not in state:
                 if not state["run_id"]:
                     prepared = prepare_ready_sync(self.client.sync_atoms, objective=state["objective"], task_family=state["task_family"] or "general", key=state["turn_id"])
@@ -654,8 +783,8 @@ class _Runtime:
                 run = self.client.sync_atoms.get_run(state["run_id"])
                 state["frozen_context"] = freeze_run_context(state.get("prepared"), run)
                 self._save(state)
-            self._send_sync(state["run_id"])
-            return state, result(state["frozen_context"])
+            self._send_sync(state["run_id"], initial_snapshot)
+            return state, result(state["frozen_context"]), initial_snapshot
         except Exception as exc:
             state["last_error"] = str(exc)
             self._save(state)
@@ -666,6 +795,7 @@ class _Runtime:
         state["decision"] = decision
         self._save(state)
         try:
+            initial_snapshot = await self._snapshot_async()
             if "frozen_context" not in state:
                 if not state["run_id"]:
                     prepared = await prepare_ready_async(self.client.atoms, objective=state["objective"], task_family=state["task_family"] or "general", key=state["turn_id"])
@@ -675,8 +805,8 @@ class _Runtime:
                 run = await self.client.atoms.get_run(state["run_id"])
                 state["frozen_context"] = freeze_run_context(state.get("prepared"), run)
                 self._save(state)
-            await self._send_async(state["run_id"])
-            return state, result(state["frozen_context"])
+            await self._send_async(state["run_id"], initial_snapshot)
+            return state, result(state["frozen_context"]), initial_snapshot
         except Exception as exc:
             state["last_error"] = str(exc)
             self._save(state)
@@ -717,10 +847,13 @@ class _Runtime:
     def _preflight_sync(self, native, path, kwargs):
         self._guard_request(kwargs, path)
         decision = self._decide_sync(native, path, kwargs)
-        state, context = self._prepare_sync(decision, kwargs, path) if decision["activate"] else self._recall_sync(decision, kwargs, path)
+        if decision["activate"]:
+            state, context, before = self._prepare_sync(decision, kwargs, path)
+        else:
+            state, context = self._recall_sync(decision, kwargs, path)
+            before = None
         if state["run_id"]:
             state["visible_input"] = user_text(path, kwargs)
-            before = self._snapshot_sync()
             state["session_before_count"] = len(before.items) if before else 0
             state["visible_input_in_session"] = self._input_in_snapshot(before, state["visible_input"])
             self._save(state)
@@ -733,10 +866,13 @@ class _Runtime:
     async def _preflight_async(self, native, path, kwargs):
         self._guard_request(kwargs, path)
         decision = await self._decide_async(native, path, kwargs)
-        state, context = await self._prepare_async(decision, kwargs, path) if decision["activate"] else await self._recall_async(decision, kwargs, path)
+        if decision["activate"]:
+            state, context, before = await self._prepare_async(decision, kwargs, path)
+        else:
+            state, context = await self._recall_async(decision, kwargs, path)
+            before = None
         if state["run_id"]:
             state["visible_input"] = user_text(path, kwargs)
-            before = await self._snapshot_async()
             state["session_before_count"] = len(before.items) if before else 0
             state["visible_input_in_session"] = self._input_in_snapshot(before, state["visible_input"])
             self._save(state)
@@ -753,31 +889,33 @@ class _Runtime:
             state["state"] = "completed"
             state["result"] = {"summary": summary(response), "outcome": "completed"}
         else:
-            state["state"] = "awaiting_continuation"
-            response_id = getattr(response, "id", None)
-            if response_id:
-                self.turns.put("response:" + str(response_id), {"turn_ref": state["turn_id"]})
+            state["state"] = "awaiting_continuation" if tool_continuation(response) else "incomplete"
+            if state["state"] == "awaiting_continuation":
+                self._record_tool_continuation(state, response)
+                return True
         self._save(state)
         return True
 
     def _complete_sync(self, state, response):
         if self._complete_without_run(state, response):
             return
-        response_id = getattr(response, "id", None)
         if not terminal(response):
+            if not tool_continuation(response):
+                state["state"] = "incomplete"
+                self._save(state)
+                return
+            self._record_tool_continuation(state, response)
             try:
                 visible = self._visible_events(state, response, self._snapshot_sync())
                 prompt_events = [event for event in visible if event["kind"] == "user_prompt"]
-                self._send_observable_sync(state, prompt_events + self._function_call_events(state, response))
+                self._send_observable_sync(state, prompt_events + state["tool_call_events"])
             except Exception as exc:
                 state["last_error"] = str(exc)
-                state["state"] = "observability_pending"
                 self._save(state)
                 return
             state["state"] = "awaiting_continuation"
+            state.pop("last_error", None)
             self._save(state)
-            if response_id:
-                self.turns.put("response:" + str(response_id), {"turn_ref": state["turn_id"]})
             return
         state["state"] = "native_completed"
         state["result"] = {"summary": summary(response), "outcome": "completed"}
@@ -797,21 +935,23 @@ class _Runtime:
     async def _complete_async(self, state, response):
         if self._complete_without_run(state, response):
             return
-        response_id = getattr(response, "id", None)
         if not terminal(response):
+            if not tool_continuation(response):
+                state["state"] = "incomplete"
+                self._save(state)
+                return
+            self._record_tool_continuation(state, response)
             try:
                 visible = self._visible_events(state, response, await self._snapshot_async())
                 prompt_events = [event for event in visible if event["kind"] == "user_prompt"]
-                await self._send_observable_async(state, prompt_events + self._function_call_events(state, response))
+                await self._send_observable_async(state, prompt_events + state["tool_call_events"])
             except Exception as exc:
                 state["last_error"] = str(exc)
-                state["state"] = "observability_pending"
                 self._save(state)
                 return
             state["state"] = "awaiting_continuation"
+            state.pop("last_error", None)
             self._save(state)
-            if response_id:
-                self.turns.put("response:" + str(response_id), {"turn_ref": state["turn_id"]})
             return
         state["state"] = "native_completed"
         state["result"] = {"summary": summary(response), "outcome": "completed"}
@@ -830,11 +970,32 @@ class _Runtime:
 
     def reconcile_sync(self, turn_id):
         state = self.turns.get(turn_id)
+        if state and state.get("mode") != self.mode:
+            raise RSIRecoveryRequired("Turn has a different or unknown originating mode")
+        if state:
+            self._require_session(state)
+        if state and state.get("run_id") and state.get("state") == "observability_pending":
+            try:
+                self._send_sync(state["run_id"])
+                visible = self._visible_events(state, None, self._snapshot_sync())
+                prompt_events = [event for event in visible if event["kind"] == "user_prompt"]
+                self._send_observable_sync(state, prompt_events + state.get("tool_call_events", []))
+                state["state"] = "awaiting_continuation"
+                state.pop("last_error", None)
+                self._save(state)
+                return state
+            except Exception as exc:
+                state["last_error"] = str(exc)
+                self._save(state)
+                raise
         if not state or state.get("state") not in {"native_completed", "completion_pending"}:
             raise RSIRecoveryRequired("Turn has no completed native result to reconcile")
         try:
             self._send_sync(state["run_id"])
-            self._send_observable_sync(state, [])
+            visible = [] if state.get("observable_pending") else self._visible_events(
+                state, result({"output_text": state["result"]["summary"]}), self._snapshot_sync()
+            )
+            self._send_observable_sync(state, visible)
             remote = self.client.sync_atoms.get_run(state["run_id"])
             if remote.status == "completed":
                 if remote.get("result") != state.get("result"):
@@ -857,11 +1018,32 @@ class _Runtime:
 
     async def reconcile_async(self, turn_id):
         state = self.turns.get(turn_id)
+        if state and state.get("mode") != self.mode:
+            raise RSIRecoveryRequired("Turn has a different or unknown originating mode")
+        if state:
+            self._require_session(state)
+        if state and state.get("run_id") and state.get("state") == "observability_pending":
+            try:
+                await self._send_async(state["run_id"])
+                visible = self._visible_events(state, None, await self._snapshot_async())
+                prompt_events = [event for event in visible if event["kind"] == "user_prompt"]
+                await self._send_observable_async(state, prompt_events + state.get("tool_call_events", []))
+                state["state"] = "awaiting_continuation"
+                state.pop("last_error", None)
+                self._save(state)
+                return state
+            except Exception as exc:
+                state["last_error"] = str(exc)
+                self._save(state)
+                raise
         if not state or state.get("state") not in {"native_completed", "completion_pending"}:
             raise RSIRecoveryRequired("Turn has no completed native result to reconcile")
         try:
             await self._send_async(state["run_id"])
-            await self._send_observable_async(state, [])
+            visible = [] if state.get("observable_pending") else self._visible_events(
+                state, result({"output_text": state["result"]["summary"]}), await self._snapshot_async()
+            )
+            await self._send_observable_async(state, visible)
             remote = await self.client.atoms.get_run(state["run_id"])
             if remote.status == "completed":
                 if remote.get("result") != state.get("result"):

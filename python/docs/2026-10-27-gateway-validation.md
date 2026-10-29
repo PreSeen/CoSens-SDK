@@ -2,10 +2,14 @@
 
 日期：2026-10-27（Asia/Shanghai）。参考用户提供的 `FULL_CURL_TRANSCRIPT.md`、`friday-rsi/docs/api/gateway-authentication.md` 及实测网关 OpenAPI 1.0.0。
 
+后续 SDK 请求头更新：当前客户端向 CoSens 网关同时发送 `X-Auth-Type: api_key` 与 `Authorization: Bearer <api_key>`。下文记录的是更新前的联调事实；新增双请求头已在 2026-10-28 的 [Python CN 只读复验](testing/2026-10-28-cn-auth-recheck.json)与 [TypeScript CN 主链联调](../../typescript/docs/2026-10-28-gateway-validation.md)中验证。US 区域仍缺少有效 Key 的同等联调。
+
+2026-10-28 新 Task / Revision / Recipe Candidate 工作流的 SDK 适配见[新开发契约](2026-10-28-task-workflow-sdk-design.md)。使用本机 CN Key 再次只读查询 `/api/openapi.json`：HTTP 200，版本仍为 `1.0.0`，未列出 `/v1/tasks`、`/v1/executions` 等新工作流路径。以下旧 Run 联调记录不能视为新流程的真实网关验收。
+
 ## 结论与身份契约
 
 - 实际请求统一为 `https://friday-rsi-cn.stardust-ai.com/api` + 算法原路径，查询参数保留。
-- SDK 只提供 Friday Key 的 `Authorization: Bearer`，不接受/发送 `X-User-Id` 或 `X_User_Id`；网关根据鉴权结果 accountId 注入。
+- 当时联调的 SDK 只提供 Friday Key 的 `Authorization: Bearer`，不接受/发送 `X-User-Id` 或 `X_User_Id`；网关根据鉴权结果 accountId 注入。当前 SDK 另发送上文所述的 `X-Auth-Type: api_key`。
 - 无身份头的健康请求返回账号对应的 Memory project，Memory 写入和读取成功。单一 Key 的测试不能证明跨账号隔离；本次没有伪造身份头或冒充附件中的另一个用户。
 - 原子主流程 **34 次 HTTP 200**；包装入口验证 **19 次 HTTP 200**。另有探测/持久化核对请求。原始 Key 未写入仓库或报告。
 - SDK 增加公开 Memory、Recipe step、guidance、checkpoint、decision、trace 和显式管理员评估原子方法。

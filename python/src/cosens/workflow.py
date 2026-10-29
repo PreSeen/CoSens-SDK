@@ -1,11 +1,22 @@
 """Local orchestration helpers shared by transparent and explicit runs."""
 
 import asyncio
+import math
 import time
 from copy import deepcopy
 
 from .errors import RSIRecoveryRequired
 from .models import result
+
+
+def _bounded_timeout(value):
+    try:
+        valid = not isinstance(value, bool) and value >= 0 and math.isfinite(value)
+    except (TypeError, ValueError, OverflowError):
+        valid = False
+    if not valid:
+        raise ValueError("timeout must be a finite nonnegative number")
+    return value
 
 
 def freeze_run_context(prepared, run):
@@ -37,13 +48,15 @@ def freeze_recall_context(context):
 def _delay(reply):
     try:
         delay = float(reply.get("retry_after_seconds", 2))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        delay = 2
+    if not math.isfinite(delay):
         delay = 2
     return min(max(delay, 0), 30)
 
 
 async def prepare_ready_async(atoms, *, timeout=300, **params):
-    deadline = asyncio.get_running_loop().time() + timeout
+    deadline = asyncio.get_running_loop().time() + _bounded_timeout(timeout)
     while True:
         reply = await atoms.prepare(**params)
         if reply.status == "ready" and reply.get("run_id"):
@@ -57,7 +70,7 @@ async def prepare_ready_async(atoms, *, timeout=300, **params):
 
 
 def prepare_ready_sync(atoms, *, timeout=300, **params):
-    deadline = time.monotonic() + timeout
+    deadline = time.monotonic() + _bounded_timeout(timeout)
     while True:
         reply = atoms.prepare(**params)
         if reply.status == "ready" and reply.get("run_id"):

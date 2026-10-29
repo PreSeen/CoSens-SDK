@@ -34,10 +34,12 @@ def decision_prompt(user_text, tool_names):
 def parse_decision(response):
     try:
         data = json.loads(response.output_text)
+        if not isinstance(data, dict) or set(data) != {"activate", "objective", "task_family", "reason"}:
+            raise ValueError("decision must contain only the four declared fields")
         if not isinstance(data["activate"], bool):
             raise ValueError("activate must be boolean")
-        if not isinstance(data["objective"], str) or not isinstance(data["task_family"], str):
-            raise ValueError("objective/task_family must be text")
+        if not all(isinstance(data[field], str) for field in ("objective", "task_family", "reason")):
+            raise ValueError("objective/task_family/reason must be text")
         return data
     except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise RSIDecisionUnavailable("Decision model returned invalid structured output") from exc

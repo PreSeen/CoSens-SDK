@@ -5,6 +5,7 @@ import pytest
 def gateway_test_key(monkeypatch):
     # All external services are replaced by local transports in these tests.
     monkeypatch.setenv("COSENS_API_KEY", "test-only-gateway-key")
+    monkeypatch.setenv("COSENS_REGION", "cn")
 
 
 @pytest.fixture

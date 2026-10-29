@@ -1,10 +1,24 @@
 import asyncio
+import math
 
 import httpx
 import pytest
 
 from cosens import CoSensClient
+from cosens.atoms import _part
 from cosens.errors import RSIHTTPError
+from cosens.workflow import _delay, prepare_ready_async, prepare_ready_sync
+
+
+@pytest.mark.parametrize("resource_id", [".", ".."])
+def test_resource_id_dot_segments_are_rejected(resource_id):
+    with pytest.raises(ValueError, match="resource ID"):
+        _part(resource_id)
+
+
+@pytest.mark.parametrize("invalid", [math.nan, math.inf, -math.inf, "nan", "inf", None, ""])
+def test_prepare_retry_delay_defaults_on_invalid_gateway_values(invalid):
+    assert _delay({"retry_after_seconds": invalid}) == 2
 
 
 @pytest.mark.asyncio
@@ -65,6 +79,35 @@ async def test_atomic_endpoints_send_the_documented_requests():
 def test_public_constructor_has_no_service_base_url():
     with pytest.raises(TypeError):
         CoSensClient(api_key="ordinary", base_url="https://attacker.invalid")
+
+
+@pytest.mark.asyncio
+async def test_polling_rejects_non_finite_timeouts_before_gateway_requests():
+    requests = []
+
+    def server(request):
+        requests.append(request)
+        return httpx.Response(200, json={"job_id": "j1", "status": "validated"})
+
+    class Prepared:
+        async def prepare(self, **_kwargs):
+            requests.append("async prepare")
+            return {"run_id": "r1", "status": "ready"}
+
+    class PreparedSync:
+        def prepare(self, **_kwargs):
+            requests.append("sync prepare")
+            return {"run_id": "r1", "status": "ready"}
+
+    async with CoSensClient(api_key="ordinary", _http_transport=httpx.MockTransport(server)) as client:
+        for invalid in (math.nan, math.inf, -1):
+            with pytest.raises(ValueError, match="timeout"):
+                await client.atoms.wait_improvement("j1", timeout=invalid)
+            with pytest.raises(ValueError, match="timeout"):
+                await prepare_ready_async(Prepared(), timeout=invalid, objective="task", key="k1")
+            with pytest.raises(ValueError, match="timeout"):
+                prepare_ready_sync(PreparedSync(), timeout=invalid, objective="task", key="k1")
+    assert requests == []
 
 
 @pytest.mark.asyncio

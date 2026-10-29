@@ -36,14 +36,131 @@ class Runner:
 
 
 @pytest.mark.asyncio
+async def test_pending_agent_run_is_isolated_by_session_incarnation(tmp_path):
+    agent = Agent(name="assistant", instructions="Original")
+    old_session = Session()
+    old_session.session_incarnation = "old"
+    new_session = Session()
+    new_session.session_incarnation = "new"
+    prepares = 0
+    native_calls = 0
+
+    def server(request):
+        nonlocal prepares
+        path = request.url.path
+        if path.endswith("/prepare"):
+            prepares += 1
+            return httpx.Response(200, json={"run_id": f"r{prepares}", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/api/v1/runs/r1":
+            return httpx.Response(503, json={"error": {"message": "temporary"}})
+        if path == "/api/v1/runs/r2":
+            return httpx.Response(200, json={"run_id": "r2", "status": "ready", "snapshot": {}})
+        if path.endswith("/session-events"):
+            body = json.loads(request.content)
+            return httpx.Response(200, json={"durable_ack": [item["id"] for item in body["events"]]})
+        if path.endswith("/submit"):
+            return httpx.Response(200, json={"status": "completed"})
+        raise AssertionError(path)
+
+    class Native:
+        @staticmethod
+        async def run(*_args, **_kwargs):
+            nonlocal native_calls
+            native_calls += 1
+            return SimpleNamespace(final_output="done")
+
+    client = cosens(agent, mode="disable", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Native)
+    with pytest.raises(Exception, match="temporary"):
+        await client.run(agent, "same task", session=old_session)
+    await client.run(agent, "same task", session=new_session)
+    assert (prepares, native_calls) == (2, 1)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_agent_retry_rejects_changed_input_artifacts(tmp_path, streamed):
+    agent = Agent(name="assistant", instructions="Original")
+    requests = []
+
+    def server(request):
+        requests.append(request.url.path)
+        if request.url.path.endswith("/artifacts"):
+            return httpx.Response(200, json={"artifact_id": "a1", "content_hash": "hash-1"})
+        if request.url.path.endswith("/prepare"):
+            return httpx.Response(503, json={"error": {"message": "temporary"}})
+        raise AssertionError(request.url.path)
+
+    class Native:
+        @staticmethod
+        async def run(*_args, **_kwargs):
+            raise AssertionError("native runner must not start")
+
+        @staticmethod
+        def run_streamed(*_args, **_kwargs):
+            raise AssertionError("native stream must not start")
+
+    client = cosens(agent, mode="disable", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Native)
+    invoke = client.run_streamed if streamed else client.run
+    with pytest.raises(Exception, match="temporary"):
+        await invoke(agent, "task", input_artifacts=[{"name": "source.txt", "content": "original"}])
+    before = len(requests)
+    with pytest.raises(RSIRecoveryRequired, match="artifacts"):
+        await invoke(agent, "task", input_artifacts=[{"name": "source.txt", "content": "changed"}])
+    assert len(requests) == before
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_malformed_input_artifact_receipt_stops_before_prepare_and_retry(tmp_path, streamed):
+    agent = Agent(name="assistant", instructions="Original")
+    uploads = 0
+    prepares = 0
+
+    def server(request):
+        nonlocal uploads, prepares
+        path = request.url.path
+        if path.endswith("/artifacts"):
+            uploads += 1
+            return httpx.Response(200, json={"artifact_id": "a1"})
+        if path.endswith("/prepare"):
+            prepares += 1
+            raise AssertionError("prepare must not start")
+        raise AssertionError(path)
+
+    class Native:
+        @staticmethod
+        async def run(*_args, **_kwargs):
+            raise AssertionError("native runner must not start")
+
+        @staticmethod
+        def run_streamed(*_args, **_kwargs):
+            raise AssertionError("native stream must not start")
+
+    client = cosens(agent, mode="disable", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Native)
+    material = [{"name": "source.txt", "content": "facts"}]
+    invoke = client.run_streamed if streamed else client.run
+    with pytest.raises(RSIRecoveryRequired, match="receipt"):
+        await invoke(agent, "task", input_artifacts=material)
+    with pytest.raises(RSIRecoveryRequired, match="receipt"):
+        await invoke(agent, "task", input_artifacts=material)
+    assert (uploads, prepares) == (1, 0)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_explicit_run_composes_atoms_around_one_native_runner_call(tmp_path):
     calls = []
+    phase = []
 
     def server(request):
         body = json.loads(request.content) if request.content else None
         calls.append((request.url.path, body))
         path = request.url.path
         if path.endswith("/prepare"):
+            phase.append("prepare")
+            session.items.append({"id": "late", "role": "user", "content": "during prepare"})
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {"summary": "Use checks"}, "context": {}})
         if path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {"wiki": "Source fact"}})
@@ -56,10 +173,18 @@ async def test_explicit_run_composes_atoms_around_one_native_runner_call(tmp_pat
     Runner.calls = 0
     agent = Agent(name="assistant", instructions="Original instructions")
     session = Session()
+    original_get_items = session.get_items
+
+    async def tracked_get_items():
+        phase.append("session-read")
+        return await original_get_items()
+
+    session.get_items = tracked_get_items
     client = cosens(agent, mode="disable", session=session, api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Runner)
     result = await client.run(agent, "Current request", session=session)
     assert result.final_output == "done"
     assert Runner.calls == 1
+    assert phase.index("session-read") < phase.index("prepare")
     assert agent.instructions == "Original instructions"
     assert Runner.seen_agent is not agent
     assert "Source fact" in Runner.seen_agent.instructions
@@ -68,7 +193,7 @@ async def test_explicit_run_composes_atoms_around_one_native_runner_call(tmp_pat
         "/api/v1/runs/r1/session-events", "/api/v1/runs/r1/submit",
     ]
     assert [e["id"] for e in calls[2][1]["events"]] == ["chat:old"]
-    assert [e["id"] for e in calls[3][1]["events"]] == ["chat:new-user", "chat:new-assistant"]
+    assert [e["id"] for e in calls[3][1]["events"]] == ["chat:late", "chat:new-user", "chat:new-assistant"]
     assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "completed"
     await client.aclose()
 
@@ -94,6 +219,35 @@ async def test_pre_execution_event_failure_never_runs_agent_or_advances_cursor(t
     assert Runner.calls == 0
     assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "pre_execution_pending"
     await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_explicit_retry_rejects_a_different_originating_mode(tmp_path):
+    agent = Agent(name="assistant")
+    state_path = tmp_path / "state.sqlite3"
+    first = cosens(
+        agent, mode="disable", api_key="ordinary", state_path=state_path,
+        _http_transport=httpx.MockTransport(lambda _request: httpx.Response(503, json={"error": {"message": "later"}})),
+        _runner=Runner,
+    )
+    with pytest.raises(Exception, match="later"):
+        await first.run(agent, "same task")
+    await first.aclose()
+
+    requests = []
+
+    def second_server(request):
+        requests.append(request.url.path)
+        return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}, "snapshot": {}})
+
+    second = cosens(
+        agent, mode="auto", api_key="ordinary", state_path=state_path,
+        _http_transport=httpx.MockTransport(second_server), _runner=Runner,
+    )
+    with pytest.raises(RSIRecoveryRequired, match="mode"):
+        await second.run(agent, "same task")
+    assert requests == []
+    await second.aclose()
 
 
 @pytest.mark.asyncio
@@ -304,19 +458,79 @@ async def test_explicit_run_uploads_real_input_and_output_artifacts(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_lost_output_artifact_receipt_is_not_blindly_uploaded_again(tmp_path):
-    uploads = 0
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_malformed_native_output_files_stay_pending_without_submit(tmp_path, streamed):
+    from types import SimpleNamespace
+
+    agent = Agent(name="assistant")
+    counts = {"native": 0, "artifact": 0, "submit": 0}
 
     def server(request):
-        nonlocal uploads
         path = request.url.path
         if path.endswith("/prepare"):
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
         if path == "/api/v1/runs/r1":
             return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
+        if path.endswith("/artifacts"):
+            counts["artifact"] += 1
+            raise AssertionError("invalid file must not upload")
+        if path.endswith("/submit"):
+            counts["submit"] += 1
+            raise AssertionError("invalid file must not submit")
+        raise AssertionError(path)
+
+    class NativeStream:
+        is_complete = True
+        run_loop_exception = None
+        interruptions = []
+        final_output = {"summary": "done", "files": "bad-shape"}
+
+        async def stream_events(self):
+            yield SimpleNamespace(type="raw_response_event")
+
+    class Native:
+        @staticmethod
+        async def run(*_args, **_kwargs):
+            counts["native"] += 1
+            return SimpleNamespace(final_output={"summary": "done", "files": "bad-shape"})
+
+        @staticmethod
+        def run_streamed(*_args, **_kwargs):
+            counts["native"] += 1
+            return NativeStream()
+
+    client = cosens(agent, mode="disable", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=Native)
+    if streamed:
+        result = await client.run_streamed(agent, "task")
+        async for _ in result.stream_events():
+            pass
+    else:
+        await client.run(agent, "task")
+    turn_id = client.cosens.last_turn_id
+    assert client.cosens.get_turn(turn_id)["state"] == "completion_pending"
+    with pytest.raises(TypeError, match="files must be a list"):
+        await client.cosens.reconcile(turn_id)
+    assert counts == {"native": 1, "artifact": 0, "submit": 0}
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("malformed", [False, True])
+async def test_lost_output_artifact_receipt_is_not_blindly_uploaded_again(tmp_path, malformed):
+    uploads = 0
+    get_runs = 0
+
+    def server(request):
+        nonlocal uploads, get_runs
+        path = request.url.path
+        if path.endswith("/prepare"):
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "recipe": {}, "context": {}})
+        if path == "/api/v1/runs/r1":
+            get_runs += 1
+            return httpx.Response(200, json={"run_id": "r1", "status": "ready", "snapshot": {}})
         if path == "/api/v1/artifacts":
             uploads += 1
-            return httpx.Response(503, json={"error": {"code": "unknown", "message": "receipt lost"}})
+            return httpx.Response(200, json={"artifact_id": "a1"}) if malformed else httpx.Response(503, json={"error": {"code": "unknown", "message": "receipt lost"}})
         raise AssertionError(path)
 
     class FileRunner:
@@ -330,6 +544,7 @@ async def test_lost_output_artifact_receipt_is_not_blindly_uploaded_again(tmp_pa
     with pytest.raises(RSIRecoveryRequired):
         await client.cosens.reconcile(client.cosens.last_turn_id)
     assert uploads == 1
+    assert get_runs == 2
     await client.aclose()
 
 
@@ -475,13 +690,21 @@ async def test_native_approval_interruptions_pause_submit_and_resume_same_run(tm
 
     agent = Agent(name="assistant")
     client = cosens(agent, mode="disable", api_key="ordinary", state_path=tmp_path / "state.sqlite3", _http_transport=httpx.MockTransport(server), _runner=RunnerStub)
-    await client.run(agent, "task")
+    session = Session()
+    session.items = []
+    session.session_incarnation = "old"
+    await client.run(agent, "task", session=session)
     turn_id = client.cosens.last_turn_id
     assert client.cosens.get_turn(turn_id)["state"] == "awaiting_native_approval"
     assert submitted == 0
     with pytest.raises(RSIRecoveryRequired):
-        await client.run(agent, "task")
-    await client.resume(agent, turn_id, NativeState())
+        await client.run(agent, "task", session=session)
+    wrong_session = Session()
+    wrong_session.items = []
+    wrong_session.session_incarnation = "new"
+    with pytest.raises(RSIRecoveryRequired, match="Session incarnation"):
+        await client.resume(agent, turn_id, NativeState(), session=wrong_session)
+    await client.resume(agent, turn_id, NativeState(), session=session)
     assert (prepared, submitted, native_calls) == (1, 1, 2)
     assert client.cosens.get_turn(turn_id)["state"] == "completed"
 

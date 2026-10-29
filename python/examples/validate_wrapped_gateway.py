@@ -18,6 +18,7 @@ from agents import Agent
 from openai import AsyncOpenAI, OpenAI
 
 from cosens import cosens
+from cosens._config import resolve_service
 
 
 async def check(key, report):
@@ -89,7 +90,8 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     key = os.getenv('RSI_API_KEY') or os.getenv('COSENS_API_KEY') or getpass.getpass('Friday API Key (hidden): ')
-    report = {"model_execution":"local fake only", "requests":[]}
+    service = resolve_service()
+    report = {"model_execution":"local fake only", "gateway":service.url, "region":service.region, "requests":[]}
     try:
         asyncio.run(check(key, report))
         report['result'] = 'passed'

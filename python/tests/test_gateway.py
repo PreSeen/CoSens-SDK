@@ -33,6 +33,7 @@ async def test_gateway_retains_service_paths_queries_and_headers_for_both_transp
         "https://friday-rsi-cn.stardust-ai.com/api/internal/admin/v1/improvements/j1/publish",
     ]
     assert [r.headers["authorization"] for r in requests] == ["Bearer test-gateway"] * 3
+    assert [r.headers["x-auth-type"] for r in requests] == ["api_key"] * 3
     assert requests[1].headers["idempotency-key"] == "turn-key"
     assert all("api-key" not in r.headers and "x-api-key" not in r.headers for r in requests)
 
@@ -48,7 +49,7 @@ async def test_gateway_key_is_the_only_caller_credential(monkeypatch):
         await client.atoms.prepare(objective="task", key="key")
         client.sync_atoms.get_run("r1")
     assert len(requests) == 2
-    assert all(r.headers["authorization"] == "Bearer test-gateway" and "api-key" not in r.headers for r in requests)
+    assert all(r.headers["authorization"] == "Bearer test-gateway" and r.headers["x-auth-type"] == "api_key" and "api-key" not in r.headers for r in requests)
 
 
 @pytest.mark.asyncio
@@ -101,6 +102,18 @@ async def test_plain_text_gateway_rejection_retains_http_status_and_request_id()
             await client.atoms.get_run("r1")
     assert exc.value.status_code == 401
     assert exc.value.request_id == "gateway-request"
+
+
+@pytest.mark.asyncio
+async def test_gateway_error_text_redacts_the_friday_key():
+    async with CoSensClient(api_key="secret-key", _http_transport=httpx.MockTransport(
+        lambda r: httpx.Response(401, json={"error": {"code": "denied", "message": "Rejected Bearer secret-key"}})
+    )) as client:
+        with pytest.raises(RSIHTTPError) as exc:
+            await client.atoms.get_run("r1")
+    assert exc.value.status_code == 401
+    assert exc.value.code == "denied"
+    assert "secret-key" not in str(exc.value)
 
 
 @pytest.mark.parametrize("key", ["", "Bearer test-key", " key", "key\n"])
@@ -165,7 +178,7 @@ async def test_gateway_rejects_redirect_without_forwarding_key(asynchronous):
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("path", ["http://friday-rsi-cn.stardust-ai.com/api/v1/runs/r1", "https://other.example/collect", "//other.example/collect"])
+@pytest.mark.parametrize("path", ["http://friday-rsi-cn.stardust-ai.com/api/v1/runs/r1", "https://other.example/collect", "//other.example/collect", "/api/v1/runs/r1", "/api?debug=1", "/v1\\runs\\r1"])
 @pytest.mark.asyncio
 async def test_gateway_never_sends_key_to_absolute_or_external_paths(asynchronous, path):
     requests = []

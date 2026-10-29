@@ -1,4 +1,4 @@
-"""Validate the supplied curl case through the SDK and domestic gateway.
+"""Validate the supplied curl case through the SDK and selected gateway.
 
 Reads RSI_API_KEY (or prompts without echo). Default is read-only. --write
 creates an isolated synthetic Recipe, Memory source, Run and evaluations.
@@ -21,6 +21,8 @@ from decimal import Decimal
 from pathlib import Path
 
 from cosens import CoSensClient
+from cosens._config import resolve_service
+from urllib.parse import urlsplit
 from cosens.workflow import freeze_run_context, prepare_ready_async
 
 
@@ -52,15 +54,18 @@ async def poll(call, ready, *, timeout=30):
 
 
 async def validate(args, key, report):
+    host = urlsplit(resolve_service().url).hostname
     async def observe(response):
         request = response.request
         identity = any(k.lower().replace("_", "-") == "x-user-id" for k in request.headers)
+        assert request.headers.get("x-auth-type") == "api_key"
+        assert request.headers.get("authorization") == f"Bearer {key}"
         entry = {"method": request.method, "path": request.url.raw_path.decode(), "http_status": response.status_code,
                  "request_id": response.headers.get("x-request-id"), "identity_header_sent": identity}
         report["requests"].append(entry)
         print(dump(entry), flush=True)
         assert not identity, "SDK must not send X-User-Id"
-        assert request.url.scheme == "https" and request.url.host == "friday-rsi-cn.stardust-ai.com"
+        assert request.url.scheme == "https" and request.url.host == host
 
     async with CoSensClient(api_key=key) as client:
         client._transport.client.event_hooks["response"].append(observe)
@@ -73,6 +78,10 @@ async def validate(args, key, report):
         context = await atoms.recall_context(query="CoSens SDK gateway validation", token_budget=200)
         assert context.get("run_id") is None
         report["standalone_recall"] = "passed"
+        items = await atoms.get_memory_items(limit=1)
+        assert isinstance(items.get("sources"), list) and isinstance(items.get("experiences"), list)
+        assert items.get("limit") == 1
+        report["memory_items"] = "passed"
         if not args.write:
             return
 
@@ -180,7 +189,8 @@ def main():
     if args.write and not args.transcript:
         parser.error("--write requires --transcript")
     key = os.getenv("RSI_API_KEY") or os.getenv("COSENS_API_KEY") or getpass.getpass("Friday API Key (hidden): ")
-    report = {"started_at": datetime.now(timezone.utc).isoformat(), "gateway": "https://friday-rsi-cn.stardust-ai.com/api", "requests": []}
+    service = resolve_service()
+    report = {"started_at": datetime.now(timezone.utc).isoformat(), "gateway": service.url, "region": service.region, "requests": []}
     try:
         asyncio.run(validate(args, key, report))
         report["result"] = "passed"

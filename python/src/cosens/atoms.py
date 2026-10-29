@@ -2,23 +2,16 @@
 
 import asyncio
 import os
-from urllib.parse import quote, urlencode
+from urllib.parse import urlencode
 
 from .http import AsyncTransport, SyncTransport
+from ._config import resolve_service
 from .errors import RSIRecoveryRequired
 from .models import result
-
-
-def _part(value):
-    if not isinstance(value, str) or not value:
-        raise ValueError("resource ID must be a nonempty string")
-    return quote(value, safe="")
-
-
-def _key(value):
-    if not isinstance(value, str) or not value.strip() or len(value) > 256:
-        raise ValueError("key must be 1–256 characters")
-    return value
+from .workflow import _bounded_timeout
+from .atoms_helpers import path_part as _part, stable_key as _key
+from .workflow_atoms import AsyncWorkflowAtoms, SyncWorkflowAtoms, validate_artifact
+from .document_atoms import AsyncDocumentAtoms, SyncDocumentAtoms
 
 
 def _recall_context(recipe, memory, query, task_family):
@@ -32,7 +25,44 @@ def _recall_context(recipe, memory, query, task_family):
                    "snapshot": {"evidence": memory["items"], "memory_recall": memory}})
 
 
-class AsyncAtoms:
+def _bounded_integer(value, *, name, minimum, maximum):
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be an integer from {minimum} to {maximum}")
+    return value
+
+
+def _ingest_body(content, request_key, source_kind, durable, source_id, expected_revision):
+    body = {"content": content, "request_key": _key(request_key), "source_kind": source_kind, "durable": durable}
+    if source_id is not None:
+        if not isinstance(source_id, str) or not source_id.strip():
+            raise ValueError("source_id must be a nonempty string")
+        body["source_id"] = source_id
+    if expected_revision is not None:
+        body["expected_revision"] = _bounded_integer(expected_revision, name="expected_revision", minimum=0, maximum=2**53-1)
+    return body
+
+
+def _step_body(attempt_token, outputs, decision_id, actual_action_id):
+    if not isinstance(attempt_token, str) or not attempt_token:
+        raise ValueError("attempt_token is required")
+    if not isinstance(outputs, dict):
+        raise TypeError("outputs must be an object")
+    body = {"attempt_token": attempt_token, "outputs": outputs}
+    if decision_id is not None:
+        body["decision_id"] = decision_id
+    if actual_action_id is not None:
+        body["actual_action_id"] = actual_action_id
+    return body
+
+
+def _prepare_body(objective, task_family, input_artifact_ids, options):
+    execution_mode = options.get("execution_mode", "assist")
+    if execution_mode not in {"assist", "guided"}:
+        raise ValueError("execution_mode must be assist or guided")
+    return {"objective": objective, "task_family": task_family, "input_artifact_ids": input_artifact_ids or [], **options}
+
+
+class AsyncAtoms(AsyncWorkflowAtoms, AsyncDocumentAtoms):
     def __init__(self, transport):
         self._http = transport
 
@@ -46,10 +76,13 @@ class AsyncAtoms:
         return await self._http.request("GET", "/v1/recipes/active?" + urlencode({"task_family": task_family}))
 
     async def memory_recall(self, *, query, token_budget=1000):
-        return await self._http.request("POST", "/v1/memory/recall", body={"query": query, "token_budget": token_budget})
+        return await self._http.request("POST", "/v1/memory/recall", body={"query": query, "token_budget": _bounded_integer(token_budget, name="token_budget", minimum=1, maximum=8000)})
 
-    async def memory_ingest(self, *, content, request_key, source_kind="decision", durable=True):
-        return await self._http.request("POST", "/v1/memory/ingest", body={"content": content, "request_key": _key(request_key), "source_kind": source_kind, "durable": durable})
+    async def memory_ingest(self, *, content, request_key, source_kind="decision", durable=True, source_id=None, expected_revision=None):
+        return await self._http.request("POST", "/v1/memory/ingest", body=_ingest_body(content, request_key, source_kind, durable, source_id, expected_revision))
+
+    async def get_memory_items(self, *, limit=200):
+        return await self._http.request("GET", "/v1/memory/items?" + urlencode({"limit": _bounded_integer(limit, name="limit", minimum=1, maximum=500)}))
 
     async def get_memory_job(self, job_id):
         return await self._http.request("GET", f"/v1/memory/jobs/{_part(job_id)}")
@@ -76,12 +109,25 @@ class AsyncAtoms:
     async def get_trace(self, run_id):
         return await self._http.request("GET", f"/v1/runs/{_part(run_id)}/trace")
 
+    async def next_step(self, run_id):
+        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/steps/next")
+
+    async def submit_step(self, run_id, attempt_id, *, attempt_token, outputs, decision_id=None, actual_action_id=None):
+        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/steps/{_part(attempt_id)}/submit",
+                                        body=_step_body(attempt_token, outputs, decision_id, actual_action_id))
+
+    async def complete_guided(self, run_id):
+        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/complete")
+
+    async def get_events(self, run_id):
+        return await self._http.request("GET", f"/v1/runs/{_part(run_id)}/events")
+
     async def artifact(self, *, name, content):
+        validate_artifact(name, content)
         return await self._http.request("POST", "/v1/artifacts", body={"name": name, "content": content})
 
     async def prepare(self, *, objective, key, task_family="general", input_artifact_ids=None, **options):
-        body = {"objective": objective, "task_family": task_family, "input_artifact_ids": input_artifact_ids or []}
-        body.update(options)
+        body = _prepare_body(objective, task_family, input_artifact_ids, options)
         return await self._http.request("POST", "/v1/runs/prepare", body=body, key=_key(key))
 
     async def get_run(self, run_id):
@@ -94,15 +140,15 @@ class AsyncAtoms:
         return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/initial-inputs", body={"artifact_ids": artifact_ids})
 
     async def submit(self, run_id, *, data=None, key=None):
-        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/submit", body={"data": data or {}}, key=_key(key) if key else None)
+        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/submit", body={"data": data or {}}, key=_key(key) if key is not None else None)
 
     async def feedback(self, run_id, *, data, key=None):
-        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/feedback", body={"data": data}, key=_key(key) if key else None)
+        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/feedback", body={"data": data}, key=_key(key) if key is not None else None)
 
     async def improve(self, run_id, *, reason, key=None):
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("reason is required")
-        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/improvements", body={"data": {"reason": reason}}, key=_key(key) if key else None)
+        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/improvements", body={"data": {"reason": reason}}, key=_key(key) if key is not None else None)
 
     async def get_improvement(self, job_id):
         return await self._http.request("GET", f"/v1/improvements/{_part(job_id)}")
@@ -112,7 +158,7 @@ class AsyncAtoms:
 
     async def wait_improvement(self, job_id, *, timeout=300, initial_delay=2, max_delay=30):
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
+        deadline = loop.time() + _bounded_timeout(timeout)
         delay = initial_delay
         while True:
             job = await self.get_improvement(job_id)
@@ -152,7 +198,7 @@ class _AdminClient:
         self.atoms = AdminAtoms(transport)
 
 
-class SyncAtoms:
+class SyncAtoms(SyncWorkflowAtoms, SyncDocumentAtoms):
     """Internal synchronous form used by wrapped synchronous OpenAI clients."""
 
     def __init__(self, transport):
@@ -168,10 +214,13 @@ class SyncAtoms:
         return self._http.request("GET", "/v1/recipes/active?" + urlencode({"task_family": task_family}))
 
     def memory_recall(self, *, query, token_budget=1000):
-        return self._http.request("POST", "/v1/memory/recall", body={"query": query, "token_budget": token_budget})
+        return self._http.request("POST", "/v1/memory/recall", body={"query": query, "token_budget": _bounded_integer(token_budget, name="token_budget", minimum=1, maximum=8000)})
 
-    def memory_ingest(self, *, content, request_key, source_kind="decision", durable=True):
-        return self._http.request("POST", "/v1/memory/ingest", body={"content": content, "request_key": _key(request_key), "source_kind": source_kind, "durable": durable})
+    def memory_ingest(self, *, content, request_key, source_kind="decision", durable=True, source_id=None, expected_revision=None):
+        return self._http.request("POST", "/v1/memory/ingest", body=_ingest_body(content, request_key, source_kind, durable, source_id, expected_revision))
+
+    def get_memory_items(self, *, limit=200):
+        return self._http.request("GET", "/v1/memory/items?" + urlencode({"limit": _bounded_integer(limit, name="limit", minimum=1, maximum=500)}))
 
     def get_memory_job(self, job_id):
         return self._http.request("GET", f"/v1/memory/jobs/{_part(job_id)}")
@@ -198,12 +247,25 @@ class SyncAtoms:
     def get_trace(self, run_id):
         return self._http.request("GET", f"/v1/runs/{_part(run_id)}/trace")
 
+    def next_step(self, run_id):
+        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/steps/next")
+
+    def submit_step(self, run_id, attempt_id, *, attempt_token, outputs, decision_id=None, actual_action_id=None):
+        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/steps/{_part(attempt_id)}/submit",
+                                  body=_step_body(attempt_token, outputs, decision_id, actual_action_id))
+
+    def complete_guided(self, run_id):
+        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/complete")
+
+    def get_events(self, run_id):
+        return self._http.request("GET", f"/v1/runs/{_part(run_id)}/events")
+
     def artifact(self, *, name, content):
+        validate_artifact(name, content)
         return self._http.request("POST", "/v1/artifacts", body={"name": name, "content": content})
 
     def prepare(self, *, objective, key, task_family="general", input_artifact_ids=None, **options):
-        body = {"objective": objective, "task_family": task_family, "input_artifact_ids": input_artifact_ids or []}
-        body.update(options)
+        body = _prepare_body(objective, task_family, input_artifact_ids, options)
         return self._http.request("POST", "/v1/runs/prepare", body=body, key=_key(key))
 
     def get_run(self, run_id):
@@ -216,15 +278,16 @@ class SyncAtoms:
         return self._http.request("POST", f"/v1/runs/{_part(run_id)}/initial-inputs", body={"artifact_ids": artifact_ids})
 
     def submit(self, run_id, *, data=None, key=None):
-        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/submit", body={"data": data or {}}, key=_key(key) if key else None)
+        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/submit", body={"data": data or {}}, key=_key(key) if key is not None else None)
 
 
 class CoSensClient:
     def __init__(self, api_key=None, *, state_path=None, _http_transport=None):
         api_key = api_key if api_key is not None else (os.getenv("RSI_API_KEY") or os.getenv("COSENS_API_KEY"))
-        self._transport = AsyncTransport(api_key=api_key, transport=_http_transport)
-        self._admin_transport = AsyncTransport(api_key=api_key, transport=_http_transport)
-        self._sync_transport = SyncTransport(api_key=api_key, transport=_http_transport)
+        self._service = resolve_service()
+        self._transport = AsyncTransport(api_key=api_key, transport=_http_transport, service=self._service)
+        self._admin_transport = AsyncTransport(api_key=api_key, transport=_http_transport, service=self._service)
+        self._sync_transport = SyncTransport(api_key=api_key, transport=_http_transport, service=self._service)
         self.atoms = AsyncAtoms(self._transport)
         self.sync_atoms = SyncAtoms(self._sync_transport)
         self.admin = _AdminClient(self._admin_transport)
@@ -234,6 +297,12 @@ class CoSensClient:
         await self._transport.aclose()
         await self._admin_transport.aclose()
         self._sync_transport.close()
+
+    async def start(self, session_context, *, phase="prepare", mode="auto", request_key=None, authorize=None):
+        """Start a workflow phase and return the host's next request or job receipt."""
+        from .workflow_start import start_workflow
+        return await start_workflow(self.atoms, session_context, phase=phase, mode=mode,
+                                    request_key=request_key, authorize=authorize)
 
     def close(self):
         self._sync_transport.close()

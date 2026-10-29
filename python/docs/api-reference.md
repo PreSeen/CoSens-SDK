@@ -2,9 +2,15 @@
 
 基础安装和可运行示例见 [接入文档](../README.md)。以下是可选能力，普通透明接入只需 `native`、`api_key`、`mode`。
 
+## 新任务工作流
+
+`client.atoms` 和 `client.sync_atoms` 已增加 Task、Execution、Revision、Attribution、Recipe Candidate、Verification、Memory v3 与 guided Run 的原子方法。方法名、请求体、幂等键和恢复语义见[任务工作流 SDK 开发契约](2026-10-28-task-workflow-sdk-design.md)。下方分别列出旧 `/v1/runs`、Memory 与文档上传 API。
+
 ## 原子编排入口
 
 `CoSensClient(api_key=...)` 是异步上下文管理器，`rsi.atoms` 不会替应用执行模型或工具。
+
+所有 CoSens 原子接口（包括 `admin.atoms`）均发送 `X-Auth-Type: api_key` 与 `Authorization: Bearer <api_key>`；`Idempotency-Key` 仅在相应调用提供稳定幂等键时发送。显式提供的键必须为非空、最多 256 字符且不含控制字符；可选键传入空字符串会报错，不会静默省略。
 
 | 方法 | 调用时机 | 网关 `/api` 后路径 |
 | --- | --- | --- |
@@ -18,7 +24,7 @@
 | `improve(run_id, reason=..., key=...)` | 明确要求发起改进时 | `POST /v1/runs/{run_id}/improvements` |
 | `get_improvement(job_id)` / `wait_improvement(job_id)` | 查询/有界轮询异步改进 | `GET /v1/improvements/{job_id}` |
 | `resume_improvement(job_id)` | 确认任务可恢复后 | `POST /v1/improvements/{job_id}/resume` |
-| `admin.atoms.publish(job_id, expected_revision=..., reason=...)` | 显式批准发布时，由服务端校验权限 | `POST /internal/admin/v1/improvements/{job_id}/publish` |
+| `admin.atoms.publish(job_id, expected_revision=..., reason=...)` | 显式批准发布时，须由外部网关实施管理员授权 | `POST /internal/admin/v1/improvements/{job_id}/publish` |
 
 `prepare` 返回 `processing` 时，使用同一个 key 有界轮询；只有 `ready` 才进入模型调用。不要将一次请求超时当成失败后创建新任务的依据。三种入口的详细接口时机见 [设计文档](2026-10-26-cosens-python-sdk-design.md)。
 
@@ -43,8 +49,9 @@ Session 事件只在收到 `durable_ack` 后推进本地游标。失败后可查
 | SDK 方法 | 网关 `/api` 后的路径 |
 | --- | --- |
 | `get_active_recipe(task_family=...)` | `GET /v1/recipes/active?task_family=...` |
-| `memory_ingest(content=..., request_key=...)` | `POST /v1/memory/ingest` |
-| `memory_recall(query=..., token_budget=1000)` | `POST /v1/memory/recall` |
+| `memory_ingest(content=..., request_key=..., source_id=..., expected_revision=..., source_kind=..., durable=...)` | `POST /v1/memory/ingest` |
+| `memory_recall(query=..., token_budget=1000)` | `POST /v1/memory/recall`；预算 1–8000 |
+| `get_memory_items(limit=200)` | `GET /v1/memory/items?limit=...`；limit 1–500 |
 | `get_memory_job(job_id)` | `GET /v1/memory/jobs/{job_id}` |
 | `get_memory_experience(experience_id, revision=...)` | `GET /v1/memory/experiences/{experience_id}` |
 | `get_memory()` | `GET /v1/memory` |
@@ -53,6 +60,14 @@ Session 事件只在收到 `durable_ack` 后推进本地游标。失败后可查
 | `checkpoint(run_id, data=...)` | `POST /v1/runs/{run_id}/checkpoint` |
 | `get_decision(run_id, decision_id)` | `GET /v1/runs/{run_id}/decisions/{decision_id}` |
 | `get_trace(run_id)` | `GET /v1/runs/{run_id}/trace` |
+| `next_step(run_id)` | `POST /v1/runs/{run_id}/steps/next` |
+| `submit_step(run_id, attempt_id, attempt_token=..., outputs=..., decision_id=..., actual_action_id=...)` | `POST /v1/runs/{run_id}/steps/{attempt_id}/submit` |
+| `complete_guided(run_id)` | `POST /v1/runs/{run_id}/complete` |
+| `get_events(run_id)` | `GET /v1/runs/{run_id}/events` |
+
+`memory_ingest` 为兼容既有调用，SDK 仍显式发送 `source_kind="decision"`、`durable=True`；原始服务省略字段时的默认值分别是 `message`、`false`。需要原始服务默认语义时显式传 `source_kind="message", durable=False`。新增来源可省略 `expected_revision`（服务默认 0）；更新来源时传入 `source_id` 和当前 revision。`memory_ingest` 返回 `pending` 时使用原 `job_id` 查询至 `committed` 或 `failed`。`prepare(..., execution_mode="guided")` 启用 guided；`managed` 被客户端拒绝。guided 步骤的 `attempt_id`/`attempt_token` 应持久保存；原生动作结果未知时先对账，不能重放动作。`get_events` 与 `get_trace` 是不同接口，`complete_guided` 不代替 assist 的 `submit`。
+
+CN 已验证：`next_step` 的 `step_ready` 回执在 `node.output_contract` 声明输出端口。artifact 端口应传 `outputs={"files": [{"artifact_id": ..., "name": ..., "content_hash": ...}]}`，引用上传回执；单独 ID 不满足该端口。`submit_step` 的 HTTP 200 仍可能返回 `repair_required`，只有 `step_passed` 表示步骤通过。全流程完成后 `complete_guided` 返回 `completed`；`get_events` 返回含 `items` 列表的对象。
 
 `admin.atoms` 新增显式调用：`bootstrap_bundle`、`evaluate_decision`、`evaluate_recipe`，对应附件的 Recipe 注册、决策评估、Recipe 评估接口。它们不会由透明包装自动触发；调用者须提交实际执行和评估证据。`feedback` 不等于经验已经 verified，异步写入需轮询 Job/经验版本确认。
 
@@ -61,6 +76,8 @@ Session 事件只在收到 `durable_ack` 后推进本地游标。失败后可查
 ## 复现网关联调
 
 先由运行环境注入 `RSI_API_KEY`（没有设置时脚本隐藏输入 Key），在仓库根目录运行：
+
+两个诊断脚本均支持 `COSENS_REGION=cn`（默认）或 `us`，网关分别为 `https://friday-rsi-cn.stardust-ai.com/api`、`https://rsi.cosens.ai/api`。它们不加载 `.env` 或选择 `RSI_API_KEY_US`；请将目标区域的 Key 注入进程的 `RSI_API_KEY`。三种可直接运行的模型示例会读取 `.env` 并选择区域 Key，详见 [区域配置](../README.md#国内区与美国区测试)。
 
 ```bash
 # 只读验证：健康状态和无 Run 召回
@@ -73,3 +90,40 @@ python python/examples/validate_gateway.py --write \
 # 真实网关 + 本地模型/Agent 替身；会创建测试 Run，需要 agents 可选依赖
 python python/examples/validate_wrapped_gateway.py --output /tmp/cosens-wrapped.json
 ```
+
+## 文档上传
+
+Python 异步 `client.atoms` 和同步 `client.sync_atoms` 均支持以下四个方法：
+
+| 方法 | 请求 |
+| --- | --- |
+| `create_document_upload_grant(filename=..., mime_type=..., **metadata)` | 签发一次性上传 grant |
+| `upload_document_to_grant(grant, content=...)` | 将非空原始字节上传一次 |
+| `upload_document(filename=..., mime_type=..., content=..., **metadata)` | 普通 multipart 上传 |
+| `get_document_status(document_ids)` | 查询非空文档 ID 列表 |
+
+```python
+import asyncio
+import os
+from pathlib import Path
+from cosens import CoSensClient
+
+async def main():
+    os.environ["COSENS_REGION"] = "cn"
+    async with CoSensClient(api_key=os.environ["RSI_API_KEY"]) as client:
+        content = Path("notes.txt").read_bytes()
+        grant = await client.atoms.create_document_upload_grant(
+            filename="notes.txt", mime_type="text/plain", wait_for_processing=False,
+        )
+        receipt = await client.atoms.upload_document_to_grant(grant, content=content)
+        # 持久化回执并检查业务状态；HTTP 200 不等于文件已完成处理。
+        if receipt.get("document_id"):
+            status = await client.atoms.get_document_status([receipt["document_id"]])
+            print(status)
+
+asyncio.run(main())
+```
+
+普通 multipart 可单独使用 `await client.atoms.upload_document(filename="notes.txt", mime_type="text/plain", content=content)`；它与 grant 上传是两种入口，不应对同一结果不明的文件依次尝试。同步宿主改用 `client.sync_atoms` 并去掉方法调用的 `await`。
+
+元数据、URL 校验和恢复规则见[开发契约第 8.4 节](2026-10-28-task-workflow-sdk-design.md#84-文档上传)。SDK 不接受用户身份覆盖，不自动重试一次性令牌，也不执行 grant 内的命令文本。Key 来自构造参数或进程环境 `RSI_API_KEY` / `COSENS_API_KEY`，SDK 本身不自动加载 `.env`。CN grant 路径尚未部署，以上代码需待服务上线后联调；离线契约测试已通过。

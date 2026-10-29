@@ -2,6 +2,8 @@
 
 Spec: `python/docs/2026-10-26-cosens-python-sdk-design.md` (current revision).
 
+历史实施计划：以下鉴权描述记录当时的 Bearer-only 方案。当前请求头契约以设计文档第 1 节为准，CoSens 请求同时发送 `X-Auth-Type: api_key` 与 `Authorization: Bearer <api_key>`。
+
 Continue on the user's `wangzhichao_sdk_2026-10-26` branch. Preserve unrelated `.idea/` files. Use HTTP mocks for writes; do not invent the missing standalone recall endpoint.
 
 ### Task 1: Private gateway transport

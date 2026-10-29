@@ -9,7 +9,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from ._config import SERVICE_ID
+from ._config import resolve_service
 from .errors import RSIRecoveryRequired, SessionHistoryChanged
 
 
@@ -49,7 +49,8 @@ class PendingBatch:
 
 
 class CursorStore:
-    def __init__(self, path=None, *, principal):
+    def __init__(self, path=None, *, principal, service_id=None):
+        self._service_id = service_id or resolve_service().identity
         path = str(path or default_state_path())
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -77,8 +78,15 @@ class CursorStore:
             items = await items
         if not isinstance(items, (list, tuple)):
             raise TypeError("Session.get_items() must return a list")
-        key = _hash([SERVICE_ID, self._principal, str(session_id), str(incarnation)])
-        return SessionSnapshot(key, str(session_id), tuple(copy.deepcopy(_plain(item)) for item in items))
+        key = _hash([self._service_id, self._principal, str(session_id), str(incarnation)])
+        snapshot = SessionSnapshot(key, str(session_id), tuple(copy.deepcopy(_plain(item)) for item in items))
+        event_ids = set()
+        for position in range(len(snapshot.items)):
+            event_id = self._event(snapshot, position)["id"]
+            if event_id in event_ids:
+                raise SessionHistoryChanged(f"Session contains duplicate message ID {event_id}")
+            event_ids.add(event_id)
+        return snapshot
 
     @staticmethod
     def _event(snapshot, position):
@@ -176,7 +184,6 @@ class CursorStore:
             acknowledged = acknowledged.get("event_ids", acknowledged.get("ids", []))
         if not isinstance(acknowledged, list):
             raise RSIRecoveryRequired("Session event receipt has no durable_ack event IDs")
-        ack_set = set(acknowledged)
         with self._lock, self._db:
             old_index, old_hash, run_id, pending_json = self._row(snapshot.key)
             self._validate(snapshot, old_index, old_hash)
@@ -184,6 +191,12 @@ class CursorStore:
                 raise RSIRecoveryRequired("No pending Session event batch to acknowledge")
             pending = json.loads(pending_json)
             self._validate_batch(snapshot, pending, old_index + 1)
+            pending_ids = {event["id"] for event in pending}
+            ack_set = set()
+            for event_id in acknowledged:
+                if not isinstance(event_id, str) or event_id not in pending_ids or event_id in ack_set:
+                    raise RSIRecoveryRequired("Session event ACK contains an unsent or duplicate event ID")
+                ack_set.add(event_id)
             advanced = 0
             for event in pending:
                 if event["id"] not in ack_set:

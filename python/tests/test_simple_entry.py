@@ -48,7 +48,9 @@ async def test_three_argument_entry_uses_request_model_and_captures_without_sess
         assert [body["model"] for _, body in model_requests] == ["business-model", "business-model"]
         assert model_requests[0][1]["store"] is False
         assert all(request.headers["authorization"] == "Bearer model-key" for request, _ in model_requests)
+        assert all("x-auth-type" not in request.headers for request, _ in model_requests)
         assert all(request.headers["authorization"] == "Bearer friday-key" for request, _ in gateway_requests)
+        assert all(request.headers["x-auth-type"] == "api_key" for request, _ in gateway_requests)
         events = [e for request, body in gateway_requests if request.url.path.endswith("/session-events") for e in body["events"]]
         assert [(e["payload"]["role"], e["payload"]["content"]) for e in events] == [("user", "hello"), ("assistant", "done")]
         assert client.cosens.get_turn(client.cosens.last_turn_id)["state"] == "completed"

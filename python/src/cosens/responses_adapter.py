@@ -30,14 +30,12 @@ def user_text(path, kwargs):
         return value
     if isinstance(value, list):
         texts = []
-        for item in value:
-            if not isinstance(item, dict) or item.get("role") != "user":
-                continue
-            content = item.get("content")
-            if isinstance(content, str):
-                texts.append(content)
-            elif isinstance(content, list):
-                texts.extend(part.get("text", "") for part in content if isinstance(part, dict) and part.get("type") in {"text", "input_text"})
+        item = next((item for item in reversed(value) if isinstance(item, dict) and item.get("role") == "user"), None)
+        content = item.get("content") if item else None
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            texts.extend(part["text"] for part in content if isinstance(part, dict) and part.get("type") in {"text", "input_text"} and isinstance(part.get("text"), str))
         return "\n".join(texts)[-8000:]
     return ""
 
@@ -89,6 +87,18 @@ def terminal(response):
     if choices is not None:
         return bool(choices) and all(getattr(choice, "finish_reason", None) not in {"tool_calls", "function_call", None} for choice in choices)
     return bool(getattr(response, "output_text", None))
+
+
+def tool_continuation(response):
+    if getattr(response, "status", "completed") not in {"completed", None}:
+        return False
+    outputs = getattr(response, "output", None)
+    if outputs is not None:
+        return any((item.get("type") if isinstance(item, dict) else getattr(item, "type", None)) == "function_call" for item in outputs)
+    choices = getattr(response, "choices", None)
+    if choices is not None:
+        return any(getattr(choice, "finish_reason", None) in {"tool_calls", "function_call"} for choice in choices)
+    return False
 
 
 def summary(response):

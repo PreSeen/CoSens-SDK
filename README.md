@@ -13,6 +13,8 @@ client = cosens(native, api_key=os.environ["RSI_API_KEY"], mode="auto")
 
 **[Python 接入文档](python/README.md) · [可运行示例](python/examples/) · [原子 API](python/docs/api-reference.md)**
 
+2026-10-28 下游新增 Task / Revision / Recipe Candidate 工作流。Python 和 TypeScript 已提供对应的手动原子接口及独立的 `cosens(Runner)` 包装；协议、恢复规则及当前实现边界见 [任务工作流开发契约](python/docs/2026-10-28-task-workflow-sdk-design.md)。现有透明包装及 `cosens(Agent)` 显式入口仍使用旧 Run 协议。
+
 ## 能做什么
 
 - **透明接入**：继续使用 `client.responses.create(...)` 等原生调用；其他 OpenAI 资源方法透传。
@@ -47,16 +49,21 @@ cp python/.env.example python/.env
 | SDK | 状态 |
 | --- | --- |
 | [Python](python/) | 0.1.0，支持从源码安装 |
-| [TypeScript](typescript/) | 仅预留目录，尚未实现 |
+| [TypeScript](typescript/) | 开发中，已提供源码和模拟测试；尚未完成设计文档中的全部验收项 |
 
-CoSens 国内网关地址由 SDK 内部管理，无需传入 `base_url` 或 `X_User_Id`。OpenAI 模型凭证和 Friday Key 分别用于两个服务，具体配置、常见错误和恢复方式见 [Python 接入文档](python/README.md)。
+CoSens 网关地址由 SDK 内部管理：`COSENS_REGION=cn`（默认）使用国内区，`COSENS_REGION=us` 使用美国区。三种示例均支持，无需传入 CoSens `base_url` 或 `X_User_Id`。OpenAI 模型凭证和 Friday Key 分别用于两个服务，区域 Key 配置、常见错误和恢复方式见 [Python 接入文档](python/README.md#国内区与美国区测试)。
+
+CoSens 服务端请求统一发送 `X-Auth-Type: api_key` 和 `Authorization: Bearer <api_key>`；原生 OpenAI 模型请求不附加 `X-Auth-Type`。
 
 ## 开发与验证
+
+在 IDEA 的 Run Configurations 中选择 **`00_all_tests_CN`**，可依次运行 Python 全量测试、TypeScript 构建/类型检查/全量测试，以及两种语言的 CN 网关只读和新工作流冒烟测试。**`00_all_tests_CN_live`** 还会运行 Python / TypeScript 各三个真实模型示例，会产生模型调用和旧协议 Run。凭据从 `python/.env` 读取；运行报告保存在 `python/docs/testing/latest-cn/summary.json`。若 CN 网关尚未部署新工作流路由，冒烟测试只读退出，整体配置返回代码 2；不会写入新工作流测试任务。独立配置 **`04_task_workflow_CN`** 只运行 Python 新工作流冒烟测试。两个语言的冒烟脚本在路由可用时仅创建带唯一前缀的合成任务，并保存 ID 与提交正文以供中断后对账。
 
 ```bash
 python -m pip install -e "./python[examples,test]"
 python -m pytest python/tests
 python -m build python
+python python/examples/run_all_cn_tests.py
 ```
 
 - [设计与调用时机](python/docs/2026-10-26-cosens-python-sdk-design.md)

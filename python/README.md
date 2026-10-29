@@ -4,6 +4,12 @@
 
 [安装](#安装) · [配置](#配置) · [快速开始](#快速开始) · [三种可运行示例](#三种可运行示例) · [常见问题](#常见问题) · [API 参考](docs/api-reference.md)
 
+新增任务工作流的 Python / TypeScript 原子方法与恢复约束见[开发契约](docs/2026-10-28-task-workflow-sdk-design.md)。本页的透明包装及显式 Run 示例仍使用旧 `/v1/runs` 协议。
+
+新版 Memory 与 guided Run 原子方法已加入 `client.atoms` 和 `client.sync_atoms`：来源版本写入、Memory 列表、guided 取下一步/提交步骤/完成及事件读取。方法参数见 [API 参考](docs/api-reference.md)。2026-10-29 固定 CN 区域后，Recipe、Memory 召回/列表、来源版本更新、guided Run 完整步骤流及 Task → Execution → Revision 冒烟测试通过，见 [验证记录](docs/testing/2026-10-29-v3-cn-contract.json)。Memory 抽取作业仍 pending；文档上传的四个原子方法已实现并完成离线测试，使用方式见 [API 参考](docs/api-reference.md#文档上传)；一次性上传的 grant 路由尚未出现在 CN OpenAPI 中，真实联调待下游部署。
+
+在 IDEA 中选择 `00_all_tests_CN` 可运行两种语言的完整离线测试和 CN 网关检查；`00_all_tests_CN_live` 还会执行两种语言的真实模型示例。`04_task_workflow_CN` 单独检查新工作流。网关尚未部署新路由时，新工作流测试只读退出（代码 2）；详见根目录 [测试说明](../README.md#开发与验证)。
+
 ## 安装
 
 要求 **Python 3.10+**。当前支持 `openai` 2.54.x，Agent 接入使用 `openai-agents` 0.20.x。以下命令均从 **CoSens-SDK 仓库根目录**执行：
@@ -34,12 +40,36 @@ RSI_API_KEY=your-friday-key
 | `OPENAI_BASE_URL` | 自定义兼容模型服务地址；不填使用 OpenAI 默认地址 | 否 |
 | `COSENS_MODE` | 透明示例的模式，默认 `auto`，可改为 `disable` | 否 |
 | `COSENS_INPUT` | 示例任务文字，不填使用内置集成测试问题 | 否 |
+| `COSENS_REGION` | CoSens 服务区域，`cn`（默认）或 `us` | 否 |
+| `RSI_API_KEY_CN` / `RSI_API_KEY_US` | 示例按区域选用的 Friday Key；未配置时使用 `RSI_API_KEY` | 否 |
 
 三个示例自动读取 `python/.env`，已有进程环境变量优先。**SDK 本身不自动读取 `.env`**；你自己的应用可使用环境变量或 `load_dotenv()`。
 
-CoSens 网关固定为 `https://friday-rsi-cn.stardust-ai.com/api`，由 SDK 内部配置。无需传入 CoSens `base_url` 或 `X_User_Id`，用户身份由网关注入。`OPENAI_BASE_URL` 仅配置模型服务。
+CoSens 网关由 SDK 内部按 `COSENS_REGION` 选择：国内 `cn` 为 `https://friday-rsi-cn.stardust-ai.com/api`，美国 `us` 为 `https://rsi.cosens.ai/api`。无需传入 CoSens `base_url` 或 `X_User_Id`，用户身份由网关注入。`OPENAI_BASE_URL` 仅配置模型服务。
 
-Friday Key 经 HTTPS 通过 `Authorization: Bearer <key>` 发送，证书验证保持开启，不跟随重定向。它不会传给 OpenAI。请使用环境变量或部署平台密钥管理；`.env` 已被 Git 忽略。不要把真实 Key 写入提交到仓库的源码。
+### 国内区与美国区测试
+
+三个示例共用同一套代码，在 `python/.env` 中配置区域与对应 Key：
+
+```dotenv
+COSENS_REGION=us
+RSI_API_KEY_CN=your-cn-friday-key
+RSI_API_KEY_US=your-us-friday-key
+```
+
+这些值是占位符，真实联调需要有效 Key。示例优先使用对应区域的 Key，未设置或为空时回退到 `RSI_API_KEY`；显式填了占位符则在发送任何请求前提示补全配置，不会回退。不要假设两区 Key 通用。这个 Key 选择逻辑属于示例辅助代码；应用直接使用 SDK 时仍通过 `api_key` 或 `RSI_API_KEY` / `COSENS_API_KEY` 提供当前区域凭证。
+
+IDEA 本地运行配置 `01_transparent`、`02_explicit_run`、`03_atomic` 固定测试国内区；同名加 `_US` 的三个入口测试美国区。也可直接打开示例运行，此时使用 `.env` 中的区域。终端临时切换示例：
+
+```bash
+COSENS_REGION=us python/.venv/bin/python python/examples/01_transparent.py
+COSENS_REGION=us python/.venv/bin/python python/examples/02_explicit_run.py
+COSENS_REGION=us python/.venv/bin/python python/examples/03_atomic.py
+```
+
+客户端在初始化时固定区域，切换区域需新建客户端。两区的 Run 恢复状态和消息确认游标相互隔离；国内区已有状态继续可用。
+
+每个 CoSens 服务端请求携带 `X-Auth-Type: api_key` 和 `Authorization: Bearer <api_key>`。Friday Key 经 HTTPS 发送，证书验证保持开启，不跟随重定向；这两个头不会加到原生 OpenAI 模型请求。请使用环境变量或部署平台密钥管理；`.env` 已被 Git 忽略。不要把真实 Key 写入提交到仓库的源码。
 
 ## 快速开始
 
@@ -194,3 +224,5 @@ python -m build python
 - [原子 API 与恢复边界](docs/api-reference.md)
 - [OpenAI Python SDK](https://github.com/openai/openai-python)
 - [OpenAI Agents SDK](https://github.com/openai/openai-agents-python)
+
+新增 30 个请求边界回归测试（Python / TypeScript 各 15 个），已纳入现有测试入口；用例清单、单独运行命令、缺陷修复与最新验证结果见[测试说明](docs/testing/2026-10-29-sdk-request-regression.md)。
