@@ -4,7 +4,21 @@
 
 ## 新任务工作流
 
-`client.atoms` 和 `client.sync_atoms` 已增加 Task、Execution、Revision、Attribution、Recipe Candidate、Verification、Memory v3 与 guided Run 的原子方法。方法名、请求体、幂等键和恢复语义见[任务工作流 SDK 开发契约](2026-10-28-task-workflow-sdk-design.md)。下方分别列出旧 `/v1/runs`、Memory 与文档上传 API。
+`client.atoms` 和 `client.sync_atoms` 提供 Task、Execution、Revision、Attribution、Recipe Candidate 和 Verification 的原子方法。写入方法的 `data` 参数直接对应服务端请求体；归因、验收和 Recipe 等接口由 SDK 包装为 `{"data": ...}`。工作流需要宿主执行并提交真实产物，不能将网络超时视为远端未执行。
+
+| SDK 方法 | 服务端路径 |
+| --- | --- |
+| `create_task(data=...)`, `get_task(id)`, `update_task_context(id, data=...)` | `POST /v1/tasks`, `GET /v1/tasks/{id}`, `POST /v1/tasks/{id}/context` |
+| `get_artifact(id)` | `GET /v1/artifacts/{id}` |
+| `start_task_analysis(id)`, `get_task_analysis(id)`, `resume_task_analysis(id)` | `/v1/tasks/{id}/analysis`, `/v1/task-analyses/{id}` 和其 `/resume` |
+| `start_reconstruction(id)`, `start_execution(id)` | `/v1/tasks/{id}/reconstructions`, `/executions` |
+| `get_execution(id)`, `submit_execution_result(id, data=...)`, `get_revision(id)` | `/v1/executions/{id}`、其 `/result`、`/v1/revisions/{id}` |
+| `start_attribution(id, data=...)`, `get_attribution(id)`, `resume_attribution(id)`, `select_attribution(id, data=...)` | `/v1/revisions/{id}/attributions`、`/v1/attributions/{id}` 和其 `/resume`、`/selection` |
+| `start_revision(id, data=...)`, `accept_revision(id, data=...)` | `/v1/revisions/{id}/revisions`、`/acceptance` |
+| `start_recipe_candidate(id, data=...)`, `get_recipe_candidate(id)`, `resume_recipe_candidate(id)` | `/v1/tasks/{id}/recipe-candidates`、`/v1/recipe-candidates/{id}` 和其 `/resume` |
+| `start_recipe_verification(id)`, `get_recipe_verification(id)` | `/v1/recipe-candidates/{id}/verifications`、`/v1/recipe-verifications/{id}` |
+
+`TaskWorkflowRunner` 和 `CoSensClient.start()` 的原始实现及恢复契约在当前分支缺失，调用会明确报 `NotImplementedError`；请使用原子接口自行编排。
 
 ## 原子编排入口
 
@@ -43,6 +57,14 @@ Session 事件只在收到 `durable_ack` 后推进本地游标。失败后可查
 网关 OpenAPI 当前标识为 1.0.0；以本次 curl 附件、网关实际返回和联调报告为准。审批协调器 `/v1/invocations` 仍未确认，透明 `approval` 命中时保持明确报错。单元测试使用模拟 HTTP；真实网关联调使用独立测试标识并写入合成测试数据，模型执行用本地替身验证编排，未调用真实模型或银行系统。详细时机与限制见 [设计文档](2026-10-26-cosens-python-sdk-design.md)。
 
 ## Recipe、Memory 与决策接口
+
+`client.atoms.list_recipe_candidates(limit=20, cursor=None, task_id=None, status=None)`
+列出当前用户的 Task 工作流 Recipe 候选摘要，调用 `GET /v1/recipe-candidates`；
+同步调用使用 `client.sync_atoms.list_recipe_candidates(...)`。`limit` 为 1–100，
+`status` 可为 `queued`、`running`、`awaiting_runner`、`candidate` 或 `failed`。
+保持筛选条件不变，使用响应的 `next_cursor` 翻页，直到 `has_more` 为 false。
+列表不包含旧 Run 的 active Recipe，完整内容需通过候选详情接口获取。
+用户身份由网关根据 API Key 注入；接口可用性取决于网关是否转发该路径及服务是否部署。
 
 普通原子接口（`atoms` 异步，`sync_atoms` 提供新增接口的同步形式）：
 
@@ -93,12 +115,10 @@ python python/examples/validate_wrapped_gateway.py --output /tmp/cosens-wrapped.
 
 ## 文档上传
 
-Python 异步 `client.atoms` 和同步 `client.sync_atoms` 均支持以下四个方法：
+Python 异步 `client.atoms` 和同步 `client.sync_atoms` 支持以下方法：
 
 | 方法 | 请求 |
 | --- | --- |
-| `create_document_upload_grant(filename=..., mime_type=..., **metadata)` | 签发一次性上传 grant |
-| `upload_document_to_grant(grant, content=...)` | 将非空原始字节上传一次 |
 | `upload_document(filename=..., mime_type=..., content=..., **metadata)` | 普通 multipart 上传 |
 | `get_document_status(document_ids)` | 查询非空文档 ID 列表 |
 
@@ -112,10 +132,9 @@ async def main():
     os.environ["COSENS_REGION"] = "cn"
     async with CoSensClient(api_key=os.environ["RSI_API_KEY"]) as client:
         content = Path("notes.txt").read_bytes()
-        grant = await client.atoms.create_document_upload_grant(
-            filename="notes.txt", mime_type="text/plain", wait_for_processing=False,
+        receipt = await client.atoms.upload_document(
+            filename="notes.txt", mime_type="text/plain", content=content, wait_for_processing=False,
         )
-        receipt = await client.atoms.upload_document_to_grant(grant, content=content)
         # 持久化回执并检查业务状态；HTTP 200 不等于文件已完成处理。
         if receipt.get("document_id"):
             status = await client.atoms.get_document_status([receipt["document_id"]])
@@ -124,6 +143,6 @@ async def main():
 asyncio.run(main())
 ```
 
-普通 multipart 可单独使用 `await client.atoms.upload_document(filename="notes.txt", mime_type="text/plain", content=content)`；它与 grant 上传是两种入口，不应对同一结果不明的文件依次尝试。同步宿主改用 `client.sync_atoms` 并去掉方法调用的 `await`。
+同步宿主改用 `client.sync_atoms` 并去掉方法调用的 `await`。上传结果不明时应先对账，不应盲目重新上传。
 
-元数据、URL 校验和恢复规则见[开发契约第 8.4 节](2026-10-28-task-workflow-sdk-design.md#84-文档上传)。SDK 不接受用户身份覆盖，不自动重试一次性令牌，也不执行 grant 内的命令文本。Key 来自构造参数或进程环境 `RSI_API_KEY` / `COSENS_API_KEY`，SDK 本身不自动加载 `.env`。CN grant 路径尚未部署，以上代码需待服务上线后联调；离线契约测试已通过。
+算法服务当前版本已移除一次性上传 grant 路由，因此 SDK 不提供 grant 上传。SDK 不接受用户身份覆盖；Key 来自构造参数或进程环境 `RSI_API_KEY` / `COSENS_API_KEY`，SDK 本身不自动加载 `.env`。实际网关支持情况需联调确认。

@@ -31,6 +31,20 @@ def _bounded_integer(value, *, name, minimum, maximum):
     return value
 
 
+def _recipe_list_path(limit, cursor, task_id, status):
+    params = {"limit": _bounded_integer(limit, name="limit", minimum=1, maximum=100)}
+    for name, value in (("cursor", cursor), ("task_id", task_id)):
+        if value is not None:
+            if not isinstance(value, str) or not value.strip() or len(value) > 128:
+                raise ValueError(f"{name} must be a nonempty string of at most 128 characters")
+            params[name] = value
+    if status is not None:
+        if not isinstance(status, str) or status not in {"queued", "running", "awaiting_runner", "candidate", "failed"}:
+            raise ValueError("invalid Recipe candidate status")
+        params["status"] = status
+    return "/v1/recipe-candidates?" + urlencode(params)
+
+
 def _ingest_body(content, request_key, source_kind, durable, source_id, expected_revision):
     body = {"content": content, "request_key": _key(request_key), "source_kind": source_kind, "durable": durable}
     if source_id is not None:
@@ -65,6 +79,9 @@ def _prepare_body(objective, task_family, input_artifact_ids, options):
 class AsyncAtoms(AsyncWorkflowAtoms, AsyncDocumentAtoms):
     def __init__(self, transport):
         self._http = transport
+
+    async def list_recipe_candidates(self, *, limit=20, cursor=None, task_id=None, status=None):
+        return await self._http.request("GET", _recipe_list_path(limit, cursor, task_id, status))
 
     async def recall_context(self, *, query, task_family="general", token_budget=1000):
         """Read Recipe and Memory without creating a Run; freeze per turn upstream."""
@@ -203,6 +220,9 @@ class SyncAtoms(SyncWorkflowAtoms, SyncDocumentAtoms):
 
     def __init__(self, transport):
         self._http = transport
+
+    def list_recipe_candidates(self, *, limit=20, cursor=None, task_id=None, status=None):
+        return self._http.request("GET", _recipe_list_path(limit, cursor, task_id, status))
 
     def recall_context(self, *, query, task_family="general", token_budget=1000):
         """Read Recipe and Memory without creating a Run; freeze per turn upstream."""

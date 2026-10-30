@@ -4,11 +4,11 @@
 
 [安装](#安装) · [配置](#配置) · [快速开始](#快速开始) · [三种可运行示例](#三种可运行示例) · [常见问题](#常见问题) · [API 参考](docs/api-reference.md)
 
-新增任务工作流的 Python / TypeScript 原子方法与恢复约束见[开发契约](docs/2026-10-28-task-workflow-sdk-design.md)。本页的透明包装及显式 Run 示例仍使用旧 `/v1/runs` 协议。
+Python 任务工作流原子方法见 [API 参考](docs/api-reference.md)。本页的透明包装及显式 Run 示例使用旧 `/v1/runs` 协议。
 
-新版 Memory 与 guided Run 原子方法已加入 `client.atoms` 和 `client.sync_atoms`：来源版本写入、Memory 列表、guided 取下一步/提交步骤/完成及事件读取。方法参数见 [API 参考](docs/api-reference.md)。2026-10-29 固定 CN 区域后，Recipe、Memory 召回/列表、来源版本更新、guided Run 完整步骤流及 Task → Execution → Revision 冒烟测试通过，见 [验证记录](docs/testing/2026-10-29-v3-cn-contract.json)。Memory 抽取作业仍 pending；文档上传的四个原子方法已实现并完成离线测试，使用方式见 [API 参考](docs/api-reference.md#文档上传)；一次性上传的 grant 路由尚未出现在 CN OpenAPI 中，真实联调待下游部署。
+Memory、guided Run 和任务工作流原子方法支持 `client.atoms` 和 `client.sync_atoms`。文档上传使用 multipart；算法服务当前版本已移除一次性上传 grant。`TaskWorkflowRunner` 和 `CoSensClient.start()` 的原始实现及恢复契约缺失，调用会明确报错，任务工作流需使用原子方法由宿主编排。
 
-在 IDEA 中选择 `00_all_tests_CN` 可运行两种语言的完整离线测试和 CN 网关检查；`00_all_tests_CN_live` 还会执行两种语言的真实模型示例。`04_task_workflow_CN` 单独检查新工作流。网关尚未部署新路由时，新工作流测试只读退出（代码 2）；详见根目录 [测试说明](../README.md#开发与验证)。
+真实网关上的新工作流路由及运行器状态需要在目标环境另行验证。
 
 ## 安装
 
