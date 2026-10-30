@@ -68,8 +68,8 @@ class AsyncTransport:
         self.service = service or resolve_service()
         self.client = httpx.AsyncClient(base_url=self.service.url, timeout=timeout, transport=transport, verify=True, follow_redirects=False)
 
-    async def request(self, method, path, *, body=None, key=None):
-        return await self._send(method, path, key=key, json=body)
+    async def request(self, method, path, *, body=None, key=None, sensitive_values=()):
+        return await self._send(method, path, key=key, sensitive_values=sensitive_values, json=body)
 
     async def request_bytes(self, method, path, *, content, sensitive_values=()):
         return await self._send(method, path, sensitive_values=sensitive_values, content_type="application/octet-stream", content=content)
@@ -99,8 +99,8 @@ class SyncTransport:
         self.service = service or resolve_service()
         self.client = httpx.Client(base_url=self.service.url, timeout=timeout, transport=transport, verify=True, follow_redirects=False)
 
-    def request(self, method, path, *, body=None, key=None):
-        return self._send(method, path, key=key, json=body)
+    def request(self, method, path, *, body=None, key=None, sensitive_values=()):
+        return self._send(method, path, key=key, sensitive_values=sensitive_values, json=body)
 
     def request_bytes(self, method, path, *, content, sensitive_values=()):
         return self._send(method, path, sensitive_values=sensitive_values, content_type="application/octet-stream", content=content)

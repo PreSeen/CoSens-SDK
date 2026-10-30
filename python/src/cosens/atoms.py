@@ -11,6 +11,7 @@ from .workflow import _bounded_timeout
 from .atoms_helpers import path_part as _part, stable_key as _key
 from .workflow_atoms import AsyncWorkflowAtoms, SyncWorkflowAtoms, validate_artifact
 from .document_atoms import AsyncDocumentAtoms, SyncDocumentAtoms
+from .model_api import improvement_data
 
 
 def _recall_context(recipe, memory, query, task_family):
@@ -161,16 +162,25 @@ class AsyncAtoms(AsyncWorkflowAtoms, AsyncDocumentAtoms):
     async def feedback(self, run_id, *, data, key=None):
         return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/feedback", body={"data": data}, key=_key(key) if key is not None else None)
 
-    async def improve(self, run_id, *, reason, key=None):
+    async def improve(self, run_id, *, reason, key=None, feedback=None, model_api=None):
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("reason is required")
-        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/improvements", body={"data": {"reason": reason}}, key=_key(key) if key is not None else None)
+        data, secrets = improvement_data(reason=reason, feedback=feedback, model_api=model_api)
+        options = {"sensitive_values": secrets} if secrets else {}
+        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/improvements", body={"data": data}, key=_key(key) if key is not None else None, **options)
 
     async def get_improvement(self, job_id):
         return await self._http.request("GET", f"/v1/improvements/{_part(job_id)}")
 
-    async def resume_improvement(self, job_id):
-        return await self._http.request("POST", f"/v1/improvements/{_part(job_id)}/resume")
+    async def resume_improvement(self, job_id, *, model_api=None):
+        if model_api is None:
+            return await self._http.request("POST", f"/v1/improvements/{_part(job_id)}/resume")
+        data, secrets = improvement_data(model_api=model_api)
+        return await self._http.request("POST", f"/v1/improvements/{_part(job_id)}/resume", body={"data": data}, sensitive_values=secrets)
+
+    async def confirm_attribution(self, job_id, *, candidate_id, candidate_sha256):
+        return await self._http.request("POST", f"/v1/improvements/{_part(job_id)}/attribution/confirm",
+                                        body={"data": {"candidate_id": candidate_id, "candidate_sha256": candidate_sha256}})
 
     async def wait_improvement(self, job_id, *, timeout=300, initial_delay=2, max_delay=30):
         loop = asyncio.get_running_loop()

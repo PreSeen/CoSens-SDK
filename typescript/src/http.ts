@@ -14,8 +14,8 @@ export class Transport {
     this.fetcher = options.fetch ?? fetch;
     this.timeoutMs = options.timeoutMs ?? 30_000;
   }
-  async request(method: string, path: string, body?: unknown, key?: string): Promise<any> {
-    return this.send(method, path, body === undefined ? undefined : JSON.stringify(body), key, body === undefined ? undefined : 'application/json');
+  async request(method: string, path: string, body?: unknown, key?: string, sensitiveValues: string[] = []): Promise<any> {
+    return this.send(method, path, body === undefined ? undefined : JSON.stringify(body), key, body === undefined ? undefined : 'application/json', sensitiveValues);
   }
   async requestBytes(method: string, path: string, content: Uint8Array, sensitiveValues: string[] = []): Promise<any> {
     return this.send(method, path, Uint8Array.from(content).buffer, undefined, 'application/octet-stream', sensitiveValues);

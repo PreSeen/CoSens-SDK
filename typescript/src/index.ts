@@ -1,5 +1,6 @@
 export { CoSensClient, Atoms, AdminAtoms } from './atoms.js';
 export type { WorkflowArtifactRef, WorkflowOutputRef, WorkflowEvent } from './atoms.js';
+export type { BusinessModelAPI } from './model-api.js';
 export type { DocumentUploadGrant, DocumentUploadMetadata } from './document-upload.js';
 export type { WorkflowPhase, WorkflowSnapshot, WorkflowStartOptions } from './workflow-start.js';
 export * from './errors.js';

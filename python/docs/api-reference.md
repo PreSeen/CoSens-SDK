@@ -35,12 +35,32 @@
 | `initial_inputs(run_id, artifact_ids)` | 补充实际初始材料 | `POST /v1/runs/{run_id}/initial-inputs` |
 | `submit(run_id, data=..., key=...)` | 本地模型/工具完成后，提交实际输出 | `POST /v1/runs/{run_id}/submit` |
 | `feedback(run_id, data=..., key=...)` | 有真实用户反馈或验收证据后 | `POST /v1/runs/{run_id}/feedback` |
-| `improve(run_id, reason=..., key=...)` | 明确要求发起改进时 | `POST /v1/runs/{run_id}/improvements` |
+| `improve(run_id, reason=..., key=..., feedback=..., model_api=...)` | 明确要求发起改进时，可绑定业务模型 API | `POST /v1/runs/{run_id}/improvements` |
 | `get_improvement(job_id)` / `wait_improvement(job_id)` | 查询/有界轮询异步改进 | `GET /v1/improvements/{job_id}` |
-| `resume_improvement(job_id)` | 确认任务可恢复后 | `POST /v1/improvements/{job_id}/resume` |
+| `resume_improvement(job_id, model_api=...)` | 恢复原任务；可补充业务模型配置或轮换 Key | `POST /v1/improvements/{job_id}/resume` |
+| `confirm_attribution(job_id, candidate_id=..., candidate_sha256=...)` | 归因候选待确认时，选择供后续验证的假设 | `POST /v1/improvements/{job_id}/attribution/confirm` |
 | `admin.atoms.publish(job_id, expected_revision=..., reason=...)` | 显式批准发布时，须由外部网关实施管理员授权 | `POST /internal/admin/v1/improvements/{job_id}/publish` |
 
 `prepare` 返回 `processing` 时，使用同一个 key 有界轮询；只有 `ready` 才进入模型调用。不要将一次请求超时当成失败后创建新任务的依据。三种入口的详细接口时机见 [设计文档](2026-10-26-cosens-python-sdk-design.md)。
+
+改进任务可显式使用调用方的业务模型 API。模型服务须支持 OpenAI 兼容 Chat Completions 和 function tools：
+
+```python
+model_api = {
+    "base_url": "https://business-model.example/v1",
+    "model": "business-model-name",
+    "api_key": business_model_key,
+}
+job = await client.atoms.improve(
+    run_id, reason="分析遗漏并改进方法", key="improvement-1", model_api=model_api,
+)
+# 旧任务缺少运行时，或需要补充/轮换模型 Key 时，恢复原任务：
+await client.atoms.resume_improvement(job.job_id, model_api=model_api)
+```
+
+`model_api` 是独立于 Friday Key 的业务模型连接；可选 `temperature`、`max_tokens`。仅显式提供时才发送，包装 native client 不会自动上传其凭证。服务端用该连接完成归因、候选生成、重跑及产物评审；须部署支持该参数的服务端及 bubblewrap 隔离工具。模型 Key 不进入任务报告，SDK 对网关异常中的模型 Key 做脱敏。模型/地址/生成参数在实验冻结后不能替换，但可以在可恢复状态轮换 Key。不传新参数保持原请求格式。
+
+`wait_improvement` 遇到 `awaiting_attribution_review` 会返回；读取 `job.report.attribution_review`，再调用 `confirm_attribution` 传入候选 ID 及冻结的 `candidate_sha256`。`candidate_id="none"` 表示拒绝所有候选。确认后仍需重跑、有效验收标准及独立验证任务，验证通过后才能显式发布；不会因为模型请求成功而自动发布。没有已校准标准编译器时，应提交明确的 `acceptance.checks` 或反馈 `acceptance_checks`。
 
 ## Session、工具和恢复
 

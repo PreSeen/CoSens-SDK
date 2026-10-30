@@ -1,4 +1,5 @@
 import { RSIRecoveryRequired } from './errors.js';
+import { modelAPIData, type BusinessModelAPI } from './model-api.js';
 import { pathPart, requestKey, Transport, type TransportOptions } from './http.js';
 import { performance } from 'node:perf_hooks';
 import { startWorkflow, type WorkflowSnapshot, type WorkflowStartOptions } from './workflow-start.js';
@@ -203,12 +204,21 @@ export class Atoms {
   getEvents(runId: string) { return this.http.request('GET', `/v1/runs/${pathPart(runId)}/events`); }
   submit(runId: string, { data = {}, key }: { data?: unknown; key?: string } = {}) { return this.http.request('POST', `/v1/runs/${pathPart(runId)}/submit`, { data }, key === undefined ? undefined : requestKey(key)); }
   feedback(runId: string, { data, key }: { data: unknown; key?: string }) { return this.http.request('POST', `/v1/runs/${pathPart(runId)}/feedback`, { data }, key === undefined ? undefined : requestKey(key)); }
-  improve(runId: string, { reason, key }: { reason: string; key?: string }) {
+  improve(runId: string, { reason, key, feedback, modelApi }: { reason: string; key?: string; feedback?: string; modelApi?: BusinessModelAPI }) {
     if (!reason?.trim()) throw new TypeError('reason is required');
-    return this.http.request('POST', `/v1/runs/${pathPart(runId)}/improvements`, { data: { reason } }, key === undefined ? undefined : requestKey(key));
+    if (feedback !== undefined && (typeof feedback !== 'string' || !feedback.trim() || feedback.length > 4000)) throw new TypeError('feedback must be nonempty text of at most 4000 characters');
+    const connection = modelApi === undefined ? undefined : modelAPIData(modelApi);
+    const data = { reason, ...(feedback === undefined ? {} : { feedback }), ...(connection ? { model_api: connection.wire } : {}) };
+    return this.http.request('POST', `/v1/runs/${pathPart(runId)}/improvements`, { data }, key === undefined ? undefined : requestKey(key), connection?.secrets);
   }
   getImprovement(jobId: string) { return this.http.request('GET', `/v1/improvements/${pathPart(jobId)}`); }
-  resumeImprovement(jobId: string) { return this.http.request('POST', `/v1/improvements/${pathPart(jobId)}/resume`); }
+  resumeImprovement(jobId: string, { modelApi }: { modelApi?: BusinessModelAPI } = {}) {
+    const connection = modelApi === undefined ? undefined : modelAPIData(modelApi);
+    return this.http.request('POST', `/v1/improvements/${pathPart(jobId)}/resume`, connection ? { data: { model_api: connection.wire } } : undefined, undefined, connection?.secrets);
+  }
+  confirmAttribution(jobId: string, { candidateId, candidateSha256 }: { candidateId: string; candidateSha256: string }) {
+    return this.http.request('POST', `/v1/improvements/${pathPart(jobId)}/attribution/confirm`, { data: { candidate_id: candidateId, candidate_sha256: candidateSha256 } });
+  }
   async waitImprovement(jobId: string, { timeout = 300 }: { timeout?: number } = {}) {
     const deadline = performance.now() + boundedTimeout(boundedTimeout(timeout) * 1000);
     let delay = 2_000;

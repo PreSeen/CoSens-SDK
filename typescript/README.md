@@ -107,3 +107,24 @@ try {
 Key 可由构造参数 `apiKey` 或当前区域的 `RSI_API_KEY_CN` / `RSI_API_KEY_US` 提供，缺失时回退到 `RSI_API_KEY` / `COSENS_API_KEY`。SDK 本身不自动加载 `.env`。所有上传请求保留网关双鉴权头，只接受当前区域网关的指定上传路径，不跟随重定向，不转发任意 grant 请求头，不自动重试或重新签发。完整字段与恢复规则见[开发契约第 8.4 节](../python/docs/2026-10-28-task-workflow-sdk-design.md#84-文档上传)。CN grant 路径尚未部署，以上代码需待服务上线后联调；离线测试已纳入 IDEA `00_all_tests_CN`。
 
 新增 30 个请求边界回归测试（Python / TypeScript 各 15 个），已纳入现有测试入口；用例清单、单独运行命令、缺陷修复与最新验证结果见[测试说明](../python/docs/testing/2026-10-29-sdk-request-regression.md)。
+
+### 改进任务使用业务模型 API
+
+`atoms.improve` 和 `atoms.resumeImprovement` 接受显式的 `modelApi`，服务端使用该业务模型完成归因、生成候选、重跑和评审。需要支持此参数的服务端，以及支持 function tools 的 OpenAI 兼容 Chat Completions 接口。
+
+```typescript
+const modelApi = {
+  baseUrl: 'https://business-model.example/v1',
+  model: 'business-model-name',
+  apiKey: process.env.OPENAI_API_KEY!,
+};
+const job = await client.atoms.improve(runId, {
+  reason: '分析遗漏并改进方法', key: 'improvement-1', modelApi,
+});
+// 为等待中的原任务补充配置或轮换模型 Key：
+await client.atoms.resumeImprovement(job.job_id, { modelApi });
+// 读取 attribution_review 后，选择供后续验证的候选：
+await client.atoms.confirmAttribution(job.job_id, { candidateId, candidateSha256 });
+```
+
+可选 `temperature`、`maxTokens`；SDK 转为现有 `data.model_api` 的 snake_case 字段。Friday 网关 Key 与业务模型 Key 分开，只有显式提供 `modelApi` 才发送业务凭证；包装原生 OpenAI client 不会自动上传其 Key。任务报告不包含模型 Key，异常文本也会脱敏。模型连接在实验冻结后不能替换，仅可在可恢复状态轮换 Key。不传参数保持原请求格式。归因确认、验收标准、独立验证和显式发布仍需完成；模型接口返回成功不代表改进已经验证。
