@@ -47,12 +47,19 @@ cp python/.env.example python/.env
 
 | SDK | 状态 |
 | --- | --- |
-| [Python](python/) | 0.1.0，支持从源码安装 |
-| [TypeScript](typescript/) | 开发中，已提供源码和模拟测试；尚未完成设计文档中的全部验收项 |
+| [Python](python/) | 0.2.0，已发布到 PyPI |
+| [TypeScript](typescript/) | 0.2.0，已发布到 npm；尚未完成设计文档中的全部验收项 |
 
 CoSens 网关地址由 SDK 内部管理：`COSENS_REGION=cn`（默认）使用国内区，`COSENS_REGION=us` 使用美国区。三种示例均支持，无需传入 CoSens `base_url` 或 `X_User_Id`。OpenAI 模型凭证和 Friday Key 分别用于两个服务，区域 Key 配置、常见错误和恢复方式见 [Python 接入文档](python/README.md#国内区与美国区测试)。
 
 CoSens 服务端请求统一发送 `X-Auth-Type: api_key` 和 `Authorization: Bearer <api_key>`；原生 OpenAI 模型请求不附加 `X-Auth-Type`。
+
+## 安装
+
+```bash
+npm install cosens-sdk
+pip install cosens-sdk
+```
 
 ## 本地安装包
 
@@ -64,7 +71,7 @@ npm pack ./typescript --pack-destination ./dist
 python -m build ./python --outdir ./dist
 ```
 
-在另一项目中可分别使用 `npm install /path/to/cosens-sdk-0.1.0.tgz` 和 `python -m pip install /path/to/cosens_sdk-0.1.0-py3-none-any.whl` 安装；安装时仍需能够获取各自的运行依赖。
+在另一项目中可分别使用 `npm install /path/to/cosens-sdk-0.2.0.tgz` 和 `python -m pip install /path/to/cosens_sdk-0.2.0-py3-none-any.whl` 安装；安装时仍需能够获取各自的运行依赖。
 
 ## 开发与验证
 
