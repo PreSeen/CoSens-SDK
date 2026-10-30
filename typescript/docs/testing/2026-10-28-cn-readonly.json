@@ -1,0 +1,28 @@
+{
+  "region": "cn",
+  "gateway": "https://friday-rsi-cn.stardust-ai.com/api",
+  "openapiVersion": "1.0.0",
+  "observed": [
+    {
+      "method": "GET",
+      "path": "/api/health/ready",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/openapi.json",
+      "status": 200
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/recipes/active?task_family=general",
+      "status": 200
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/memory/recall",
+      "status": 200
+    }
+  ],
+  "standaloneRecall": "passed"
+}

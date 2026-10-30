@@ -1,0 +1,143 @@
+{
+  "tag": "sdk-ts-atomic-8c69cc38-d1f0-45b3-8c06-ff67a2b94d7a",
+  "region": "cn",
+  "runId": "run_cdfff22e2b904478a4a069b9a0b33570",
+  "artifactId": "artifact_73b53e8ad0dc41128796a79e97671855",
+  "prepareIdempotency": "passed",
+  "durableAckReplay": "passed",
+  "traceDeduplication": "passed",
+  "requests": [
+    {
+      "method": "POST",
+      "path": "/api/v1/artifacts",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "body": {
+        "name": "sdk-ts-atomic-8c69cc38-d1f0-45b3-8c06-ff67a2b94d7a-input.txt",
+        "content": "sdk-ts-atomic-8c69cc38-d1f0-45b3-8c06-ff67a2b94d7a: synthetic TypeScript SDK atomic validation"
+      },
+      "requestId": "6137afabc94dec71eccb61c7e498117d"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/prepare",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "body": {
+        "objective": "sdk-ts-atomic-8c69cc38-d1f0-45b3-8c06-ff67a2b94d7a: synthetic atomic Run",
+        "task_family": "general",
+        "input_artifact_ids": [
+          "artifact_73b53e8ad0dc41128796a79e97671855"
+        ]
+      },
+      "requestId": "b1d58fd9281ebba25284bd4d5c8b1690"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/prepare",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "body": {
+        "objective": "sdk-ts-atomic-8c69cc38-d1f0-45b3-8c06-ff67a2b94d7a: synthetic atomic Run",
+        "task_family": "general",
+        "input_artifact_ids": [
+          "artifact_73b53e8ad0dc41128796a79e97671855"
+        ]
+      },
+      "requestId": "a538d37cd0f950fac88bdd4ff7762a18"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/run_cdfff22e2b904478a4a069b9a0b33570",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "requestId": "9daeae533e9fe3122215f90a28184be6"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/run_cdfff22e2b904478a4a069b9a0b33570/session-events",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "body": {
+        "events": [
+          {
+            "id": "sdk-ts-atomic-8c69cc38-d1f0-45b3-8c06-ff67a2b94d7a:user",
+            "kind": "user_prompt",
+            "payload": {
+              "role": "user",
+              "content": "sdk-ts-atomic-8c69cc38-d1f0-45b3-8c06-ff67a2b94d7a: synthetic atomic Run",
+              "source_revision": "local_synthetic_fixture"
+            }
+          },
+          {
+            "id": "sdk-ts-atomic-8c69cc38-d1f0-45b3-8c06-ff67a2b94d7a:assistant",
+            "kind": "agent_action",
+            "payload": {
+              "role": "assistant",
+              "content": "local synthetic result",
+              "source_revision": "local_synthetic_fixture"
+            }
+          }
+        ]
+      },
+      "requestId": "76e7e27964e4496e734c5ebcc422c448"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/run_cdfff22e2b904478a4a069b9a0b33570/session-events",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "body": {
+        "events": [
+          {
+            "id": "sdk-ts-atomic-8c69cc38-d1f0-45b3-8c06-ff67a2b94d7a:user",
+            "kind": "user_prompt",
+            "payload": {
+              "role": "user",
+              "content": "sdk-ts-atomic-8c69cc38-d1f0-45b3-8c06-ff67a2b94d7a: synthetic atomic Run",
+              "source_revision": "local_synthetic_fixture"
+            }
+          },
+          {
+            "id": "sdk-ts-atomic-8c69cc38-d1f0-45b3-8c06-ff67a2b94d7a:assistant",
+            "kind": "agent_action",
+            "payload": {
+              "role": "assistant",
+              "content": "local synthetic result",
+              "source_revision": "local_synthetic_fixture"
+            }
+          }
+        ]
+      },
+      "requestId": "0d7ed6fd3f8bf05732e82c44ca5db210"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/run_cdfff22e2b904478a4a069b9a0b33570/submit",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "body": {
+        "data": {
+          "summary": "local synthetic result",
+          "outcome": "completed"
+        }
+      },
+      "requestId": "2006b028a4a84d7705ef7266068a8b12"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/run_cdfff22e2b904478a4a069b9a0b33570/trace",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "requestId": "c2d9fae7b5e7215079428677ace96f08"
+    }
+  ]
+}

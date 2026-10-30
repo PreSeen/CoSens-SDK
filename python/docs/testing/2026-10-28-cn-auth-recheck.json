@@ -1,0 +1,31 @@
+{
+  "started_at": "2026-10-28T03:02:16.328045+00:00",
+  "gateway": "https://friday-rsi-cn.stardust-ai.com/api",
+  "region": "cn",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/api/health/ready",
+      "http_status": 200,
+      "request_id": "3d6ff2642c56ec0e5f4de8b5fde22bf7",
+      "identity_header_sent": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/recipes/active?task_family=general",
+      "http_status": 200,
+      "request_id": "d027621361b116b4e5290d8bbfe42f04",
+      "identity_header_sent": false
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/memory/recall",
+      "http_status": 200,
+      "request_id": "4660fc3d8ebb9563a557c4b633888c67",
+      "identity_header_sent": false
+    }
+  ],
+  "gateway_memory_project_present": true,
+  "standalone_recall": "passed",
+  "result": "passed"
+}

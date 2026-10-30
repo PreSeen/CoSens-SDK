@@ -3,12 +3,11 @@
 为 OpenAI 应用接入 Recipe、Memory 召回与 RSI 经验沉淀。保留现有 OpenAI 调用方式，在每个 turn 执行前获取参考上下文，并按需将任务消息与结果提交到 CoSens 服务。
 
 ```python
-import os
 from openai import OpenAI
 from cosens import cosens
 
 native = OpenAI()  # 读取 OPENAI_API_KEY
-client = cosens(native, api_key=os.environ["RSI_API_KEY"], mode="auto")
+client = cosens(native, mode="auto")  # 按 COSENS_REGION 选取对应的区域 Key
 ```
 
 **[Python 接入文档](python/README.md) · [可运行示例](python/examples/) · [原子 API](python/docs/api-reference.md)**
@@ -34,7 +33,7 @@ python -m pip install -e "./python[examples]"
 cp python/.env.example python/.env
 ```
 
-编辑 `python/.env`，填写 `OPENAI_API_KEY`、`OPENAI_MODEL`、`RSI_API_KEY`。然后在 IDE 选择 `python/.venv` 解释器，打开下面任一文件，点击 **Run**。不需要填写命令行参数，也不依赖 IDE 的工作目录。
+编辑 `python/.env`，填写 `OPENAI_API_KEY`、`OPENAI_MODEL` 和当前区域的 `RSI_API_KEY_CN` 或 `RSI_API_KEY_US`（也可使用通用 `RSI_API_KEY`）。然后在 IDE 选择 `python/.venv` 解释器，打开下面任一文件，点击 **Run**。不需要填写命令行参数，也不依赖 IDE 的工作目录。
 
 | 场景 | 可运行文件 | 行为 |
 | --- | --- | --- |
@@ -54,6 +53,18 @@ cp python/.env.example python/.env
 CoSens 网关地址由 SDK 内部管理：`COSENS_REGION=cn`（默认）使用国内区，`COSENS_REGION=us` 使用美国区。三种示例均支持，无需传入 CoSens `base_url` 或 `X_User_Id`。OpenAI 模型凭证和 Friday Key 分别用于两个服务，区域 Key 配置、常见错误和恢复方式见 [Python 接入文档](python/README.md#国内区与美国区测试)。
 
 CoSens 服务端请求统一发送 `X-Auth-Type: api_key` 和 `Authorization: Bearer <api_key>`；原生 OpenAI 模型请求不附加 `X-Auth-Type`。
+
+## 本地安装包
+
+在仓库根目录生成可离线分发的 npm 包、Python wheel 和源码包（不上传到 npm 或 PyPI）：
+
+```bash
+mkdir -p dist
+npm pack ./typescript --pack-destination ./dist
+python -m build ./python --outdir ./dist
+```
+
+在另一项目中可分别使用 `npm install /path/to/cosens-sdk-0.1.0.tgz` 和 `python -m pip install /path/to/cosens_sdk-0.1.0-py3-none-any.whl` 安装；安装时仍需能够获取各自的运行依赖。
 
 ## 开发与验证
 

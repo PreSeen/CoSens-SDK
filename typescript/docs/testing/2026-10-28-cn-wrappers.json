@@ -1,0 +1,181 @@
+{
+  "tag": "sdk-ts-gateway-30652b6e-fe49-4aa3-9de9-5e9eb205949b",
+  "write": true,
+  "results": {
+    "disable": {
+      "status": "passed",
+      "runId": null,
+      "modelCalls": 1
+    },
+    "autoFalse": {
+      "status": "passed",
+      "runId": null,
+      "modelCalls": 2
+    },
+    "autoTrue": {
+      "status": "passed",
+      "runId": "run_fffc860ae87341fb9d577501ae64965c",
+      "modelCalls": 2
+    },
+    "explicit": {
+      "status": "passed",
+      "runId": "run_2295795da912414b9e94f325281ee683",
+      "nativeCalls": 1
+    }
+  },
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/api/v1/recipes/active?task_family=general",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "identityHeaderSent": false,
+      "requestId": "82fce2650307d1b7c7d1cb363d048abc"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/memory/recall",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "identityHeaderSent": false,
+      "body": {
+        "query": "sdk-ts-gateway-30652b6e-fe49-4aa3-9de9-5e9eb205949b:disable synthetic request",
+        "token_budget": 1000
+      },
+      "requestId": "4521d5d1c399318adbbfc8da2117effc"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/recipes/active?task_family=general",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "identityHeaderSent": false,
+      "requestId": "10eb95d8076a2ab32dc12befafa263a6"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/memory/recall",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "identityHeaderSent": false,
+      "body": {
+        "query": "sdk-ts-gateway-30652b6e-fe49-4aa3-9de9-5e9eb205949b:auto_false",
+        "token_budget": 1000
+      },
+      "requestId": "e0f1995652a6f019b4627fc0e73c9391"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/prepare",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "identityHeaderSent": false,
+      "body": {
+        "objective": "sdk-ts-gateway-30652b6e-fe49-4aa3-9de9-5e9eb205949b:auto_true",
+        "task_family": "general",
+        "input_artifact_ids": []
+      },
+      "requestId": "a192812d38efd99afa310362b616a0cd"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/run_fffc860ae87341fb9d577501ae64965c",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "identityHeaderSent": false,
+      "requestId": "4e5cc35ee14b4791c2511c0ce67771fe"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/run_fffc860ae87341fb9d577501ae64965c/session-events",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "identityHeaderSent": false,
+      "body": {
+        "events": [
+          {
+            "id": "visible:2a5fbdfc-2560-41c4-9e81-893d991079f9:input",
+            "kind": "user_prompt",
+            "payload": {
+              "session_id": null,
+              "role": "user",
+              "content": "sdk-ts-gateway-30652b6e-fe49-4aa3-9de9-5e9eb205949b:auto_true synthetic request",
+              "source_revision": "native_request"
+            }
+          },
+          {
+            "id": "visible:2a5fbdfc-2560-41c4-9e81-893d991079f9:output",
+            "kind": "agent_action",
+            "payload": {
+              "session_id": null,
+              "role": "assistant",
+              "content": "local fake model result",
+              "source_revision": "native_response"
+            }
+          }
+        ]
+      },
+      "requestId": "6135eb4a461fd68e40f3033fafc69c38"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/run_fffc860ae87341fb9d577501ae64965c/submit",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "identityHeaderSent": false,
+      "body": {
+        "data": {
+          "summary": "local fake model result",
+          "outcome": "completed"
+        }
+      },
+      "requestId": "0b013e0707d1b2e2e4c7b1542a4118c4"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/prepare",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "identityHeaderSent": false,
+      "body": {
+        "objective": "sdk-ts-gateway-30652b6e-fe49-4aa3-9de9-5e9eb205949b:explicit synthetic request",
+        "task_family": "general",
+        "input_artifact_ids": []
+      },
+      "requestId": "f62893d33273c06102bde3b6d139dca0"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/runs/run_2295795da912414b9e94f325281ee683",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "identityHeaderSent": false,
+      "requestId": "9aa49d85ccb5255ffd7113d52605c27e"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/runs/run_2295795da912414b9e94f325281ee683/submit",
+      "status": 200,
+      "authType": "api_key",
+      "authorization": "Bearer <redacted>",
+      "identityHeaderSent": false,
+      "body": {
+        "data": {
+          "summary": "local fake Agent result",
+          "outcome": "completed"
+        }
+      },
+      "requestId": "a070bb9d64ca4ef9183a63774926a873"
+    }
+  ]
+}

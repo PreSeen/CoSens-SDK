@@ -1,0 +1,16 @@
+{
+  "started_at": "2026-10-28T02:53:45.034455+00:00",
+  "gateway": "https://rsi.cosens.ai/api",
+  "region": "us",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/api/health/ready",
+      "http_status": 401,
+      "request_id": "7125238b4d99899923921d8b6cb5b89d",
+      "identity_header_sent": false
+    }
+  ],
+  "result": "failed",
+  "error": "RSIHTTPError: Unauthorized"
+}

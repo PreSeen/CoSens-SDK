@@ -1,0 +1,37 @@
+{
+  "checked_at": "2026-10-29T07:44:11.474004+00:00",
+  "region": "cn",
+  "client": "curl without SDK",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/api/health/ready",
+      "status": "502",
+      "curl_exit_code": 0,
+      "headers": {
+        "content-type": "text/plain; charset=utf-8",
+        "x-request-id": "b520a8d630f82ea99cf6fd16d695e397"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/openapi.json",
+      "status": "502",
+      "curl_exit_code": 0,
+      "headers": {
+        "content-type": "text/plain; charset=utf-8",
+        "x-request-id": "9d7c534a89657cb7e990119fd4eccbf1"
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/memory/items?limit=1",
+      "status": "502",
+      "curl_exit_code": 0,
+      "headers": {
+        "content-type": "text/plain; charset=utf-8",
+        "x-request-id": "194c910cbf9e26c1ec703942cdd0088f"
+      }
+    }
+  ]
+}

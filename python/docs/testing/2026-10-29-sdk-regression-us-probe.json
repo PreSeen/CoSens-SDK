@@ -1,0 +1,60 @@
+{
+  "region": "us",
+  "gateway": "https://rsi.cosens.ai/api",
+  "status": "not_passed",
+  "started_at": "2026-10-29T07:45:45.359947+00:00",
+  "direct_http_health": {
+    "status": 401,
+    "request_id": "f74af9e710076775a47b367b4f6488d1"
+  },
+  "python": {
+    "requests": [
+      {
+        "method": "GET",
+        "path": "/api/health/ready",
+        "http_status": 401,
+        "request_id": "02612cb812760229d5eadd8e5dda3ea9",
+        "identity_header_sent": false
+      }
+    ],
+    "result": "failed",
+    "error": "RSIHTTPError: {'code': 'unauthenticated', 'message': 'invalid bearer credential'}"
+  },
+  "typescript": {
+    "region": "us",
+    "client": "TypeScript SDK independent recheck",
+    "observations": [
+      {
+        "host": "rsi.cosens.ai",
+        "path": "/api/health/ready",
+        "authType": "api_key",
+        "bearerMatchesProvidedKey": true,
+        "networkError": {
+          "name": "TypeError",
+          "code": "UND_ERR_CONNECT_TIMEOUT"
+        },
+        "error": {
+          "name": "RSITransportError",
+          "message": "CoSens transport failed: TypeError"
+        }
+      },
+      {
+        "host": "rsi.cosens.ai",
+        "path": "/api/openapi.json",
+        "authType": "api_key",
+        "bearerMatchesProvidedKey": true,
+        "networkError": {
+          "name": "TypeError",
+          "code": "UND_ERR_CONNECT_TIMEOUT"
+        },
+        "error": {
+          "name": "RSITransportError",
+          "message": "CoSens transport failed: TypeError"
+        }
+      }
+    ]
+  },
+  "workflow": "not_run: authentication failed and TypeScript connection timed out",
+  "credentials": "provided key used only in process memory; not saved",
+  "next_step": "confirm US gateway credential activation; restore stable Node connectivity before workflow verification"
+}

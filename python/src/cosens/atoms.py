@@ -1,11 +1,10 @@
 """Public atomic RSI resources. No atom runs an Agent or model."""
 
 import asyncio
-import os
 from urllib.parse import urlencode
 
 from .http import AsyncTransport, SyncTransport
-from ._config import resolve_service
+from ._config import resolve_api_key, resolve_service
 from .errors import RSIRecoveryRequired
 from .models import result
 from .workflow import _bounded_timeout
@@ -303,8 +302,8 @@ class SyncAtoms(SyncWorkflowAtoms, SyncDocumentAtoms):
 
 class CoSensClient:
     def __init__(self, api_key=None, *, state_path=None, _http_transport=None):
-        api_key = api_key if api_key is not None else (os.getenv("RSI_API_KEY") or os.getenv("COSENS_API_KEY"))
         self._service = resolve_service()
+        api_key = resolve_api_key(api_key, self._service)
         self._transport = AsyncTransport(api_key=api_key, transport=_http_transport, service=self._service)
         self._admin_transport = AsyncTransport(api_key=api_key, transport=_http_transport, service=self._service)
         self._sync_transport = SyncTransport(api_key=api_key, transport=_http_transport, service=self._service)

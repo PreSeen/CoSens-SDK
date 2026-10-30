@@ -18,6 +18,9 @@ test = ["pytest>=8", "pytest-asyncio>=0.24", "build>=1"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/cosens"]
 
+[tool.hatch.build.targets.sdist]
+only-include = ["src/cosens", "README.md", "pyproject.toml", "docs/api-reference.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

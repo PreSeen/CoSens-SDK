@@ -25,3 +25,11 @@ def resolve_service():
     if region not in _SERVICES:
         raise ValueError('COSENS_REGION must be cn or us')
     return _SERVICES[region]
+
+
+def resolve_api_key(api_key, service):
+    if api_key is not None:
+        return api_key
+    return (os.getenv(f'RSI_API_KEY_{service.region.upper()}')
+            or os.getenv('RSI_API_KEY')
+            or os.getenv('COSENS_API_KEY'))

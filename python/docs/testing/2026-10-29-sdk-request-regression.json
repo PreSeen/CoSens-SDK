@@ -1,0 +1,79 @@
+{
+  "finished_at": "2026-10-29T07:40:03.281847+00:00",
+  "new_test_cases": {
+    "python": 15,
+    "typescript": 15,
+    "passed": 30,
+    "failed": 0
+  },
+  "initial_failures": {
+    "python": [
+      "R03",
+      "R04",
+      "R15"
+    ],
+    "typescript": [
+      "R03",
+      "R04",
+      "R13"
+    ]
+  },
+  "fixed_defects": [
+    "explicit empty optional idempotency key silently omitted",
+    "control characters accepted in idempotency key",
+    "Python upload port 0 treated as default 443",
+    "TypeScript Date.parse normalized impossible expiry dates",
+    "structured detail errors did not preserve code and message"
+  ],
+  "offline": {
+    "python_passed": 283,
+    "typescript_passed": 167,
+    "typescript_build": "passed",
+    "typescript_typecheck": "passed"
+  },
+  "cn_integration": {
+    "status": "failed",
+    "stages": [
+      {
+        "name": "python-unit",
+        "exit_code": 0,
+        "log": "latest-cn/python-unit.log"
+      },
+      {
+        "name": "typescript-check",
+        "exit_code": 0,
+        "log": "latest-cn/typescript-check.log"
+      },
+      {
+        "name": "python-cn-readonly",
+        "exit_code": 1,
+        "log": "latest-cn/python-cn-readonly.log"
+      },
+      {
+        "name": "typescript-cn-readonly",
+        "exit_code": 1,
+        "log": "latest-cn/typescript-cn-readonly.log"
+      },
+      {
+        "name": "python-cn-workflow",
+        "exit_code": 1,
+        "log": "latest-cn/python-cn-workflow.log"
+      },
+      {
+        "name": "typescript-cn-workflow",
+        "exit_code": 1,
+        "log": "latest-cn/typescript-cn-workflow.log"
+      }
+    ],
+    "diagnosis": "HTTP 502 also reproduced by standalone curl on health, OpenAPI and Memory routes; downstream availability is unresolved",
+    "probe": "2026-10-29-sdk-regression-cn-probe.json"
+  },
+  "us_integration": {
+    "status": "not_passed",
+    "probe": "2026-10-29-sdk-regression-us-probe.json",
+    "python": "401 invalid bearer credential after user updated key",
+    "typescript": "401 on first retry, later intermittent connect error",
+    "workflow": "not_run",
+    "retry_probe": "2026-10-29-sdk-regression-us-retry.json"
+  }
+}

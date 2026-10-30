@@ -20,7 +20,7 @@ npm run check
 
 配置好 Key 和 `OPENAI_MODEL` 后，可在本目录分别运行 `node --import tsx examples/01_transparent.ts`、`node --import tsx examples/02_explicit.ts`、`node --import tsx examples/03_atomic.ts`。三者访问真实服务；第三个入口会创建 Run，若模型已开始执行而流程中断，需先核对远端 Run 与本地结果，不能仅靠复用 `COSENS_TURN_ID` 重新执行模型。
 
-运行环境提供 `RSI_API_KEY`（或 `COSENS_API_KEY`）；也可在构造选项中传 `apiKey`。模型服务单独使用 `OPENAI_API_KEY`。`COSENS_REGION=cn` 是默认值，可选 `us`。CoSens 服务端请求同时发送 `X-Auth-Type: api_key` 与 `Authorization: Bearer <api_key>`；这两个请求头不会加入原生 OpenAI 模型请求。`apiKey` 只填 Key 本身，不要包含 `Bearer `。
+运行环境优先提供当前区域的 `RSI_API_KEY_CN` 或 `RSI_API_KEY_US`，缺失时依次回退到 `RSI_API_KEY`、`COSENS_API_KEY`；也可在构造选项中传 `apiKey`，其优先级最高。模型服务单独使用 `OPENAI_API_KEY`。`COSENS_REGION=cn` 是默认值，可选 `us`。CoSens 服务端请求同时发送 `X-Auth-Type: api_key` 与 `Authorization: Bearer <api_key>`；这两个请求头不会加入原生 OpenAI 模型请求。`apiKey` 只填 Key 本身，不要包含 `Bearer `。
 
 ## 三种入口
 
@@ -104,6 +104,6 @@ try {
 
 普通 multipart 可单独调用 `await client.atoms.uploadDocument({ filename: 'notes.txt', mimeType: 'text/plain', content })`。不要在一次性上传结果不明时把普通上传作为自动回退。可选元数据为 `threadId`、`uploadedAt`、`sourceKind`、`workspaceId`、`ingestMode`、`summary`、`background`、`waitForProcessing` 和 `waitTimeoutSeconds`（整数 1–3600）。包导出 `DocumentUploadMetadata`、`DocumentUploadGrant` 类型；grant 的服务端字段保留 snake_case。
 
-Key 可由构造参数 `apiKey` 或进程环境 `RSI_API_KEY` / `COSENS_API_KEY` 提供，SDK 本身不自动加载 `.env`。所有上传请求保留网关双鉴权头，只接受当前区域网关的指定上传路径，不跟随重定向，不转发任意 grant 请求头，不自动重试或重新签发。完整字段与恢复规则见[开发契约第 8.4 节](../python/docs/2026-10-28-task-workflow-sdk-design.md#84-文档上传)。CN grant 路径尚未部署，以上代码需待服务上线后联调；离线测试已纳入 IDEA `00_all_tests_CN`。
+Key 可由构造参数 `apiKey` 或当前区域的 `RSI_API_KEY_CN` / `RSI_API_KEY_US` 提供，缺失时回退到 `RSI_API_KEY` / `COSENS_API_KEY`。SDK 本身不自动加载 `.env`。所有上传请求保留网关双鉴权头，只接受当前区域网关的指定上传路径，不跟随重定向，不转发任意 grant 请求头，不自动重试或重新签发。完整字段与恢复规则见[开发契约第 8.4 节](../python/docs/2026-10-28-task-workflow-sdk-design.md#84-文档上传)。CN grant 路径尚未部署，以上代码需待服务上线后联调；离线测试已纳入 IDEA `00_all_tests_CN`。
 
 新增 30 个请求边界回归测试（Python / TypeScript 各 15 个），已纳入现有测试入口；用例清单、单独运行命令、缺陷修复与最新验证结果见[测试说明](../python/docs/testing/2026-10-29-sdk-request-regression.md)。

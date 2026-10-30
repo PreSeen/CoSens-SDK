@@ -36,12 +36,12 @@ RSI_API_KEY=your-friday-key
 | --- | --- | --- |
 | `OPENAI_API_KEY` | OpenAI 或兼容模型服务的凭证 | 是 |
 | `OPENAI_MODEL` | 你有权限调用的模型名，示例使用 Responses API | 是 |
-| `RSI_API_KEY` | Friday 用户 Key，用于 CoSens 网关 | 是 |
+| `RSI_API_KEY` | 通用网关 Key；未设置区域 Key 时使用 | 与当前区域 Key 二选一 |
 | `OPENAI_BASE_URL` | 自定义兼容模型服务地址；不填使用 OpenAI 默认地址 | 否 |
 | `COSENS_MODE` | 透明示例的模式，默认 `auto`，可改为 `disable` | 否 |
 | `COSENS_INPUT` | 示例任务文字，不填使用内置集成测试问题 | 否 |
 | `COSENS_REGION` | CoSens 服务区域，`cn`（默认）或 `us` | 否 |
-| `RSI_API_KEY_CN` / `RSI_API_KEY_US` | 示例按区域选用的 Friday Key；未配置时使用 `RSI_API_KEY` | 否 |
+| `RSI_API_KEY_CN` / `RSI_API_KEY_US` | SDK 和示例按当前区域选用的网关 Key | 与 `RSI_API_KEY` 二选一 |
 
 三个示例自动读取 `python/.env`，已有进程环境变量优先。**SDK 本身不自动读取 `.env`**；你自己的应用可使用环境变量或 `load_dotenv()`。
 
@@ -57,7 +57,7 @@ RSI_API_KEY_CN=your-cn-friday-key
 RSI_API_KEY_US=your-us-friday-key
 ```
 
-这些值是占位符，真实联调需要有效 Key。示例优先使用对应区域的 Key，未设置或为空时回退到 `RSI_API_KEY`；显式填了占位符则在发送任何请求前提示补全配置，不会回退。不要假设两区 Key 通用。这个 Key 选择逻辑属于示例辅助代码；应用直接使用 SDK 时仍通过 `api_key` 或 `RSI_API_KEY` / `COSENS_API_KEY` 提供当前区域凭证。
+这些值是占位符，真实联调需要有效 Key。SDK 和示例优先使用对应区域的 Key，未设置或为空时回退到 `RSI_API_KEY`，再回退到 `COSENS_API_KEY`；示例显式填了占位符时会在发送请求前提示补全配置。不要假设两区 Key 通用。显式传入 `api_key` 的优先级最高。
 
 IDEA 本地运行配置 `01_transparent`、`02_explicit_run`、`03_atomic` 固定测试国内区；同名加 `_US` 的三个入口测试美国区。也可直接打开示例运行，此时使用 `.env` 中的区域。终端临时切换示例：
 
@@ -79,7 +79,7 @@ from openai import OpenAI
 from cosens import cosens
 
 native = OpenAI()
-client = cosens(native, api_key=os.environ["RSI_API_KEY"], mode="auto")
+client = cosens(native, mode="auto")
 try:
     response = client.responses.create(
         model=os.environ["OPENAI_MODEL"],
@@ -90,7 +90,7 @@ finally:
     client.close()
 ```
 
-接入只需 `native`、`api_key`、`mode`。SDK 默认复用业务请求的模型做提交判断，无需额外填写 `decision_model` 或 `session`。Friday Key 也可省略参数从环境读取，优先级为显式 `api_key` → `RSI_API_KEY` → `COSENS_API_KEY`。
+接入只需 `native` 和 `mode`；也可显式传入 `api_key`。SDK 默认复用业务请求的模型做提交判断，无需额外填写 `decision_model` 或 `session`。网关 Key 的优先级为显式 `api_key` → 当前区域的 `RSI_API_KEY_CN` / `RSI_API_KEY_US` → `RSI_API_KEY` → `COSENS_API_KEY`。
 
 ## 三种可运行示例
 

@@ -13,19 +13,21 @@ async def test_task_workflow_requests_and_response_forwarding():
         calls.append((request.method, request.url.path, json.loads(request.content) if request.content else None))
         return httpx.Response(200, json={'id': 'test', 'status': 'ready'})
     async with CoSensClient(api_key='key', _http_transport=httpx.MockTransport(server)) as client:
-        task = await client.atoms.create_task(data={'source': 'new_task', 'objective': 'test'})
-        await client.atoms.start_execution('task-1')
-        await client.atoms.submit_execution_result('execution-1', data={'request_sha256': 'hash', 'outcome': 'completed', 'artifacts': [], 'events': [], 'trace_coverage': 'partial'})
-        client.sync_atoms.accept_revision('revision-1', data={'artifact_hashes': {'artifact-1': 'hash'}})
-        await client.atoms.start_recipe_candidate('task-1', data={'revision_id': 'revision-1'})
+        task = await client.atoms.create_task(source='new_task', objective='test', key='task-key')
+        await client.atoms.start_execution('task-1', key='execution-key')
+        await client.atoms.submit_execution('execution-1', request_sha256='hash', outcome='completed',
+                                            artifacts=[{'artifact_id': 'artifact-1', 'role': 'submitted_output'}],
+                                            events=[], trace_coverage='partial')
+        client.sync_atoms.accept_revision('revision-1', artifact_hashes={'artifact-1': 'hash'})
+        await client.atoms.start_recipe_candidate('task-1', revision_id='revision-1', key='recipe-key')
         client.sync_atoms.get_recipe_candidate('recipe-1')
     assert task.status == 'ready'
     assert calls == [
-        ('POST', '/api/v1/tasks', {'source': 'new_task', 'objective': 'test'}),
+        ('POST', '/api/v1/tasks', {'source': 'new_task', 'artifacts': [], 'objective': 'test'}),
         ('POST', '/api/v1/tasks/task-1/executions', None),
-        ('POST', '/api/v1/executions/execution-1/result', {'request_sha256': 'hash', 'outcome': 'completed', 'artifacts': [], 'events': [], 'trace_coverage': 'partial'}),
+        ('POST', '/api/v1/executions/execution-1/result', {'request_sha256': 'hash', 'outcome': 'completed', 'artifacts': [{'artifact_id': 'artifact-1', 'role': 'submitted_output'}], 'events': [], 'trace_coverage': 'partial'}),
         ('POST', '/api/v1/revisions/revision-1/acceptance', {'data': {'artifact_hashes': {'artifact-1': 'hash'}}}),
-        ('POST', '/api/v1/tasks/task-1/recipe-candidates', {'data': {'revision_id': 'revision-1'}}),
+        ('POST', '/api/v1/tasks/task-1/recipe-candidates', {'data': {'revision_id': 'revision-1', 'include_memory': False}}),
         ('GET', '/api/v1/recipe-candidates/recipe-1', None),
     ]
 

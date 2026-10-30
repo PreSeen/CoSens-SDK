@@ -1,0 +1,31 @@
+{
+  "checked_at": "2026-10-29T07:51:19.331331+00:00",
+  "region": "us",
+  "gateway": "https://rsi.cosens.ai/api",
+  "credential_source": "python/.env RSI_API_KEY_US; key omitted",
+  "python": {
+    "status": "failed",
+    "request": {
+      "method": "GET",
+      "path": "/api/health/ready",
+      "http_status": 401,
+      "request_id": "33f0f16bb8d0e2af7cc6cbb7762ea438",
+      "identity_header_sent": false
+    },
+    "error": "RSIHTTPError: invalid bearer credential"
+  },
+  "typescript": {
+    "first_attempt": {
+      "status": "http_error",
+      "status_code": 401,
+      "request_id": "8f3383c13cd5255dcbbd5faf401d3e8b",
+      "message": "invalid bearer credential"
+    },
+    "second_attempt": {
+      "status": "transport_error",
+      "message": "connect failed"
+    }
+  },
+  "workflow": "not run because readiness and authentication did not pass",
+  "error_decoding": "both SDKs now preserve detail.code and detail.message; regression tests include secret redaction"
+}

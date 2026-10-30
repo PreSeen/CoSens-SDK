@@ -1,0 +1,44 @@
+{
+  "checked_at": "2026-10-30T06:03:07.459516+00:00",
+  "region": "us",
+  "gateway": "https://rsi.cosens.ai/api",
+  "offline": {
+    "python_passed": 283,
+    "typescript_passed": 167,
+    "typescript_build": "passed",
+    "typescript_typecheck": "passed",
+    "added_regression_cases": 30
+  },
+  "python": {
+    "readonly": "passed",
+    "workflow": "passed",
+    "task_id": "task_c57754aa74234a3296703b86d2af2370",
+    "execution_id": "execution_2fd15892a9674f2e86e85f312ac75f58",
+    "revision_id": "revision_92ece44918d8430698be1a658799e6a0"
+  },
+  "typescript": {
+    "workflow": "passed_after_recovery",
+    "task_id": "task_481edee4bda84b73a1539595244fd2b8",
+    "execution_id": "execution_9808676060344e2eadedceeda50655ca",
+    "revision_id": "revision_f4a9527cbe03442a9ffcebbab1f4ce7e",
+    "initial_execution_request": "timed out; recovered with original task and idempotency key",
+    "readonly_combined": "failed three runs with intermittent UND_ERR_CONNECT_TIMEOUT at memory/recall or memory/items; operations succeeded across separate attempts",
+    "memory_items_isolated": "passed",
+    "network_limitation": "intermittent connectivity remains; no automatic retry added",
+    "response_read_error_classification": "fixed; live response read TimeoutError was correctly reported after fix",
+    "latest_readonly": "failed: TimeoutError reading application/json response for HTTP 200 /api/openapi.json",
+    "independent_node_probe": "native Node fetch, without SDK, failed before headers with UND_ERR_CONNECT_TIMEOUT; response body cause remains unconfirmed",
+    "latest_checked_at": "2026-10-30T06:08:38.157307+00:00"
+  },
+  "workflow_checks": [
+    "create task",
+    "start execution",
+    "frozen request hash",
+    "local uppercase computation",
+    "upload output artifact",
+    "submit execution",
+    "same-body submission replay",
+    "revision and artifact readback"
+  ],
+  "latest_offline_verification_at": "2026-10-30T06:07:10.780255+00:00"
+}

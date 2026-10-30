@@ -1,0 +1,102 @@
+{
+  "checked_at": "2026-10-29T03:07:21.926938+00:00",
+  "region": "cn",
+  "gateway": "https://friday-rsi-cn.stardust-ai.com/api",
+  "offline": {
+    "python_passed": 268,
+    "typescript_passed": 152,
+    "typescript_build": "passed",
+    "typescript_typecheck": "passed",
+    "checked_at": "2026-10-29T03:19:37.092703+00:00",
+    "document_upload_python_passed": 30,
+    "document_upload_typescript_passed": 7
+  },
+  "readonly": {
+    "recipe": "passed",
+    "memory_recall": "passed",
+    "memory_items": "passed",
+    "memory_items_fields": [
+      "sources",
+      "experiences",
+      "limit"
+    ]
+  },
+  "task_workflow": {
+    "python": "passed",
+    "typescript": "passed",
+    "covered": [
+      "create_task",
+      "start_execution",
+      "get_execution",
+      "upload_artifact",
+      "submit_execution",
+      "same_body_result_retry",
+      "get_revision",
+      "get_artifact"
+    ]
+  },
+  "guided": {
+    "fixture_task_family": "sdk-guided-8e72699681f6",
+    "fixture_recipe_id": "recipe_769f0bc4a164403ca421c925b2b88b1f",
+    "python": {
+      "run_id": "run_ee5f37fb95d448b5a53aca8a89869931",
+      "status": "completed",
+      "first_submit_status": "repair_required",
+      "repaired_submit_status": "step_passed",
+      "events_fields": [
+        "items"
+      ]
+    },
+    "typescript": {
+      "run_id": "run_69112cbc3b4b4f26a7a3c6ef2746cdb8",
+      "status": "completed",
+      "submit_status": "step_passed",
+      "event_count": 4
+    },
+    "artifact_port_reference_fields": [
+      "artifact_id",
+      "name",
+      "content_hash"
+    ],
+    "server_evaluation": "inconclusive"
+  },
+  "memory": {
+    "source_id": "dfbed27c-ca6f-46d4-9080-b83cfe3dc9c7",
+    "python": {
+      "initial_revision": 1,
+      "updated_revision": 2,
+      "same_key_replay": "passed",
+      "changed_body_conflict_http": 409
+    },
+    "typescript": {
+      "updated_revision": 3,
+      "same_key_replay": "passed",
+      "stale_revision_conflict_http": 409
+    },
+    "latest_job_id": "18090d58-70c2-41bc-9438-af60b7798d79",
+    "latest_job_status": "pending"
+  },
+  "pending": {
+    "document_upload_grants": {
+      "openapi_present": false,
+      "options_http_status": 404,
+      "sdk_adapter": "implemented_offline",
+      "live_verification": "pending downstream deployment; user requested implementation before rollout"
+    },
+    "memory_extraction": "job still pending; not declared complete"
+  },
+  "region_correction": "Earlier 401 probes loaded COSENS_REGION=us from python/.env; they were not CN probes. Explicit CN requests with the same key succeeded.",
+  "idea_cn_suite": {
+    "status": "passed",
+    "finished_at": "2026-10-29T03:19:55.108251+00:00",
+    "stages": {
+      "python-unit": 0,
+      "typescript-check": 0,
+      "python-cn-readonly": 0,
+      "typescript-cn-readonly": 0,
+      "python-cn-workflow": 0,
+      "typescript-cn-workflow": 0
+    },
+    "report": "latest-cn/summary.json"
+  }
+}

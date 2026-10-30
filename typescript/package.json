@@ -1,0 +1,39 @@
+{
+  "name": "cosens-sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "files": [
+    "dist/",
+    "README.md",
+    "tests/fixtures/openai-public-methods.json"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "prepare": "npm run build",
+    "build": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "typecheck": "tsc -p tsconfig.typecheck.json",
+    "check": "npm run build && npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@openai/agents": "0.21.0",
+    "better-sqlite3": "13.0.3",
+    "openai": "7.45.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@openai/agents-core": "0.21.0",
+    "@types/better-sqlite3": "7.6.13",
+    "@types/node": "22.19.15",
+    "tsx": "4.20.6",
+    "typescript": "6.0.3"
+  }
+}
