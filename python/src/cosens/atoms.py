@@ -39,7 +39,7 @@ def _recipe_list_path(limit, cursor, task_id, status):
                 raise ValueError(f"{name} must be a nonempty string of at most 128 characters")
             params[name] = value
     if status is not None:
-        if not isinstance(status, str) or status not in {"queued", "running", "awaiting_runner", "candidate", "failed"}:
+        if not isinstance(status, str) or status not in {"queued", "running", "awaiting_runner", "awaiting_parent", "awaiting_material", "candidate", "failed"}:
             raise ValueError("invalid Recipe candidate status")
         params["status"] = status
     return "/v1/recipe-candidates?" + urlencode(params)
@@ -188,7 +188,7 @@ class AsyncAtoms(AsyncWorkflowAtoms, AsyncDocumentAtoms):
         delay = initial_delay
         while True:
             job = await self.get_improvement(job_id)
-            if job.status not in {"queued", "running"}:
+            if job.status not in {"queued", "running", "awaiting_parent"}:
                 return job
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -311,8 +311,8 @@ class SyncAtoms(SyncWorkflowAtoms, SyncDocumentAtoms):
 
 
 class CoSensClient:
-    def __init__(self, api_key=None, *, state_path=None, _http_transport=None):
-        self._service = resolve_service()
+    def __init__(self, api_key=None, *, region=None, state_path=None, _http_transport=None):
+        self._service = resolve_service(region)
         api_key = resolve_api_key(api_key, self._service)
         self._transport = AsyncTransport(api_key=api_key, transport=_http_transport, service=self._service)
         self._admin_transport = AsyncTransport(api_key=api_key, transport=_http_transport, service=self._service)
@@ -327,11 +327,11 @@ class CoSensClient:
         await self._admin_transport.aclose()
         self._sync_transport.close()
 
-    async def start(self, session_context, *, phase="prepare", mode="auto", request_key=None, authorize=None):
+    async def start(self, session_context, *, phase="prepare", mode="auto", request_key=None, authorize=None, recipe_id=None, model_api=None, include_memory=False):
         """Start a workflow phase and return the host's next request or job receipt."""
         from .workflow_start import start_workflow
         return await start_workflow(self.atoms, session_context, phase=phase, mode=mode,
-                                    request_key=request_key, authorize=authorize)
+                                    request_key=request_key, authorize=authorize, recipe_id=recipe_id, model_api=model_api, include_memory=include_memory)
 
     def close(self):
         self._sync_transport.close()

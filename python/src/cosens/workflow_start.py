@@ -16,11 +16,17 @@ def _derived_key(key, operation):
     return hashlib.sha256(f"workflow-start:{operation}:{stable_key(key)}".encode()).hexdigest()
 
 
-async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto", request_key=None, authorize=None):
+async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto", request_key=None, authorize=None, recipe_id=None, model_api=None, include_memory=False):
     if mode not in {"auto", "approval", "disable"}:
         raise ValueError("mode must be auto, approval or disable")
     if mode == "disable":
         return result({"status": "disabled", "phase": phase})
+    if type(include_memory) is not bool:
+        raise ValueError('include_memory must be boolean')
+    if isinstance(session_context, str) and phase == 'prepare':
+        if not session_context.strip():
+            raise ValueError('task Prompt must be nonempty')
+        session_context = {'task': {'source': 'new_task', 'objective': session_context}}
     if not isinstance(session_context, dict):
         raise TypeError("session_context must be an explicitly authorized snapshot object")
     if mode == "approval":
@@ -51,7 +57,14 @@ async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto"
             task = await atoms.get_task(task_id)
             if task.get("status") != "ready":
                 return result({"phase": phase, "task": task, "status": task.get("status")})
-        execution = await atoms.start_execution(task_id, key=_derived_key(request_key, "execution"))
+        options = {}
+        if recipe_id is not None:
+            options['recipe_id'] = recipe_id
+        if model_api is not None:
+            options['model_api'] = model_api
+        if include_memory:
+            options['include_memory'] = True
+        execution = await atoms.start_execution(task_id, key=_derived_key(request_key, "execution"), **options)
         return result({"phase": phase, "status": execution.get("status"), "task_id": task_id,
                        "task": task, "execution_id": execution.get("execution_id"),
                        "request_sha256": execution.get("request_sha256"), "execution_request": execution.get("request"),
@@ -62,6 +75,9 @@ async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto"
         return await atoms.start_external_analysis(session_context["task_id"], key=request_key)
     if phase == "attribute":
         return await atoms.start_attribution(session_context["revision_id"], feedback=session_context.get("feedback"), key=request_key)
+    if phase == 'improve':
+        return await atoms.improve_task(session_context['task_id'], revision_id=session_context['revision_id'],
+                                        feedback=session_context['feedback'], key=request_key, model_api=model_api)
     if phase == "revise":
         return await atoms.start_revision(session_context["revision_id"], attribution_id=session_context["attribution_id"], key=request_key)
     if phase == "recipe":
@@ -69,4 +85,4 @@ async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto"
                                                   include_memory=session_context.get("include_memory", False), key=request_key)
     if phase == "verify":
         return await atoms.start_verification(session_context["recipe_candidate_id"], key=request_key)
-    raise ValueError("phase must be prepare, analyze, attribute, revise, recipe or verify")
+    raise ValueError("phase must be prepare, analyze, attribute, improve, revise, recipe or verify")

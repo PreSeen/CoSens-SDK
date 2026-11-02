@@ -926,6 +926,7 @@ class _Runtime:
             receipt = self.client.sync_atoms.submit(state["run_id"], data=state["result"])
             if receipt.status != "completed":
                 raise RSIRecoveryRequired("CoSens submit did not confirm completion")
+            state.update({key: receipt[key] for key in ('task_id', 'revision_id', 'recipe_id', 'recipe_candidate_id') if receipt.get(key)})
             state["state"] = "completed"
         except Exception as exc:
             state["state"] = "completion_pending"
@@ -962,6 +963,7 @@ class _Runtime:
             receipt = await self.client.atoms.submit(state["run_id"], data=state["result"])
             if receipt.status != "completed":
                 raise RSIRecoveryRequired("CoSens submit did not confirm completion")
+            state.update({key: receipt[key] for key in ('task_id', 'revision_id', 'recipe_id', 'recipe_candidate_id') if receipt.get(key)})
             state["state"] = "completed"
         except Exception as exc:
             state["state"] = "completion_pending"
@@ -1000,10 +1002,12 @@ class _Runtime:
             if remote.status == "completed":
                 if remote.get("result") != state.get("result"):
                     raise RSIRecoveryRequired("Remote completed Run result differs from locally saved result")
+                state.update({key: value for key, value in (remote.get('workflow') or {}).items() if key in {'task_id', 'revision_id', 'recipe_id', 'recipe_candidate_id'}})
             elif remote.status == "ready":
                 receipt = self.client.sync_atoms.submit(state["run_id"], data=state["result"])
                 if receipt.status != "completed":
                     raise RSIRecoveryRequired("CoSens did not confirm recovered submit")
+                state.update({key: receipt[key] for key in ('task_id', 'revision_id', 'recipe_id', 'recipe_candidate_id') if receipt.get(key)})
             else:
                 raise RSIRecoveryRequired(f"Run {state['run_id']} is {remote.status}; cannot safely submit")
             state["state"] = "completed"
@@ -1048,10 +1052,12 @@ class _Runtime:
             if remote.status == "completed":
                 if remote.get("result") != state.get("result"):
                     raise RSIRecoveryRequired("Remote completed Run result differs from locally saved result")
+                state.update({key: value for key, value in (remote.get('workflow') or {}).items() if key in {'task_id', 'revision_id', 'recipe_id', 'recipe_candidate_id'}})
             elif remote.status == "ready":
                 receipt = await self.client.atoms.submit(state["run_id"], data=state["result"])
                 if receipt.status != "completed":
                     raise RSIRecoveryRequired("CoSens did not confirm recovered submit")
+                state.update({key: receipt[key] for key in ('task_id', 'revision_id', 'recipe_id', 'recipe_candidate_id') if receipt.get(key)})
             else:
                 raise RSIRecoveryRequired(f"Run {state['run_id']} is {remote.status}; cannot safely submit")
             state["state"] = "completed"

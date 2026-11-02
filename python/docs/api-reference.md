@@ -1,5 +1,34 @@
 # Python SDK 进阶与原子 API
 
+## 统一的 Task 与 Recipe 迭代
+
+Task 可以直接传自然语言 Prompt。首次执行的真实产物提交后生成 Recipe V1；用户确认反馈原因后，基于当前版本生成 V2、V3。稳定的 `recipe_id` 串联全部版本，旧版内容保留。
+
+客户端可直接构造为 `CoSensClient(api_key=cosens_api_key, region="us")`，无需设置区域环境变量。
+
+```python
+prepared = await client.start(
+    "请核对本期结算与银行到账。",
+    request_key="task-1", include_memory=True,
+    model_api={"base_url": model_base_url, "model": model, "api_key": model_api_key},
+)
+# 应用运行 Agent，并通过 atoms.artifact / atoms.submit_execution 提交真实结果。
+job = await client.atoms.improve_task(
+    task_id, revision_id=revision_id, feedback="重复回执被多算。", key="feedback-1",
+)
+change = await client.atoms.select_cause(job["job_id"], custom_reason="汇总前缺少按回执号去重。")
+v2 = await client.atoms.wait_workflow_job("recipe_candidate", change["recipe_candidate_id"], timeout=300)
+next_task = await client.start("请核对下月的到账。", request_key="task-2", recipe_id=v2["recipe_id"], include_memory=True)
+```
+
+也可先读取模型归因候选，再用 `candidate_id` 与 `candidate_sha256` 确认。未确认原因的反馈不会产生方法更新。`include_memory=True` 使服务检索并验证来源，Agent 和初始 Recipe 使用同一份冻结证据。
+
+新增原子方法：`get_task_recipe(task_id)`、`get_recipe_versions(recipe_id)`、`improve_task(...)`。`start_execution` 支持 `recipe_id`、`model_api`、`include_memory`；同步客户端提供同名方法。候选增加 `recipe_id`、`version`、`parent_candidate_id`、`attribution_id` 和 `current` 字段，等待父版时状态为 `awaiting_parent`。
+
+旧 `atoms.improve(run_id, ...)` 由服务适配到同一任务版本链，不再新建另一套用户反馈优化作业。需要服务应用 `005_unified_recipe_lifecycle.sql`；Key 经普通函数参数传入，模型配置冻结，可轮换 Key。生成的版本仍是候选，独立评价及生产发布状态单独记录。
+
+完整调用见 [自然语言 Task 与 Recipe 示例](../examples/09_sdk_memory_recipe_call_flow.py)。
+
 基础安装和可运行示例见 [接入文档](../README.md)。以下是可选能力，普通透明接入只需 `native`、`api_key`、`mode`。
 
 ## 新任务工作流

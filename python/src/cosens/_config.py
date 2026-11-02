@@ -20,8 +20,11 @@ SERVICE_URL = _SERVICES['cn'].url
 SERVICE_ID = _SERVICES['cn'].identity
 
 
-def resolve_service():
-    region = os.getenv('COSENS_REGION', 'cn').strip().lower()
+def resolve_service(region=None):
+    region = os.getenv('COSENS_REGION', 'cn') if region is None else region
+    if not isinstance(region, str):
+        raise ValueError('region must be cn or us')
+    region = region.strip().lower()
     if region not in _SERVICES:
         raise ValueError('COSENS_REGION must be cn or us')
     return _SERVICES[region]

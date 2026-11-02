@@ -11,13 +11,14 @@ import time
 
 from .atoms_helpers import path_part, stable_key
 from .errors import RSIRecoveryRequired
+from .model_api import improvement_data
 
 
 _ROLES = {"original_input", "submitted_output", "acceptance", "external_trace"}
 _JOB_STATES = {
     "analysis": {"queued", "running", "awaiting_runner", "completed", "failed"},
     "attribution": {"queued", "running", "awaiting_runner", "awaiting_selection", "inconclusive", "selected", "failed"},
-    "recipe_candidate": {"queued", "running", "awaiting_runner", "candidate", "failed"},
+    "recipe_candidate": {"queued", "running", "awaiting_runner", "awaiting_parent", "awaiting_material", "candidate", "failed"},
 }
 
 
@@ -88,13 +89,13 @@ def _context(expected_context_version, objective, artifacts, self_contained):
 def _selection(candidate_sha256, candidate_id, custom_reason):
     if bool(candidate_id) == bool(custom_reason):
         raise ValueError("provide exactly one candidate_id or custom_reason")
-    if not isinstance(candidate_sha256, str) or not candidate_sha256.strip():
+    if candidate_id is not None and (not isinstance(candidate_sha256, str) or not candidate_sha256.strip()):
         raise ValueError("candidate_sha256 is required")
     if candidate_id is not None and (not isinstance(candidate_id, str) or not candidate_id.strip()):
         raise ValueError("candidate_id must be nonempty")
     if custom_reason is not None and (not isinstance(custom_reason, str) or not custom_reason.strip() or len(custom_reason) > 4_000):
         raise ValueError("custom_reason must be nonempty text of at most 4,000 characters")
-    data = {"candidate_sha256": candidate_sha256}
+    data = {"candidate_sha256": candidate_sha256} if candidate_sha256 is not None else {}
     if candidate_id:
         data["candidate_id"] = candidate_id
     else:
@@ -138,7 +139,7 @@ class AsyncWorkflowAtoms:
             status = job.get("status")
             if status not in _JOB_STATES[kind]:
                 raise RSIRecoveryRequired(f"Unexpected workflow {kind} status: {status}")
-            if status not in {"queued", "running"}:
+            if status not in {"queued", "running", "awaiting_parent"}:
                 return job
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
@@ -168,8 +169,34 @@ class AsyncWorkflowAtoms:
     async def resume_external_analysis(self, analysis_id):
         return await self._http.request("POST", f"/v1/task-analyses/{path_part(analysis_id)}/resume")
 
-    async def start_execution(self, task_id, *, key):
-        return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/executions", key=stable_key(key))
+    async def start_execution(self, task_id, *, key, recipe_id=None, model_api=None, include_memory=False):
+        data, secrets = improvement_data(model_api=model_api)
+        if type(include_memory) is not bool:
+            raise ValueError('include_memory must be boolean')
+        if include_memory:
+            data['include_memory'] = True
+        if recipe_id is not None:
+            path_part(recipe_id)
+            data['recipe_id'] = recipe_id
+        options = {'body': data} if data else {}
+        if secrets:
+            options['sensitive_values'] = secrets
+        return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/executions", key=stable_key(key), **options)
+
+    async def get_task_recipe(self, task_id):
+        return await self._http.request('GET', f'/v1/tasks/{path_part(task_id)}/recipe')
+
+    async def get_recipe_versions(self, recipe_id):
+        return await self._http.request('GET', f'/v1/recipe-chains/{path_part(recipe_id)}/versions')
+
+    async def improve_task(self, task_id, *, revision_id, feedback, key, model_api=None):
+        path_part(revision_id)
+        data, secrets = improvement_data(feedback=feedback, model_api=model_api)
+        if not data.get('feedback'):
+            raise ValueError('feedback is required')
+        data['revision_id'] = revision_id
+        options = {'sensitive_values': secrets} if secrets else {}
+        return await self._http.request('POST', f'/v1/tasks/{path_part(task_id)}/improvements', body=data, key=stable_key(key), **options)
 
     async def start_reconstruction(self, task_id, *, key):
         """Compatibility route for external_artifact tasks; shares execution key space."""
@@ -198,7 +225,7 @@ class AsyncWorkflowAtoms:
     async def resume_attribution(self, attribution_id):
         return await self._http.request("POST", f"/v1/attributions/{path_part(attribution_id)}/resume")
 
-    async def select_cause(self, attribution_id, *, candidate_sha256, candidate_id=None, custom_reason=None):
+    async def select_cause(self, attribution_id, *, candidate_sha256=None, candidate_id=None, custom_reason=None):
         return await self._http.request("POST", f"/v1/attributions/{path_part(attribution_id)}/selection",
                                         body=_selection(candidate_sha256, candidate_id, custom_reason))
 
@@ -239,7 +266,7 @@ class SyncWorkflowAtoms:
             status = job.get("status")
             if status not in _JOB_STATES[kind]:
                 raise RSIRecoveryRequired(f"Unexpected workflow {kind} status: {status}")
-            if status not in {"queued", "running"}:
+            if status not in {"queued", "running", "awaiting_parent"}:
                 return job
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -269,8 +296,34 @@ class SyncWorkflowAtoms:
     def resume_external_analysis(self, analysis_id):
         return self._http.request("POST", f"/v1/task-analyses/{path_part(analysis_id)}/resume")
 
-    def start_execution(self, task_id, *, key):
-        return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/executions", key=stable_key(key))
+    def start_execution(self, task_id, *, key, recipe_id=None, model_api=None, include_memory=False):
+        data, secrets = improvement_data(model_api=model_api)
+        if type(include_memory) is not bool:
+            raise ValueError('include_memory must be boolean')
+        if include_memory:
+            data['include_memory'] = True
+        if recipe_id is not None:
+            path_part(recipe_id)
+            data['recipe_id'] = recipe_id
+        options = {'body': data} if data else {}
+        if secrets:
+            options['sensitive_values'] = secrets
+        return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/executions", key=stable_key(key), **options)
+
+    def get_task_recipe(self, task_id):
+        return self._http.request('GET', f'/v1/tasks/{path_part(task_id)}/recipe')
+
+    def get_recipe_versions(self, recipe_id):
+        return self._http.request('GET', f'/v1/recipe-chains/{path_part(recipe_id)}/versions')
+
+    def improve_task(self, task_id, *, revision_id, feedback, key, model_api=None):
+        path_part(revision_id)
+        data, secrets = improvement_data(feedback=feedback, model_api=model_api)
+        if not data.get('feedback'):
+            raise ValueError('feedback is required')
+        data['revision_id'] = revision_id
+        options = {'sensitive_values': secrets} if secrets else {}
+        return self._http.request('POST', f'/v1/tasks/{path_part(task_id)}/improvements', body=data, key=stable_key(key), **options)
 
     def start_reconstruction(self, task_id, *, key):
         """Compatibility route for external_artifact tasks; shares execution key space."""
@@ -299,7 +352,7 @@ class SyncWorkflowAtoms:
     def resume_attribution(self, attribution_id):
         return self._http.request("POST", f"/v1/attributions/{path_part(attribution_id)}/resume")
 
-    def select_cause(self, attribution_id, *, candidate_sha256, candidate_id=None, custom_reason=None):
+    def select_cause(self, attribution_id, *, candidate_sha256=None, candidate_id=None, custom_reason=None):
         return self._http.request("POST", f"/v1/attributions/{path_part(attribution_id)}/selection",
                                   body=_selection(candidate_sha256, candidate_id, custom_reason))
 
