@@ -22,11 +22,13 @@ export type WorkflowArtifactRef = string | { artifact_id: string; role: 'origina
 export type WorkflowOutputRef = { artifact_id: string; role: 'submitted_output' };
 export type WorkflowEvent = { id: string; kind: string; payload: Record<string, unknown> };
 
-function workflowSelection(candidateSha256: string, candidateId?: string, customReason?: string) {
-  if (!candidateSha256?.trim()) throw new TypeError('candidateSha256 is required');
+function workflowSelection(candidateSha256?: string, candidateId?: string, customReason?: string) {
   if (Boolean(candidateId) === Boolean(customReason)) throw new TypeError('provide exactly one candidateId or customReason');
+  if (candidateId !== undefined && (typeof candidateSha256 !== 'string' || !candidateSha256.trim())) throw new TypeError('candidateSha256 is required');
+  if (candidateId !== undefined && (typeof candidateId !== 'string' || !candidateId.trim())) throw new TypeError('candidateId must be nonempty');
   if (customReason !== undefined && (!customReason.trim() || customReason.length > 4_000)) throw new TypeError('customReason must be 1–4,000 characters');
-  return { data: { candidate_sha256: candidateSha256, ...(candidateId ? { candidate_id: candidateId } : { custom_reason: customReason }) } };
+  return { data: { ...(candidateSha256 === undefined ? {} : { candidate_sha256: candidateSha256 }),
+    ...(candidateId ? { candidate_id: candidateId } : { custom_reason: customReason }) } };
 }
 export class Atoms {
   constructor(private readonly http: Transport) {}
@@ -105,7 +107,24 @@ export class Atoms {
   startExternalAnalysis(taskId: string, { key }: { key: string }) { return this.http.request('POST', `/v1/tasks/${pathPart(taskId)}/analysis`, undefined, requestKey(key)); }
   getExternalAnalysis(analysisId: string) { return this.http.request('GET', `/v1/task-analyses/${pathPart(analysisId)}`); }
   resumeExternalAnalysis(analysisId: string) { return this.http.request('POST', `/v1/task-analyses/${pathPart(analysisId)}/resume`); }
-  startExecution(taskId: string, { key }: { key: string }) { return this.http.request('POST', `/v1/tasks/${pathPart(taskId)}/executions`, undefined, requestKey(key)); }
+  startExecution(taskId: string, { key, modelApi, recipeId, includeMemory = false }: { key: string; modelApi?: BusinessModelAPI; recipeId?: string; includeMemory?: boolean }) {
+    if (typeof includeMemory !== 'boolean') throw new TypeError('includeMemory must be boolean');
+    if (recipeId !== undefined) pathPart(recipeId);
+    const connection = modelApi === undefined ? undefined : modelAPIData(modelApi);
+    const body = { ...(connection ? { model_api: connection.wire } : {}),
+      ...(recipeId === undefined ? {} : { recipe_id: recipeId }), ...(includeMemory ? { include_memory: true } : {}) };
+    return this.http.request('POST', `/v1/tasks/${pathPart(taskId)}/executions`,
+      Object.keys(body).length ? body : undefined, requestKey(key), connection?.secrets);
+  }
+  getTaskRecipe(taskId: string) { return this.http.request('GET', `/v1/tasks/${pathPart(taskId)}/recipe`); }
+  getRecipeVersions(recipeId: string) { return this.http.request('GET', `/v1/recipe-chains/${pathPart(recipeId)}/versions`); }
+  improveTask(taskId: string, { revisionId, feedback, key, modelApi }: { revisionId: string; feedback: string; key: string; modelApi?: BusinessModelAPI }) {
+    pathPart(revisionId);
+    if (typeof feedback !== 'string' || !feedback.trim() || feedback.length > 4_000) throw new TypeError('feedback must be 1–4,000 characters');
+    const connection = modelApi === undefined ? undefined : modelAPIData(modelApi);
+    return this.http.request('POST', `/v1/tasks/${pathPart(taskId)}/improvements`,
+      { revision_id: revisionId, feedback, ...(connection ? { model_api: connection.wire } : {}) }, requestKey(key), connection?.secrets);
+  }
   startReconstruction(taskId: string, { key }: { key: string }) { return this.http.request('POST', `/v1/tasks/${pathPart(taskId)}/reconstructions`, undefined, requestKey(key)); }
   getExecution(executionId: string) { return this.http.request('GET', `/v1/executions/${pathPart(executionId)}`); }
   submitExecution(executionId: string, { requestSha256, outcome, artifacts, events = [], traceCoverage = 'unknown' }: { requestSha256: string; outcome: 'completed' | 'failed' | 'cancelled'; artifacts: WorkflowOutputRef[]; events?: WorkflowEvent[]; traceCoverage?: 'full' | 'partial' | 'unknown' }) {
@@ -128,7 +147,7 @@ export class Atoms {
   }
   getAttribution(attributionId: string) { return this.http.request('GET', `/v1/attributions/${pathPart(attributionId)}`); }
   resumeAttribution(attributionId: string) { return this.http.request('POST', `/v1/attributions/${pathPart(attributionId)}/resume`); }
-  selectCause(attributionId: string, { candidateSha256, candidateId, customReason }: { candidateSha256: string; candidateId?: string; customReason?: string }) {
+  selectCause(attributionId: string, { candidateSha256, candidateId, customReason }: { candidateSha256?: string; candidateId?: string; customReason?: string }) {
     return this.http.request('POST', `/v1/attributions/${pathPart(attributionId)}/selection`, workflowSelection(candidateSha256, candidateId, customReason));
   }
   startRevision(revisionId: string, { attributionId, key }: { attributionId: string; key: string }) {
@@ -148,7 +167,7 @@ export class Atoms {
     const allowed: Record<string, readonly string[]> = {
       analysis: ['queued', 'running', 'awaiting_runner', 'completed', 'failed'],
       attribution: ['queued', 'running', 'awaiting_runner', 'awaiting_selection', 'inconclusive', 'selected', 'failed'],
-      recipe_candidate: ['queued', 'running', 'awaiting_runner', 'candidate', 'failed'],
+      recipe_candidate: ['queued', 'running', 'awaiting_runner', 'awaiting_parent', 'awaiting_material', 'candidate', 'failed'],
     };
     if (!(kind in allowed)) throw new TypeError('job kind must be analysis, attribution or recipe_candidate');
     const deadline = performance.now() + boundedTimeout(boundedTimeout(timeout) * 1000);
@@ -156,7 +175,7 @@ export class Atoms {
     while (true) {
       const job = kind === 'analysis' ? await this.getExternalAnalysis(id) : kind === 'attribution' ? await this.getAttribution(id) : await this.getRecipeCandidate(id);
       if (!allowed[kind]!.includes(job?.status)) throw new RSIRecoveryRequired(`Unexpected workflow ${kind} status: ${job?.status}`);
-      if (!['queued', 'running'].includes(job.status)) return job;
+      if (!['queued', 'running', 'awaiting_parent'].includes(job.status)) return job;
       const remaining = deadline - performance.now();
       if (remaining <= 0) throw new Error(`Workflow ${kind} ${id} is still ${job.status}; resume polling the same ID`);
       await new Promise(resolve => setTimeout(resolve, Math.min(delay, remaining)));
@@ -253,6 +272,6 @@ export class CoSensClient {
     this.atoms = new Atoms(this.transport);
     this.admin = { atoms: new AdminAtoms(this.transport) };
   }
-  start(snapshot: WorkflowSnapshot, options: WorkflowStartOptions = {}) { return startWorkflow(this.atoms, snapshot, options); }
+  start(snapshot: WorkflowSnapshot | string, options: WorkflowStartOptions = {}) { return startWorkflow(this.atoms, snapshot, options); }
   async close() { /* fetch has no owned socket lifecycle */ }
 }

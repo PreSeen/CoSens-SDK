@@ -19,6 +19,9 @@ test('task workflow atoms preserve routes, bodies, keys and gateway authenticati
     [() => a.getExternalAnalysis('an1'), 'GET', '/api/v1/task-analyses/an1', undefined],
     [() => a.resumeExternalAnalysis('an1'), 'POST', '/api/v1/task-analyses/an1/resume', undefined],
     [() => a.startExecution('t1', { key: 'execution-key' }), 'POST', '/api/v1/tasks/t1/executions', undefined, 'execution-key'],
+    [() => a.getTaskRecipe('t1'), 'GET', '/api/v1/tasks/t1/recipe', undefined],
+    [() => a.getRecipeVersions('rc1'), 'GET', '/api/v1/recipe-chains/rc1/versions', undefined],
+    [() => a.improveTask('t1', { revisionId: 'r1', feedback: 'Review units', key: 'improve-key' }), 'POST', '/api/v1/tasks/t1/improvements', { revision_id: 'r1', feedback: 'Review units' }, 'improve-key'],
     [() => a.startReconstruction('t1', { key: 'reconstruction-key' }), 'POST', '/api/v1/tasks/t1/reconstructions', undefined, 'reconstruction-key'],
     [() => a.getExecution('ex1'), 'GET', '/api/v1/executions/ex1', undefined],
     [() => a.submitExecution('ex1', { requestSha256: 'hash1', outcome: 'completed', artifacts: [{ artifact_id: 'a2', role: 'submitted_output' }] }), 'POST', '/api/v1/executions/ex1/result', { request_sha256: 'hash1', outcome: 'completed', artifacts: [{ artifact_id: 'a2', role: 'submitted_output' }], events: [], trace_coverage: 'unknown' }],
@@ -38,6 +41,95 @@ test('task workflow atoms preserve routes, bodies, keys and gateway authenticati
   for (const [call] of cases) await call();
   assert.deepEqual(seen.map(x => [x.method, x.path, x.body, x.key]), cases.map(([, method, path, body, key]) => [method, path, body, key ?? null]));
   assert.ok(seen.every(x => x.auth === 'Bearer example-key' && x.type === 'api_key'));
+  await client.close();
+});
+
+test('Task execution and improvement transmit caller model settings in the root body', async () => {
+  const seen: Array<{ path: string; body: any; key: string | null; auth: string | null }> = [];
+  const client = new CoSensClient({ apiKey: 'gateway-key', fetch: async (input, init) => {
+    const headers = new Headers(init?.headers);
+    seen.push({ path: new URL(String(input)).pathname, body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      key: headers.get('Idempotency-Key'), auth: headers.get('Authorization') });
+    return new Response('{}');
+  } });
+  const modelApi = { baseUrl: 'https://business.example/v1', model: 'business-model', apiKey: 'model-secret', temperature: 0.2, maxTokens: 4096 };
+  const wire = { base_url: modelApi.baseUrl, model: modelApi.model, api_key: modelApi.apiKey, temperature: 0.2, max_tokens: 4096 };
+  await client.atoms.startExecution('t/1', { key: 'execution', modelApi, recipeId: 'recipe-1', includeMemory: true });
+  await client.atoms.improveTask('t/1', { key: 'improvement', revisionId: 'rev-1', feedback: 'Keep signs', modelApi });
+  await client.atoms.startExecution('t/1', { key: 'recipe-only', recipeId: 'recipe-1' });
+  await client.atoms.startExecution('t/1', { key: 'memory-only', includeMemory: true });
+  await client.atoms.startExecution('t/1', { key: 'legacy', includeMemory: false });
+  assert.deepEqual(seen.map(x => x.body), [
+    { model_api: wire, recipe_id: 'recipe-1', include_memory: true },
+    { revision_id: 'rev-1', feedback: 'Keep signs', model_api: wire },
+    { recipe_id: 'recipe-1' }, { include_memory: true }, undefined,
+  ]);
+  assert.equal(seen[0]!.path, '/api/v1/tasks/t%2F1/executions');
+  assert.equal(seen[1]!.path, '/api/v1/tasks/t%2F1/improvements');
+  assert.deepEqual(seen.map(x => x.key), ['execution', 'improvement', 'recipe-only', 'memory-only', 'legacy']);
+  assert.ok(seen.every(x => x.auth === 'Bearer gateway-key'));
+  await client.close();
+});
+
+test('Task model API errors redact provider credentials and invalid inputs make no request', async () => {
+  let calls = 0;
+  const modelApi = { baseUrl: 'https://business.example/v1', model: 'model', apiKey: 'provider-secret' };
+  const client = new CoSensClient({ apiKey: 'gateway-key', fetch: async () => {
+    calls++;
+    return new Response(JSON.stringify({ error: { message: 'Rejected provider-secret', code: 'provider-secret' } }),
+      { status: 401, headers: { 'x-request-id': 'provider-secret' } });
+  } });
+  const a = client.atoms;
+  for (const invalid of [{ baseUrl: 'file:///etc/passwd' }, { apiKey: 'key\r\n' }, { agent_argv: ['sh'] }]) {
+    const bad = { ...modelApi, ...invalid };
+    assert.throws(() => a.startExecution('t1', { key: 'k1', modelApi: bad }), /modelApi/);
+    assert.throws(() => a.improveTask('t1', { key: 'k2', revisionId: 'r1', feedback: 'Review', modelApi: bad }), /modelApi/);
+  }
+  assert.throws(() => a.startExecution('t1', { key: 'k', recipeId: '' }), /resource ID/);
+  assert.throws(() => a.startExecution('t1', { key: 'k', includeMemory: 'true' as unknown as boolean }), /includeMemory/);
+  assert.throws(() => a.improveTask('t1', { key: 'k', revisionId: '', feedback: 'Review' }), /resource ID/);
+  for (const feedback of ['', ' ', 'x'.repeat(4001)]) {
+    assert.throws(() => a.improveTask('t1', { key: 'k', revisionId: 'r1', feedback }), /feedback/);
+  }
+  assert.equal(calls, 0);
+  for (const call of [() => a.startExecution('t1', { key: 'k1', modelApi }),
+    () => a.improveTask('t1', { key: 'k2', revisionId: 'r1', feedback: 'Review', modelApi })]) {
+    await assert.rejects(call, (error: any) => {
+      assert.ok(!error.message.includes('provider-secret'));
+      assert.equal(error.code, '[REDACTED]');
+      assert.equal(error.requestId, '[REDACTED]');
+      return true;
+    });
+  }
+  assert.equal(calls, 2);
+  await client.close();
+});
+
+test('a custom cause does not require a generated candidate portfolio', async () => {
+  let body: unknown;
+  let calls = 0;
+  const client = new CoSensClient({ apiKey: 'key', fetch: async (_input, init) => {
+    calls++;
+    body = JSON.parse(String(init?.body));
+    return new Response('{}');
+  } });
+  await client.atoms.selectCause('at1', { customReason: 'Simulated operator hypothesis' });
+  assert.deepEqual(body, { data: { custom_reason: 'Simulated operator hypothesis' } });
+  assert.throws(() => client.atoms.selectCause('at1', { candidateId: 'candidate-1' }), /candidateSha256/);
+  assert.equal(calls, 1);
+  await client.close();
+});
+
+test('Recipe polling waits for a parent, stops at a material gap and bounds the wait', async () => {
+  const states = ['awaiting_parent', 'candidate', 'awaiting_material', 'awaiting_parent'];
+  let calls = 0;
+  const client = new CoSensClient({ apiKey: 'key', fetch: async () => {
+    return new Response(JSON.stringify({ status: states[calls++] }));
+  } });
+  assert.equal((await client.atoms.waitWorkflowJob('recipe_candidate', 'r1', { timeout: 5 })).status, 'candidate');
+  assert.equal((await client.atoms.waitWorkflowJob('recipe_candidate', 'r2', { timeout: 0 })).status, 'awaiting_material');
+  await assert.rejects(client.atoms.waitWorkflowJob('recipe_candidate', 'r3', { timeout: 0 }), /still awaiting_parent/);
+  assert.equal(calls, 4);
   await client.close();
 });
 

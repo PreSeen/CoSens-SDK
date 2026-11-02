@@ -18,6 +18,34 @@ npm run check
 
 安装或打包本地 SDK 时，`prepare` 会编译 `dist/`；包内容只包含运行时代码、类型声明、README 和公开方法清单，不包含测试及联调记录。
 
+## Task 工作流使用调用方业务模型
+
+显式 Task 入口支持 `modelApi`、`recipeId`、`includeMemory`，与 Python 对应参数一致。SDK 校验模型配置后，将其转换为根请求体的 `model_api`，并将 `recipeId`、`includeMemory` 转为 `recipe_id`、`include_memory`。CoSens 网关 Key 仍由客户端构造参数提供，业务模型 Key 由 `modelApi.apiKey` 提供。
+
+```ts
+import { CoSensClient } from 'cosens-sdk';
+
+const client = new CoSensClient({ region: 'us' });
+const modelApi = {
+  baseUrl: process.env.OPENAI_BASE_URL!,
+  apiKey: process.env.OPENAI_API_KEY!,
+  model: process.env.OPENAI_MODEL!,
+};
+
+const prepared = await client.start('根据本次输入生成业务报告', {
+  requestKey: 'business-task-001',
+  modelApi,
+  includeMemory: true,
+  // recipeId: 已生成的 Recipe 链 ID，用于显式复用方法。
+});
+```
+
+宿主根据 `prepared.execution_request` 执行业务模型和工具，再通过 `submitExecution` 提交真实产物。直接调用原子方法时，使用 `startExecution(taskId, { key, modelApi, recipeId?, includeMemory? })`，发送相同的配置。省略所有新增选项时仍发送原来的无请求体调用。
+
+收到提交回执中的 `revision_id` 后，可调用 `improveTask(taskId, { revisionId, feedback, key, modelApi })`；高层入口对应 `client.start({ task_id, revision_id, feedback }, { phase: 'improve', requestKey, modelApi })`。该方法调用 `/v1/tasks/{taskId}/improvements`，不会转到旧 Run 改进接口。反馈发起归因，生成的候选与原因选择均不代表用户验收或验证成功。
+
+`getTaskRecipe(taskId)` 查询任务的当前及最新候选，`getRecipeVersions(recipeId)` 查询同一 Recipe 链的版本。`selectCause(id, { customReason })` 可提交待验证的自定义原因；选择服务端候选时仍须传入 `candidateId` 和冻结的 `candidateSha256`。`waitWorkflowJob('recipe_candidate', id)` 会有界等待 `awaiting_parent`，遇到 `awaiting_material` 或 `awaiting_runner` 则返回当前状态。
+
 配置好 Key 和 `OPENAI_MODEL` 后，可在本目录分别运行 `node --import tsx examples/01_transparent.ts`、`node --import tsx examples/02_explicit.ts`、`node --import tsx examples/03_atomic.ts`。三者访问真实服务；第三个入口会创建 Run，若模型已开始执行而流程中断，需先核对远端 Run 与本地结果，不能仅靠复用 `COSENS_TURN_ID` 重新执行模型。
 
 运行环境优先提供当前区域的 `RSI_API_KEY_CN` 或 `RSI_API_KEY_US`，缺失时依次回退到 `RSI_API_KEY`、`COSENS_API_KEY`；也可在构造选项中传 `apiKey`，其优先级最高。模型服务单独使用 `OPENAI_API_KEY`。`COSENS_REGION=cn` 是默认值，可选 `us`。CoSens 服务端请求同时发送 `X-Auth-Type: api_key` 与 `Authorization: Bearer <api_key>`；这两个请求头不会加入原生 OpenAI 模型请求。`apiKey` 只填 Key 本身，不要包含 `Bearer `。
