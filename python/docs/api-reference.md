@@ -142,7 +142,7 @@ CN 已验证：`next_step` 的 `step_ready` 回执在 `node.output_contract` 声
 
 `admin.atoms` 新增显式调用：`bootstrap_bundle`、`evaluate_decision`、`evaluate_recipe`，对应附件的 Recipe 注册、决策评估、Recipe 评估接口。它们不会由透明包装自动触发；调用者须提交实际执行和评估证据。`feedback` 不等于经验已经 verified，异步写入需轮询 Job/经验版本确认。
 
-`recall_context` 顺序读取 Recipe 和 Memory 后冻结本地结果，服务端未承诺两个独立读取拥有同一个事务快照。`disable` 使用 `general` 任务族；`auto` 未命中时使用分类结果的任务族。Recipe `not_found` 或 Memory 空列表是合法结果，HTTP 错误和缺失字段仍阻止业务模型调用。
+`recall_context` 顺序读取 Recipe 和 Memory 后冻结本地结果，服务端未承诺两个独立读取拥有同一个事务快照。`disable` 使用 `general` 任务族；旧 Run 兼容路径（`auto_learning=False`）的 `auto` 未命中时使用分类结果的任务族。Recipe `not_found` 或 Memory 空列表是合法结果，HTTP 错误和缺失字段仍阻止业务模型调用。
 
 ## 复现网关联调
 
@@ -195,3 +195,10 @@ asyncio.run(main())
 同步宿主改用 `client.sync_atoms` 并去掉方法调用的 `await`。上传结果不明时应先对账，不应盲目重新上传。
 
 算法服务当前版本已移除一次性上传 grant 路由，因此 SDK 不提供 grant 上传。SDK 不接受用户身份覆盖；Key 来自构造参数或进程环境 `RSI_API_KEY` / `COSENS_API_KEY`，SDK 本身不自动加载 `.env`。实际网关支持情况需联调确认。
+
+
+## 统一 OpenAI auto
+
+`cosens(native, mode="auto", auto_learning=AutoLearning(...))` 默认启用统一工作流 Recipe 复用和后台 `create / revise / noop` 决策。`client.cosens.get_auto(turn_id=None)` 同步读取操作与进度；`get_learning` 获取详细状态。`feedback(message, turn_id=...)`、`wait_learning(turn_id, timeout=...)`、`resume_learning(turn_id)` 在 AsyncOpenAI 下需 await；普通反馈优先使用原生 user 消息。
+
+`submit_execution` 仅记录执行结果及 Revision；生成 Recipe 必须由独立接口显式触发。请求不包含 `generate_recipe` 字段，也不保留提交时自动生成 V1 的服务端分支。完整生命周期、兼容范围、服务端补丁及恢复说明见 [统一 auto](unified-auto.md)。

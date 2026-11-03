@@ -13,6 +13,8 @@ import uuid
 from types import SimpleNamespace
 
 from .atoms import CoSensClient
+from .auto_learning import AutoLearning, LearningCoordinator
+from .auto_execution import AutoExecution
 from .decision import decide_async, decide_sync
 from .errors import RSIApprovalUnavailable, RSIDecisionUnavailable, RSIRecoveryRequired
 from .responses_adapter import SUPPORTED, base_path, inject, summary, terminal, tool_continuation, tool_names, user_text
@@ -46,7 +48,60 @@ class _Status:
         self._scope = contextvars.ContextVar("cosens_scope", default=None)
 
     def get_turn(self, turn_id):
-        return self._runtime.turns.get(turn_id)
+        value = self._runtime.turns.get(turn_id)
+        if value and self._runtime._learning is not None:
+            value['learning'] = self._runtime._learning.get(turn_id)
+        return value
+
+    def _learning_turn(self, turn_id):
+        turn_id = turn_id or self.last_turn_id
+        if not turn_id:
+            raise RSIRecoveryRequired('No turn selected for learning')
+        return turn_id
+
+    def get_learning(self, turn_id=None):
+        return self._runtime.learning().get(self._learning_turn(turn_id))
+
+    def get_auto(self, turn_id=None):
+        request_turn = self._learning_turn(turn_id)
+        turn = self._runtime.turns.get(request_turn)
+        if not turn:
+            return None
+        target = (turn.get('decision') or {}).get('feedback_turn_id') or request_turn
+        learning = self._runtime.learning().get(target)
+        if learning:
+            return {**{key: learning.get(key) for key in (
+                'action', 'reason', 'used_recipe_id', 'used_recipe_version', 'recipe_candidate_id', 'error_type')},
+                'turn_id': target, 'request_turn_id': request_turn, 'status': learning['state'],
+                'job_id': learning.get('recipe_candidate_id') or learning.get('attribution_id')}
+        return {'action': 'noop', 'reason': turn.get('state'), 'turn_id': request_turn,
+                'used_recipe_id': turn.get('used_recipe_id'), 'used_recipe_version': turn.get('used_recipe_version'),
+                'status': 'blocked' if turn.get('state') == 'completion_pending' else 'pending',
+                'error_type': turn.get('last_error_type') or turn.get('learning_error_type')}
+
+    def _learning_call(self, method, *args):
+        function = getattr(self._runtime.learning(), method)
+        def bind(loop):
+            turn = self._runtime.turns.get(args[0]) or {}
+            model = self._runtime.decision_model or turn.get('policy_model')
+            if model and self._runtime._policy_native is not None:
+                self._runtime._policy_bindings[args[0]] = (self._runtime._policy_native, model, loop)
+        if self._runtime.asynchronous:
+            async def call():
+                bind(asyncio.get_running_loop())
+                return await asyncio.to_thread(function, *args)
+            return call()
+        bind(None)
+        return function(*args)
+
+    def feedback(self, message, *, turn_id=None):
+        return self._learning_call('feedback', self._learning_turn(turn_id), message)
+
+    def resume_learning(self, turn_id=None):
+        return self._learning_call('resume', self._learning_turn(turn_id))
+
+    def wait_learning(self, turn_id=None, *, timeout=1800):
+        return self._learning_call('wait', self._learning_turn(turn_id), timeout)
 
     def reconcile(self, turn_id):
         if self._runtime.asynchronous:
@@ -338,12 +393,22 @@ class _DeferredAsyncManager:
                 self._entered_response._incomplete()
 
 
-class _Runtime:
-    def __init__(self, *, mode, decision_model, session, api_key, state_path, http_transport, asynchronous=False, decision_timeout=5, decision_max_output_tokens=256):
+class _Runtime(AutoExecution):
+    def __init__(self, *, mode, decision_model, session, api_key, state_path, http_transport, asynchronous=False, decision_timeout=5, decision_max_output_tokens=None, auto_learning=None):
+        if auto_learning is not None and auto_learning is not False and not isinstance(auto_learning, AutoLearning):
+            raise TypeError('auto_learning must be AutoLearning, False, or None')
+        if auto_learning not in (None, False) and mode != 'auto':
+            raise ValueError('auto_learning requires mode="auto"')
+        self.auto_learning = auto_learning if auto_learning is not None else (AutoLearning() if mode == 'auto' else False)
+        self._learning = None
+        self._policy_bindings = {}
+        self._policy_native = None
+        self._learning_lock = threading.Lock()
+        self._learning_transport = http_transport
         self.mode = mode
         self.asynchronous = asynchronous
         self.decision_model = decision_model
-        if decision_timeout <= 0 or decision_max_output_tokens <= 0:
+        if decision_timeout <= 0 or (decision_max_output_tokens is not None and decision_max_output_tokens <= 0):
             raise ValueError("Decision timeout and output token limit must be positive")
         self.decision_timeout = decision_timeout
         self.decision_max_output_tokens = decision_max_output_tokens
@@ -355,6 +420,18 @@ class _Runtime:
         self._owner_lock = threading.Lock()
         self._owners = 0
         self._closed = False
+
+    def learning(self):
+        with self._learning_lock:
+            if self._closed:
+                raise RuntimeError('CoSens client is closed')
+            if self.auto_learning is False:
+                raise ValueError('Auto learning is disabled')
+            if self._learning is None:
+                self._learning = LearningCoordinator(
+                    api_key=self.client._transport.api_key, region=self.client._service.region,
+                    state_path=self.client.state_path, transport=self._learning_transport, config=self.auto_learning, planner=self._plan_learning)
+            return self._learning
 
     def acquire(self):
         with self._owner_lock:
@@ -374,6 +451,8 @@ class _Runtime:
 
     async def release_async(self):
         if self._drop_owner():
+            if self._learning is not None:
+                self._learning.close()
             try:
                 await self.client.aclose()
             finally:
@@ -382,6 +461,8 @@ class _Runtime:
 
     def release_sync(self):
         if self._drop_owner():
+            if self._learning is not None:
+                self._learning.close()
             try:
                 _sync_await(self.client.aclose)
             finally:
@@ -505,6 +586,48 @@ class _Runtime:
             raise RSIDecisionUnavailable("Set model on the native request so CoSens can use it for its decision")
         return model
 
+    def _feedback_chat_key(self, user, assistant):
+        return 'feedback-chat:' + hashlib.sha256(json.dumps(
+            [self._session_identity(), user, assistant], ensure_ascii=False).encode()).hexdigest()
+
+    def _feedback_target(self, path, kwargs):
+        if self.mode != 'auto' or self.auto_learning is False or not user_text(path, kwargs).strip():
+            return None
+        reference = kwargs.get('previous_response_id')
+        alias = self.turns.get('response:' + str(reference)) if reference else None
+        if alias is None and self._conversation_key(kwargs):
+            alias = self.turns.get(self._conversation_key(kwargs))
+        messages = kwargs.get('messages') or kwargs.get('input')
+        if alias is None and isinstance(messages, list) and messages and isinstance(messages[-1], dict) and messages[-1].get('role') == 'user':
+            # Require the adjacent user/assistant pair, never a global last turn.
+            prior = messages[:-1]
+            if len(prior) >= 2 and all(isinstance(m, dict) for m in prior[-2:]):
+                user, assistant = prior[-2:]
+                if user.get('role') == 'user' and assistant.get('role') == 'assistant':
+                    alias = self.turns.get(self._feedback_chat_key(user.get('content'), assistant.get('content')))
+        value = self.turns.get(alias['turn_ref']) if alias and alias.get('turn_ref') else None
+        if value and value.get('mode') == 'auto' and value.get('state') == 'completed' and value.get('revision_id'):
+            self._require_session(value)
+            return value
+        return None
+
+    @staticmethod
+    def _feedback_context(target):
+        if target is None:
+            return None
+        return {'objective': target.get('objective', '')[:4000],
+                'assistant': target.get('result', {}).get('summary', '')[:8000]}
+
+    def _route_feedback(self, decision, target, path, kwargs):
+        if target is not None and decision.get('feedback') is True:
+            try:
+                self.learning().attach(target)
+                self.learning().feedback(target['turn_id'], user_text(path, kwargs))
+                decision['feedback_turn_id'] = target['turn_id']
+            except Exception as error:
+                decision['feedback_error_type'] = type(error).__name__
+        return decision
+
     def _decide_sync(self, native, path, kwargs):
         saved = self._saved_decision(kwargs, path)
         if saved:
@@ -512,12 +635,16 @@ class _Runtime:
         if self.mode == "disable":
             return self._no_run_decision(path, kwargs, "disabled")
         model = self._decision_model_for(kwargs)
+        target = self._feedback_target(path, kwargs)
         try:
-            decision = decide_sync(native, model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens)
+            decision = decide_sync(native, model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens, feedback_context=self._feedback_context(target))
         except Exception as exc:
             if self.mode == "approval":
                 raise RSIDecisionUnavailable(str(exc)) from exc
             decision = self._no_run_decision(path, kwargs, "decision_failed")
+        if target is not None:
+            self._policy_bindings[target["turn_id"]] = (native, model, None)
+        decision = self._route_feedback(decision, target, path, kwargs)
         return self._decision_result(decision, path, kwargs)
 
     async def _decide_async(self, native, path, kwargs):
@@ -527,12 +654,16 @@ class _Runtime:
         if self.mode == "disable":
             return self._no_run_decision(path, kwargs, "disabled")
         model = self._decision_model_for(kwargs)
+        target = self._feedback_target(path, kwargs)
         try:
-            decision = await decide_async(native, model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens)
+            decision = await decide_async(native, model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens, feedback_context=self._feedback_context(target))
         except Exception as exc:
             if self.mode == "approval":
                 raise RSIDecisionUnavailable(str(exc)) from exc
             decision = self._no_run_decision(path, kwargs, "decision_failed")
+        if target is not None:
+            self._policy_bindings[target["turn_id"]] = (native, model, asyncio.get_running_loop())
+        decision = self._route_feedback(decision, target, path, kwargs)
         return self._decision_result(decision, path, kwargs)
 
     def _new_state(self, objective, task_family, kwargs, path):
@@ -567,12 +698,23 @@ class _Runtime:
 
     def _save(self, state):
         entries = []
+        if state.get('state') == 'completed' and state.get('revision_id'):
+            entries.append((self._feedback_chat_key(state.get('visible_input'), state.get('result', {}).get('summary')), {'turn_ref': state['turn_id']}))
+            if state.get('native_response_id'):
+                entries.append(('response:' + state['native_response_id'], {'turn_ref': state['turn_id']}))
         if state.get("conversation_key"):
             entries.append((state["conversation_key"], {"turn_ref": state["turn_id"]}))
         entries.extend((key, {"turn_ref": state["turn_id"]}) for key in state.get("continuation_keys", []))
         entries.append((state["turn_id"], state))
         entries.extend((request_key, state) for request_key in state.get("request_keys", []))
         self.turns.put_many(entries)
+        if self.mode == 'auto' and self.auto_learning is not False and state.get('state') == 'completed':
+            try:
+                self.learning().attach(state)
+            except Exception as error:
+                # A learning failure must not change a successful business result.
+                state['learning_error_type'] = type(error).__name__
+                self.turns.put(state['turn_id'], state)
 
     def _snapshot_sync(self):
         if self.session is None:
@@ -847,6 +989,10 @@ class _Runtime:
     def _preflight_sync(self, native, path, kwargs):
         self._guard_request(kwargs, path)
         decision = self._decide_sync(native, path, kwargs)
+        if self.mode == 'auto' and self.auto_learning is not False:
+            state, updated = self._setup_auto(decision, path, kwargs, native)
+            self._policy_bindings[state['turn_id']] = (native, self._decision_model_for(kwargs), None)
+            return state, updated
         if decision["activate"]:
             state, context, before = self._prepare_sync(decision, kwargs, path)
         else:
@@ -866,6 +1012,10 @@ class _Runtime:
     async def _preflight_async(self, native, path, kwargs):
         self._guard_request(kwargs, path)
         decision = await self._decide_async(native, path, kwargs)
+        if self.mode == 'auto' and self.auto_learning is not False:
+            state, updated = await asyncio.to_thread(self._setup_auto, decision, path, kwargs, native, asyncio.get_running_loop())
+            self._policy_bindings[state['turn_id']] = (native, self._decision_model_for(kwargs), asyncio.get_running_loop())
+            return state, updated
         if decision["activate"]:
             state, context, before = await self._prepare_async(decision, kwargs, path)
         else:
@@ -897,6 +1047,8 @@ class _Runtime:
         return True
 
     def _complete_sync(self, state, response):
+        if self.mode == 'auto' and self.auto_learning is not False:
+            return self._complete_auto(state, response)
         if self._complete_without_run(state, response):
             return
         if not terminal(response):
@@ -917,6 +1069,7 @@ class _Runtime:
             state.pop("last_error", None)
             self._save(state)
             return
+        state["native_response_id"] = getattr(response, "id", None)
         state["state"] = "native_completed"
         state["result"] = {"summary": summary(response), "outcome": "completed"}
         self._save(state)
@@ -934,6 +1087,8 @@ class _Runtime:
         self._save(state)
 
     async def _complete_async(self, state, response):
+        if self.mode == 'auto' and self.auto_learning is not False:
+            return await asyncio.to_thread(self._complete_auto, state, response)
         if self._complete_without_run(state, response):
             return
         if not terminal(response):
@@ -954,6 +1109,7 @@ class _Runtime:
             state.pop("last_error", None)
             self._save(state)
             return
+        state["native_response_id"] = getattr(response, "id", None)
         state["state"] = "native_completed"
         state["result"] = {"summary": summary(response), "outcome": "completed"}
         self._save(state)
@@ -972,6 +1128,11 @@ class _Runtime:
 
     def reconcile_sync(self, turn_id):
         state = self.turns.get(turn_id)
+        if state and state.get('execution_id') and state.get('mode') == self.mode:
+            self._require_session(state)
+            if state.get('state') not in {'native_completed', 'completion_pending'}:
+                raise RSIRecoveryRequired('No completed native result to reconcile')
+            return self._submit_auto_result(state)
         if state and state.get("mode") != self.mode:
             raise RSIRecoveryRequired("Turn has a different or unknown originating mode")
         if state:
@@ -1022,6 +1183,8 @@ class _Runtime:
 
     async def reconcile_async(self, turn_id):
         state = self.turns.get(turn_id)
+        if state and state.get('execution_id') and state.get('mode') == self.mode:
+            return await asyncio.to_thread(self.reconcile_sync, turn_id)
         if state and state.get("mode") != self.mode:
             raise RSIRecoveryRequired("Turn has a different or unknown originating mode")
         if state:
@@ -1176,6 +1339,8 @@ class _ResourceProxy:
 
 class CoSensOpenAIProxy(_ResourceProxy):
     def __init__(self, native, runtime):
+        if runtime._policy_native is None:
+            runtime._policy_native = native
         super().__init__(native, runtime, (), native)
         self.native = native
         self.cosens = runtime.status

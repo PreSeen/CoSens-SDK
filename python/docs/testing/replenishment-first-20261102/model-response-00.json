@@ -1,0 +1,85 @@
+{
+  "id": "chatcmpl-52ede77a-f3c1-4c67-8c7e-2f5e57ee1276",
+  "choices": [
+    {
+      "finish_reason": "tool_calls",
+      "index": 0,
+      "logprobs": null,
+      "message": {
+        "content": "我先检索该店铺的经营记录与补货口径规则。",
+        "refusal": null,
+        "role": "assistant",
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "call_00_rwtdkpiap5228tllc82re538",
+            "function": {
+              "arguments": "{\"query\": \"青禾仿真店 补货建议 补货口径 规则\"}",
+              "name": "memory_recall"
+            },
+            "type": "function"
+          },
+          {
+            "id": "call_01_z97gmm92vhm0uv7j39ees4k3",
+            "function": {
+              "arguments": "{\"query\": \"A-17 商品 销量 库存 在途 到货\"}",
+              "name": "memory_recall"
+            },
+            "type": "function"
+          }
+        ],
+        "reasoning_content": "The user wants a replenishment suggestion for a store. Let me recall business records first.\n\nLet me search memory for relevant policies."
+      }
+    }
+  ],
+  "created": 1793624007,
+  "model": "deepseek-v4-flash",
+  "object": "chat.completion",
+  "moderation": null,
+  "service_tier": "default",
+  "system_fingerprint": null,
+  "usage": {
+    "completion_tokens": 132,
+    "prompt_tokens": 436,
+    "total_tokens": 568,
+    "completion_tokens_details": {
+      "accepted_prediction_tokens": null,
+      "audio_tokens": null,
+      "reasoning_tokens": 26,
+      "rejected_prediction_tokens": null
+    },
+    "prompt_tokens_details": {
+      "audio_tokens": null,
+      "cache_write_tokens": null,
+      "cached_tokens": 0
+    }
+  },
+  "usageNormalization": {
+    "billableOutputTokens": 132,
+    "unrecognizedUsageFields": [
+      "total_tokens"
+    ],
+    "normalizationStatus": "NORMALIZED",
+    "rawUsage": {
+      "prompt_tokens": 436,
+      "completion_tokens": 132,
+      "total_tokens": 568,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      },
+      "completion_tokens_details": {
+        "reasoning_tokens": 26
+      }
+    },
+    "recognizedUsageFields": [
+      "prompt_tokens",
+      "completion_tokens",
+      "prompt_tokens_details",
+      "completion_tokens_details"
+    ],
+    "billableInputTokens": 436,
+    "reasoningTokens": 26
+  }
+}

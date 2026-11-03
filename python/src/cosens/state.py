@@ -30,6 +30,22 @@ class TurnStore:
     def put(self, turn_id, value):
         self.put_many([(turn_id, value)])
 
+    def mutate(self, turn_id, update):
+        """Read/modify/write one record atomically across threads and processes."""
+        with self._lock:
+            self._db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._db.execute("SELECT value FROM turns WHERE turn_id=?", (self._namespace + turn_id,)).fetchone()
+                value = update(json.loads(row[0]) if row else None)
+                if value is not None:
+                    self._db.execute("INSERT INTO turns(turn_id,value) VALUES(?,?) ON CONFLICT(turn_id) DO UPDATE SET value=excluded.value",
+                                     (self._namespace + turn_id, json.dumps(value, default=str, ensure_ascii=False)))
+                self._db.commit()
+                return value
+            except BaseException:
+                self._db.rollback()
+                raise
+
     def put_many(self, entries):
         with self._lock, self._db:
             for turn_id, value in entries:

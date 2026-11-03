@@ -1,0 +1,19 @@
+{
+  "recipe_candidate_id": "recipe_candidate_716851ead18546a896d9b9fc852a06e7",
+  "recipe_id": "recipe_candidate_33da86ffb2a54db5a257b856e1e3f474",
+  "version": 2,
+  "parent_candidate_id": "recipe_candidate_33da86ffb2a54db5a257b856e1e3f474",
+  "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335",
+  "current": false,
+  "task_id": "task_a77241c689aa45b59f55c24a12f1460f",
+  "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf",
+  "status": "failed",
+  "context_sha256": "06bf495c97d3b6e7a357c02086968ea11e904acded3f09d0c482628f922c788a",
+  "recipe_sha256": null,
+  "recipe": null,
+  "error": "JSONDecodeError",
+  "memory_context": "not_captured",
+  "initial": false,
+  "source_accepted": false,
+  "material_gap": null
+}

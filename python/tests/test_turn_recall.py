@@ -6,7 +6,14 @@ import httpx
 import pytest
 from openai import AsyncOpenAI, OpenAI
 
-from cosens import cosens
+from cosens import cosens as _cosens
+
+
+def cosens(*args, **kwargs):
+    # These regression cases exercise the legacy Run/session ACK contract.
+    # Unified auto behavior is covered separately in test_auto_learning.py.
+    kwargs.setdefault('auto_learning', False)
+    return _cosens(*args, **kwargs)
 from cosens.errors import RSIRecoveryRequired, RSITransportError
 
 

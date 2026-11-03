@@ -1,0 +1,87 @@
+{
+  "evaluated_at": "2026-11-02T21:14:32.514076+08:00",
+  "sdk_version": "0.3.0",
+  "model": "deepseek-v4-flash",
+  "protocol": {
+    "synthetic": true,
+    "attempts": 1,
+    "memory_seeded": false,
+    "memory_tool_available": false,
+    "memory_supplied": false,
+    "recipe_supplied": false,
+    "feedback_supplied": false,
+    "temperature": 0,
+    "output_token_limit_parameter": "omitted",
+    "client_timeout": null,
+    "max_retries": 0,
+    "comparison": "Same task facts and system prompt as the Memory-enabled attempt, with a fresh enterprise namespace. No Memory or retrieval tools are supplied."
+  },
+  "task_id": "task_a77241c689aa45b59f55c24a12f1460f",
+  "execution_id": "execution_3229f928ff71450a97f7572a703e8076",
+  "receipt": {
+    "task_id": "task_a77241c689aa45b59f55c24a12f1460f",
+    "execution_id": "execution_3229f928ff71450a97f7572a703e8076",
+    "status": "completed",
+    "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf",
+    "trace_origin": "original",
+    "initial_recipe_candidate_id": "recipe_candidate_33da86ffb2a54db5a257b856e1e3f474"
+  },
+  "model_calls": 1,
+  "memory_calls": 0,
+  "output_token_limit_parameter_omitted": true,
+  "finish_reason": "stop",
+  "usage": {
+    "completion_tokens": 6827,
+    "prompt_tokens": 165,
+    "total_tokens": 6992,
+    "completion_tokens_details": {
+      "accepted_prediction_tokens": null,
+      "audio_tokens": null,
+      "reasoning_tokens": 6249,
+      "rejected_prediction_tokens": null
+    },
+    "prompt_tokens_details": {
+      "audio_tokens": null,
+      "cache_write_tokens": null,
+      "cached_tokens": 0
+    }
+  },
+  "artifact_readback_matches": true,
+  "assessment_method": "manual review of saved final answer against separately held synthetic company policy; no evaluator facts were in the model request",
+  "reference_policy": {
+    "daily_demand": 40,
+    "purchase_lead_days": 5,
+    "review_days": 2,
+    "safety_days": 2,
+    "protection_days": 9,
+    "stock": 8,
+    "confirmed_inbound": 120,
+    "raw_order": 232,
+    "pack_multiple": 10,
+    "minimum_order": 50,
+    "rounded_order": 240
+  },
+  "observed": {
+    "identified_possible_stockout": true,
+    "daily_demand_estimate": 40,
+    "assumed_lead_days": 4,
+    "assumed_postarrival_cover_days": 7,
+    "assumed_protection_days": 11,
+    "main_recommendation": 312,
+    "conditional_alternatives": [
+      152,
+      432
+    ],
+    "disclosed_unverified_policy": true,
+    "recognized_immediate_stockout_risk": true
+  },
+  "business_target_met": false,
+  "original_hypothesized_stockout_direction_omission_observed": false,
+  "observed_gap": "The output identifies stockout but recommends an order based on expressly assumed coverage/lead-time parameters rather than the held-out company purchasing policy.",
+  "interpretation": "A complete cold-start answer is available. 312 does not match the synthetic company target of 240, but the answer discloses missing company policy and its conditional assumptions; do not label it an unqualified fabricated company fact.",
+  "limitations": [
+    "This is one unbounded rerun, separate from the earlier 8192-token failed attempt.",
+    "No RSI feedback or iteration has been executed.",
+    "Knowledge acquisition and Recipe improvement must be evaluated separately using matched Memory controls."
+  ]
+}

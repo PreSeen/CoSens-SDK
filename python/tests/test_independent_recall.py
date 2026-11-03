@@ -5,7 +5,12 @@ import httpx
 import pytest
 from openai import AsyncOpenAI, OpenAI
 
-from cosens import CoSensClient, cosens
+from cosens import CoSensClient, cosens as _cosens
+
+
+def cosens(*args, **kwargs):
+    kwargs.setdefault("auto_learning", False)
+    return _cosens(*args, **kwargs)
 from cosens.atoms import AsyncAtoms, SyncAtoms
 from cosens.errors import RSIError, RSITransportError
 from cosens.models import result

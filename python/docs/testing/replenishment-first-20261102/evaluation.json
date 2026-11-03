@@ -1,0 +1,95 @@
+{
+  "evaluated_at": "2026-11-02T20:54:53.257358+08:00",
+  "scope": "one real first attempt on Task1; no feedback, no Recipe supplied, no model retries or altered second attempts",
+  "sdk_version": "0.3.0",
+  "model": "deepseek-v4-flash",
+  "region": "us",
+  "task_id": "task_ccea58a9c4094ac797ecb33e4b669c92",
+  "execution_id": "execution_0f7a18971bfc4b81b641add9e7e0ee77",
+  "revision_id": "revision_3621e3e1d53a4692bd25f48d4d9ad702",
+  "initial_recipe_candidate_id": "recipe_candidate_43814a0c168742039919a008d90b6a6c",
+  "model_calls": 2,
+  "memory_recall_calls": 2,
+  "total_tokens": 5197,
+  "assessment_method": "manual review of saved final answer against independent arithmetic and actual Memory tool responses; not a separate judge-model score",
+  "expected": {
+    "sellable_hours": 72,
+    "sellable_days": 3,
+    "daily_demand": 40,
+    "protection_days": 9,
+    "raw_order": 232,
+    "rounded_order": 240
+  },
+  "observed": {
+    "sellable_hours": 72,
+    "sellable_days": 3,
+    "daily_demand": 40,
+    "protection_days": 9,
+    "raw_order": 232,
+    "rounded_order": 240,
+    "mentioned_prearrival_stockout": true,
+    "mentioned_recompute_after_confirmed_transfer": true
+  },
+  "main_initial_defect_observed": false,
+  "eligible_as_observed_correction_case": false,
+  "artifact_readback_matches": true,
+  "memory_evidence_checks": [
+    {
+      "id": "stockout-first-7915bd16bbd9:demand-policy",
+      "matches_seed_text": true,
+      "source_ref_matches": true
+    },
+    {
+      "id": "stockout-first-7915bd16bbd9:historical-correction",
+      "matches_seed_text": true,
+      "source_ref_matches": true
+    },
+    {
+      "id": "stockout-first-7915bd16bbd9:order-policy",
+      "matches_seed_text": true,
+      "source_ref_matches": true
+    },
+    {
+      "id": "stockout-first-7915bd16bbd9:a17-availability",
+      "matches_seed_text": true,
+      "source_ref_matches": true
+    },
+    {
+      "id": "stockout-first-7915bd16bbd9:a17-purchasing",
+      "matches_seed_text": true,
+      "source_ref_matches": true
+    },
+    {
+      "id": "stockout-first-7915bd16bbd9:historical-correction",
+      "matches_seed_text": true,
+      "source_ref_matches": true
+    },
+    {
+      "id": "stockout-first-7915bd16bbd9:a17-purchasing",
+      "matches_seed_text": true,
+      "source_ref_matches": true
+    },
+    {
+      "id": "stockout-first-7915bd16bbd9:order-policy",
+      "matches_seed_text": true,
+      "source_ref_matches": true
+    },
+    {
+      "id": "stockout-first-7915bd16bbd9:a17-availability",
+      "matches_seed_text": true,
+      "source_ref_matches": true
+    },
+    {
+      "id": "stockout-first-7915bd16bbd9:demand-policy",
+      "matches_seed_text": true,
+      "source_ref_matches": true
+    }
+  ],
+  "interpretation": "This single run solved the proposed main defect without feedback. It does not support a claim that the case reliably induces initial failure or that RSI improved quality.",
+  "limitations": [
+    "Only one model and one first attempt were tested.",
+    "No feedback-driven iteration, Task2 run, or RSI gain comparison was performed.",
+    "Synthetic source writes were immediately recalled; source extraction jobs need not have completed.",
+    "No 120-character or style requirement existed in the first prompt, so verbosity is not scored as a style failure."
+  ]
+}

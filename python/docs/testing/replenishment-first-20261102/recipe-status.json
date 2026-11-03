@@ -1,0 +1,25 @@
+{
+  "task_id": "task_ccea58a9c4094ac797ecb33e4b669c92",
+  "recipe_id": "recipe_candidate_43814a0c168742039919a008d90b6a6c",
+  "status": "queued",
+  "current": null,
+  "latest": {
+    "recipe_candidate_id": "recipe_candidate_43814a0c168742039919a008d90b6a6c",
+    "recipe_id": "recipe_candidate_43814a0c168742039919a008d90b6a6c",
+    "version": 1,
+    "parent_candidate_id": null,
+    "attribution_id": null,
+    "current": false,
+    "task_id": "task_ccea58a9c4094ac797ecb33e4b669c92",
+    "revision_id": "revision_3621e3e1d53a4692bd25f48d4d9ad702",
+    "status": "queued",
+    "context_sha256": "05ad27e1fa48caa62604b0cf664291e2b65d2f3a3d22453577cf9560b45fffd3",
+    "recipe_sha256": null,
+    "recipe": null,
+    "error": null,
+    "memory_context": "not_captured",
+    "initial": true,
+    "source_accepted": false,
+    "material_gap": null
+  }
+}
