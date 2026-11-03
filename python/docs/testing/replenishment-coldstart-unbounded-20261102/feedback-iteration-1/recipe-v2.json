@@ -1,0 +1,378 @@
+{
+  "recipe_candidate_id": "recipe_candidate_716851ead18546a896d9b9fc852a06e7",
+  "recipe_id": "recipe_candidate_33da86ffb2a54db5a257b856e1e3f474",
+  "version": 2,
+  "parent_candidate_id": "recipe_candidate_33da86ffb2a54db5a257b856e1e3f474",
+  "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335",
+  "current": true,
+  "task_id": "task_a77241c689aa45b59f55c24a12f1460f",
+  "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf",
+  "status": "candidate",
+  "context_sha256": "06bf495c97d3b6e7a357c02086968ea11e904acded3f09d0c482628f922c788a",
+  "recipe_sha256": "3bd638032cc2645161a3036a61a8c301bb994e5325027c4d551aa31db20fb5d0",
+  "recipe": {
+    "lessons": [
+      {
+        "do": "Use the item-level availability record (sellable hours or an equivalent per-day availability flag) to compute the daily rate over the actually-sellable time, and classify each zero as stock-out/unavailable or as true zero demand before it enters the baseline.",
+        "evidence_refs": [
+          {
+            "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335"
+          },
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          },
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          }
+        ],
+        "when": "When a recent daily-sales series contains a run of consecutive zero-sales days and the item's availability during those days is not yet resolved",
+        "when_not": "Do not apply the availability correction when the evidence shows the item was continuously purchasable and in stock, or when the zeros are already confirmed as true zero demand; there the plain full-window average is the correct baseline.",
+        "why": "Averaging across stock-out days mixes 'no demand' with 'could not sell', which drags the rate down and causes under-ordering; and using only the count of days with sales as the denominator also misstates the rate, because it ignores how much of each day the item was actually sellable."
+      },
+      {
+        "do": "Verify them against store records or ask for them explicitly, and state the data gap before any quantity is quoted; if a number must be shown meanwhile, present it only as a clearly-labelled illustration that is not an order basis.",
+        "evidence_refs": [
+          {
+            "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335"
+          },
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          },
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          }
+        ],
+        "when": "When a requested order quantity depends on purchasing-policy parameters (lead time, review/cycle period, safety days or protection period, MOQ, pack multiple) and those parameters are not present in the evidence",
+        "when_not": "Do not hedge into conditional scenarios when the purchasing policy is documented and verified, or when the store's system already fixes the parameters; there, compute one number.",
+        "why": "A single number built on self-chosen 'common' parameters silently imports an unverified assumption and reads as authoritative; the store's own口径, not a generic default, is what determines a valid order quantity."
+      },
+      {
+        "do": "Model the in-transit arrival day and the store's purchase lead time as separate parameters, and build the order horizon from the verified protection period rather than from the arrival day.",
+        "evidence_refs": [
+          {
+            "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335"
+          },
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          }
+        ],
+        "when": "When the inputs give an in-transit shipment with an expected arrival day while the item also needs a new replenishment order",
+        "when_not": "Do not need this separation when the delivery is a straightforward order-arrival confirmation with no new order being sized, or when there is no in-transit shipment at all.",
+        "why": "Reusing the arrival day of an existing shipment as the lead time for the new order substitutes an unrelated time value for the store's real lead time and mis-sizes the horizon, so the resulting quantity is wrong even if the demand rate is right."
+      },
+      {
+        "do": "Compute with that documented formula and definition, then round the raw gap up to satisfy both the minimum order quantity and the pack multiple, showing each term and the rounding step.",
+        "evidence_refs": [
+          {
+            "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335"
+          },
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          },
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          }
+        ],
+        "when": "When the store has an established ordering口径 (its own formula, protection-period definition, MOQ and pack multiple)",
+        "when_not": "Do not invent rounding rules or a formula when the store's口径 is unknown; surface the missing definition instead of guessing it.",
+        "why": "Applying a self-invented formula or skipping the MOQ/pack rounding produces a number the store cannot actually order, and hides the arithmetic the operator needs in order to audit it."
+      },
+      {
+        "do": "Do not deduct it and do not add it in on top of a figure that already includes it; list it as pending and recompute the quantity once its status (and whether on-hand already contains it) is confirmed.",
+        "evidence_refs": [
+          {
+            "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335"
+          },
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          }
+        ],
+        "when": "When a temporary transfer, loan, or inbound quantity appears in the inputs but is not confirmed as actually available or arriving within the protection period",
+        "when_not": "Do not hedge when the inbound is confirmed by a live shipment/tracking record with a reliable ETA and the on-hand figure is clearly stated to exclude it; then it can be netted directly.",
+        "why": "Netting an unconfirmed inflow understates the true gap, while adding a transfer that is already inside the on-hand figure double-counts supply; either error changes the recommended quantity."
+      },
+      {
+        "do": "Put stop-loss and inbound-expediting actions ahead of the order-quantity discussion and present them as the first same-day priorities.",
+        "evidence_refs": [
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          },
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          }
+        ],
+        "when": "When sellable stock cover is shorter than the time remaining before the next confirmed inbound shipment",
+        "when_not": "Do not lead with stop-loss actions when on-hand comfortably covers lead-time offtake and no availability gap exists; then replenishment planning is the primary concern.",
+        "why": "An order placed today cannot prevent overselling or lost sales during the gap; sequencing immediate containment first protects against the failure already in motion."
+      },
+      {
+        "do": "Recommend recording item-level availability (sellable hours or an availability flag) and fixing the documented purchasing口径, so stock-out days stay distinguishable from true zero-demand days and the parameters are citable.",
+        "evidence_refs": [
+          {
+            "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335"
+          },
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          }
+        ],
+        "when": "When a sales-history or on-hand field is reused as the demand and gap baseline for recurring replenishment calculations",
+        "when_not": "Do not raise a data-hygiene action when the history already records availability status and the parameters are documented and free of ambiguous zeros.",
+        "why": "If the contaminated window or the informal口径 stays unflagged, every future rate and cover figure is recomputed on the same biased or guessed inputs, so the same ordering error repeats regardless of who computes it."
+      },
+      {
+        "do": "Add a closing limitations block that names the unverified inputs, labels the headline figure as conditional, states which pending confirmations could change it, and requests the specific data needed to finalise it.",
+        "evidence_refs": [
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          },
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          }
+        ],
+        "when": "When any part of the estimate rests on incomplete or unconfirmed inputs",
+        "when_not": "Do not add a generic disclaimer when every input is verified and the calculation is reproducible from the supplied evidence; boilerplate hedging then erodes trust in a correct result.",
+        "why": "It prevents a conditional estimate from being read as a verified result and converts the answer into a concrete data request that closes the loop on the next iteration."
+      },
+      {
+        "do": "Distil the procedure but mark it as unverified, derive steps from what the artifact actually contains (diagnosis, arithmetic, action list, limitations) rather than from assumed hidden steps, and attach the artifact/revision/event references to every step and lesson.",
+        "evidence_refs": [
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          },
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          }
+        ],
+        "when": "When reusing a recorded execution as a procedure and the record shows no user acceptance or feedback and only partial trace coverage",
+        "when_not": "Do not add this unverified-method caveat when the history contains explicit user acceptance of a specific revision, which would license treating the accepted method as validated.",
+        "why": "The artifact proves what content was produced, not that the method was validated or that any recommended action was carried out; treating it as verified would propagate an unconfirmed method."
+      },
+      {
+        "do": "Rework the recommendation against the supplied verified parameters and the store's stated formula, separate confirmed inflows from pending ones, and cite the correction as the source of the method change while still treating it as a selected hypothesis rather than proven fact.",
+        "evidence_refs": [
+          {
+            "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335"
+          },
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          }
+        ],
+        "when": "When a user correction supplies the real business parameters and points out that assumed values were used as the order basis",
+        "when_not": "Do not adopt a correction as a validated rule when it is only a selected hypothesis with no supporting record; use it to revise the method but keep the verification steps in place.",
+        "why": "The correction identifies which assumption was unfounded and what the real口径 is; aligning the procedure to it fixes the recurring error, whereas keeping the earlier assumed values would reproduce it."
+      }
+    ],
+    "steps": [
+      {
+        "evidence_refs": [
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          },
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          },
+          {
+            "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335"
+          }
+        ],
+        "id": "step-parse-inputs",
+        "instruction": "Restate the request as explicit typed inputs before any reasoning: SKU identifier; the daily-sales series in chronological order; the item-level availability record for the same window (sellable hours or equivalent availability flag per day); current sellable on-hand; in-transit quantity with expected arrival day and its confirmation status; any transfer/loan quantity with its confirmation status; and the store purchasing parameters (purchase lead time, review/cycle period, safety days or protection-period definition, minimum order quantity, case/pack multiple, and the store's ordering formula). Mark every field as supplied, confirmed, or missing; never silently fill a missing field."
+      },
+      {
+        "evidence_refs": [
+          {
+            "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335"
+          },
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          },
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          }
+        ],
+        "id": "step-verify-policy-parameters",
+        "instruction": "Before computing any quantity, obtain and verify the store's real purchasing口径: purchase lead time, review/cycle period, safety days (or however the protection period is defined), minimum order quantity, case/pack multiple, and the ordering formula the store actually uses. Do not substitute self-chosen 'common' or 'typical' values as the basis of an order recommendation; such values may only appear as clearly-labelled illustration and must never be presented as the proposed order quantity. If these parameters are absent, state the gap explicitly and ask the operator for them instead of producing a number as if it were confirmed."
+      },
+      {
+        "evidence_refs": [
+          {
+            "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335"
+          },
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          },
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          }
+        ],
+        "id": "step-availability-verified-demand-rate",
+        "instruction": "Compute the effective daily demand rate from actual sellable time, not from the count of days that happened to show sales and not from the whole-window average. Use the availability record (e.g. sellable hours per day) to build the denominator: rate per sellable hour scaled back to a full day, or equivalently total units divided by total sellable time. State the numerator window, the exact denominator used, and why a whole-window average would understate offtake when zeros were unavailability days. Where the available arithmetic tooling permits, compute exactly and show the arithmetic."
+      },
+      {
+        "evidence_refs": [
+          {
+            "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335"
+          },
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          },
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          }
+        ],
+        "id": "step-classify-zero-run",
+        "instruction": "For each consecutive zero-sales day, use the availability record to classify it as 'not sellable / stock-out' or as 'genuinely sold nothing'. State the evidence used for the classification and flag any zero that the availability record cannot resolve as ambiguous rather than as zero demand. Only days classified as available contribute to the demand baseline."
+      },
+      {
+        "evidence_refs": [
+          {
+            "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335"
+          },
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          },
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          }
+        ],
+        "id": "step-separate-eta-from-lead-time",
+        "instruction": "Keep the in-transit shipment's expected arrival day and the store's purchase lead time as two distinct quantities in the model. Never reuse the in-transit arrival day as the lead time for a new purchase order, and never invent a coverage window to stand in for the store's protection period. Label which parameter each horizon value comes from."
+      },
+      {
+        "evidence_refs": [
+          {
+            "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335"
+          },
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          }
+        ],
+        "id": "step-build-protection-period",
+        "instruction": "Construct the horizon from the verified parameters exactly as the store defines it (for example purchase lead time plus review cycle plus safety days, if that is the store's protection period). Show the component values and the resulting horizon in days. If the store defines protection differently, follow the store's definition instead of imposing a generic one."
+      },
+      {
+        "evidence_refs": [
+          {
+            "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335"
+          },
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          },
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          }
+        ],
+        "id": "step-gap-computation",
+        "instruction": "Apply the store's documented ordering formula, normally order quantity = (effective daily demand × protection period) − current sellable on-hand − in-transit expected to arrive within the protection period. Then round the result up so that it satisfies both the minimum order quantity and the pack multiple. Show each term, the netting, and the rounding step, and keep the arithmetic exact rather than illustrative."
+      },
+      {
+        "evidence_refs": [
+          {
+            "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335"
+          },
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          },
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          }
+        ],
+        "id": "step-in-transit-and-transfer-status",
+        "instruction": "Confirm each inbound and each transfer quantity before netting it: deduct only in-transit that is confirmed and that is expected to land within the protection period, and account for whether the on-hand figure already includes a temporary transfer so it is not added twice. Do not deduct unconfirmed transfers or loans; state them as pending and recompute the quantity once their status is confirmed."
+      },
+      {
+        "evidence_refs": [
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          },
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          }
+        ],
+        "id": "step-stop-loss-first",
+        "instruction": "Before finalising the quantity, compare sellable on-hand against the effective daily rate to get cover in days, and compare that cover against the time until the next confirmed arrival. If cover is shorter, the first priority actions for the day must be demand stop-loss (purchase limit, de-list, or turning the item into a pre-order) to prevent overselling and service damage, ahead of the order-quantity discussion."
+      },
+      {
+        "evidence_refs": [
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          },
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          }
+        ],
+        "id": "step-expedite-in-transit",
+        "instruction": "Make confirming the in-transit shipment with the warehouse/supplier and pulling its arrival earlier an explicit same-day action, and quantify the residual gap that remains between now and that arrival so the operator knows whether an emergency transfer or pre-order承接 is needed. Treat the arrival day as a claim until it is confirmed by a shipment record."
+      },
+      {
+        "evidence_refs": [
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          },
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          }
+        ],
+        "id": "step-recurrence-check",
+        "instruction": "Project the position after the next confirmed arrival: divide on-hand plus expected arrivals by the effective daily rate to state how many days of cover the shipment buys, and flag that another stock-out will recur within the replenishment cycle if no follow-up order is placed. Keep this as a recurrence warning tied to the stated rate, not as a forecast claim."
+      },
+      {
+        "evidence_refs": [
+          {
+            "attribution_id": "attribution_e54e98c5f1fa4d6bb2bc9f97acb6f335"
+          },
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          },
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          }
+        ],
+        "id": "step-data-hygiene",
+        "instruction": "Recommend the record corrections that keep future calculations valid: store item-level availability (sellable hours or an availability flag) per day so stock-out days are distinguishable from true zero-demand days, and keep the purchasing parameters, MOQ and pack multiple in a written口径 that can be cited instead of re-guessed."
+      },
+      {
+        "evidence_refs": [
+          {
+            "event_id": "model-final",
+            "revision_id": "revision_25db8ab7bd024114bfd46e2eb66ef7bf"
+          },
+          {
+            "artifact_id": "artifact_1a9f749bc0bd43ab8f476015c3fabc8c"
+          }
+        ],
+        "id": "step-state-unverified",
+        "instruction": "Close with an explicit limitations block: list which inputs were not verifiable, state whether the quantity rests on any unconfirmed inbound or transfer, label the headline figure as conditional on the parameters actually used, and ask the operator to confirm the specific missing parameters (protection-period components, MOQ, pack multiple, arrival/transfer status) so the number can be finalised. Do not present the result as verified or accepted."
+      }
+    ],
+    "title": "Replenishment/reorder recommendation for a single SKU whose recent zero-sales run may be stock-out days, computed only from verified availability and store purchasing-policy parameters",
+    "when": "Use this procedure when a store operator asks for a reorder quantity plus a 'what to do today' priority list for one SKU and the request supplies (a) a recent daily-sales series that contains one or more consecutive zero-sales days, (b) a current sellable on-hand figure, and (c) an in-transit quantity with an expected arrival day. It is meant for short-horizon (days), single-SKU stock-out triage and replenishment where demand is observed through sales rather than through true demand signals, so zeros are ambiguous between 'no demand' and 'not sellable'. Apply it once the item-level availability record (e.g. sellable hours or an equivalent availability flag per day) and the store's documented purchasing parameters (purchase lead time, review/cycle period, safety days or an explicitly-defined protection period, minimum order quantity, case/pack multiple, and the store's own ordering formula) are available or can be obtained by asking. It fits a text deliverable that must expose assumptions rather than a machine-produced number from the store's own ERP.",
+    "when_not": "Do not apply this procedure when: the zero-sales days are already confirmed as genuine 'no demand' days (item continuously purchasable and in stock throughout the window), because the stock-out correction then collapses to a plain average; when availability evidence and the store's purchasing parameters are unavailable and the deliverable must serve as an order basis, because in that case the correct output is a stated data gap plus a targeted question, not an invented number; when the store's parameters, formula, MOQ and pack multiple are documented and verified, in which case the task is pure verified arithmetic; when the item is made-to-order, non-stock, or on a fixed non-adjustable order cycle; when the request concerns range assortment, price, or promotion planning rather than replenishment; when the horizon is long-term (months/quarters) demand or inventory planning where forecasting models, seasonality and lead-time distributions are appropriate; when sellable inventory comfortably covers lead-time offtake so that no stock-out triage is needed; or when the deliverable must be a validated number produced by the store's own purchasing system."
+  },
+  "error": null,
+  "memory_context": "not_captured",
+  "initial": false,
+  "source_accepted": false,
+  "material_gap": null
+}

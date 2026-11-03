@@ -112,9 +112,9 @@ response = client.responses.create(model=model, input=user_input)
 print(response.output_text)
 ```
 
-`auto` 先用模型判断是否需要 RSI Run；命中则准备 Run、获取冻结上下文，再执行业务模型、上报消息和提交结果。不命中或分类失败时，通过公开 Recipe + Memory 接口召回，不创建 Run。`disable` 跳过自动判断和自动 Run，但仍然召回。
+`auto` 默认采用统一流程：查询可用的工作流 Recipe 并冻结本次版本，正常执行模型，再在后台选择 `create`（生成）、`revise`（反馈归因后迭代）或 `noop`（不更新）。反馈可直接通过后续原生 user 消息输入。需要记录的执行使用 Task / Execution 接口。**必须先部署配套的服务端“提交只记录、生成独立触发”契约**，否则会保留模型回答但记录 `completion_pending / blocked`。详见 [统一 auto 流程](docs/unified-auto.md) 和 [多轮示例](examples/11_unified_auto.py)。`auto_learning=False` 保留旧 Run 行为；`disable` 仍召回旧 active Recipe + Memory。
 
-运行会输出答案、capture、turn_id、run_id 和本地 state。**auto 没有创建 Run 是合法结果**；不要将 `run_id: None` 直接视为失败。`auto` 的决策请求增加一次模型调用，模型服务需支持 Responses 结构化输出。高级参数 `decision_model` 可覆盖默认选择。
+运行会输出答案、capture、turn_id、run_id 和本地 state。**auto 没有创建 Run 是合法结果**；不要将 `run_id: None` 直接视为失败。`auto` 的任务分类、非空候选的适用性判断，以及需要时的后台学习决策会增加模型调用，模型服务需支持 Responses 结构化输出。高级参数 `decision_model` 可覆盖默认选择。
 
 ### 2. 显式调用 run
 
@@ -163,7 +163,7 @@ python python/examples/03_atomic.py
 
 | 入口 / 模式 | 模型调用前召回 | 创建 RSI Run | 执行者 |
 | --- | --- | --- | --- |
-| 透明 `auto` | 每 turn 一次 | 由模型判断 | 原始 OpenAI client |
+| 透明 `auto` | 每 turn 冻结一次工作流 Recipe + Memory | 使用 Task / Execution 记录；后台 create / revise / noop | 原始 OpenAI client |
 | 透明 `disable` | 每 turn 一次 | 不自动创建 | 原始 OpenAI client |
 | 显式 `run()` + `disable` | 每 turn 一次 | 显式创建 | OpenAI Agents SDK |
 | 原子接口 | 由应用在模型前调用 | 应用显式 prepare | 应用自己的模型/工具代码 |
@@ -226,3 +226,25 @@ python -m build python
 - [OpenAI Agents SDK](https://github.com/openai/openai-agents-python)
 
 新增 30 个请求边界回归测试（Python / TypeScript 各 15 个），已纳入现有测试入口；用例清单、单独运行命令、缺陷修复与最新验证结果见[测试说明](docs/testing/2026-10-29-sdk-request-regression.md)。
+# Friday US 模型网关
+
+使用用户自己的 Friday 凭证创建模型客户端，并从模型目录选择或验证用户传入的公开模型 ID：
+
+```python
+import os
+from cosens import cosens, friday_gateway_client
+
+key = os.environ["FRIDAY_USER_API_KEY"]
+native = friday_gateway_client(key)
+models = native.models.list()  # 需要 llm.models.read
+client = cosens(native, api_key=key)
+response = client.chat.completions.create(
+    model=os.environ["FRIDAY_MODEL_ID"],  # 使用 models 返回的 ID
+    messages=[{"role": "user", "content": "你好"}],
+)
+```
+
+API Key 还需要 `llm.invoke`。access token 使用 `auth_type="access_token"`。
+Responses 调用应先确认模型目录中的 `responses_features` 支持所需能力；网关不支持
+`previous_response_id`、`store=true`、托管工具或多模态输入。后台任务需单独提供用户
+凭证与模型配置，不能仅凭用户 ID 确定计费账号。

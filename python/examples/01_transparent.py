@@ -7,7 +7,8 @@ from _common import launch, settings, show_turn
 def main():
     config = settings()
     with OpenAI(api_key=config.openai_key, base_url=config.base_url) as native:
-        # 只需三个接入参数。auto 由模型决定是否创建 RSI Run。
+        # auto 复用工作流 Recipe，后台统一决定 create / revise / noop。
+        # 服务端提交须只记录执行结果；见 docs/unified-auto.md。
         client = cosens(native, api_key=config.rsi_key, mode=config.mode)
         try:
             response = client.responses.create(model=config.model, input=config.prompt)

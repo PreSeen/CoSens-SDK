@@ -50,7 +50,10 @@ async def test_invalid_standalone_context_is_not_silently_treated_as_empty(recip
 async def test_auto_skipped_uses_decided_family_and_freezes_public_recall_for_tool_loop(tmp_path, asynchronous):
     from types import SimpleNamespace
     from openai import AsyncOpenAI, OpenAI
-    from cosens import cosens
+    from cosens import cosens as _cosens
+    def cosens(*args, **kwargs):
+        kwargs.setdefault("auto_learning", False)
+        return _cosens(*args, **kwargs)
     requests, business, decisions = [], [], []
     def server(request):
         requests.append(request)

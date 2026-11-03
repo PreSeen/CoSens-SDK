@@ -52,11 +52,11 @@ export async function startWorkflow(atoms: Atoms, snapshot: WorkflowSnapshot | s
       execution_id: execution?.execution_id, request_sha256: execution?.request_sha256,
       execution_request: execution?.request, execution };
   }
-  if (phase === 'analyze') return atoms.startExternalAnalysis(snapshot.task_id!, { key: stable });
-  if (phase === 'attribute') return atoms.startAttribution(snapshot.revision_id!, { feedback: snapshot.feedback, key: stable });
+  if (phase === 'analyze') return atoms.startExternalAnalysis(snapshot.task_id!, { key: stable, modelApi });
+  if (phase === 'attribute') return atoms.startAttribution(snapshot.revision_id!, { feedback: snapshot.feedback, key: stable, modelApi });
   if (phase === 'improve') return atoms.improveTask(snapshot.task_id!, { revisionId: snapshot.revision_id!, feedback: snapshot.feedback!, key: stable, modelApi });
   if (phase === 'revise') return atoms.startRevision(snapshot.revision_id!, { attributionId: snapshot.attribution_id!, key: stable });
-  if (phase === 'recipe') return atoms.startRecipeCandidate(snapshot.task_id!, { revisionId: snapshot.revision_id!, includeMemory: snapshot.include_memory, key: stable });
+  if (phase === 'recipe') return atoms.startRecipeCandidate(snapshot.task_id!, { revisionId: snapshot.revision_id!, includeMemory: snapshot.include_memory, key: stable, modelApi });
   if (phase === 'verify') return atoms.startVerification(snapshot.recipe_candidate_id!, { key: stable });
   throw new RSIRecoveryRequired('phase must be prepare, analyze, attribute, improve, revise, recipe or verify');
 }

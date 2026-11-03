@@ -15,7 +15,7 @@ def improvement_data(*, reason=None, feedback=None, model_api=None):
         data["feedback"] = feedback
     if model_api is None:
         return data, ()
-    if not isinstance(model_api, dict) or set(model_api) - {"base_url", "model", "api_key", "temperature", "max_tokens"}:
+    if not isinstance(model_api, dict) or set(model_api) - {"base_url", "model", "api_key", "temperature", "max_tokens", "friday_auth_type"}:
         raise ValueError("model_api requires base_url, model and optional api_key, temperature, max_tokens")
     url, model, key = (model_api.get(k, "") for k in ("base_url", "model", "api_key"))
     if not all(isinstance(v, str) for v in (url, model, key)) or not model.strip() or len(model) > 256:
@@ -28,6 +28,12 @@ def improvement_data(*, reason=None, feedback=None, model_api=None):
         valid = False
     if not valid or len(url) > 2048 or len(key) > 8192 or any(c in key for c in "\r\n"):
         raise ValueError("invalid model_api connection")
+    gateway_url = url.strip().rstrip("/").removesuffix("/chat/completions")
+    auth_type = model_api.get("friday_auth_type")
+    if auth_type is not None and (not isinstance(auth_type, str) or auth_type not in {"api_key", "access_token"} or not key.strip() or gateway_url != "https://llm.cosens.ai/v1"):
+        raise ValueError("Friday authentication requires a credential and the US gateway")
+    if gateway_url == "https://llm.cosens.ai/v1" and auth_type is None:
+        raise ValueError("Friday gateway requires an explicit friday_auth_type")
     temperature, tokens = model_api.get("temperature"), model_api.get("max_tokens")
     if temperature is not None and (type(temperature) not in (int, float) or not math.isfinite(temperature) or not 0 <= temperature <= 2):
         raise ValueError("model_api.temperature must be between 0 and 2")

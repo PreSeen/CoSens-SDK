@@ -160,14 +160,16 @@ class AsyncWorkflowAtoms:
         return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/context",
                                         body=_context(expected_context_version, objective, artifacts, self_contained))
 
-    async def start_external_analysis(self, task_id, *, key):
-        return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/analysis", key=stable_key(key))
+    async def start_external_analysis(self, task_id, *, key, model_api=None):
+        data, secrets = improvement_data(model_api=model_api)
+        return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/analysis", body={"data": data} if data else None, key=stable_key(key), sensitive_values=secrets)
 
     async def get_external_analysis(self, analysis_id):
         return await self._http.request("GET", f"/v1/task-analyses/{path_part(analysis_id)}")
 
-    async def resume_external_analysis(self, analysis_id):
-        return await self._http.request("POST", f"/v1/task-analyses/{path_part(analysis_id)}/resume")
+    async def resume_external_analysis(self, analysis_id, *, model_api=None):
+        data, secrets = improvement_data(model_api=model_api)
+        return await self._http.request("POST", f"/v1/task-analyses/{path_part(analysis_id)}/resume", body={"data": data} if data else None, sensitive_values=secrets)
 
     async def start_execution(self, task_id, *, key, recipe_id=None, model_api=None, include_memory=False):
         data, secrets = improvement_data(model_api=model_api)
@@ -212,18 +214,19 @@ class AsyncWorkflowAtoms:
     async def get_revision(self, revision_id):
         return await self._http.request("GET", f"/v1/revisions/{path_part(revision_id)}")
 
-    async def start_attribution(self, revision_id, *, key, feedback=None):
+    async def start_attribution(self, revision_id, *, key, feedback=None, model_api=None):
         if feedback is not None and (not isinstance(feedback, str) or not feedback.strip() or len(feedback) > 4_000):
             raise ValueError("feedback must be nonempty text of at most 4,000 characters")
-        data = {} if feedback is None else {"feedback": feedback}
+        data, secrets = improvement_data(feedback=feedback, model_api=model_api)
         return await self._http.request("POST", f"/v1/revisions/{path_part(revision_id)}/attributions",
-                                        body={"data": data}, key=stable_key(key))
+                                        body={"data": data}, key=stable_key(key), sensitive_values=secrets)
 
     async def get_attribution(self, attribution_id):
         return await self._http.request("GET", f"/v1/attributions/{path_part(attribution_id)}")
 
-    async def resume_attribution(self, attribution_id):
-        return await self._http.request("POST", f"/v1/attributions/{path_part(attribution_id)}/resume")
+    async def resume_attribution(self, attribution_id, *, model_api=None):
+        data, secrets = improvement_data(model_api=model_api)
+        return await self._http.request("POST", f"/v1/attributions/{path_part(attribution_id)}/resume", body={"data": data} if data else None, sensitive_values=secrets)
 
     async def select_cause(self, attribution_id, *, candidate_sha256=None, candidate_id=None, custom_reason=None):
         return await self._http.request("POST", f"/v1/attributions/{path_part(attribution_id)}/selection",
@@ -237,15 +240,18 @@ class AsyncWorkflowAtoms:
         return await self._http.request("POST", f"/v1/revisions/{path_part(revision_id)}/acceptance",
                                         body={"data": {"artifact_hashes": artifact_hashes}})
 
-    async def start_recipe_candidate(self, task_id, *, revision_id, key, include_memory=False):
+    async def start_recipe_candidate(self, task_id, *, revision_id, key, include_memory=False, model_api=None):
+        data, secrets = improvement_data(model_api=model_api)
+        data.update(revision_id=revision_id, include_memory=include_memory)
         return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/recipe-candidates",
-                                        body={"data": {"revision_id": revision_id, "include_memory": include_memory}}, key=stable_key(key))
+                                        body={"data": data}, key=stable_key(key), sensitive_values=secrets)
 
     async def get_recipe_candidate(self, recipe_id):
         return await self._http.request("GET", f"/v1/recipe-candidates/{path_part(recipe_id)}")
 
-    async def resume_recipe_candidate(self, recipe_id):
-        return await self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/resume")
+    async def resume_recipe_candidate(self, recipe_id, *, model_api=None):
+        data, secrets = improvement_data(model_api=model_api)
+        return await self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/resume", body={"data": data} if data else None, sensitive_values=secrets)
 
     async def start_verification(self, recipe_id, *, key):
         return await self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/verifications", key=stable_key(key))
@@ -287,14 +293,16 @@ class SyncWorkflowAtoms:
         return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/context",
                                   body=_context(expected_context_version, objective, artifacts, self_contained))
 
-    def start_external_analysis(self, task_id, *, key):
-        return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/analysis", key=stable_key(key))
+    def start_external_analysis(self, task_id, *, key, model_api=None):
+        data, secrets = improvement_data(model_api=model_api)
+        return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/analysis", body={"data": data} if data else None, key=stable_key(key), sensitive_values=secrets)
 
     def get_external_analysis(self, analysis_id):
         return self._http.request("GET", f"/v1/task-analyses/{path_part(analysis_id)}")
 
-    def resume_external_analysis(self, analysis_id):
-        return self._http.request("POST", f"/v1/task-analyses/{path_part(analysis_id)}/resume")
+    def resume_external_analysis(self, analysis_id, *, model_api=None):
+        data, secrets = improvement_data(model_api=model_api)
+        return self._http.request("POST", f"/v1/task-analyses/{path_part(analysis_id)}/resume", body={"data": data} if data else None, sensitive_values=secrets)
 
     def start_execution(self, task_id, *, key, recipe_id=None, model_api=None, include_memory=False):
         data, secrets = improvement_data(model_api=model_api)
@@ -339,18 +347,19 @@ class SyncWorkflowAtoms:
     def get_revision(self, revision_id):
         return self._http.request("GET", f"/v1/revisions/{path_part(revision_id)}")
 
-    def start_attribution(self, revision_id, *, key, feedback=None):
+    def start_attribution(self, revision_id, *, key, feedback=None, model_api=None):
         if feedback is not None and (not isinstance(feedback, str) or not feedback.strip() or len(feedback) > 4_000):
             raise ValueError("feedback must be nonempty text of at most 4,000 characters")
-        data = {} if feedback is None else {"feedback": feedback}
+        data, secrets = improvement_data(feedback=feedback, model_api=model_api)
         return self._http.request("POST", f"/v1/revisions/{path_part(revision_id)}/attributions",
-                                  body={"data": data}, key=stable_key(key))
+                                  body={"data": data}, key=stable_key(key), sensitive_values=secrets)
 
     def get_attribution(self, attribution_id):
         return self._http.request("GET", f"/v1/attributions/{path_part(attribution_id)}")
 
-    def resume_attribution(self, attribution_id):
-        return self._http.request("POST", f"/v1/attributions/{path_part(attribution_id)}/resume")
+    def resume_attribution(self, attribution_id, *, model_api=None):
+        data, secrets = improvement_data(model_api=model_api)
+        return self._http.request("POST", f"/v1/attributions/{path_part(attribution_id)}/resume", body={"data": data} if data else None, sensitive_values=secrets)
 
     def select_cause(self, attribution_id, *, candidate_sha256=None, candidate_id=None, custom_reason=None):
         return self._http.request("POST", f"/v1/attributions/{path_part(attribution_id)}/selection",
@@ -364,15 +373,18 @@ class SyncWorkflowAtoms:
         return self._http.request("POST", f"/v1/revisions/{path_part(revision_id)}/acceptance",
                                   body={"data": {"artifact_hashes": artifact_hashes}})
 
-    def start_recipe_candidate(self, task_id, *, revision_id, key, include_memory=False):
+    def start_recipe_candidate(self, task_id, *, revision_id, key, include_memory=False, model_api=None):
+        data, secrets = improvement_data(model_api=model_api)
+        data.update(revision_id=revision_id, include_memory=include_memory)
         return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/recipe-candidates",
-                                  body={"data": {"revision_id": revision_id, "include_memory": include_memory}}, key=stable_key(key))
+                                  body={"data": data}, key=stable_key(key), sensitive_values=secrets)
 
     def get_recipe_candidate(self, recipe_id):
         return self._http.request("GET", f"/v1/recipe-candidates/{path_part(recipe_id)}")
 
-    def resume_recipe_candidate(self, recipe_id):
-        return self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/resume")
+    def resume_recipe_candidate(self, recipe_id, *, model_api=None):
+        data, secrets = improvement_data(model_api=model_api)
+        return self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/resume", body={"data": data} if data else None, sensitive_values=secrets)
 
     def start_verification(self, recipe_id, *, key):
         return self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/verifications", key=stable_key(key))

@@ -1,0 +1,54 @@
+{
+  "evaluated_at": "2026-11-02T21:05:13.320090+08:00",
+  "protocol": {
+    "synthetic": true,
+    "attempts": 1,
+    "memory_seeded": false,
+    "memory_tool_available": false,
+    "memory_supplied": false,
+    "recipe_supplied": false,
+    "feedback_supplied": false,
+    "temperature": 0,
+    "max_completion_tokens": 8192,
+    "max_retries": 0,
+    "comparison": "Same task facts and system prompt as the Memory-enabled attempt, with a fresh enterprise namespace. No Memory or retrieval tools are supplied."
+  },
+  "sdk_version": "0.3.0",
+  "model": "deepseek-v4-flash",
+  "task_id": "task_2845e208ab144d658d1b555c6e21b3e3",
+  "execution_id": "execution_42dbe923190145219733b16eeb2b0022",
+  "observed": {
+    "model_calls": 1,
+    "memory_calls": 0,
+    "finish_reason": "length",
+    "usage": {
+      "completion_tokens": 8192,
+      "prompt_tokens": 165,
+      "total_tokens": 8357,
+      "completion_tokens_details": {
+        "accepted_prediction_tokens": null,
+        "audio_tokens": null,
+        "reasoning_tokens": 8192,
+        "rejected_prediction_tokens": null
+      },
+      "prompt_tokens_details": {
+        "audio_tokens": null,
+        "cache_write_tokens": null,
+        "cached_tokens": 0
+      }
+    },
+    "final_answer_delivered": false
+  },
+  "classification": "delivery_failure_due_to_completion_budget_exhaustion",
+  "business_reasoning_defect_verified": false,
+  "domain_knowledge_omission_verified": false,
+  "interpretation": "The requested cold-start condition was used. No final answer exists to grade. Do not interpret this as an observed wrong replenishment quantity, missed stockout direction, or measured RSI improvement.",
+  "sdk_recovery": "Task creation encountered two TLS handshake timeouts; the same idempotency key was reused. The actual model request was issued only once.",
+  "execution_receipt": {
+    "task_id": "task_2845e208ab144d658d1b555c6e21b3e3",
+    "execution_id": "execution_42dbe923190145219733b16eeb2b0022",
+    "status": "failed",
+    "revision_id": null,
+    "trace_origin": "original"
+  }
+}

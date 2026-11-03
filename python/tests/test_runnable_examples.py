@@ -35,6 +35,7 @@ def test_click_run_uses_real_sdks_and_recalls_before_model(filename, mode, regio
     monkeypatch.setenv("RSI_API_KEY_US", "us-test-secret")
     monkeypatch.setenv("COSENS_MODE", mode)
     calls = []
+    unified = filename == FILES[0] and mode == "auto"
 
     def send(self, request, **kwargs):
         body = json.loads(request.content) if request.content else {}
@@ -43,13 +44,27 @@ def test_click_run_uses_real_sdks_and_recalls_before_model(filename, mode, regio
         if request.url.host == "model.example":
             assert request.headers["authorization"] == "Bearer model-test-secret"
             decision = body.get("text", {}).get("format", {}).get("name") == "cosens_decision"
-            output = json.dumps({"activate": True, "objective": "demo", "task_family": "general", "reason": "reusable"}) if decision else "示例回答完成"
+            match = body.get('text', {}).get('format', {}).get('name') == 'cosens_recipe_match'
+            output = json.dumps({"activate": True, "objective": "demo", "task_family": "general", "reason": "reusable"}) if decision else (json.dumps({"candidate_id": "candidate-demo", "reason": "matches"}) if match else "示例回答完成")
             data = {"id": "resp-demo", "object": "response", "created_at": 0, "model": "test-model", "status": "completed", "output": [{"id": "msg-demo", "type": "message", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": output, "annotations": []}]}], "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "input_tokens_details": {"cached_tokens": 0}, "output_tokens_details": {"reasoning_tokens": 0}}}
         else:
             assert request.url.host == ("rsi.cosens.ai" if region == "us" else "friday-rsi-cn.stardust-ai.com")
             assert request.headers["authorization"] == ("Bearer us-test-secret" if region == "us" else "Bearer gateway-test-secret")
             path = request.url.path
-            if path.endswith("/recipes/active"):
+            if path == '/api/v1/recipe-candidates':
+                data = {'items': [{'status': 'candidate', 'current': True, 'recipe_candidate_id': 'candidate-demo'}], 'has_more': False}
+            elif path == '/api/v1/recipe-candidates/candidate-demo':
+                data = {'status': 'candidate', 'current': True, 'recipe_candidate_id': 'candidate-demo',
+                        'recipe_id': 'chain-demo', 'version': 1, 'recipe': {'title': 'RECALLED_FACT', 'when': 'demo', 'steps': []}}
+            elif path == '/api/v1/tasks':
+                data = {'task_id': 'task-demo', 'status': 'ready'}
+            elif path.endswith('/executions'):
+                data = {'status': 'awaiting_execution', 'execution_id': 'execution-demo', 'request_sha256': 'hash',
+                        'request': {'method': {'recipe_id': 'chain-demo', 'recipe_candidate_id': 'candidate-demo', 'version': 1}}}
+            elif path.endswith('/result'):
+                assert body['generate_recipe'] is False
+                data = {'status': 'completed', 'revision_id': 'revision-demo', 'generate_recipe': False}
+            elif path.endswith("/recipes/active"):
                 data = {"status": "matched", "recipe_id": "recipe-demo", "bundle": {"summary": "RECALLED_FACT"}}
             elif path.endswith("/memory/recall"):
                 data = {"items": []}
@@ -79,16 +94,18 @@ def test_click_run_uses_real_sdks_and_recalls_before_model(filename, mode, regio
     runpy.run_path(str(target), run_name="__main__")
     output = capsys.readouterr().out
     assert "示例回答完成" in output
-    assert ("demo-run" in output) == (mode != "disable")
+    assert ("demo-run" in output) == (mode != "disable" and not unified)
     assert "model-test-secret" not in output and "gateway-test-secret" not in output
-    business = [(i, body) for i, (path, body) in enumerate(calls) if path == "/v1/responses" and body.get("text", {}).get("format", {}).get("name") != "cosens_decision"]
+    business = [(i, body) for i, (path, body) in enumerate(calls) if path == "/v1/responses" and body.get("text", {}).get("format", {}).get("name") not in {"cosens_decision", "cosens_recipe_match"}]
     assert len(business) == 1
     assert "RECALLED_FACT" in json.dumps(business[0][1])
-    recall_path = "/api/v1/memory/recall" if mode == "disable" else "/api/v1/runs/demo-run"
+    recall_path = "/api/v1/memory/recall" if mode == "disable" or unified else "/api/v1/runs/demo-run"
     assert next(i for i, (path, _) in enumerate(calls) if path == recall_path) < business[0][0]
-    assert sum(path == "/v1/responses" for path, _ in calls) == (2 if filename == FILES[0] and mode == "auto" else 1)
-    assert any(path.endswith("/submit") for path, _ in calls) == (mode != "disable")
+    assert sum(path == "/v1/responses" for path, _ in calls) == (3 if unified else 1)
+    assert any(path.endswith("/result") if unified else path.endswith("/submit") for path, _ in calls) == (mode != "disable")
     events = [event for path, body in calls if path.endswith("/session-events") for event in body["events"]]
+    if unified:
+        events = [event for path, body in calls if path.endswith("/result") for event in body["events"]]
     if mode != "disable":
         assert any("示例回答完成" in json.dumps(e, ensure_ascii=False) for e in events)
     else:
