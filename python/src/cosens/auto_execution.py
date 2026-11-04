@@ -4,6 +4,7 @@ from copy import deepcopy
 import json
 
 from .errors import RSIRecoveryRequired
+from ._structured import structured_sync, structured_async
 from .responses_adapter import inject, summary, terminal, tool_continuation, user_text
 from .workflow import freeze_recall_context
 
@@ -18,9 +19,9 @@ class AutoExecution:
         if self.decision_max_output_tokens is not None:
             options['max_output_tokens'] = self.decision_max_output_tokens
         if loop is None:
-            response = native.responses.create(**options)
+            response = structured_sync(native, **options)
         else:
-            future = asyncio.run_coroutine_threadsafe(native.responses.create(**options), loop)
+            future = asyncio.run_coroutine_threadsafe(structured_async(native, **options), loop)
             try:
                 response = future.result(timeout=self.decision_timeout + 1)
             except BaseException:
@@ -131,8 +132,7 @@ class AutoExecution:
             if state.get('used_recipe_id'):
                 # Pin the candidate/version from lookup when the service exposes it.
                 options['recipe_id'] = state['used_recipe_id']
-            if self.auto_learning.model_api is not None:
-                options['model_api'] = self.auto_learning.model_api
+            options['model'] = kwargs.get('model')
             execution = revision_execution or atoms.start_execution(state['task_id'], key='auto-execution:' + state['turn_id'], **options)
             if execution.get('status') != 'awaiting_execution' or not execution.get('execution_id') or not execution.get('request_sha256'):
                 raise RSIRecoveryRequired('Auto execution is not ready')

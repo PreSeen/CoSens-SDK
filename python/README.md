@@ -3,13 +3,14 @@
 Install with `pip install .` from this directory. Agent support: `pip install '.[agents]'`.
 
 ```python
-from openai import OpenAI
-from cosens import cosens
+from cosens import cosens, friday_gateway_client
 
-client = cosens(OpenAI(), mode="auto")
-result = client.responses.create(model="gpt-4.1-mini", input="Produce a report")
+client = cosens(friday_gateway_client(), mode="auto")
+result = client.responses.create(model="<public-model-id>", input="Produce a report")
 turn_id = client.cosens.last_turn_id
 ```
+
+Set `COSENS_API_KEY` and optionally `COSENS_REGION=cn|us` (default `cn`). Model and CoSens clients reuse the same Friday user API Key. The application loads `.env`; the SDK reads process environment. Use a model ID from the regional gateway catalog.
 
 The response is the native OpenAI result. After your application obtains user confirmation of the artifact, call from its confirmation handler:
 

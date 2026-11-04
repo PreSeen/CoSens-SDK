@@ -47,7 +47,7 @@ def _decode(response, api_key, sensitive_values=()):
 
 def _headers(api_key, key):
     if not isinstance(api_key, str) or not api_key or any(c.isspace() for c in api_key):
-        raise ValueError("CoSens api_key must be the bare Friday API Key; set api_key or RSI_API_KEY")
+        raise ValueError("CoSens api_key must be the bare Friday API Key; set api_key or COSENS_API_KEY")
     headers = {"X-Auth-Type": "api_key", "Authorization": f"Bearer {api_key}"}
     if key:
         headers["Idempotency-Key"] = key

@@ -4,6 +4,7 @@ import json
 from copy import deepcopy
 
 from .errors import RSIDecisionUnavailable
+from ._structured import structured_sync, structured_async
 
 
 _FORMAT = {
@@ -70,7 +71,7 @@ def _request(user_text, tool_names, feedback_context):
 def decide_sync(native, model, user_text, tool_names, *, timeout=5, max_output_tokens=None, feedback_context=None):
     prompt, output_format = _request(user_text, tool_names, feedback_context)
     options = {} if max_output_tokens is None else {"max_output_tokens": max_output_tokens}
-    response = native.responses.create(
+    response = structured_sync(native,
         model=model,
         input=prompt,
         text={"format": output_format},
@@ -84,7 +85,7 @@ def decide_sync(native, model, user_text, tool_names, *, timeout=5, max_output_t
 async def decide_async(native, model, user_text, tool_names, *, timeout=5, max_output_tokens=None, feedback_context=None):
     prompt, output_format = _request(user_text, tool_names, feedback_context)
     options = {} if max_output_tokens is None else {"max_output_tokens": max_output_tokens}
-    response = await native.responses.create(
+    response = await structured_async(native,
         model=model,
         input=prompt,
         text={"format": output_format},

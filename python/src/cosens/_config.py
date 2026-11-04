@@ -30,9 +30,7 @@ def resolve_service(region=None):
     return _SERVICES[region]
 
 
-def resolve_api_key(api_key, service):
+def resolve_api_key(api_key):
     if api_key is not None:
         return api_key
-    return (os.getenv(f'RSI_API_KEY_{service.region.upper()}')
-            or os.getenv('RSI_API_KEY')
-            or os.getenv('COSENS_API_KEY'))
+    return os.getenv('COSENS_API_KEY')

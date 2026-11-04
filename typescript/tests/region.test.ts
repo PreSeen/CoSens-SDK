@@ -37,17 +37,15 @@ test('invalid region fails before any gateway request', () => {
 });
 
 test('client selects the regional gateway key before the generic key', async () => {
-  const previous = Object.fromEntries(['COSENS_REGION', 'RSI_API_KEY_CN', 'RSI_API_KEY_US', 'RSI_API_KEY'].map(name => [name, process.env[name]]));
+  const previous = Object.fromEntries(['COSENS_REGION', 'COSENS_API_KEY'].map(name => [name, process.env[name]]));
   try {
-    process.env.RSI_API_KEY_CN = 'cn-key';
-    process.env.RSI_API_KEY_US = 'us-key';
-    process.env.RSI_API_KEY = 'fallback-key';
-    for (const [region, expected] of [['cn', 'cn-key'], ['us', 'us-key']] as const) {
+    process.env.COSENS_API_KEY = 'shared-key';
+    for (const [region, expected] of [['cn', 'shared-key'], ['us', 'shared-key']] as const) {
       const client = new CoSensClient({ region });
       assert.equal(client.transport.apiKey, expected);
       await client.close();
     }
-    process.env.RSI_API_KEY_US = '';
+    process.env.COSENS_API_KEY = 'fallback-key';
     const fallback = new CoSensClient({ region: 'us' });
     assert.equal(fallback.transport.apiKey, 'fallback-key');
     await fallback.close();

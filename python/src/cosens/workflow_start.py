@@ -16,7 +16,7 @@ def _derived_key(key, operation):
     return hashlib.sha256(f"workflow-start:{operation}:{stable_key(key)}".encode()).hexdigest()
 
 
-async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto", request_key=None, authorize=None, recipe_id=None, model_api=None, include_memory=False):
+async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto", request_key=None, authorize=None, recipe_id=None, model=None, include_memory=False):
     if mode not in {"auto", "approval", "disable"}:
         raise ValueError("mode must be auto, approval or disable")
     if mode == "disable":
@@ -60,8 +60,8 @@ async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto"
         options = {}
         if recipe_id is not None:
             options['recipe_id'] = recipe_id
-        if model_api is not None:
-            options['model_api'] = model_api
+        if model is not None:
+            options['model'] = model
         if include_memory:
             options['include_memory'] = True
         execution = await atoms.start_execution(task_id, key=_derived_key(request_key, "execution"), **options)
@@ -74,6 +74,6 @@ async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto"
     if phase == 'revise':
         return await atoms.start_revision(session_context['revision_id'], key=request_key)
     if phase == 'recipe':
-        options = {'model_api': model_api} if model_api is not None else {}
+        options = {'model': model} if model is not None else {}
         return await atoms.start_recipe_candidate(session_context['task_id'], revision_id=session_context['revision_id'], key=request_key, **options)
     raise ValueError('phase must be prepare, revise or recipe')

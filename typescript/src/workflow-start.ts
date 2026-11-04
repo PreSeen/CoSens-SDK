@@ -1,7 +1,6 @@
 /** Explicit host-coordinated start for a task-workflow phase. No Agent runs here. */
 import { createHash } from 'node:crypto';
 import type { Atoms, WorkflowArtifactRef } from './atoms.js';
-import type { BusinessModelAPI } from './model-api.js';
 import { RSIApprovalUnavailable, RSIRecoveryRequired } from './errors.js';
 import { requestKey } from './http.js';
 
@@ -13,7 +12,7 @@ export interface WorkflowSnapshot {
 }
 export interface WorkflowStartOptions {
   phase?: WorkflowPhase; mode?: 'auto' | 'approval' | 'disable'; requestKey?: string;
-  recipeId?: string; modelApi?: BusinessModelAPI; includeMemory?: boolean;
+  recipeId?: string; model?: string; includeMemory?: boolean;
   authorize?: (phase: WorkflowPhase, snapshot: WorkflowSnapshot) => boolean | Promise<boolean>;
 }
 
@@ -21,7 +20,7 @@ function derivedKey(key: string, operation: string) {
   return createHash('sha256').update(`workflow-start:${operation}:${requestKey(key)}`).digest('hex');
 }
 
-export async function startWorkflow(atoms: Atoms, snapshot: WorkflowSnapshot | string, { phase = 'prepare', mode = 'auto', requestKey: key, authorize, recipeId, modelApi, includeMemory = false }: WorkflowStartOptions = {}): Promise<any> {
+export async function startWorkflow(atoms: Atoms, snapshot: WorkflowSnapshot | string, { phase = 'prepare', mode = 'auto', requestKey: key, authorize, recipeId, model, includeMemory = false }: WorkflowStartOptions = {}): Promise<any> {
   if (!['auto', 'approval', 'disable'].includes(mode)) throw new TypeError('mode must be auto, approval or disable');
   if (mode === 'disable') return { status: 'disabled', phase };
   if (typeof includeMemory !== 'boolean') throw new TypeError('includeMemory must be boolean');
@@ -47,12 +46,12 @@ export async function startWorkflow(atoms: Atoms, snapshot: WorkflowSnapshot | s
     }
     if (task?.status === 'ready' && !taskId) throw new RSIRecoveryRequired('Ready task receipt has no task_id');
     if (task?.status !== 'ready') return { phase, task, status: task?.status };
-    const execution = await atoms.startExecution(taskId!, { key: derivedKey(stable, 'execution'), recipeId, modelApi, includeMemory });
+    const execution = await atoms.startExecution(taskId!, { key: derivedKey(stable, 'execution'), recipeId, model, includeMemory });
     return { phase, status: execution?.status, task_id: taskId, task,
       execution_id: execution?.execution_id, request_sha256: execution?.request_sha256,
       execution_request: execution?.request, execution };
   }
   if(phase==='revise')return atoms.startRevision(snapshot.revision_id!,{key:stable});
-  if(phase==='recipe')return atoms.startRecipeCandidate(snapshot.task_id!,{revisionId:snapshot.revision_id!,key:stable,modelApi});
+  if(phase==='recipe')return atoms.startRecipeCandidate(snapshot.task_id!,{revisionId:snapshot.revision_id!,key:stable,model});
   throw new RSIRecoveryRequired('phase must be prepare, revise or recipe');
 }

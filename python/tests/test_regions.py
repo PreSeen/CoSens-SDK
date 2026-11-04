@@ -32,12 +32,10 @@ def test_unknown_region_is_rejected_before_any_client_is_created(monkeypatch):
         CoSensClient(api_key='regional-key')
 
 
-@pytest.mark.parametrize('region,expected', [('cn','cn-key'), ('us','us-key')])
+@pytest.mark.parametrize('region,expected', [('cn','shared-key'), ('us','shared-key')])
 def test_client_uses_key_for_selected_region(monkeypatch, region, expected):
     monkeypatch.setenv('COSENS_REGION', region)
-    monkeypatch.setenv('RSI_API_KEY_CN', 'cn-key')
-    monkeypatch.setenv('RSI_API_KEY_US', 'us-key')
-    monkeypatch.setenv('RSI_API_KEY', 'fallback-key')
+    monkeypatch.setenv('COSENS_API_KEY', 'shared-key')
     client = CoSensClient()
     try:
         assert client._transport.api_key == expected
@@ -48,8 +46,7 @@ def test_client_uses_key_for_selected_region(monkeypatch, region, expected):
 
 def test_client_falls_back_to_generic_key_and_explicit_key_wins(monkeypatch):
     monkeypatch.setenv('COSENS_REGION', 'us')
-    monkeypatch.setenv('RSI_API_KEY_US', '')
-    monkeypatch.setenv('RSI_API_KEY', 'fallback-key')
+    monkeypatch.setenv('COSENS_API_KEY', 'fallback-key')
     fallback = CoSensClient()
     explicit = CoSensClient(api_key='explicit-key')
     try:

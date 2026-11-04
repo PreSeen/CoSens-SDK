@@ -11,7 +11,6 @@ from .workflow import _bounded_timeout
 from .atoms_helpers import path_part as _part, stable_key as _key
 from .workflow_atoms import AsyncWorkflowAtoms, SyncWorkflowAtoms, validate_artifact
 from .document_atoms import AsyncDocumentAtoms, SyncDocumentAtoms
-from .model_api import model_connection_data
 
 
 def _recall_context(recipe, memory, query, task_family):
@@ -141,7 +140,7 @@ class SyncAtoms(SyncWorkflowAtoms, SyncDocumentAtoms):
 class CoSensClient:
     def __init__(self, api_key=None, *, region=None, state_path=None, _http_transport=None):
         self._service = resolve_service(region)
-        api_key = resolve_api_key(api_key, self._service)
+        api_key = resolve_api_key(api_key)
         self._transport = AsyncTransport(api_key=api_key, transport=_http_transport, service=self._service)
         self._sync_transport = SyncTransport(api_key=api_key, transport=_http_transport, service=self._service)
         self.atoms = AsyncAtoms(self._transport)
@@ -152,11 +151,11 @@ class CoSensClient:
         await self._transport.aclose()
         self._sync_transport.close()
 
-    async def start(self, session_context, *, phase="prepare", mode="auto", request_key=None, authorize=None, recipe_id=None, model_api=None, include_memory=False):
+    async def start(self, session_context, *, phase="prepare", mode="auto", request_key=None, authorize=None, recipe_id=None, model=None, include_memory=False):
         """Start a workflow phase and return the host's next request or job receipt."""
         from .workflow_start import start_workflow
         return await start_workflow(self.atoms, session_context, phase=phase, mode=mode,
-                                    request_key=request_key, authorize=authorize, recipe_id=recipe_id, model_api=model_api, include_memory=include_memory)
+                                    request_key=request_key, authorize=authorize, recipe_id=recipe_id, model=model, include_memory=include_memory)
 
     def close(self):
         self._sync_transport.close()

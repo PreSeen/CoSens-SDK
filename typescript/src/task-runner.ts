@@ -120,7 +120,7 @@ export class TaskWorkflowRunner {
     if (state.mode !== this.cosens.mode) throw new RSIRecoveryRequired('Workflow turn originated in a different mode');
     this.cosens.lastTurnId = state.turnId;
     if (!state.executionId) {
-      const started = await this.client!.start(state.taskId ? { task_id: state.taskId } : { task: state.taskSpec }, { phase: 'prepare', mode: state.mode, requestKey: state.turnId, authorize: rsi.authorize });
+      const started = await this.client!.start(state.taskId ? { task_id: state.taskId } : { task: state.taskSpec }, { phase: 'prepare', mode: state.mode, requestKey: state.turnId, authorize: rsi.authorize, ...(typeof agent?.model==='string'&&agent.model.trim()?{model:agent.model}:{}) });
       if (started?.task_id || started?.task?.task_id) {
         state.taskId = started.task_id ?? started.task.task_id; this.savePending(state);
       }

@@ -1,11 +1,10 @@
-"""Transparent capture; generate only from the host's confirmation handler."""
-from openai import OpenAI
-from cosens import cosens
+"""COSENS_API_KEY is shared by the model gateway and execution capture."""
+from cosens import cosens, friday_gateway_client
 
 
-def run_task(task):
-    client = cosens(OpenAI(), mode='auto')
-    response = client.responses.create(model='gpt-4.1-mini', input=task)
+def run_task(task, model):
+    client = cosens(friday_gateway_client(), mode="auto")
+    response = client.responses.create(model=model, input=task, store=False)
     return client, response, client.cosens.last_turn_id
 
 

@@ -11,7 +11,14 @@ import time
 
 from .atoms_helpers import path_part, stable_key
 from .errors import RSIRecoveryRequired
-from .model_api import model_connection_data
+
+
+def _model_data(model):
+    if model is None:
+        return {}
+    if not isinstance(model, str) or not model.strip() or len(model) > 256:
+        raise ValueError('model must be a public Friday model ID')
+    return {'model': model.strip()}
 
 
 _ROLES = {"original_input", "submitted_output", "acceptance", "external_trace"}
@@ -142,8 +149,8 @@ class AsyncWorkflowAtoms:
                                         body=_context(expected_context_version, objective, artifacts, self_contained))
 
 
-    async def start_execution(self, task_id, *, key, recipe_id=None, model_api=None, include_memory=False):
-        data, secrets = model_connection_data(model_api=model_api)
+    async def start_execution(self, task_id, *, key, recipe_id=None, model=None, include_memory=False):
+        data = _model_data(model)
         if type(include_memory) is not bool:
             raise ValueError('include_memory must be boolean')
         if include_memory:
@@ -152,8 +159,6 @@ class AsyncWorkflowAtoms:
             path_part(recipe_id)
             data['recipe_id'] = recipe_id
         options = {'body': data} if data else {}
-        if secrets:
-            options['sensitive_values'] = secrets
         return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/executions", key=stable_key(key), **options)
 
     async def get_task_recipe(self, task_id):
@@ -179,18 +184,18 @@ class AsyncWorkflowAtoms:
                                         body={"data": {}}, key=stable_key(key))
 
 
-    async def start_recipe_candidate(self, task_id, *, revision_id, key, model_api=None):
-        data, secrets = model_connection_data(model_api=model_api)
+    async def start_recipe_candidate(self, task_id, *, revision_id, key, model=None):
+        data = _model_data(model)
         data.update(revision_id=revision_id)
         return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/recipe-candidates",
-                                        body={"data": data}, key=stable_key(key), sensitive_values=secrets)
+                                        body={"data": data}, key=stable_key(key))
 
     async def get_recipe_candidate(self, recipe_id):
         return await self._http.request("GET", f"/v1/recipe-candidates/{path_part(recipe_id)}")
 
-    async def resume_recipe_candidate(self, recipe_id, *, model_api=None):
-        data, secrets = model_connection_data(model_api=model_api)
-        return await self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/resume", body={"data": data} if data else None, sensitive_values=secrets)
+    async def resume_recipe_candidate(self, recipe_id, *, model=None):
+        data = _model_data(model)
+        return await self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/resume", body={"data": data} if data else None)
 
     async def list_tasks(self, *, limit=20, cursor=None):
         from urllib.parse import urlencode
@@ -246,8 +251,8 @@ class SyncWorkflowAtoms:
                                   body=_context(expected_context_version, objective, artifacts, self_contained))
 
 
-    def start_execution(self, task_id, *, key, recipe_id=None, model_api=None, include_memory=False):
-        data, secrets = model_connection_data(model_api=model_api)
+    def start_execution(self, task_id, *, key, recipe_id=None, model=None, include_memory=False):
+        data = _model_data(model)
         if type(include_memory) is not bool:
             raise ValueError('include_memory must be boolean')
         if include_memory:
@@ -256,8 +261,6 @@ class SyncWorkflowAtoms:
             path_part(recipe_id)
             data['recipe_id'] = recipe_id
         options = {'body': data} if data else {}
-        if secrets:
-            options['sensitive_values'] = secrets
         return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/executions", key=stable_key(key), **options)
 
     def get_task_recipe(self, task_id):
@@ -283,18 +286,18 @@ class SyncWorkflowAtoms:
                                   body={"data": {}}, key=stable_key(key))
 
 
-    def start_recipe_candidate(self, task_id, *, revision_id, key, model_api=None):
-        data, secrets = model_connection_data(model_api=model_api)
+    def start_recipe_candidate(self, task_id, *, revision_id, key, model=None):
+        data = _model_data(model)
         data.update(revision_id=revision_id)
         return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/recipe-candidates",
-                                  body={"data": data}, key=stable_key(key), sensitive_values=secrets)
+                                  body={"data": data}, key=stable_key(key))
 
     def get_recipe_candidate(self, recipe_id):
         return self._http.request("GET", f"/v1/recipe-candidates/{path_part(recipe_id)}")
 
-    def resume_recipe_candidate(self, recipe_id, *, model_api=None):
-        data, secrets = model_connection_data(model_api=model_api)
-        return self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/resume", body={"data": data} if data else None, sensitive_values=secrets)
+    def resume_recipe_candidate(self, recipe_id, *, model=None):
+        data = _model_data(model)
+        return self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/resume", body={"data": data} if data else None)
 
     def list_tasks(self, *, limit=20, cursor=None):
         from urllib.parse import urlencode

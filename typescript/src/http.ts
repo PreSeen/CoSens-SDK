@@ -10,7 +10,7 @@ export class Transport {
   private readonly timeoutMs: number;
   constructor(options: TransportOptions = {}) {
     this.service = resolveService(options.region);
-    this.apiKey = resolveApiKey(options.apiKey, this.service.region);
+    this.apiKey = resolveApiKey(options.apiKey);
     this.fetcher = options.fetch ?? fetch;
     this.timeoutMs = options.timeoutMs ?? 30_000;
   }

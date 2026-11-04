@@ -1,10 +1,10 @@
 """Atomic recording and explicitly requested Recipe generation."""
 
 
-async def record_task(client, objective, output, request_key):
+async def record_task(client, objective, output, request_key, model):
     atoms = client.atoms
     task = await atoms.create_task(source='new_task', objective=objective, self_contained=True, key=request_key+':task')
-    execution = await atoms.start_execution(task['task_id'], key=request_key+':execution')
+    execution = await atoms.start_execution(task['task_id'], key=request_key+':execution', model=model)
     artifact = await atoms.artifact(name='output.txt', content=output)
     result = await atoms.submit_execution(execution['execution_id'], request_sha256=execution['request_sha256'],
         outcome='completed', artifacts=[{'artifact_id':artifact['artifact_id'],'role':'submitted_output'}])

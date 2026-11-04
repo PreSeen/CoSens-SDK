@@ -11,8 +11,8 @@ export function resolveService(region?: string): Service {
   return SERVICES[chosen];
 }
 
-export function resolveApiKey(key?: string, region: Region = resolveService().region): string {
-  const value = key ?? (process.env[`RSI_API_KEY_${region.toUpperCase()}`] || process.env.RSI_API_KEY || process.env.COSENS_API_KEY);
+export function resolveApiKey(key?: string): string {
+  const value = key ?? process.env.COSENS_API_KEY;
   if (!value || /\s/.test(value)) throw new TypeError('CoSens apiKey must be the bare Friday API Key');
   return value;
 }

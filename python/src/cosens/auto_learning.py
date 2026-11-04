@@ -15,7 +15,6 @@ class AutoLearning:
     """Generation polling/model settings; never authorizes generation by itself."""
     timeout: float = 1800
     poll_interval: float = 2
-    model_api: dict | None = None
 
     def __post_init__(self):
         for name in ('timeout', 'poll_interval'):
@@ -67,8 +66,7 @@ class LearningCoordinator:
             return value
         value.update(request_key=key,state='request_pending',reason='explicit_generation_requested')
         self.store.put(self._key(turn_id),value)
-        options={'model_api':self.config.model_api} if self.config.model_api is not None else {}
-        receipt=self.atoms.start_recipe_candidate(value['task_id'],revision_id=value['revision_id'],key=key,**options)
+        receipt=self.atoms.start_recipe_candidate(value['task_id'],revision_id=value['revision_id'],key=key)
         value.update(recipe_candidate_id=receipt['recipe_candidate_id'],state=receipt['status'],
                      action='revise' if receipt.get('parent_candidate_id') else 'create')
         self.store.put(self._key(turn_id),value)

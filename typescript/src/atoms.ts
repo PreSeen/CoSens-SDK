@@ -1,9 +1,14 @@
 import { RSIRecoveryRequired } from './errors.js';
-import { modelAPIData, type BusinessModelAPI } from './model-api.js';
 import { pathPart, requestKey, Transport, type TransportOptions } from './http.js';
 import { performance } from 'node:perf_hooks';
 import { startWorkflow, type WorkflowSnapshot, type WorkflowStartOptions } from './workflow-start.js';
 import { documentBytes, documentMetadata, documentStatusBody, uploadTarget, type DocumentUploadGrant, type DocumentUploadMetadata } from './document-upload.js';
+
+function modelData(model?:string):Record<string,string>{
+ if(model===undefined)return {};
+ if(typeof model!=='string'||!model.trim()||model.length>256)throw new TypeError('model must be a public Friday model ID');
+ return {model:model.trim()};
+}
 
 function boundedTimeout(milliseconds: number): number {
   if (typeof milliseconds !== 'number' || !Number.isFinite(milliseconds) || milliseconds < 0 || milliseconds > Number.MAX_SAFE_INTEGER) {
@@ -100,14 +105,14 @@ export class Atoms {
     if (!Number.isInteger(expectedContextVersion) || expectedContextVersion < 1) throw new TypeError('expectedContextVersion must be a positive integer');
     return this.http.request('POST', `/v1/tasks/${pathPart(taskId)}/context`, { expected_context_version: expectedContextVersion, ...(objective === undefined ? {} : { objective }), ...(artifacts === undefined ? {} : { artifacts }), ...(selfContained === undefined ? {} : { self_contained: selfContained }) });
   }
-  startExecution(taskId: string, { key, modelApi, recipeId, includeMemory = false }: { key: string; modelApi?: BusinessModelAPI; recipeId?: string; includeMemory?: boolean }) {
+  startExecution(taskId: string, { key, model, recipeId, includeMemory = false }: { key: string; model?: string; recipeId?: string; includeMemory?: boolean }) {
     if (typeof includeMemory !== 'boolean') throw new TypeError('includeMemory must be boolean');
     if (recipeId !== undefined) pathPart(recipeId);
-    const connection = modelApi === undefined ? undefined : modelAPIData(modelApi);
-    const body = { ...(connection ? { model_api: connection.wire } : {}),
+    const connection = modelData(model);
+    const body = { ...connection,
       ...(recipeId === undefined ? {} : { recipe_id: recipeId }), ...(includeMemory ? { include_memory: true } : {}) };
     return this.http.request('POST', `/v1/tasks/${pathPart(taskId)}/executions`,
-      Object.keys(body).length ? body : undefined, requestKey(key), connection?.secrets);
+      Object.keys(body).length ? body : undefined, requestKey(key), undefined);
   }
   getTaskRecipe(taskId: string) { return this.http.request('GET', `/v1/tasks/${pathPart(taskId)}/recipe`); }
   getRecipeVersions(recipeId: string) { return this.http.request('GET', `/v1/recipe-chains/${pathPart(recipeId)}/versions`); }
@@ -127,11 +132,11 @@ export class Atoms {
   }
   getRevision(revisionId: string) { return this.http.request('GET', `/v1/revisions/${pathPart(revisionId)}`); }
   startRevision(revisionId:string,{key}:{key:string}) {return this.http.request('POST',`/v1/revisions/${pathPart(revisionId)}/revisions`,{data:{}},requestKey(key));}
-  startRecipeCandidate(taskId:string,{revisionId,key,modelApi}:{revisionId:string;key:string;modelApi?:BusinessModelAPI}) {
- const c=modelApi&&modelAPIData(modelApi);return this.http.request('POST',`/v1/tasks/${pathPart(taskId)}/recipe-candidates`,{data:{revision_id:revisionId,...(c?{model_api:c.wire}:{})}},requestKey(key),c?.secrets);
- }
-  getRecipeCandidate(recipeId: string) { return this.http.request('GET', `/v1/recipe-candidates/${pathPart(recipeId)}`); }
-  resumeRecipeCandidate(recipeId: string, modelApi?: BusinessModelAPI) { const c = modelApi && modelAPIData(modelApi); return this.http.request('POST', `/v1/recipe-candidates/${pathPart(recipeId)}/resume`, c ? { data: { model_api: c.wire } } : undefined, undefined, c?.secrets); }
+  startRecipeCandidate(taskId:string,{revisionId,key,model}:{revisionId:string;key:string;model?:string}) {
+    return this.http.request('POST',`/v1/tasks/${pathPart(taskId)}/recipe-candidates`,{data:{revision_id:revisionId,...modelData(model)}},requestKey(key));
+  }
+  getRecipeCandidate(recipeId:string){return this.http.request('GET',`/v1/recipe-candidates/${pathPart(recipeId)}`);}
+  resumeRecipeCandidate(recipeId:string,model?:string){const data=modelData(model);return this.http.request('POST',`/v1/recipe-candidates/${pathPart(recipeId)}/resume`,Object.keys(data).length?{data}:undefined);}
 
   listTasks({limit=20,cursor}:{limit?:number;cursor?:string}={}) {return this.http.request('GET','/v1/tasks?'+new URLSearchParams({limit:String(limit),...(cursor?{cursor}:{})}));}
   recordFeedback(revisionId:string,{feedback,key}:{feedback:string;key:string}) {return this.http.request('POST',`/v1/revisions/${pathPart(revisionId)}/feedback`,{feedback},requestKey(key));}

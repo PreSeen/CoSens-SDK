@@ -130,8 +130,7 @@ def test_invalid_key_is_rejected_without_network_or_secret_in_error(key):
 
 @pytest.mark.asyncio
 async def test_documented_environment_key_and_explicit_key_precedence(monkeypatch):
-    monkeypatch.setenv("RSI_API_KEY", "environment-key")
-    monkeypatch.delenv("COSENS_API_KEY", raising=False)
+    monkeypatch.setenv("COSENS_API_KEY", "environment-key")
     headers = []
     transport = httpx.MockTransport(lambda r: (headers.append(r.headers["authorization"]), httpx.Response(200, json={}))[1])
     async with CoSensClient(_http_transport=transport) as client:

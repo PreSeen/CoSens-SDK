@@ -9,7 +9,7 @@ import pytest
 from agents import Agent
 from openai import OpenAI
 
-from cosens import CoSensClient, cosens
+from cosens import CoSensClient, cosens, friday_gateway_client
 from test_explicit_recipe_protocol import native_response
 
 URL=os.environ.get('COSENS_TEST_ALGORITHM_HTTP_URL')
@@ -26,19 +26,19 @@ async def test_three_entries_against_local_algorithm(tmp_path,entry):
     def forward(request):
         path=request.url.path.removeprefix('/api')
         observed.append(path)
-        response=remote.request(request.method,path,params=request.url.params,content=request.content,headers={'X-User-Id':owner,'Content-Type':'application/json',**({'Idempotency-Key':request.headers['Idempotency-Key']} if 'Idempotency-Key' in request.headers else {})})
+        response=remote.request(request.method,path,params=request.url.params,content=request.content,headers={'X-User-Id':owner,'Authorization':request.headers.get('Authorization',''),'X-Auth-Type':'api_key','Content-Type':'application/json',**({'Idempotency-Key':request.headers['Idempotency-Key']} if 'Idempotency-Key' in request.headers else {})})
         return httpx.Response(response.status_code,content=response.content,headers={'Content-Type':'application/json'})
     transport=httpx.MockTransport(forward)
     sdk=CoSensClient(api_key='local-test-key',state_path=tmp_path/'atoms.sqlite',_http_transport=transport)
     native=None;wrapped=None
     try:
         if entry=='transparent':
-            native=OpenAI(api_key='model-fixture-key',http_client=httpx.Client(transport=httpx.MockTransport(native_response)))
+            native=friday_gateway_client(api_key='local-test-key',region='us',http_client=httpx.Client(transport=httpx.MockTransport(native_response)))
             wrapped=cosens(native,mode='auto',api_key='local-test-key',state_path=tmp_path/'wrapper.sqlite',_http_transport=transport)
             wrapped.responses.create(model='model',input='Produce a structured report')
             turn=wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
         elif entry=='agent':
-            agent=Agent(name='reporter',instructions='Produce a report')
+            agent=Agent(name='reporter',instructions='Produce a report',model='model')
             class Runner:
                 @staticmethod
                 async def run(*args,**kwargs):return SimpleNamespace(final_output='report',new_items=[],interruptions=[])
@@ -47,11 +47,14 @@ async def test_three_entries_against_local_algorithm(tmp_path,entry):
             turn=wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
         else:
             task=await sdk.atoms.create_task(source='new_task',objective='Produce a structured report',self_contained=True,key='task')
-            execution=await sdk.atoms.start_execution(task['task_id'],key='execution')
+            execution=await sdk.atoms.start_execution(task['task_id'],key='execution',model='model')
             artifact=await sdk.atoms.artifact(name='report.txt',content='report')
             revision=await sdk.atoms.submit_execution(execution['execution_id'],request_sha256=execution['request_sha256'],outcome='completed',artifacts=[{'artifact_id':artifact['artifact_id'],'role':'submitted_output'}])
             turn={'task_id':task['task_id'],'revision_id':revision['revision_id']}
         assert turn.get('revision_id'),turn
+        execution_id = turn.get('execution_id') or execution['execution_id']
+        captured = await sdk.atoms.get_execution(execution_id)
+        assert captured['request']['model'] == 'model'
         assert (await sdk.atoms.list_recipe_candidates())['items']==[]
         if entry=='transparent':
             request=wrapped.cosens.generate_recipe()

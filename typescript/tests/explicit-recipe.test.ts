@@ -14,6 +14,7 @@ for(const entry of ['transparent','agent','atomic'])test(`explicit generation: $
   const url=new URL(String(input));const path=url.pathname.replace(/^\/api/,'');paths.push(path);
   assert.ok(!path.includes('/runs')&&!path.includes('/attributions')&&!path.includes('/improvements'));
   const body=init?.body?JSON.parse(String(init.body)):undefined;
+  if(path.endsWith('/executions'))assert.equal(body.model,'model');
   if(local){const headers=new Headers(init?.headers);headers.set('X-User-Id',owner);return fetch(local+path+url.search,{...init,headers});}
   let value:any;
   if(path==='/v1/recipe-candidates')value={items:[],has_more:false};
@@ -37,13 +38,13 @@ for(const entry of ['transparent','agent','atomic'])test(`explicit generation: $
   const response=await wrapper.responses.create({model:'model',input:'Produce output'});assert.equal(response.output_text,'final output');
   const turn=wrapper.cosens.getTurn(wrapper.cosens.lastTurnId);assert.equal(turn.state,'completed');taskId=turn.taskId;revisionId=turn.revisionId;
  }else if(entry==='agent'){
-  const agent=new Agent({name:'reporter',instructions:'Produce output'});
+  const agent=new Agent({name:'reporter',instructions:'Produce output',model:'model'});
   wrapper=new CoSensAgentRunner(agent,{apiKey:'test-key',mode:'disable',fetch:fetcher,statePath,runner:{run:async()=>({finalOutput:'final output',newItems:[],interruptions:[]})}});
   const result=await wrapper.run(agent,'Produce output');assert.equal(result.finalOutput,'final output');
   const turn=wrapper.cosens.getTurn(wrapper.cosens.lastTurnId);assert.equal(turn.state,'completed');taskId=turn.taskId;revisionId=turn.revisionId;
  }else{
   const task=await client.atoms.createTask({source:'new_task',objective:'Produce output',selfContained:true,key:'task'});taskId=task.task_id;
-  const execution=await client.atoms.startExecution(taskId,{key:'execution'});
+  const execution=await client.atoms.startExecution(taskId,{key:'execution',model:'model'});
   const artifact=await client.atoms.artifact({name:'output.txt',content:'final output'});
   const result=await client.atoms.submitExecution(execution.execution_id,{requestSha256:execution.request_sha256,outcome:'completed',artifacts:[{artifact_id:artifact.artifact_id,role:'submitted_output'}]});revisionId=result.revision_id;
  }

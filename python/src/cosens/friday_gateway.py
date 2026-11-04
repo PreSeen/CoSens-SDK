@@ -1,20 +1,17 @@
-"""Construct OpenAI-compatible clients for the Friday US model gateway."""
+"""A regional model client using the same Friday API Key as CoSens."""
+from ._config import resolve_api_key, resolve_service
 
 FRIDAY_US_BASE_URL = "https://llm.cosens.ai/v1"
+_GATEWAYS = {"cn": "https://friday-llm-gateway.corpintra.rosettalab.top/v1", "us": FRIDAY_US_BASE_URL}
 
 
-def friday_gateway_client(credential, *, auth_type="api_key", asynchronous=False, **options):
-    """Use the user's Friday credential; pass the selected public model to each call.
-
-    Call ``client.models.list()`` to obtain the account's public model IDs.
-    """
-    if not isinstance(credential, str) or not credential.strip() or any(c.isspace() for c in credential):
-        raise ValueError("Friday credential must be a nonempty bare token")
-    if auth_type not in ("api_key", "access_token"):
-        raise ValueError("auth_type must be api_key or access_token")
-    if any(key in options for key in ("api_key", "base_url", "default_headers", "max_retries")):
-        raise ValueError("gateway credentials, base URL and authentication headers are fixed")
+def friday_gateway_client(api_key=None, *, region=None, asynchronous=False, **options):
+    service = resolve_service(region)
+    key = resolve_api_key(api_key)
+    if not isinstance(key, str) or not key or any(c.isspace() for c in key):
+        raise ValueError("Set COSENS_API_KEY or pass a bare Friday user API Key")
+    if any(name in options for name in ("auth_type", "base_url", "default_headers", "max_retries")):
+        raise ValueError("gateway URL and API Key authentication are selected automatically")
     from openai import AsyncOpenAI, OpenAI
     cls = AsyncOpenAI if asynchronous else OpenAI
-    return cls(api_key=credential, base_url=FRIDAY_US_BASE_URL,
-               default_headers={"X-Friday-Auth-Type": auth_type}, max_retries=0, **options)
+    return cls(api_key=key, base_url=_GATEWAYS[service.region], default_headers={"X-Friday-Auth-Type": "api_key"}, max_retries=0, **options)

@@ -1,13 +1,14 @@
 # CoSens TypeScript SDK
 
 ```ts
-import OpenAI from 'openai';
-import { cosens } from 'cosens-sdk';
+import { cosens, fridayGatewayClient } from 'cosens-sdk';
 
-const client = cosens(new OpenAI(), { mode: 'auto' });
-const result = await client.responses.create({ model: 'gpt-4.1-mini', input: 'Produce a report' });
+const client = cosens(fridayGatewayClient(), { mode: 'auto' });
+const result = await client.responses.create({ model: '<public-model-id>', input: 'Produce a report' });
 const turnId = client.cosens.lastTurnId;
 ```
+
+Set `COSENS_API_KEY` and optionally `COSENS_REGION=cn|us` (default `cn`). Both clients reuse this key. Use a public model ID from the selected regional gateway.
 
 From the application's artifact-confirmation handler:
 

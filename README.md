@@ -4,7 +4,7 @@ Python and TypeScript clients for the current CoSens Task/Execution/Revision API
 
 | Entry | Python | TypeScript |
 | --- | --- | --- |
-| Transparent OpenAI | `cosens(OpenAI())` | `cosens(new OpenAI())` |
+| Transparent OpenAI | `cosens(friday_gateway_client())` | `cosens(fridayGatewayClient())` |
 | Explicit Agent execution | `cosens(agent).run(agent, input)` | `cosens(agent).run(agent, input)` |
 | Atomic HTTP operations | `client.atoms` / `client.sync_atoms` | `client.atoms` |
 
@@ -15,3 +15,9 @@ The `auto` mode selects useful existing context and records the task. It does no
 See [Python](python/README.md), [TypeScript](typescript/README.md), and the three examples in each package. This is a breaking protocol change: Run, standalone attribution, acceptance and learning-job APIs have been removed.
 
 Tests: `PYTHONPATH=python/src pytest python/tests` and `npm --prefix typescript run check`. Optional real local HTTP integration: set `COSENS_TEST_ALGORITHM_HTTP_URL=http://127.0.0.1:18149` against the algorithm repository's `tests/support/explicit_http_server.py` fixture. It uses PostgreSQL and deterministic model substitutes, not a production model or production data.
+
+## One API Key
+
+Set `COSENS_API_KEY` to your Friday user API Key and optionally `COSENS_REGION=cn|us` (default `cn`). The SDK uses this same key for CoSens and the corresponding regional LLM gateway. `RSI_API_KEY*`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, `COSENS_MODE` and `COSENS_INPUT` are not SDK configuration. The application loads any `.env` file.
+
+Pass a public model ID in the model call. Algorithm operations accept only `model`, never a second API Key, base URL, auth type or provider settings. Model credentials are carried in Authorization. The algorithm gateway must forward that header alongside the authenticated user ID. Recipe generation still requires external artifact confirmation.
