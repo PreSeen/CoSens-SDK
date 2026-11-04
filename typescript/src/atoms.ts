@@ -145,6 +145,7 @@ export class Atoms {
   getSessionContext(sessionId:string,after=0) {return this.http.request('GET',`/v1/sessions/${pathPart(sessionId)}/context?after=${after}`);}
   endSession(sessionId:string) {return this.http.request('POST',`/v1/sessions/${pathPart(sessionId)}/end`);}
   async waitWorkflowJob(kind:'recipe_candidate',id:string,{timeout=300}:{timeout?:number}={}) {
+    if(kind!=='recipe_candidate')throw new TypeError('job kind must be recipe_candidate');
     const deadline=performance.now()+boundedTimeout(timeout*1000);
     while(true){const value=await this.getRecipeCandidate(id);if(!['queued','running','awaiting_parent'].includes(value.status))return value;
     if(performance.now()>=deadline)throw new Error('Poll or resume the same candidate');await new Promise(r=>setTimeout(r,100));}
