@@ -44,7 +44,7 @@ class SessionSnapshot:
 
 @dataclass(frozen=True)
 class PendingBatch:
-    run_id: str
+    session_id: str
     events: list[dict]
 
 
@@ -57,13 +57,13 @@ class CursorStore:
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute(
-            "CREATE TABLE IF NOT EXISTS cursors (key TEXT PRIMARY KEY, acked_index INTEGER NOT NULL, "
-            "prefix_hash TEXT, run_id TEXT, pending_events TEXT)"
+            "CREATE TABLE IF NOT EXISTS workflow_session_cursors (key TEXT PRIMARY KEY, acked_index INTEGER NOT NULL, "
+            "prefix_hash TEXT, session_id TEXT, pending_events TEXT)"
         )
-        columns = {row[1] for row in self._db.execute("PRAGMA table_info(cursors)")}
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(workflow_session_cursors)")}
         for column in ("acked_message_id", "acked_item_hash", "source_revision"):
             if column not in columns:
-                self._db.execute(f"ALTER TABLE cursors ADD COLUMN {column} TEXT")
+                self._db.execute(f"ALTER TABLE workflow_session_cursors ADD COLUMN {column} TEXT")
         self._db.commit()
         self._principal = _hash(principal)
         self._lock = threading.RLock()
@@ -115,7 +115,7 @@ class CursorStore:
 
     def _row(self, key):
         row = self._db.execute(
-            "SELECT acked_index, prefix_hash, run_id, pending_events FROM cursors WHERE key=?", (key,)
+            "SELECT acked_index, prefix_hash, session_id, pending_events FROM workflow_session_cursors WHERE key=?", (key,)
         ).fetchone()
         return row or (-1, None, None, None)
 
@@ -140,17 +140,17 @@ class CursorStore:
                 size += encoded_size
             return events
 
-    def begin_batch(self, run_id, snapshot, events):
+    def begin_batch(self, session_id, snapshot, events):
         if not events:
             return
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
-                acked_index, prefix_hash, old_run_id, pending_json = self._row(snapshot.key)
+                acked_index, prefix_hash, old_session_id, pending_json = self._row(snapshot.key)
                 self._validate(snapshot, acked_index, prefix_hash)
                 if pending_json:
-                    if old_run_id != run_id:
-                        raise RSIRecoveryRequired(f"Pending Session events belong to Run {old_run_id}")
+                    if old_session_id != session_id:
+                        raise RSIRecoveryRequired(f"Pending Session events belong to Session {old_session_id}")
                     if events != json.loads(pending_json):
                         raise RSIRecoveryRequired("Pending Session batch changed during recovery")
                 else:
@@ -159,9 +159,9 @@ class CursorStore:
                     except SessionHistoryChanged as exc:
                         raise RSIRecoveryRequired("Session batch was built from a stale cursor or changed history") from exc
                 self._db.execute(
-                    "INSERT INTO cursors(key,acked_index,prefix_hash,run_id,pending_events) VALUES(?,?,?,?,?) "
-                    "ON CONFLICT(key) DO UPDATE SET run_id=excluded.run_id,pending_events=excluded.pending_events",
-                    (snapshot.key, acked_index, prefix_hash, run_id, _json(events)),
+                    "INSERT INTO workflow_session_cursors(key,acked_index,prefix_hash,session_id,pending_events) VALUES(?,?,?,?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET session_id=excluded.session_id,pending_events=excluded.pending_events",
+                    (snapshot.key, acked_index, prefix_hash, session_id, _json(events)),
                 )
                 self._db.commit()
             except BaseException:
@@ -170,13 +170,13 @@ class CursorStore:
 
     def recover_batch(self, snapshot):
         with self._lock:
-            acked_index, prefix_hash, run_id, pending_json = self._row(snapshot.key)
+            acked_index, prefix_hash, session_id, pending_json = self._row(snapshot.key)
             self._validate(snapshot, acked_index, prefix_hash)
             if not pending_json:
                 return None
             events = json.loads(pending_json)
             self._validate_batch(snapshot, events, acked_index + 1)
-            return PendingBatch(run_id, events)
+            return PendingBatch(session_id, events)
 
     def ack(self, snapshot, receipt):
         acknowledged = receipt.get("durable_ack")
@@ -185,7 +185,7 @@ class CursorStore:
         if not isinstance(acknowledged, list):
             raise RSIRecoveryRequired("Session event receipt has no durable_ack event IDs")
         with self._lock, self._db:
-            old_index, old_hash, run_id, pending_json = self._row(snapshot.key)
+            old_index, old_hash, session_id, pending_json = self._row(snapshot.key)
             self._validate(snapshot, old_index, old_hash)
             if not pending_json:
                 raise RSIRecoveryRequired("No pending Session event batch to acknowledge")
@@ -206,9 +206,9 @@ class CursorStore:
             remaining = pending[advanced:]
             item = snapshot.items[new_index] if new_index >= 0 else {}
             updated = self._db.execute(
-                "UPDATE cursors SET acked_index=?,prefix_hash=?,pending_events=?,"
+                "UPDATE workflow_session_cursors SET acked_index=?,prefix_hash=?,pending_events=?,"
                 "acked_message_id=?,acked_item_hash=?,source_revision=? "
-                "WHERE key=? AND acked_index=? AND run_id=? AND pending_events=?",
+                "WHERE key=? AND acked_index=? AND session_id=? AND pending_events=?",
                 (
                     new_index,
                     _hash(snapshot.items[: new_index + 1]) if new_index >= 0 else None,
@@ -218,7 +218,7 @@ class CursorStore:
                     item.get("source_revision"),
                     snapshot.key,
                     old_index,
-                    run_id,
+                    session_id,
                     pending_json,
                 ),
             )
@@ -229,12 +229,12 @@ class CursorStore:
     def last_ack(self, snapshot):
         with self._lock:
             row = self._db.execute(
-                "SELECT acked_index,acked_message_id,acked_item_hash,source_revision,run_id "
-                "FROM cursors WHERE key=?", (snapshot.key,),
+                "SELECT acked_index,acked_message_id,acked_item_hash,source_revision,session_id "
+                "FROM workflow_session_cursors WHERE key=?", (snapshot.key,),
             ).fetchone()
             if row is None:
                 return None
-            return dict(zip(("index", "message_id", "item_hash", "source_revision", "run_id"), row))
+            return dict(zip(("index", "message_id", "item_hash", "source_revision", "session_id"), row))
 
     def close(self):
         self._db.close()

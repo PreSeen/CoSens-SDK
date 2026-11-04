@@ -1,13 +1,6 @@
 import { RSIRecoveryRequired } from './errors.js';
 
-export function freezeRun(prepared: any, run: any): any {
-  if (!prepared || typeof prepared.recipe !== 'object' || Array.isArray(prepared.recipe) || !prepared.recipe ||
-    !prepared.context || typeof prepared.context !== 'object' || Array.isArray(prepared.context) ||
-    run?.run_id !== prepared.run_id || run?.status !== 'ready' || !run.snapshot || typeof run.snapshot !== 'object' || Array.isArray(run.snapshot)) {
-    throw new RSIRecoveryRequired('Prepared Recipe or Run snapshot is missing or invalid');
-  }
-  return structuredClone({ ...run, recipe: prepared.recipe, context: prepared.context });
-}
+
 export function userText(path: string[], params: any): string {
   const value = path[0] === 'responses' ? params.input : params.messages;
   if (typeof value === 'string') return value;
@@ -21,7 +14,7 @@ export function userText(path: string[], params: any): string {
 }
 export function toolNames(params: any): string[] { return (params.tools ?? []).map((x: any) => x?.name ?? x?.function?.name).filter((x: any) => typeof x === 'string'); }
 export function inject(path: string[], params: any, context: any): any {
-  const source = context.run_id ? `RSI Run ${context.run_id}` : 'RSI standalone recall';
+  const source = 'CoSens task context';
   const block = `\n\n[CoSens frozen context; source: ${source}]\n${JSON.stringify({ recipe: context.recipe, snapshot: context.snapshot, context: context.context })}`;
   if (path[0] === 'responses') {
     if (params.instructions !== undefined && typeof params.instructions !== 'string') throw new TypeError('Cannot safely append CoSens context to non-text Responses instructions');

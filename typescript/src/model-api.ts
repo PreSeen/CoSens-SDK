@@ -1,4 +1,4 @@
-/** Explicit provider connection for a server-side improvement job. */
+/** Explicit provider connection for a explicit Recipe generation job. */
 export interface BusinessModelAPI {
   baseUrl: string;
   model: string;

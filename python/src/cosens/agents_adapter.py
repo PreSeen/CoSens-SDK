@@ -1,472 +1,117 @@
-"""Native Agents SDK execution wrapped in atomic CoSens calls."""
-
+"""Explicit Agents SDK entry, backed exclusively by Task/Execution HTTP."""
 import asyncio
 import hashlib
+import inspect
 import json
-import threading
-import uuid
+from uuid import uuid4
 
-from .atoms import CoSensClient
+from .task_runner import TaskWorkflowRunner
 from .errors import RSIRecoveryRequired
-from .session_cursor import CursorStore
-from .state import TurnStore
-from .models import result
-from .workflow import freeze_run_context, prepare_ready_async
-
-
-def _stable(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
-
-
-class _Status:
-    def __init__(self, owner, mode, session):
-        self._owner = owner
-        self.mode = mode
-        self.session = session
-        self.last_turn_id = None
-
-    def get_turn(self, turn_id):
-        return self._owner._turns.get(turn_id)
-
-    async def reconcile(self, turn_id, *, session=None):
-        return await self._owner.reconcile(turn_id, session=session)
-
-
-class _StreamResult:
-    def __init__(self, owner, native_stream, state, logical_key, session, lock):
-        self._owner = owner
-        self._native = native_stream
-        self._state = state
-        self._logical_key = logical_key
-        self._session = session
-        self._lock = lock
-
-    def _release_lock(self):
-        if self._lock is not None:
-            self._lock.release()
-            self._lock = None
-
-    def __getattr__(self, name):
-        return getattr(self._native, name)
-
-    async def stream_events(self):
-        try:
-            async for event in self._native.stream_events():
-                yield event
-            if not self._native.is_complete or getattr(self._native, "run_loop_exception", None):
-                self._state["state"] = "incomplete"
-                self._owner._save(self._logical_key, self._state)
-                return
-            if getattr(self._native, "interruptions", None):
-                self._owner._save_interrupted(self._logical_key, self._state, self._native)
-                return
-            self._state["state"] = "native_completed"
-            self._state["result"] = self._owner._result_data(self._native.final_output)
-            self._state["output_files"] = self._owner._output_files(self._native.final_output)
-            self._owner._save(self._logical_key, self._state)
-            try:
-                await self._owner._send_pending(self._state["run_id"], self._session)
-                await self._owner._upload_outputs(self._logical_key, self._state)
-                submitted = await self._owner._client.atoms.submit(self._state["run_id"], data=self._state["result"])
-                if submitted.status != "completed":
-                    raise RSIRecoveryRequired("CoSens submit did not confirm completion")
-                self._state["state"] = "completed"
-            except Exception as exc:
-                self._state["state"] = "completion_pending"
-                self._state["last_error"] = str(exc)
-            self._owner._save(self._logical_key, self._state)
-        except GeneratorExit:
-            self._state["state"] = "incomplete"
-            self._owner._save(self._logical_key, self._state)
-            raise
-        except BaseException as exc:
-            self._state["state"] = "native_failed"
-            self._state["last_error"] = str(exc)
-            self._owner._save(self._logical_key, self._state)
-            raise
-        finally:
-            self._release_lock()
-
-    def cancel(self):
-        self._state["state"] = "incomplete"
-        self._owner._save(self._logical_key, self._state)
-        self._release_lock()
-        return self._native.cancel()
 
 
 class CoSensAgentRunner:
     def __init__(self, agent, *, mode, session, api_key, state_path, http_transport, runner):
-        self.native = agent
-        self._client = CoSensClient(api_key=api_key, state_path=state_path, _http_transport=http_transport)
-        self._cursor = CursorStore(state_path, principal=self._client._transport.api_key, service_id=self._client._service.identity)
-        self._turns = TurnStore(state_path, principal=self._client._transport.api_key, service_id=self._client._service.identity)
         if runner is None:
-            try:
-                from agents import Runner
-            except ImportError as exc:
-                raise ImportError("Install cosens-sdk[agents] for Agent support") from exc
+            from agents import Runner
             runner = Runner
-        self._runner = runner
-        self.cosens = _Status(self, mode, session)
-        self._session_locks = {}
-        self._session_locks_guard = threading.Lock()
+        self.native = agent
+        self._session = session
+        # An explicit run records execution even when automatic decisions are disabled.
+        self._workflow = TaskWorkflowRunner(runner, mode='approval' if mode=='approval' else 'auto',
+            api_key=api_key,state_path=state_path,_http_transport=http_transport)
+        self._client = self._workflow._client
+        self.cosens = self._workflow.cosens
+        self.cosens.mode = mode
+        self.cosens.session = session
+        self.cosens.reconcile = self.reconcile
 
-    def _require_mode(self, state):
-        if state and state.get("mode") != self.cosens.mode:
-            raise RSIRecoveryRequired("Turn has a different or unknown originating mode")
-
-    @staticmethod
-    def _session_identity(session):
-        session_id = (getattr(session, "session_id", None) or getattr(session, "id", None)) if session is not None else None
-        incarnation = str(getattr(session, "session_incarnation", None) or getattr(session, "incarnation", "0"))
-        return (str(session_id) if session_id is not None else None, incarnation)
-
-    def _require_session(self, state, session):
-        if state and (state.get("session_id"), state.get("session_incarnation")) != self._session_identity(session):
-            raise RSIRecoveryRequired("Turn belongs to a different or unknown Session incarnation")
-
-    @staticmethod
-    def _require_input_artifacts(state, input_artifacts):
-        if state and state.get("state") == "pre_execution_pending" and input_artifacts is not None and _stable(input_artifacts) != _stable(state.get("input_artifacts", [])):
-            raise RSIRecoveryRequired("Input artifacts changed during Agent pre-execution recovery")
-
-    def _session_lock(self, session):
-        loop = asyncio.get_running_loop()
-        session_id = getattr(session, "session_id", None) or getattr(session, "id", None) or id(session)
-        key = (id(loop), str(session_id))
-        with self._session_locks_guard:
-            return self._session_locks.setdefault(key, asyncio.Lock())
-
-    async def _send_pending(self, run_id, session, initial_snapshot=None):
-        if session is None:
-            return
-        snapshot = initial_snapshot if initial_snapshot is not None else await self._cursor.snapshot(session)
-        recovery = self._cursor.recover_batch(snapshot)
-        if recovery and recovery.run_id != run_id:
-            raise RSIRecoveryRequired(f"Session has unsent events for Run {recovery.run_id}")
-        while True:
-            events = recovery.events if recovery else self._cursor.pending(snapshot)
-            if not events:
-                break
-            self._cursor.begin_batch(run_id, snapshot, events)
-            receipt = await self._client.atoms.session_events(run_id, events)
-            if self._cursor.ack(snapshot, receipt) == 0:
-                raise RSIRecoveryRequired("CoSens did not durably acknowledge the first pending event")
-            recovery = self._cursor.recover_batch(snapshot)
-
-    @staticmethod
-    def _output_files(final_output):
-        if not isinstance(final_output, dict):
-            return []
-        return final_output.get("files") if final_output.get("files") is not None else []
-
-    @staticmethod
-    def _result_data(final_output):
-        if isinstance(final_output, dict):
-            data = {key: value for key, value in final_output.items() if key != "files"}
-            data["summary"] = str(data.get("summary", ""))
-        else:
-            data = {"summary": str(final_output)}
-        data["outcome"] = "completed"
-        return data
-
-    @staticmethod
-    def _artifact_ref(receipt):
-        artifact_id = receipt.get("artifact_id") if isinstance(receipt, dict) else None
-        content_hash = receipt.get("content_hash") if isinstance(receipt, dict) else None
-        if not isinstance(artifact_id, str) or not artifact_id.strip() or not isinstance(content_hash, str) or not content_hash.strip():
-            raise RSIRecoveryRequired("Artifact upload receipt is missing artifact_id/content_hash; reconcile before retrying")
-        return {"artifact_id": artifact_id, "content_hash": content_hash}
-
-    async def _upload_inputs(self, logical_key, state):
-        materials = state.get("input_artifacts") or []
-        refs = state.setdefault("input_refs", [])
-        if state.get("input_upload_inflight") is not None:
-            raise RSIRecoveryRequired("Initial Artifact upload receipt is unknown; reconcile before retrying")
-        for material in materials[len(refs):]:
-            if not isinstance(material, dict) or not isinstance(material.get("name"), str) or not isinstance(material.get("content"), str):
-                raise TypeError("input_artifacts must contain name/content text objects")
-            state["input_upload_inflight"] = len(refs)
-            self._save(logical_key, state)
-            receipt = await self._client.atoms.artifact(name=material["name"], content=material["content"])
-            refs.append(self._artifact_ref(receipt))
-            state["input_upload_inflight"] = None
-            self._save(logical_key, state)
-
-    async def _upload_outputs(self, logical_key, state):
-        materials = state.get("output_files")
-        if materials is None:
-            materials = []
-        if not isinstance(materials, list):
-            raise TypeError("final_output.files must be a list of text artifacts")
-        refs = state.setdefault("output_refs", [])
-        if state.get("output_upload_inflight") is not None:
-            raise RSIRecoveryRequired("Output Artifact upload receipt is unknown; do not re-upload blindly")
-        for material in materials[len(refs):]:
-            if not isinstance(material, dict) or not isinstance(material.get("name"), str) or not isinstance(material.get("content"), str):
-                raise TypeError("final_output.files must contain name/content text objects")
-            state["output_upload_inflight"] = len(refs)
-            self._save(logical_key, state)
-            receipt = await self._client.atoms.artifact(name=material["name"], content=material["content"])
-            refs.append(self._artifact_ref(receipt))
-            state["output_upload_inflight"] = None
-            self._save(logical_key, state)
-        if refs:
-            state["result"]["files"] = refs
-            self._save(logical_key, state)
-
-    @staticmethod
-    def _with_context(agent, prepared, run):
-        frozen = {"recipe": prepared.get("recipe"), "context": prepared.get("context"), "snapshot": run.get("snapshot")}
-        if not any(frozen.values()):
-            return agent.clone()
-        block = "\n\n[CoSens frozen context; source: RSI Run " + str(run.run_id) + "]\n" + json.dumps(frozen, ensure_ascii=False, default=str)
-        original = agent.instructions
-        if original is None or isinstance(original, str):
-            return agent.clone(instructions=(original or "") + block)
-        if callable(original):
-            if asyncio.iscoroutinefunction(original):
-                async def instructions(context, current_agent):
-                    return (await original(context, current_agent)) + block
-            else:
-                def instructions(context, current_agent):
-                    return original(context, current_agent) + block
-            return agent.clone(instructions=instructions)
-        raise TypeError("Agent instructions cannot be safely extended with CoSens context")
-
-    async def run(self, agent, user_input, *, session=None, input_artifacts=None, **native_options):
-        active_session = session if session is not None else self.cosens.session
-        async with self._session_lock(active_session):
-            return await self._run_locked(
-                agent, user_input, session=active_session,
-                input_artifacts=input_artifacts, **native_options,
-            )
-
-    async def _run_locked(self, agent, user_input, *, session=None, input_artifacts=None, **native_options):
-        session = session if session is not None else self.cosens.session
-        objective = user_input if isinstance(user_input, str) else json.dumps(user_input, ensure_ascii=False, default=str)
-        session_id, session_incarnation = self._session_identity(session)
-        logical_key = "logical:" + _stable([session_id, session_incarnation, agent.name, objective])
-        previous = self._turns.get(logical_key)
-        self._require_mode(previous)
-        self._require_input_artifacts(previous, input_artifacts)
-        if previous and previous.get("state") in {"native_running", "native_failed", "native_completed", "completion_pending", "incomplete", "awaiting_native_approval"}:
-            raise RSIRecoveryRequired(f"Turn {previous['turn_id']} may have executed; reconcile without rerunning Agent")
-        resumable = previous if previous and previous.get("state") == "pre_execution_pending" else None
-        turn_id = resumable["turn_id"] if resumable else str(uuid.uuid4())
+    async def _prepare_inputs(self, agent, user_input, *, session=None, input_artifacts=None, turn_id=None, authorize=None):
+        session = session if session is not None else self._session
+        session_identity = str(getattr(session,'session_id',None) or getattr(session,'id',None))
+        incarnation = str(getattr(session,'session_incarnation',None) or getattr(session,'incarnation','0'))
+        turn_id = turn_id or 'agent:'+hashlib.sha256(json.dumps([session_identity,incarnation,user_input],sort_keys=True,default=str).encode()).hexdigest()
         self.cosens.last_turn_id = turn_id
-        state = {"turn_id": turn_id, "mode": self.cosens.mode, "state": "pre_execution_pending", "objective": objective, "session_id": session_id, "session_incarnation": session_incarnation, "run_id": resumable.get("run_id") if resumable else None, "prepared": resumable.get("prepared") if resumable else None, "frozen_context": resumable.get("frozen_context") if resumable else None, "input_artifacts": resumable.get("input_artifacts", []) if resumable else input_artifacts or [], "input_refs": resumable.get("input_refs", []) if resumable else [], "input_upload_inflight": resumable.get("input_upload_inflight") if resumable else None}
-        self._save(logical_key, state)
-        try:
-            initial_snapshot = await self._cursor.snapshot(session) if session is not None else None
-            if state["run_id"]:
-                prepared = state["prepared"] or {"run_id": state["run_id"], "recipe": {}, "context": {}}
-            else:
-                await self._upload_inputs(logical_key, state)
-                prepared = await prepare_ready_async(
-                    self._client.atoms, objective=objective, key=turn_id,
-                    input_artifact_ids=[ref["artifact_id"] for ref in state["input_refs"]],
-                )
-                state["run_id"] = prepared.run_id
-                state["prepared"] = dict(prepared)
-                self._save(logical_key, state)
-            if state.get("frozen_context") is None:
-                remote = await self._client.atoms.get_run(state["run_id"])
-                state["frozen_context"] = freeze_run_context(state["prepared"], remote)
-                self._save(logical_key, state)
-            run = result(state["frozen_context"])
-            await self._send_pending(state["run_id"], session, initial_snapshot)
-            active_agent = self._with_context(agent, prepared, run)
-        except Exception as exc:
-            state["last_error"] = str(exc)
-            self._save(logical_key, state)
-            raise
-        state["state"] = "native_running"
-        self._save(logical_key, state)
-        try:
-            native_result = await self._runner.run(active_agent, user_input, session=session, **native_options)
-        except Exception as exc:
-            state["state"] = "native_failed"
-            state["last_error"] = str(exc)
-            self._save(logical_key, state)
-            raise
-        if getattr(native_result, "interruptions", None):
-            self._save_interrupted(logical_key, state, native_result)
-            return native_result
-        await self._complete_result(logical_key, state, native_result, session)
-        return native_result
+        store = self._workflow._store
+        signature = hashlib.sha256(json.dumps([user_input,input_artifacts],sort_keys=True,default=str).encode()).hexdigest()
+        key = 'agent-input:'+turn_id
+        initial = store.get(key)
+        if initial and initial.get('mode') != self.cosens.mode:
+            raise RSIRecoveryRequired('Turn has a different originating mode')
+        if initial and initial['signature'] != signature:
+            raise RSIRecoveryRequired('Input changed for the same turn')
+        if not initial:
+            initial={'signature':signature,'refs':[],'pending':False,'mode':self.cosens.mode}
+            store.put(key,initial)
+        if initial['pending']:
+            raise RSIRecoveryRequired('Artifact upload receipt is unknown; reconcile before retrying')
+        if 'materials' not in initial:
+            history=[]
+            if session is not None and callable(getattr(session,'get_items',None)):
+                history=session.get_items()
+                if inspect.isawaitable(history):history=await history
+            initial['materials']=[{'name':'task-input.json','content':json.dumps({'input':user_input,'session':history},default=str)},*(input_artifacts or [])]
+            store.put(key,initial)
+        for material in initial['materials'][len(initial['refs']):]:
+            initial['pending']=True;store.put(key,initial)
+            ref=await self._client.atoms.artifact(name=material['name'],content=material['content'])
+            if not isinstance(ref.get('artifact_id'),str) or not ref['artifact_id'] or not isinstance(ref.get('content_hash'),str) or not ref['content_hash']:
+                raise RSIRecoveryRequired('Artifact receipt is missing ID or content hash')
+            initial['refs'].append(ref['artifact_id']);initial['pending']=False;store.put(key,initial)
+        rsi={'turn_id':turn_id,'task':{'source':'new_task','objective':str(user_input),'artifacts':initial['refs']},'authorize':authorize}
+        return rsi, session
 
-    def _save(self, logical_key, state):
-        state["logical_key"] = logical_key
-        self._turns.put_many([(state["turn_id"], state), (logical_key, state)])
+    async def run(self, agent, user_input, *, session=None, input_artifacts=None, turn_id=None, authorize=None, **options):
+        rsi,session=await self._prepare_inputs(agent,user_input,session=session,input_artifacts=input_artifacts,turn_id=turn_id,authorize=authorize)
+        result=await self._workflow.run(agent,user_input,rsi=rsi,session=session,**options)
+        state=self.cosens.get_turn(rsi['turn_id'])
+        if session is not None and state and state.get('state')=='completed':
+            await self._session_events(session,state)
+        return result
 
-    def _save_interrupted(self, logical_key, state, native_result):
-        state["native_state"] = native_result.to_state().to_json()
-        state["interruption_count"] = len(native_result.interruptions)
-        state["state"] = "awaiting_native_approval"
-        self._save(logical_key, state)
+    async def run_streamed(self, agent, user_input, *, session=None, input_artifacts=None, turn_id=None, authorize=None, **options):
+        rsi,session=await self._prepare_inputs(agent,user_input,session=session,input_artifacts=input_artifacts,turn_id=turn_id,authorize=authorize)
+        return self._workflow.run_streamed(agent,user_input,rsi=rsi,session=session,**options)
+
+    def run_sync(self, agent, user_input, **options):
+        return asyncio.run(self.run(agent,user_input,**options))
 
     async def pending_state(self, agent, turn_id):
-        state = self._turns.get(turn_id)
-        self._require_mode(state)
-        if not state or state.get("state") != "awaiting_native_approval":
-            raise RSIRecoveryRequired("Turn has no pending native tool approval")
-        from agents import RunState
-        if state.get("frozen_context") is None:
-            raise RSIRecoveryRequired("Saved turn has no frozen context; cannot safely resume")
-        run = result(state["frozen_context"])
-        active_agent = self._with_context(agent, state["prepared"], run)
-        return await RunState.from_json(active_agent, state["native_state"])
+        return await self._workflow.pending_state(agent,turn_id,session=self._session)
 
-    async def resume(self, agent, turn_id, native_state, *, session=None, **native_options):
-        active_session = session if session is not None else self.cosens.session
-        async with self._session_lock(active_session):
-            state = self._turns.get(turn_id)
-            self._require_mode(state)
-            self._require_session(state, active_session)
-            if not state or state.get("state") != "awaiting_native_approval":
-                raise RSIRecoveryRequired("Turn is not awaiting native tool approval")
-            logical_key = state["logical_key"]
-            if state.get("frozen_context") is None:
-                raise RSIRecoveryRequired("Saved turn has no frozen context; cannot safely resume")
-            run = result(state["frozen_context"])
-            active_agent = self._with_context(agent, state["prepared"], run)
-            state["state"] = "native_running"
-            self._save(logical_key, state)
-            try:
-                native_result = await self._runner.run(active_agent, native_state, session=active_session, **native_options)
-            except Exception as exc:
-                state["state"] = "native_failed"
-                state["last_error"] = str(exc)
-                self._save(logical_key, state)
-                raise
-            if getattr(native_result, "interruptions", None):
-                self._save_interrupted(logical_key, state, native_result)
-                return native_result
-            await self._complete_result(logical_key, state, native_result, active_session)
-            return native_result
+    async def resume(self, agent, turn_id, native_state, *, session=None, **options):
+        return await self._workflow.resume(agent,turn_id,native_state,session=session or self._session,**options)
 
-    async def _complete_result(self, logical_key, state, native_result, session):
-        state["state"] = "native_completed"
-        state["result"] = self._result_data(native_result.final_output)
-        state["output_files"] = self._output_files(native_result.final_output)
-        self._save(logical_key, state)
-        try:
-            await self._send_pending(state["run_id"], session)
-            await self._upload_outputs(logical_key, state)
-            submitted = await self._client.atoms.submit(state["run_id"], data=state["result"])
-            if submitted.status != "completed":
-                raise RSIRecoveryRequired("CoSens submit did not confirm completion")
-            state["state"] = "completed"
-        except Exception as exc:
-            state["state"] = "completion_pending"
-            state["last_error"] = str(exc)
-        self._save(logical_key, state)
+    async def _session_events(self,session,state):
+        """Persist ACK only after the server accepted the exact event batch."""
+        if not callable(getattr(session,'get_items',None)):return
+        items=session.get_items()
+        if inspect.isawaitable(items):items=await items
+        identity=str(getattr(session,'session_id',None) or getattr(session,'id',None))
+        incarnation=str(getattr(session,'session_incarnation','0'))
+        key='agent-session:'+hashlib.sha256((identity+':'+incarnation).encode()).hexdigest()
+        saved=self._workflow._store.get(key)
+        if not saved:
+            opened=await self._client.atoms.start_session()
+            saved={'session_id':opened['session_id'],'acked':0,'prefix':hashlib.sha256(b'[]').hexdigest()}
+            self._workflow._store.put(key,saved)
+        encode=lambda value:json.dumps(value,sort_keys=True,default=str).encode()
+        if saved['acked']>len(items) or hashlib.sha256(encode(items[:saved['acked']])).hexdigest()!=saved['prefix']:
+            raise RSIRecoveryRequired('Session history changed after acknowledgement')
+        for offset in range(saved['acked'],len(items),200):
+            batch=items[offset:offset+200]
+            events=[{'event_id':'message:'+hashlib.sha256(encode([offset+i,item])).hexdigest(),
+                     'kind':'session_message','payload':item if isinstance(item,dict) else {'content':str(item)}} for i,item in enumerate(batch)]
+            await self._client.atoms.append_session_events(saved['session_id'],events)
+            saved.update(acked=offset+len(batch),prefix=hashlib.sha256(encode(items[:offset+len(batch)])).hexdigest())
+            self._workflow._store.put(key,saved)
 
-    async def reconcile(self, turn_id, *, session=None):
-        state = self._turns.get(turn_id)
-        self._require_mode(state)
-        if not state or state.get("state") not in {"native_completed", "completion_pending"}:
-            raise RSIRecoveryRequired("Turn has no completed native result available for reconciliation")
-        session = session if session is not None else self.cosens.session
-        self._require_session(state, session)
-        try:
-            await self._send_pending(state["run_id"], session)
-            remote = await self._client.atoms.get_run(state["run_id"])
-            if remote.status == "completed":
-                files = state.get("output_files")
-                if files is None:
-                    files = []
-                if not isinstance(files, list):
-                    raise TypeError("final_output.files must be a list of text artifacts")
-                if state.get("output_upload_inflight") is not None or len(state.get("output_refs") or []) != len(files):
-                    raise RSIRecoveryRequired("Output Artifact receipts remain unresolved; cannot accept remote completion")
-                if remote.get("result") != state.get("result"):
-                    raise RSIRecoveryRequired("Remote completed Run result differs from locally saved result")
-            elif remote.status == "ready":
-                await self._upload_outputs(state.get("logical_key", "logical:" + turn_id), state)
-                receipt = await self._client.atoms.submit(state["run_id"], data=state["result"])
-                if receipt.status != "completed":
-                    raise RSIRecoveryRequired("CoSens did not confirm the recovered submit")
-            else:
-                raise RSIRecoveryRequired(f"Run {state['run_id']} is {remote.status}; cannot safely submit")
-            state["state"] = "completed"
-            state.pop("last_error", None)
-            self._save(state.get("logical_key", "logical:" + turn_id), state)
-            return state
-        except Exception as exc:
-            state["state"] = "completion_pending"
-            state["last_error"] = str(exc)
-            self._save(state.get("logical_key", "logical:" + turn_id), state)
-            raise
-
-    def run_sync(self, agent, user_input, *, session=None, **native_options):
-        return asyncio.run(self.run(agent, user_input, session=session, **native_options))
-
-    async def run_streamed(self, agent, user_input, *, session=None, input_artifacts=None, **native_options):
-        active_session = session if session is not None else self.cosens.session
-        lock = self._session_lock(active_session)
-        await lock.acquire()
-        try:
-            return await self._run_streamed_locked(
-                agent, user_input, session=active_session, input_artifacts=input_artifacts,
-                _lock=lock, **native_options,
-            )
-        except BaseException:
-            lock.release()
-            raise
-
-    async def _run_streamed_locked(self, agent, user_input, *, session=None, input_artifacts=None, _lock, **native_options):
-        session = session if session is not None else self.cosens.session
-        objective = user_input if isinstance(user_input, str) else json.dumps(user_input, ensure_ascii=False, default=str)
-        session_id, session_incarnation = self._session_identity(session)
-        logical_key = "logical:" + _stable([session_id, session_incarnation, agent.name, objective])
-        previous = self._turns.get(logical_key)
-        self._require_mode(previous)
-        self._require_input_artifacts(previous, input_artifacts)
-        if previous and previous.get("state") in {"native_running", "native_failed", "native_completed", "completion_pending", "incomplete", "awaiting_native_approval"}:
-            raise RSIRecoveryRequired(f"Turn {previous['turn_id']} may have executed; reconcile without rerunning Agent")
-        resumable = previous if previous and previous.get("state") == "pre_execution_pending" else None
-        turn_id = resumable["turn_id"] if resumable else str(uuid.uuid4())
-        self.cosens.last_turn_id = turn_id
-        state = {"turn_id": turn_id, "mode": self.cosens.mode, "state": "pre_execution_pending", "objective": objective, "session_id": session_id, "session_incarnation": session_incarnation, "run_id": resumable.get("run_id") if resumable else None, "prepared": resumable.get("prepared") if resumable else None, "frozen_context": resumable.get("frozen_context") if resumable else None, "input_artifacts": resumable.get("input_artifacts", []) if resumable else input_artifacts or [], "input_refs": resumable.get("input_refs", []) if resumable else [], "input_upload_inflight": resumable.get("input_upload_inflight") if resumable else None}
-        self._save(logical_key, state)
-        try:
-            initial_snapshot = await self._cursor.snapshot(session) if session is not None else None
-            if state["run_id"]:
-                prepared = state["prepared"] or {"run_id": state["run_id"], "recipe": {}, "context": {}}
-            else:
-                await self._upload_inputs(logical_key, state)
-                prepared = await prepare_ready_async(
-                    self._client.atoms, objective=objective, key=turn_id,
-                    input_artifact_ids=[ref["artifact_id"] for ref in state["input_refs"]],
-                )
-                state["run_id"] = prepared.run_id
-                state["prepared"] = dict(prepared)
-                self._save(logical_key, state)
-            if state.get("frozen_context") is None:
-                remote = await self._client.atoms.get_run(state["run_id"])
-                state["frozen_context"] = freeze_run_context(state["prepared"], remote)
-                self._save(logical_key, state)
-            run = result(state["frozen_context"])
-            await self._send_pending(state["run_id"], session, initial_snapshot)
-            active_agent = self._with_context(agent, prepared, run)
-        except Exception as exc:
-            state["last_error"] = str(exc)
-            self._save(logical_key, state)
-            raise
-        state["state"] = "native_running"
-        self._save(logical_key, state)
-        try:
-            stream = self._runner.run_streamed(active_agent, user_input, session=session, **native_options)
-        except Exception as exc:
-            state["state"] = "native_failed"
-            state["last_error"] = str(exc)
-            self._save(logical_key, state)
-            raise
-        return _StreamResult(self, stream, state, logical_key, session, _lock)
+    async def reconcile(self,turn_id,*,session=None):
+        state=await self._workflow.reconcile(turn_id,session=session or self._session)
+        if session or self._session:await self._session_events(session or self._session,state)
+        return state
 
     async def aclose(self):
-        await self._client.aclose()
-        self._cursor.close()
-        self._turns.close()
+        await self._workflow.aclose()
+
+    async def __aenter__(self):return self
+    async def __aexit__(self,*args):await self.aclose()

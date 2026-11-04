@@ -16,12 +16,12 @@ async def test_region_routes_all_transports_and_freezes_at_client_creation(monke
         return httpx.Response(200,json={'status':'completed','run_id':'r1'})
     async with CoSensClient(api_key='regional-key',_http_transport=httpx.MockTransport(server)) as client:
         monkeypatch.setenv('COSENS_REGION','us' if region=='cn' else 'cn')
-        client.sync_atoms.get_run('r1')
-        await client.atoms.get_run('r1')
-        await client.admin.atoms.publish('j1',expected_revision=1,reason='verified')
+        client.sync_atoms.get_task('t1')
+        await client.atoms.get_task('t1')
+        await client.atoms.get_revision('revision1')
     assert [str(r.url) for r in requests]==[
-        f'https://{host}/api/v1/runs/r1',f'https://{host}/api/v1/runs/r1',
-        f'https://{host}/api/internal/admin/v1/improvements/j1/publish']
+        f'https://{host}/api/v1/tasks/t1',f'https://{host}/api/v1/tasks/t1',
+        f'https://{host}/api/v1/revisions/revision1']
     assert all(r.headers['authorization']=='Bearer regional-key' for r in requests)
     assert all(not any(k.lower().replace('_','-')=='x-user-id' for k in r.headers) for r in requests)
 
@@ -42,7 +42,6 @@ def test_client_uses_key_for_selected_region(monkeypatch, region, expected):
     try:
         assert client._transport.api_key == expected
         assert client._sync_transport.api_key == expected
-        assert client._admin_transport.api_key == expected
     finally:
         client.close()
 

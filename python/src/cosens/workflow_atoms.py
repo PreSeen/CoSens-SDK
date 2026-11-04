@@ -11,14 +11,12 @@ import time
 
 from .atoms_helpers import path_part, stable_key
 from .errors import RSIRecoveryRequired
-from .model_api import improvement_data
+from .model_api import model_connection_data
 
 
 _ROLES = {"original_input", "submitted_output", "acceptance", "external_trace"}
 _JOB_STATES = {
-    "analysis": {"queued", "running", "awaiting_runner", "completed", "failed"},
-    "attribution": {"queued", "running", "awaiting_runner", "awaiting_selection", "inconclusive", "selected", "failed"},
-    "recipe_candidate": {"queued", "running", "awaiting_runner", "awaiting_parent", "awaiting_material", "candidate", "failed"},
+    "recipe_candidate": {"queued", "running", "awaiting_runner", "awaiting_parent", "awaiting_material", "candidate", "failed", "interrupted"},
 }
 
 
@@ -29,9 +27,9 @@ def _job_timeout(timeout):
 
 
 def _job_getter(owner, kind):
-    names = {"analysis": "get_external_analysis", "attribution": "get_attribution", "recipe_candidate": "get_recipe_candidate"}
+    names = {"recipe_candidate": "get_recipe_candidate"}
     if kind not in names:
-        raise ValueError("job kind must be analysis, attribution or recipe_candidate")
+        raise ValueError("job kind must be recipe_candidate")
     return getattr(owner, names[kind])
 
 
@@ -84,23 +82,6 @@ def _context(expected_context_version, objective, artifacts, self_contained):
         if value is not None:
             body[field] = value
     return body
-
-
-def _selection(candidate_sha256, candidate_id, custom_reason):
-    if bool(candidate_id) == bool(custom_reason):
-        raise ValueError("provide exactly one candidate_id or custom_reason")
-    if candidate_id is not None and (not isinstance(candidate_sha256, str) or not candidate_sha256.strip()):
-        raise ValueError("candidate_sha256 is required")
-    if candidate_id is not None and (not isinstance(candidate_id, str) or not candidate_id.strip()):
-        raise ValueError("candidate_id must be nonempty")
-    if custom_reason is not None and (not isinstance(custom_reason, str) or not custom_reason.strip() or len(custom_reason) > 4_000):
-        raise ValueError("custom_reason must be nonempty text of at most 4,000 characters")
-    data = {"candidate_sha256": candidate_sha256} if candidate_sha256 is not None else {}
-    if candidate_id:
-        data["candidate_id"] = candidate_id
-    else:
-        data["custom_reason"] = custom_reason
-    return {"data": data}
 
 
 def _result(request_sha256, outcome, artifacts, events, trace_coverage):
@@ -160,19 +141,9 @@ class AsyncWorkflowAtoms:
         return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/context",
                                         body=_context(expected_context_version, objective, artifacts, self_contained))
 
-    async def start_external_analysis(self, task_id, *, key, model_api=None):
-        data, secrets = improvement_data(model_api=model_api)
-        return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/analysis", body={"data": data} if data else None, key=stable_key(key), sensitive_values=secrets)
-
-    async def get_external_analysis(self, analysis_id):
-        return await self._http.request("GET", f"/v1/task-analyses/{path_part(analysis_id)}")
-
-    async def resume_external_analysis(self, analysis_id, *, model_api=None):
-        data, secrets = improvement_data(model_api=model_api)
-        return await self._http.request("POST", f"/v1/task-analyses/{path_part(analysis_id)}/resume", body={"data": data} if data else None, sensitive_values=secrets)
 
     async def start_execution(self, task_id, *, key, recipe_id=None, model_api=None, include_memory=False):
-        data, secrets = improvement_data(model_api=model_api)
+        data, secrets = model_connection_data(model_api=model_api)
         if type(include_memory) is not bool:
             raise ValueError('include_memory must be boolean')
         if include_memory:
@@ -191,18 +162,6 @@ class AsyncWorkflowAtoms:
     async def get_recipe_versions(self, recipe_id):
         return await self._http.request('GET', f'/v1/recipe-chains/{path_part(recipe_id)}/versions')
 
-    async def improve_task(self, task_id, *, revision_id, feedback, key, model_api=None):
-        path_part(revision_id)
-        data, secrets = improvement_data(feedback=feedback, model_api=model_api)
-        if not data.get('feedback'):
-            raise ValueError('feedback is required')
-        data['revision_id'] = revision_id
-        options = {'sensitive_values': secrets} if secrets else {}
-        return await self._http.request('POST', f'/v1/tasks/{path_part(task_id)}/improvements', body=data, key=stable_key(key), **options)
-
-    async def start_reconstruction(self, task_id, *, key):
-        """Compatibility route for external_artifact tasks; shares execution key space."""
-        return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/reconstructions", key=stable_key(key))
 
     async def get_execution(self, execution_id):
         return await self._http.request("GET", f"/v1/executions/{path_part(execution_id)}")
@@ -214,35 +173,15 @@ class AsyncWorkflowAtoms:
     async def get_revision(self, revision_id):
         return await self._http.request("GET", f"/v1/revisions/{path_part(revision_id)}")
 
-    async def start_attribution(self, revision_id, *, key, feedback=None, model_api=None):
-        if feedback is not None and (not isinstance(feedback, str) or not feedback.strip() or len(feedback) > 4_000):
-            raise ValueError("feedback must be nonempty text of at most 4,000 characters")
-        data, secrets = improvement_data(feedback=feedback, model_api=model_api)
-        return await self._http.request("POST", f"/v1/revisions/{path_part(revision_id)}/attributions",
-                                        body={"data": data}, key=stable_key(key), sensitive_values=secrets)
 
-    async def get_attribution(self, attribution_id):
-        return await self._http.request("GET", f"/v1/attributions/{path_part(attribution_id)}")
-
-    async def resume_attribution(self, attribution_id, *, model_api=None):
-        data, secrets = improvement_data(model_api=model_api)
-        return await self._http.request("POST", f"/v1/attributions/{path_part(attribution_id)}/resume", body={"data": data} if data else None, sensitive_values=secrets)
-
-    async def select_cause(self, attribution_id, *, candidate_sha256=None, candidate_id=None, custom_reason=None):
-        return await self._http.request("POST", f"/v1/attributions/{path_part(attribution_id)}/selection",
-                                        body=_selection(candidate_sha256, candidate_id, custom_reason))
-
-    async def start_revision(self, revision_id, *, attribution_id, key):
+    async def start_revision(self, revision_id, *, key):
         return await self._http.request("POST", f"/v1/revisions/{path_part(revision_id)}/revisions",
-                                        body={"data": {"attribution_id": attribution_id}}, key=stable_key(key))
+                                        body={"data": {}}, key=stable_key(key))
 
-    async def accept_revision(self, revision_id, *, artifact_hashes):
-        return await self._http.request("POST", f"/v1/revisions/{path_part(revision_id)}/acceptance",
-                                        body={"data": {"artifact_hashes": artifact_hashes}})
 
-    async def start_recipe_candidate(self, task_id, *, revision_id, key, include_memory=False, model_api=None):
-        data, secrets = improvement_data(model_api=model_api)
-        data.update(revision_id=revision_id, include_memory=include_memory)
+    async def start_recipe_candidate(self, task_id, *, revision_id, key, model_api=None):
+        data, secrets = model_connection_data(model_api=model_api)
+        data.update(revision_id=revision_id)
         return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/recipe-candidates",
                                         body={"data": data}, key=stable_key(key), sensitive_values=secrets)
 
@@ -250,14 +189,27 @@ class AsyncWorkflowAtoms:
         return await self._http.request("GET", f"/v1/recipe-candidates/{path_part(recipe_id)}")
 
     async def resume_recipe_candidate(self, recipe_id, *, model_api=None):
-        data, secrets = improvement_data(model_api=model_api)
+        data, secrets = model_connection_data(model_api=model_api)
         return await self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/resume", body={"data": data} if data else None, sensitive_values=secrets)
 
-    async def start_verification(self, recipe_id, *, key):
-        return await self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/verifications", key=stable_key(key))
+    async def list_tasks(self, *, limit=20, cursor=None):
+        from urllib.parse import urlencode
+        return await self._http.request('GET', '/v1/tasks?'+urlencode({'limit':limit, **({'cursor':cursor} if cursor else {})}))
 
-    async def get_verification(self, verification_id):
-        return await self._http.request("GET", f"/v1/recipe-verifications/{path_part(verification_id)}")
+    async def record_feedback(self, revision_id, *, feedback, key):
+        return await self._http.request('POST', f'/v1/revisions/{path_part(revision_id)}/feedback', body={'feedback':feedback}, key=stable_key(key))
+
+    async def start_session(self, *, session_id=None):
+        return await self._http.request('POST', '/v1/sessions/start', body={'session_id':session_id} if session_id else {})
+
+    async def append_session_events(self, session_id, events):
+        return await self._http.request('POST', f'/v1/sessions/{path_part(session_id)}/events', body={'events':events})
+
+    async def get_session_context(self, session_id, *, after=0):
+        return await self._http.request('GET', f'/v1/sessions/{path_part(session_id)}/context?after={after}')
+
+    async def end_session(self, session_id):
+        return await self._http.request('POST', f'/v1/sessions/{path_part(session_id)}/end')
 
 
 class SyncWorkflowAtoms:
@@ -293,19 +245,9 @@ class SyncWorkflowAtoms:
         return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/context",
                                   body=_context(expected_context_version, objective, artifacts, self_contained))
 
-    def start_external_analysis(self, task_id, *, key, model_api=None):
-        data, secrets = improvement_data(model_api=model_api)
-        return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/analysis", body={"data": data} if data else None, key=stable_key(key), sensitive_values=secrets)
-
-    def get_external_analysis(self, analysis_id):
-        return self._http.request("GET", f"/v1/task-analyses/{path_part(analysis_id)}")
-
-    def resume_external_analysis(self, analysis_id, *, model_api=None):
-        data, secrets = improvement_data(model_api=model_api)
-        return self._http.request("POST", f"/v1/task-analyses/{path_part(analysis_id)}/resume", body={"data": data} if data else None, sensitive_values=secrets)
 
     def start_execution(self, task_id, *, key, recipe_id=None, model_api=None, include_memory=False):
-        data, secrets = improvement_data(model_api=model_api)
+        data, secrets = model_connection_data(model_api=model_api)
         if type(include_memory) is not bool:
             raise ValueError('include_memory must be boolean')
         if include_memory:
@@ -324,18 +266,6 @@ class SyncWorkflowAtoms:
     def get_recipe_versions(self, recipe_id):
         return self._http.request('GET', f'/v1/recipe-chains/{path_part(recipe_id)}/versions')
 
-    def improve_task(self, task_id, *, revision_id, feedback, key, model_api=None):
-        path_part(revision_id)
-        data, secrets = improvement_data(feedback=feedback, model_api=model_api)
-        if not data.get('feedback'):
-            raise ValueError('feedback is required')
-        data['revision_id'] = revision_id
-        options = {'sensitive_values': secrets} if secrets else {}
-        return self._http.request('POST', f'/v1/tasks/{path_part(task_id)}/improvements', body=data, key=stable_key(key), **options)
-
-    def start_reconstruction(self, task_id, *, key):
-        """Compatibility route for external_artifact tasks; shares execution key space."""
-        return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/reconstructions", key=stable_key(key))
 
     def get_execution(self, execution_id):
         return self._http.request("GET", f"/v1/executions/{path_part(execution_id)}")
@@ -347,35 +277,15 @@ class SyncWorkflowAtoms:
     def get_revision(self, revision_id):
         return self._http.request("GET", f"/v1/revisions/{path_part(revision_id)}")
 
-    def start_attribution(self, revision_id, *, key, feedback=None, model_api=None):
-        if feedback is not None and (not isinstance(feedback, str) or not feedback.strip() or len(feedback) > 4_000):
-            raise ValueError("feedback must be nonempty text of at most 4,000 characters")
-        data, secrets = improvement_data(feedback=feedback, model_api=model_api)
-        return self._http.request("POST", f"/v1/revisions/{path_part(revision_id)}/attributions",
-                                  body={"data": data}, key=stable_key(key), sensitive_values=secrets)
 
-    def get_attribution(self, attribution_id):
-        return self._http.request("GET", f"/v1/attributions/{path_part(attribution_id)}")
-
-    def resume_attribution(self, attribution_id, *, model_api=None):
-        data, secrets = improvement_data(model_api=model_api)
-        return self._http.request("POST", f"/v1/attributions/{path_part(attribution_id)}/resume", body={"data": data} if data else None, sensitive_values=secrets)
-
-    def select_cause(self, attribution_id, *, candidate_sha256=None, candidate_id=None, custom_reason=None):
-        return self._http.request("POST", f"/v1/attributions/{path_part(attribution_id)}/selection",
-                                  body=_selection(candidate_sha256, candidate_id, custom_reason))
-
-    def start_revision(self, revision_id, *, attribution_id, key):
+    def start_revision(self, revision_id, *, key):
         return self._http.request("POST", f"/v1/revisions/{path_part(revision_id)}/revisions",
-                                  body={"data": {"attribution_id": attribution_id}}, key=stable_key(key))
+                                  body={"data": {}}, key=stable_key(key))
 
-    def accept_revision(self, revision_id, *, artifact_hashes):
-        return self._http.request("POST", f"/v1/revisions/{path_part(revision_id)}/acceptance",
-                                  body={"data": {"artifact_hashes": artifact_hashes}})
 
-    def start_recipe_candidate(self, task_id, *, revision_id, key, include_memory=False, model_api=None):
-        data, secrets = improvement_data(model_api=model_api)
-        data.update(revision_id=revision_id, include_memory=include_memory)
+    def start_recipe_candidate(self, task_id, *, revision_id, key, model_api=None):
+        data, secrets = model_connection_data(model_api=model_api)
+        data.update(revision_id=revision_id)
         return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/recipe-candidates",
                                   body={"data": data}, key=stable_key(key), sensitive_values=secrets)
 
@@ -383,11 +293,24 @@ class SyncWorkflowAtoms:
         return self._http.request("GET", f"/v1/recipe-candidates/{path_part(recipe_id)}")
 
     def resume_recipe_candidate(self, recipe_id, *, model_api=None):
-        data, secrets = improvement_data(model_api=model_api)
+        data, secrets = model_connection_data(model_api=model_api)
         return self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/resume", body={"data": data} if data else None, sensitive_values=secrets)
 
-    def start_verification(self, recipe_id, *, key):
-        return self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/verifications", key=stable_key(key))
+    def list_tasks(self, *, limit=20, cursor=None):
+        from urllib.parse import urlencode
+        return self._http.request('GET', '/v1/tasks?'+urlencode({'limit':limit, **({'cursor':cursor} if cursor else {})}))
 
-    def get_verification(self, verification_id):
-        return self._http.request("GET", f"/v1/recipe-verifications/{path_part(verification_id)}")
+    def record_feedback(self, revision_id, *, feedback, key):
+        return self._http.request('POST', f'/v1/revisions/{path_part(revision_id)}/feedback', body={'feedback':feedback}, key=stable_key(key))
+
+    def start_session(self, *, session_id=None):
+        return self._http.request('POST', '/v1/sessions/start', body={'session_id':session_id} if session_id else {})
+
+    def append_session_events(self, session_id, events):
+        return self._http.request('POST', f'/v1/sessions/{path_part(session_id)}/events', body={'events':events})
+
+    def get_session_context(self, session_id, *, after=0):
+        return self._http.request('GET', f'/v1/sessions/{path_part(session_id)}/context?after={after}')
+
+    def end_session(self, session_id):
+        return self._http.request('POST', f'/v1/sessions/{path_part(session_id)}/end')

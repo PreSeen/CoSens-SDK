@@ -54,7 +54,7 @@ def inject(path, kwargs, run):
     frozen = {"recipe": run.get("recipe"), "snapshot": run.get("snapshot"), "context": run.get("context")}
     if not any(frozen.values()):
         return dict(kwargs)
-    source = "RSI Run " + str(run["run_id"]) if run.get("run_id") else "RSI standalone recall"
+    source = "CoSens task context"
     block = "\n\n[CoSens frozen context; source: " + source + "]\n" + json.dumps(frozen, ensure_ascii=False, default=str)
     updated = dict(kwargs)
     base = base_path(path)

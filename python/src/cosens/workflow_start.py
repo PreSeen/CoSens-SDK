@@ -71,19 +71,9 @@ async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto"
                        "execution": execution})
 
     stable_key(request_key)
-    model_options = {'model_api': model_api} if model_api is not None else {}
-    if phase == "analyze":
-        return await atoms.start_external_analysis(session_context["task_id"], key=request_key, **model_options)
-    if phase == "attribute":
-        return await atoms.start_attribution(session_context["revision_id"], feedback=session_context.get("feedback"), key=request_key, **model_options)
-    if phase == 'improve':
-        return await atoms.improve_task(session_context['task_id'], revision_id=session_context['revision_id'],
-                                        feedback=session_context['feedback'], key=request_key, model_api=model_api)
-    if phase == "revise":
-        return await atoms.start_revision(session_context["revision_id"], attribution_id=session_context["attribution_id"], key=request_key)
-    if phase == "recipe":
-        return await atoms.start_recipe_candidate(session_context["task_id"], revision_id=session_context["revision_id"],
-                                                  include_memory=session_context.get("include_memory", False), key=request_key, **model_options)
-    if phase == "verify":
-        return await atoms.start_verification(session_context["recipe_candidate_id"], key=request_key)
-    raise ValueError("phase must be prepare, analyze, attribute, improve, revise, recipe or verify")
+    if phase == 'revise':
+        return await atoms.start_revision(session_context['revision_id'], key=request_key)
+    if phase == 'recipe':
+        options = {'model_api': model_api} if model_api is not None else {}
+        return await atoms.start_recipe_candidate(session_context['task_id'], revision_id=session_context['revision_id'], key=request_key, **options)
+    raise ValueError('phase must be prepare, revise or recipe')

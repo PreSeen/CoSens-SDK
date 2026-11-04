@@ -26,7 +26,7 @@ test('the pinned OpenAI Responses stream keeps event and final-response methods 
   const gatewayCalls: string[] = [];
   const gatewayFetch: typeof fetch = async input => {
     const path = new URL(String(input)).pathname; gatewayCalls.push(path);
-    return new Response(JSON.stringify(path.endsWith('/recipes/active') ? { status: 'not_found' } : { items: [] }));
+    return new Response(JSON.stringify(path.endsWith('/recipe-candidates') ? { items: [], has_more: false } : { items: [] }));
   };
   const native = new OpenAI({ apiKey: 'native-key', baseURL: 'https://model.example/v1', fetch: modelFetch });
   const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: gatewayFetch, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
@@ -46,7 +46,7 @@ test('the pinned OpenAI Responses stream keeps event and final-response methods 
   assert.deepEqual(seen, ['completed']);
   assert.deepEqual(filteredEvents, ['response.completed']);
   assert.equal((await stream.finalResponse()).id, 'resp-model-1');
-  assert.deepEqual(gatewayCalls, ['/api/v1/recipes/active', '/api/v1/memory/recall']);
+  assert.deepEqual(gatewayCalls, ['/api/v1/recipe-candidates', '/api/v1/memory/recall']);
   assert.equal(modelRequests.length, 1);
   assert.equal(modelRequests[0]!.url, 'https://model.example/v1/responses');
   assert.equal(modelRequests[0]!.headers.get('authorization'), 'Bearer native-key');
@@ -62,7 +62,7 @@ test('the pinned OpenAI Chat stream keeps content events and finalChatCompletion
     ];
     return new Response(chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join('') + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
   };
-  const gatewayFetch: typeof fetch = async input => new Response(JSON.stringify(new URL(String(input)).pathname.endsWith('/recipes/active') ? { status: 'not_found' } : { items: [] }));
+  const gatewayFetch: typeof fetch = async input => new Response(JSON.stringify(new URL(String(input)).pathname.endsWith('/recipe-candidates') ? { items: [], has_more: false } : { items: [] }));
   const native = new OpenAI({ apiKey: 'native-key', baseURL: 'https://model.example/v1', fetch: modelFetch });
   const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: gatewayFetch, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const stream = client.chat.completions.stream({ model: 'test-model', messages: [{ role: 'user', content: 'hello' }] });
@@ -77,7 +77,7 @@ test('the pinned OpenAI Chat stream keeps content events and finalChatCompletion
   await client.close();
 });
 
-test('the pinned OpenAI Chat stream keeps a tool call on the same CoSens Run', async () => {
+test('the pinned OpenAI Chat stream keeps a tool call on the same CoSens execution', async () => {
   let modelCalls = 0, prepares = 0, submits = 0;
   const events: any[] = [];
   const modelFetch: typeof fetch = async (_input, init) => {
@@ -94,10 +94,12 @@ test('the pinned OpenAI Chat stream keeps a tool call on the same CoSens Run', a
   };
   const gatewayFetch: typeof fetch = async (input, init) => {
     const path = new URL(String(input)).pathname;
-    if (path.endsWith('/prepare')) { prepares++; return new Response(JSON.stringify({ run_id: 'r1', status: 'ready', recipe: {}, context: {} })); }
-    if (path.endsWith('/runs/r1') && init?.method === 'GET') return new Response(JSON.stringify({ run_id: 'r1', status: 'ready', snapshot: {} }));
-    if (path.endsWith('/session-events')) { const batch = JSON.parse(String(init?.body)).events; events.push(...batch); return new Response(JSON.stringify({ durable_ack: batch.map((event: any) => event.id) })); }
-    if (path.endsWith('/submit')) { submits++; return new Response(JSON.stringify({ status: 'completed' })); }
+    if(path.endsWith('/recipe-candidates'))return new Response(JSON.stringify({items:[],has_more:false}));
+    if(path.endsWith('/memory/recall'))return new Response(JSON.stringify({items:[]}));
+    if(path.endsWith('/artifacts'))return new Response(JSON.stringify({artifact_id:'artifact-1',content_hash:'sha256:test'}));
+    if(path.endsWith('/tasks'))return new Response(JSON.stringify({task_id:'task-1',status:'ready'}));
+    if(path.endsWith('/executions')){prepares++;return new Response(JSON.stringify({execution_id:'execution-1',status:'awaiting_execution',request_sha256:'hash',request:{}}));}
+    if(path.endsWith('/result')){submits++;events.push(...JSON.parse(String(init?.body)).events);return new Response(JSON.stringify({status:'completed',revision_id:'revision-1'}));}
     throw Error(path);
   };
   const native = new OpenAI({ apiKey: 'native-key', baseURL: 'https://model.example/v1', fetch: modelFetch });
@@ -124,12 +126,12 @@ test('OpenAI withOptions keeps CoSens on the derived native client', async () =>
   } });
   const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: async input => {
     const path = new URL(String(input)).pathname; gatewayCalls.push(path);
-    return new Response(JSON.stringify(path.endsWith('/recipes/active') ? { status: 'not_found' } : { items: [] }));
+    return new Response(JSON.stringify(path.endsWith('/recipe-candidates') ? { items: [], has_more: false } : { items: [] }));
   }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const derived = client.withOptions({ baseURL: 'https://other-model.example/v1' });
   assert.equal(typeof (derived as any).cosens.getTurn, 'function');
   await derived.responses.create({ model: 'test-model', input: 'hello' });
-  assert.deepEqual(gatewayCalls, ['/api/v1/recipes/active', '/api/v1/memory/recall']);
+  assert.deepEqual(gatewayCalls, ['/api/v1/recipe-candidates', '/api/v1/memory/recall']);
   assert.deepEqual(modelUrls, ['https://other-model.example/v1/responses']);
   await (derived as any).close();
   await client.close();
@@ -391,7 +393,7 @@ test('pinned OpenAI batches.list keeps native cursor pagination', async () => {
 
 test('pinned OpenAI APIPromise retains withResponse and asResponse behavior', async () => {
   let modelCalls = 0;
-  const gatewayFetch: typeof fetch = async input => new Response(JSON.stringify(new URL(String(input)).pathname.endsWith('/recipes/active') ? { status: 'not_found' } : { items: [] }));
+  const gatewayFetch: typeof fetch = async input => new Response(JSON.stringify(new URL(String(input)).pathname.endsWith('/recipe-candidates') ? { items: [], has_more: false } : { items: [] }));
   const native = new OpenAI({ apiKey: 'native-key', baseURL: 'https://model.example/v1', fetch: async () => {
     modelCalls++;
     return new Response(JSON.stringify(response), { headers: { 'content-type': 'application/json', 'x-request-id': `req-${modelCalls}` } });
@@ -433,7 +435,7 @@ test('pinned OpenAI Responses parse and Chat create/parse use the same preflight
   const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: async input => {
     const path = new URL(String(input)).pathname;
     gatewayPaths.push(path);
-    return new Response(JSON.stringify(path.endsWith('/recipes/active') ? { status: 'not_found' } : { items: [] }));
+    return new Response(JSON.stringify(path.endsWith('/recipe-candidates') ? { items: [], has_more: false } : { items: [] }));
   }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const responsesParsed = await client.responses.parse({ model: 'test-model', input: 'hello' });
   const chatCreated = await client.chat.completions.create({ model: 'test-model', messages: [{ role: 'user', content: 'hello' }] });
@@ -443,9 +445,9 @@ test('pinned OpenAI Responses parse and Chat create/parse use the same preflight
   assert.equal(chatParsed.choices[0]?.message.content, 'done');
   assert.deepEqual(modelPaths, ['/v1/responses', '/v1/chat/completions', '/v1/chat/completions']);
   assert.deepEqual(gatewayPaths, [
-    '/api/v1/recipes/active', '/api/v1/memory/recall',
-    '/api/v1/recipes/active', '/api/v1/memory/recall',
-    '/api/v1/recipes/active', '/api/v1/memory/recall',
+    '/api/v1/recipe-candidates', '/api/v1/memory/recall',
+    '/api/v1/recipe-candidates', '/api/v1/memory/recall',
+    '/api/v1/recipe-candidates', '/api/v1/memory/recall',
   ]);
   await client.close();
 });

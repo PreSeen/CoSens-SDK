@@ -21,7 +21,7 @@ from .responses_adapter import SUPPORTED, base_path, inject, summary, terminal, 
 from .session_cursor import CursorStore
 from .state import TurnStore
 from .models import result
-from .workflow import freeze_recall_context, freeze_run_context, prepare_ready_async, prepare_ready_sync
+from .workflow import freeze_recall_context
 
 
 def _resource(value):
@@ -73,7 +73,7 @@ class _Status:
             return {**{key: learning.get(key) for key in (
                 'action', 'reason', 'used_recipe_id', 'used_recipe_version', 'recipe_candidate_id', 'error_type')},
                 'turn_id': target, 'request_turn_id': request_turn, 'status': learning['state'],
-                'job_id': learning.get('recipe_candidate_id') or learning.get('attribution_id')}
+                'job_id': learning.get('recipe_candidate_id')}
         return {'action': 'noop', 'reason': turn.get('state'), 'turn_id': request_turn,
                 'used_recipe_id': turn.get('used_recipe_id'), 'used_recipe_version': turn.get('used_recipe_version'),
                 'status': 'blocked' if turn.get('state') == 'completion_pending' else 'pending',
@@ -96,6 +96,9 @@ class _Status:
 
     def feedback(self, message, *, turn_id=None):
         return self._learning_call('feedback', self._learning_turn(turn_id), message)
+
+    def generate_recipe(self, turn_id=None, *, request_key=None):
+        return self._learning_call('generate', self._learning_turn(turn_id), request_key)
 
     def resume_learning(self, turn_id=None):
         return self._learning_call('resume', self._learning_turn(turn_id))
@@ -399,7 +402,7 @@ class _Runtime(AutoExecution):
             raise TypeError('auto_learning must be AutoLearning, False, or None')
         if auto_learning not in (None, False) and mode != 'auto':
             raise ValueError('auto_learning requires mode="auto"')
-        self.auto_learning = auto_learning if auto_learning is not None else (AutoLearning() if mode == 'auto' else False)
+        self.auto_learning = auto_learning if isinstance(auto_learning, AutoLearning) else AutoLearning()
         self._learning = None
         self._policy_bindings = {}
         self._policy_native = None
@@ -430,7 +433,7 @@ class _Runtime(AutoExecution):
             if self._learning is None:
                 self._learning = LearningCoordinator(
                     api_key=self.client._transport.api_key, region=self.client._service.region,
-                    state_path=self.client.state_path, transport=self._learning_transport, config=self.auto_learning, planner=self._plan_learning)
+                    state_path=self.client.state_path, transport=self._learning_transport, config=self.auto_learning)
             return self._learning
 
     def acquire(self):
@@ -682,7 +685,7 @@ class _Runtime(AutoExecution):
                 raise RSIRecoveryRequired(f"Turn {existing['turn_id']} is already completed")
             else:
                 turn_id = scope[1] if scope and scope[1] else str(uuid.uuid4())
-                state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "task_family": task_family, "run_id": None, "mode": self.mode}
+                state = {"turn_id": turn_id, "state": "pre_execution_pending", "objective": objective, "task_family": task_family, "mode": self.mode}
         if "session_id" in state or "session_incarnation" in state:
             self._require_session(state)
         conversation_key = self._conversation_key(kwargs)
@@ -708,7 +711,7 @@ class _Runtime(AutoExecution):
         entries.append((state["turn_id"], state))
         entries.extend((request_key, state) for request_key in state.get("request_keys", []))
         self.turns.put_many(entries)
-        if self.mode == 'auto' and self.auto_learning is not False and state.get('state') == 'completed':
+        if state.get('state') == 'completed':
             try:
                 self.learning().attach(state)
             except Exception as error:
@@ -726,39 +729,7 @@ class _Runtime(AutoExecution):
             return None
         return await self.cursor.snapshot(self.session)
 
-    def _send_sync(self, run_id, initial_snapshot=None):
-        snapshot = initial_snapshot if initial_snapshot is not None else self._snapshot_sync()
-        if snapshot is None:
-            return
-        recovery = self.cursor.recover_batch(snapshot)
-        if recovery and recovery.run_id != run_id:
-            raise RSIRecoveryRequired(f"Session has unsent events for Run {recovery.run_id}")
-        while True:
-            events = recovery.events if recovery else self.cursor.pending(snapshot)
-            if not events:
-                return
-            self.cursor.begin_batch(run_id, snapshot, events)
-            receipt = self.client.sync_atoms.session_events(run_id, events)
-            if self.cursor.ack(snapshot, receipt) == 0:
-                raise RSIRecoveryRequired("Session event batch lacks a leading durable ACK")
-            recovery = self.cursor.recover_batch(snapshot)
 
-    async def _send_async(self, run_id, initial_snapshot=None):
-        snapshot = initial_snapshot if initial_snapshot is not None else await self._snapshot_async()
-        if snapshot is None:
-            return
-        recovery = self.cursor.recover_batch(snapshot)
-        if recovery and recovery.run_id != run_id:
-            raise RSIRecoveryRequired(f"Session has unsent events for Run {recovery.run_id}")
-        while True:
-            events = recovery.events if recovery else self.cursor.pending(snapshot)
-            if not events:
-                return
-            self.cursor.begin_batch(run_id, snapshot, events)
-            receipt = await self.client.atoms.session_events(run_id, events)
-            if self.cursor.ack(snapshot, receipt) == 0:
-                raise RSIRecoveryRequired("Session event batch lacks a leading durable ACK")
-            recovery = self.cursor.recover_batch(snapshot)
 
     def _visible_events(self, state, response, snapshot):
         recent = snapshot.items[state.get("session_before_count", 0):] if snapshot else ()
@@ -852,46 +823,10 @@ class _Runtime(AutoExecution):
         if not state.get("conversation_key"):
             state["conversation_key"] = self._conversation_key_from_value(getattr(response, "conversation", None))
         state["tool_call_events"] = self._function_call_events(state, response)
-        state["state"] = "observability_pending" if state.get("run_id") else "awaiting_continuation"
+        state["state"] = "awaiting_continuation"
         self._save(state)
 
-    def _send_observable_sync(self, state, events):
-        acked = set(state.get("observable_acked_ids", []))
-        pending = state.get("observable_pending") or [event for event in events if event["id"] not in acked]
-        if not pending:
-            return
-        state["observable_pending"] = pending
-        self._save(state)
-        receipt = self.client.sync_atoms.session_events(state["run_id"], pending)
-        ids = receipt.get("durable_ack")
-        if not isinstance(ids, list):
-            raise RSIRecoveryRequired("Observable model events have no durable ACK list")
-        self._validate_observable_ack(ids, pending)
-        acked.update(ids)
-        state["observable_acked_ids"] = sorted(acked)
-        state["observable_pending"] = [event for event in pending if event["id"] not in acked]
-        self._save(state)
-        if state["observable_pending"]:
-            raise RSIRecoveryRequired("Observable model events received partial ACK")
 
-    async def _send_observable_async(self, state, events):
-        acked = set(state.get("observable_acked_ids", []))
-        pending = state.get("observable_pending") or [event for event in events if event["id"] not in acked]
-        if not pending:
-            return
-        state["observable_pending"] = pending
-        self._save(state)
-        receipt = await self.client.atoms.session_events(state["run_id"], pending)
-        ids = receipt.get("durable_ack")
-        if not isinstance(ids, list):
-            raise RSIRecoveryRequired("Observable model events have no durable ACK list")
-        self._validate_observable_ack(ids, pending)
-        acked.update(ids)
-        state["observable_acked_ids"] = sorted(acked)
-        state["observable_pending"] = [event for event in pending if event["id"] not in acked]
-        self._save(state)
-        if state["observable_pending"]:
-            raise RSIRecoveryRequired("Observable model events received partial ACK")
 
     @staticmethod
     def _validate_observable_ack(ids, pending):
@@ -910,328 +845,42 @@ class _Runtime(AutoExecution):
         snapshot = await self._snapshot_async()
         await self._send_observable_async(state, self._visible_events(state, response, snapshot))
 
-    def _prepare_sync(self, decision, kwargs, path):
-        state = self._new_state(decision["objective"], decision["task_family"], kwargs, path)
-        state["decision"] = decision
-        self._save(state)
-        try:
-            initial_snapshot = self._snapshot_sync()
-            if "frozen_context" not in state:
-                if not state["run_id"]:
-                    prepared = prepare_ready_sync(self.client.sync_atoms, objective=state["objective"], task_family=state["task_family"] or "general", key=state["turn_id"])
-                    state["run_id"] = prepared.run_id
-                    state["prepared"] = dict(prepared)
-                    self._save(state)
-                run = self.client.sync_atoms.get_run(state["run_id"])
-                state["frozen_context"] = freeze_run_context(state.get("prepared"), run)
-                self._save(state)
-            self._send_sync(state["run_id"], initial_snapshot)
-            return state, result(state["frozen_context"]), initial_snapshot
-        except Exception as exc:
-            state["last_error"] = str(exc)
-            self._save(state)
-            raise
 
-    async def _prepare_async(self, decision, kwargs, path):
-        state = self._new_state(decision["objective"], decision["task_family"], kwargs, path)
-        state["decision"] = decision
-        self._save(state)
-        try:
-            initial_snapshot = await self._snapshot_async()
-            if "frozen_context" not in state:
-                if not state["run_id"]:
-                    prepared = await prepare_ready_async(self.client.atoms, objective=state["objective"], task_family=state["task_family"] or "general", key=state["turn_id"])
-                    state["run_id"] = prepared.run_id
-                    state["prepared"] = dict(prepared)
-                    self._save(state)
-                run = await self.client.atoms.get_run(state["run_id"])
-                state["frozen_context"] = freeze_run_context(state.get("prepared"), run)
-                self._save(state)
-            await self._send_async(state["run_id"], initial_snapshot)
-            return state, result(state["frozen_context"]), initial_snapshot
-        except Exception as exc:
-            state["last_error"] = str(exc)
-            self._save(state)
-            raise
 
-    def _recall_sync(self, decision, kwargs, path):
-        state = self._new_state(decision["objective"], decision["task_family"], kwargs, path)
-        state["decision"] = decision
-        state["capture"] = decision["capture"]
-        self._save(state)
-        try:
-            if "frozen_context" not in state:
-                recalled = self.client.sync_atoms.recall_context(query=state["objective"], task_family=state["task_family"] or "general")
-                state["frozen_context"] = freeze_recall_context(recalled)
-                self._save(state)
-            return state, result(state["frozen_context"])
-        except Exception as exc:
-            state["last_error"] = str(exc)
-            self._save(state)
-            raise
 
-    async def _recall_async(self, decision, kwargs, path):
-        state = self._new_state(decision["objective"], decision["task_family"], kwargs, path)
-        state["decision"] = decision
-        state["capture"] = decision["capture"]
-        self._save(state)
-        try:
-            if "frozen_context" not in state:
-                recalled = await self.client.atoms.recall_context(query=state["objective"], task_family=state["task_family"] or "general")
-                state["frozen_context"] = freeze_recall_context(recalled)
-                self._save(state)
-            return state, result(state["frozen_context"])
-        except Exception as exc:
-            state["last_error"] = str(exc)
-            self._save(state)
-            raise
 
     def _preflight_sync(self, native, path, kwargs):
-        self._guard_request(kwargs, path)
-        decision = self._decide_sync(native, path, kwargs)
-        if self.mode == 'auto' and self.auto_learning is not False:
-            state, updated = self._setup_auto(decision, path, kwargs, native)
-            self._policy_bindings[state['turn_id']] = (native, self._decision_model_for(kwargs), None)
-            return state, updated
-        if decision["activate"]:
-            state, context, before = self._prepare_sync(decision, kwargs, path)
-        else:
-            state, context = self._recall_sync(decision, kwargs, path)
-            before = None
-        if state["run_id"]:
-            state["visible_input"] = user_text(path, kwargs)
-            state["session_before_count"] = len(before.items) if before else 0
-            state["visible_input_in_session"] = self._input_in_snapshot(before, state["visible_input"])
-            self._save(state)
-            self._send_observable_sync(state, self._tool_output_events(state, kwargs))
-        updated = inject(path, kwargs, context)
-        state["state"] = "native_running"
-        self._save(state)
-        return state, updated
+        self._guard_request(kwargs,path)
+        decision=self._decide_sync(native,path,kwargs)
+        state,updated=self._setup_auto(decision,path,kwargs,native)
+        self._policy_bindings[state['turn_id']]=(native,self._decision_model_for(kwargs),None)
+        return state,updated
 
     async def _preflight_async(self, native, path, kwargs):
-        self._guard_request(kwargs, path)
-        decision = await self._decide_async(native, path, kwargs)
-        if self.mode == 'auto' and self.auto_learning is not False:
-            state, updated = await asyncio.to_thread(self._setup_auto, decision, path, kwargs, native, asyncio.get_running_loop())
-            self._policy_bindings[state['turn_id']] = (native, self._decision_model_for(kwargs), asyncio.get_running_loop())
-            return state, updated
-        if decision["activate"]:
-            state, context, before = await self._prepare_async(decision, kwargs, path)
-        else:
-            state, context = await self._recall_async(decision, kwargs, path)
-            before = None
-        if state["run_id"]:
-            state["visible_input"] = user_text(path, kwargs)
-            state["session_before_count"] = len(before.items) if before else 0
-            state["visible_input_in_session"] = self._input_in_snapshot(before, state["visible_input"])
-            self._save(state)
-            await self._send_observable_async(state, self._tool_output_events(state, kwargs))
-        updated = inject(path, kwargs, context)
-        state["state"] = "native_running"
-        self._save(state)
-        return state, updated
+        self._guard_request(kwargs,path)
+        decision=await self._decide_async(native,path,kwargs)
+        state,updated=await asyncio.to_thread(self._setup_auto,decision,path,kwargs,native,asyncio.get_running_loop())
+        self._policy_bindings[state['turn_id']]=(native,self._decision_model_for(kwargs),asyncio.get_running_loop())
+        return state,updated
 
-    def _complete_without_run(self, state, response):
-        if state["run_id"] is not None:
-            return False
-        if terminal(response):
-            state["state"] = "completed"
-            state["result"] = {"summary": summary(response), "outcome": "completed"}
-        else:
-            state["state"] = "awaiting_continuation" if tool_continuation(response) else "incomplete"
-            if state["state"] == "awaiting_continuation":
-                self._record_tool_continuation(state, response)
-                return True
-        self._save(state)
-        return True
 
-    def _complete_sync(self, state, response):
-        if self.mode == 'auto' and self.auto_learning is not False:
-            return self._complete_auto(state, response)
-        if self._complete_without_run(state, response):
-            return
-        if not terminal(response):
-            if not tool_continuation(response):
-                state["state"] = "incomplete"
-                self._save(state)
-                return
-            self._record_tool_continuation(state, response)
-            try:
-                visible = self._visible_events(state, response, self._snapshot_sync())
-                prompt_events = [event for event in visible if event["kind"] == "user_prompt"]
-                self._send_observable_sync(state, prompt_events + state["tool_call_events"])
-            except Exception as exc:
-                state["last_error"] = str(exc)
-                self._save(state)
-                return
-            state["state"] = "awaiting_continuation"
-            state.pop("last_error", None)
-            self._save(state)
-            return
-        state["native_response_id"] = getattr(response, "id", None)
-        state["state"] = "native_completed"
-        state["result"] = {"summary": summary(response), "outcome": "completed"}
-        self._save(state)
-        try:
-            self._send_sync(state["run_id"])
-            self._send_visible_sync(state, response)
-            receipt = self.client.sync_atoms.submit(state["run_id"], data=state["result"])
-            if receipt.status != "completed":
-                raise RSIRecoveryRequired("CoSens submit did not confirm completion")
-            state.update({key: receipt[key] for key in ('task_id', 'revision_id', 'recipe_id', 'recipe_candidate_id') if receipt.get(key)})
-            state["state"] = "completed"
-        except Exception as exc:
-            state["state"] = "completion_pending"
-            state["last_error"] = str(exc)
-        self._save(state)
+    def _complete_sync(self,state,response):
+        return self._complete_auto(state,response)
 
-    async def _complete_async(self, state, response):
-        if self.mode == 'auto' and self.auto_learning is not False:
-            return await asyncio.to_thread(self._complete_auto, state, response)
-        if self._complete_without_run(state, response):
-            return
-        if not terminal(response):
-            if not tool_continuation(response):
-                state["state"] = "incomplete"
-                self._save(state)
-                return
-            self._record_tool_continuation(state, response)
-            try:
-                visible = self._visible_events(state, response, await self._snapshot_async())
-                prompt_events = [event for event in visible if event["kind"] == "user_prompt"]
-                await self._send_observable_async(state, prompt_events + state["tool_call_events"])
-            except Exception as exc:
-                state["last_error"] = str(exc)
-                self._save(state)
-                return
-            state["state"] = "awaiting_continuation"
-            state.pop("last_error", None)
-            self._save(state)
-            return
-        state["native_response_id"] = getattr(response, "id", None)
-        state["state"] = "native_completed"
-        state["result"] = {"summary": summary(response), "outcome": "completed"}
-        self._save(state)
-        try:
-            await self._send_async(state["run_id"])
-            await self._send_visible_async(state, response)
-            receipt = await self.client.atoms.submit(state["run_id"], data=state["result"])
-            if receipt.status != "completed":
-                raise RSIRecoveryRequired("CoSens submit did not confirm completion")
-            state.update({key: receipt[key] for key in ('task_id', 'revision_id', 'recipe_id', 'recipe_candidate_id') if receipt.get(key)})
-            state["state"] = "completed"
-        except Exception as exc:
-            state["state"] = "completion_pending"
-            state["last_error"] = str(exc)
-        self._save(state)
+    async def _complete_async(self,state,response):
+        return await asyncio.to_thread(self._complete_auto,state,response)
 
-    def reconcile_sync(self, turn_id):
-        state = self.turns.get(turn_id)
-        if state and state.get('execution_id') and state.get('mode') == self.mode:
-            self._require_session(state)
-            if state.get('state') not in {'native_completed', 'completion_pending'}:
-                raise RSIRecoveryRequired('No completed native result to reconcile')
-            return self._submit_auto_result(state)
-        if state and state.get("mode") != self.mode:
-            raise RSIRecoveryRequired("Turn has a different or unknown originating mode")
-        if state:
-            self._require_session(state)
-        if state and state.get("run_id") and state.get("state") == "observability_pending":
-            try:
-                self._send_sync(state["run_id"])
-                visible = self._visible_events(state, None, self._snapshot_sync())
-                prompt_events = [event for event in visible if event["kind"] == "user_prompt"]
-                self._send_observable_sync(state, prompt_events + state.get("tool_call_events", []))
-                state["state"] = "awaiting_continuation"
-                state.pop("last_error", None)
-                self._save(state)
-                return state
-            except Exception as exc:
-                state["last_error"] = str(exc)
-                self._save(state)
-                raise
-        if not state or state.get("state") not in {"native_completed", "completion_pending"}:
-            raise RSIRecoveryRequired("Turn has no completed native result to reconcile")
-        try:
-            self._send_sync(state["run_id"])
-            visible = [] if state.get("observable_pending") else self._visible_events(
-                state, result({"output_text": state["result"]["summary"]}), self._snapshot_sync()
-            )
-            self._send_observable_sync(state, visible)
-            remote = self.client.sync_atoms.get_run(state["run_id"])
-            if remote.status == "completed":
-                if remote.get("result") != state.get("result"):
-                    raise RSIRecoveryRequired("Remote completed Run result differs from locally saved result")
-                state.update({key: value for key, value in (remote.get('workflow') or {}).items() if key in {'task_id', 'revision_id', 'recipe_id', 'recipe_candidate_id'}})
-            elif remote.status == "ready":
-                receipt = self.client.sync_atoms.submit(state["run_id"], data=state["result"])
-                if receipt.status != "completed":
-                    raise RSIRecoveryRequired("CoSens did not confirm recovered submit")
-                state.update({key: receipt[key] for key in ('task_id', 'revision_id', 'recipe_id', 'recipe_candidate_id') if receipt.get(key)})
-            else:
-                raise RSIRecoveryRequired(f"Run {state['run_id']} is {remote.status}; cannot safely submit")
-            state["state"] = "completed"
-            state.pop("last_error", None)
-            self._save(state)
-            return state
-        except Exception as exc:
-            state["state"] = "completion_pending"
-            state["last_error"] = str(exc)
-            self._save(state)
-            raise
+    def reconcile_sync(self,turn_id):
+        state=self.turns.get(turn_id)
+        if not state or state.get('mode')!=self.mode:
+            raise RSIRecoveryRequired('Unknown turn or different originating mode')
+        self._require_session(state)
+        if state.get('state') not in {'native_completed','completion_pending'} or not state.get('execution_id'):
+            raise RSIRecoveryRequired('No completed native execution to reconcile')
+        return self._submit_auto_result(state)
 
-    async def reconcile_async(self, turn_id):
-        state = self.turns.get(turn_id)
-        if state and state.get('execution_id') and state.get('mode') == self.mode:
-            return await asyncio.to_thread(self.reconcile_sync, turn_id)
-        if state and state.get("mode") != self.mode:
-            raise RSIRecoveryRequired("Turn has a different or unknown originating mode")
-        if state:
-            self._require_session(state)
-        if state and state.get("run_id") and state.get("state") == "observability_pending":
-            try:
-                await self._send_async(state["run_id"])
-                visible = self._visible_events(state, None, await self._snapshot_async())
-                prompt_events = [event for event in visible if event["kind"] == "user_prompt"]
-                await self._send_observable_async(state, prompt_events + state.get("tool_call_events", []))
-                state["state"] = "awaiting_continuation"
-                state.pop("last_error", None)
-                self._save(state)
-                return state
-            except Exception as exc:
-                state["last_error"] = str(exc)
-                self._save(state)
-                raise
-        if not state or state.get("state") not in {"native_completed", "completion_pending"}:
-            raise RSIRecoveryRequired("Turn has no completed native result to reconcile")
-        try:
-            await self._send_async(state["run_id"])
-            visible = [] if state.get("observable_pending") else self._visible_events(
-                state, result({"output_text": state["result"]["summary"]}), await self._snapshot_async()
-            )
-            await self._send_observable_async(state, visible)
-            remote = await self.client.atoms.get_run(state["run_id"])
-            if remote.status == "completed":
-                if remote.get("result") != state.get("result"):
-                    raise RSIRecoveryRequired("Remote completed Run result differs from locally saved result")
-                state.update({key: value for key, value in (remote.get('workflow') or {}).items() if key in {'task_id', 'revision_id', 'recipe_id', 'recipe_candidate_id'}})
-            elif remote.status == "ready":
-                receipt = await self.client.atoms.submit(state["run_id"], data=state["result"])
-                if receipt.status != "completed":
-                    raise RSIRecoveryRequired("CoSens did not confirm recovered submit")
-                state.update({key: receipt[key] for key in ('task_id', 'revision_id', 'recipe_id', 'recipe_candidate_id') if receipt.get(key)})
-            else:
-                raise RSIRecoveryRequired(f"Run {state['run_id']} is {remote.status}; cannot safely submit")
-            state["state"] = "completed"
-            state.pop("last_error", None)
-            self._save(state)
-            return state
-        except Exception as exc:
-            state["state"] = "completion_pending"
-            state["last_error"] = str(exc)
-            self._save(state)
-            raise
+    async def reconcile_async(self,turn_id):
+        return await asyncio.to_thread(self.reconcile_sync,turn_id)
 
     def invoke_sync(self, native, path, method, args, kwargs):
         if args or base_path(path) == ("completions", "create") or (

@@ -71,6 +71,25 @@ class _WorkflowStatus:
     def get_turn(self, turn_id):
         return self._owner._store.get(turn_id)
 
+    async def feedback(self, message, *, turn_id=None, request_key=None):
+        turn_id = turn_id or self.last_turn_id
+        state = self.get_turn(turn_id)
+        if not state or not state.get('revision_id'):
+            raise RSIRecoveryRequired('Turn has no recorded revision')
+        key = request_key or 'feedback:'+hashlib.sha256((turn_id+'\0'+message).encode()).hexdigest()
+        return await self._owner._client.atoms.record_feedback(state['revision_id'], feedback=message, key=key)
+
+    async def generate_recipe(self, turn_id=None, *, request_key=None, model_api=None):
+        turn_id = turn_id or self.last_turn_id
+        state = self.get_turn(turn_id)
+        if not state or not state.get('revision_id'):
+            raise RSIRecoveryRequired('Turn has no recorded revision')
+        options = {'model_api': model_api} if model_api is not None else {}
+        receipt = await self._owner._client.atoms.start_recipe_candidate(state['task_id'], revision_id=state['revision_id'], key=request_key or 'explicit-generation:'+turn_id, **options)
+        state['recipe_candidate_id'] = receipt['recipe_candidate_id']
+        self._owner._save(state)
+        return receipt
+
     async def reconcile(self, turn_id, *, session=None):
         return await self._owner.reconcile(turn_id, session=session)
 
@@ -116,7 +135,7 @@ class _TaskStream:
 
 
 class TaskWorkflowRunner:
-    """Wrap an Agents Runner class/instance without changing existing Run wrappers."""
+    """Wrap an Agents Runner using the unified Task/Execution protocol."""
 
     def __init__(self, native_runner, *, mode="disable", api_key=None, state_path=None,
                  result_adapter=None, trace_adapter=None, on_rsi_event=None, _http_transport=None):

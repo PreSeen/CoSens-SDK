@@ -51,7 +51,7 @@ async def test_partial_ack_keeps_unconfirmed_suffix_for_same_run(tmp_path):
     store.begin_batch("run-1", snapshot, events)
     assert store.ack(snapshot, {"durable_ack": ["chat:u1", "chat:u3"]}) == 1
     assert [e["id"] for e in store.pending(snapshot)] == ["chat:u2", "chat:u3"]
-    assert store.recover_batch(snapshot).run_id == "run-1"
+    assert store.recover_batch(snapshot).session_id == "run-1"
     store.close()
 
 
@@ -98,7 +98,7 @@ async def test_rewriting_acknowledged_history_raises_instead_of_skipping(tmp_pat
 def test_turn_state_survives_restart(tmp_path):
     path = tmp_path / "state.sqlite3"
     store = TurnStore(path)
-    store.put("turn-1", {"run_id": "run-1", "state": "completion_pending", "result": {"summary": "done"}})
+    store.put("turn-1", {"session_id": "run-1", "state": "completion_pending", "result": {"summary": "done"}})
     store.close()
     reopened = TurnStore(path)
     assert reopened.get("turn-1")["result"]["summary"] == "done"
@@ -156,6 +156,6 @@ async def test_two_cursor_instances_cannot_replace_another_runs_pending_batch(tm
     first.begin_batch("run-1", first_snapshot, first.pending(first_snapshot))
     with pytest.raises(RSIRecoveryRequired):
         second.begin_batch("run-2", second_snapshot, second.pending(second_snapshot))
-    assert first.recover_batch(first_snapshot).run_id == "run-1"
+    assert first.recover_batch(first_snapshot).session_id == "run-1"
     first.close()
     second.close()

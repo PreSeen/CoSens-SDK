@@ -6,7 +6,7 @@ import { canonical, hash, openState } from './state.js';
 export interface SessionLike { sessionId?: string; session_id?: string; id?: string; getSessionId?(): Promise<string>; sessionIncarnation?: string; incarnation?: string; getItems(): Promise<readonly any[]> | readonly any[] }
 export interface Snapshot { key: string; sessionId: string; items: readonly Record<string, any>[] }
 export interface SessionEvent { id: string; kind: string; payload: Record<string, any> }
-interface Row { acked_index: number; prefix_hash: string | null; run_id: string | null; pending_events: string | null }
+interface Row { acked_index: number; prefix_hash: string | null; session_id: string | null; pending_events: string | null }
 
 export class CursorStore {
   private readonly db: Database.Database;
@@ -14,7 +14,7 @@ export class CursorStore {
   constructor(path: string | undefined, principal: string, private readonly serviceId: string) {
     this.db = openState(path);
     this.principal = hash(principal);
-    this.db.exec('CREATE TABLE IF NOT EXISTS ts_cursors (key TEXT PRIMARY KEY, acked_index INTEGER NOT NULL, prefix_hash TEXT, run_id TEXT, pending_events TEXT, acked_message_id TEXT, acked_item_hash TEXT, source_revision TEXT)');
+    this.db.exec('CREATE TABLE IF NOT EXISTS ts_workflow_session_cursors (key TEXT PRIMARY KEY, acked_index INTEGER NOT NULL, prefix_hash TEXT, session_id TEXT, pending_events TEXT, acked_message_id TEXT, acked_item_hash TEXT, source_revision TEXT)');
     this.db.exec('CREATE TABLE IF NOT EXISTS ts_session_locks (key TEXT PRIMARY KEY, owner TEXT NOT NULL, pid INTEGER NOT NULL)');
   }
   private async identity(session: SessionLike): Promise<{ key: string; sessionId: string }> {
@@ -55,7 +55,7 @@ export class CursorStore {
     }
     return snapshot;
   }
-  private row(key: string): Row { return (this.db.prepare('SELECT acked_index,prefix_hash,run_id,pending_events FROM ts_cursors WHERE key=?').get(key) as Row | undefined) ?? { acked_index: -1, prefix_hash: null, run_id: null, pending_events: null }; }
+  private row(key: string): Row { return (this.db.prepare('SELECT acked_index,prefix_hash,session_id,pending_events FROM ts_workflow_session_cursors WHERE key=?').get(key) as Row | undefined) ?? { acked_index: -1, prefix_hash: null, session_id: null, pending_events: null }; }
   private validate(snapshot: Snapshot, row: Row) {
     if (row.acked_index >= snapshot.items.length || (row.acked_index >= 0 && hash(snapshot.items.slice(0, row.acked_index + 1)) !== row.prefix_hash)) throw new SessionHistoryChanged('Previously ACKed Session history changed');
   }
@@ -80,22 +80,22 @@ export class CursorStore {
     }
     return events;
   }
-  beginBatch(runId: string, snapshot: Snapshot, events: SessionEvent[]): void {
+  beginBatch(sessionId: string, snapshot: Snapshot, events: SessionEvent[]): void {
     if (!events.length) return;
     this.db.transaction(() => {
       const row = this.row(snapshot.key); this.validate(snapshot, row);
       if (row.pending_events) {
-        if (row.run_id !== runId || canonical(JSON.parse(row.pending_events)) !== canonical(events)) throw new RSIRecoveryRequired('Pending Session batch belongs to another Run or changed');
+        if (row.session_id !== sessionId || canonical(JSON.parse(row.pending_events)) !== canonical(events)) throw new RSIRecoveryRequired('Pending Session batch belongs to another Session or changed');
       } else this.validateBatch(snapshot, events, row.acked_index + 1);
-      this.db.prepare('INSERT INTO ts_cursors(key,acked_index,prefix_hash,run_id,pending_events) VALUES(?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET run_id=excluded.run_id,pending_events=excluded.pending_events').run(snapshot.key, row.acked_index, row.prefix_hash, runId, canonical(events));
+      this.db.prepare('INSERT INTO ts_workflow_session_cursors(key,acked_index,prefix_hash,session_id,pending_events) VALUES(?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET session_id=excluded.session_id,pending_events=excluded.pending_events').run(snapshot.key, row.acked_index, row.prefix_hash, sessionId, canonical(events));
     })();
   }
-  recoverBatch(snapshot: Snapshot): { runId: string; events: SessionEvent[] } | undefined {
+  recoverBatch(snapshot: Snapshot): { sessionId: string; events: SessionEvent[] } | undefined {
     const row = this.row(snapshot.key); this.validate(snapshot, row);
     if (!row.pending_events) return undefined;
     const events = JSON.parse(row.pending_events) as SessionEvent[];
     this.validateBatch(snapshot, events, row.acked_index + 1);
-    return { runId: row.run_id!, events };
+    return { sessionId: row.session_id!, events };
   }
   ack(snapshot: Snapshot, receipt: { durable_ack?: string[] | { event_ids?: string[]; ids?: string[] } }): number {
     const ids = Array.isArray(receipt.durable_ack) ? receipt.durable_ack : receipt.durable_ack?.event_ids ?? receipt.durable_ack?.ids;
@@ -116,10 +116,10 @@ export class CursorStore {
       let advanced = 0;
       while (advanced < pending.length && set.has(pending[advanced]!.id)) advanced++;
       const newIndex = row.acked_index + advanced, item = snapshot.items[newIndex];
-      const result = this.db.prepare('UPDATE ts_cursors SET acked_index=?,prefix_hash=?,pending_events=?,acked_message_id=?,acked_item_hash=?,source_revision=? WHERE key=? AND acked_index=? AND run_id=? AND pending_events=?').run(
+      const result = this.db.prepare('UPDATE ts_workflow_session_cursors SET acked_index=?,prefix_hash=?,pending_events=?,acked_message_id=?,acked_item_hash=?,source_revision=? WHERE key=? AND acked_index=? AND session_id=? AND pending_events=?').run(
         newIndex, newIndex < 0 ? null : hash(snapshot.items.slice(0, newIndex + 1)), advanced === pending.length ? null : canonical(pending.slice(advanced)),
         item ? String(item.id || hash([snapshot.key, newIndex, item])) : null, item ? hash(item) : null, item?.source_revision ?? null,
-        snapshot.key, row.acked_index, row.run_id, row.pending_events,
+        snapshot.key, row.acked_index, row.session_id, row.pending_events,
       );
       if (result.changes !== 1) throw new RSIRecoveryRequired('Session cursor changed concurrently');
       return advanced;

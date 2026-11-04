@@ -56,14 +56,11 @@ async def test_r02_oversized_key_is_rejected_before_sending():
             assert not seen
 
 
-async def test_r03_explicit_empty_optional_key_is_not_silently_omitted():
+async def test_r03_empty_generation_key_is_rejected_before_sending():
     for mode in MODES:
         async with sdk(mode) as (call, seen):
-            methods = ["submit"] if not mode else ["submit", "feedback", "improve"]
-            for method in methods:
-                options = {"reason": "revise"} if method == "improve" else {"data": {}}
-                with pytest.raises(ValueError, match="key"):
-                    await call(method, "run-1", key="", **options)
+            with pytest.raises(ValueError, match='key'):
+                await call('start_recipe_candidate','task-1',revision_id='revision-1',key='')
             assert not seen
 
 
@@ -90,7 +87,7 @@ async def test_r06_key_does_not_leak_into_following_read_request():
         async with sdk(mode) as (call, seen):
             await call("start_execution", "task-1", key="execution-key")
             await call("get_task", "task-1")
-            await call("submit", "run-1")
+            await call("get_revision", "revision-1")
             assert len(seen) == 3
             assert seen[0].headers["idempotency-key"] == "execution-key"
             assert all("idempotency-key" not in r.headers for r in seen[1:])

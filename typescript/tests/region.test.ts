@@ -13,8 +13,8 @@ test('CN and US clients retain their configured gateway hosts', async () => {
   };
   const cn = new CoSensClient({ apiKey: 'key', region: 'cn', fetch: fetcher });
   const us = new CoSensClient({ apiKey: 'key', region: 'us', fetch: fetcher });
-  await cn.atoms.getRun('r1');
-  await us.atoms.getRun('r1');
+  await cn.atoms.getTask('r1');
+  await us.atoms.getTask('r1');
   assert.deepEqual(hosts, ['friday-rsi-cn.stardust-ai.com', 'rsi.cosens.ai']);
   await cn.close(); await us.close();
 });

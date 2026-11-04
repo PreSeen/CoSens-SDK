@@ -31,6 +31,9 @@ function workflowSelection(candidateSha256?: string, candidateId?: string, custo
     ...(candidateId ? { candidate_id: candidateId } : { custom_reason: customReason }) } };
 }
 export class Atoms {
+  listRecipeCandidates({limit=20,cursor,taskId,status}:{limit?:number;cursor?:string;taskId?:string;status?:string}={}) {
+    boundedInteger(limit,'limit',100);return this.http.request('GET','/v1/recipe-candidates?'+new URLSearchParams({limit:String(limit),...(cursor?{cursor}:{}),...(taskId?{task_id:taskId}:{}),...(status?{status}:{})}));
+  }
   constructor(private readonly http: Transport) {}
   createDocumentUploadGrant(metadata: DocumentUploadMetadata) {
     return this.http.request('POST', '/v1/document/upload-grants', documentMetadata(metadata));
@@ -48,19 +51,12 @@ export class Atoms {
   getDocumentStatus(documentIds: string[]) {
     return this.http.request('POST', '/v1/document/status', documentStatusBody(documentIds));
   }
-  async recallContext({ query, taskFamily = 'general', tokenBudget = 1000 }: { query: string; taskFamily?: string; tokenBudget?: number }): Promise<RecallContext> {
-    const recipe = await this.getActiveRecipe({ taskFamily });
-    const memory = await this.memoryRecall({ query, tokenBudget });
-    if (!recipe || !['matched', 'not_found'].includes(recipe.status) ||
-      (recipe.status === 'matched' && (!recipe.recipe_id || !recipe.bundle || typeof recipe.bundle !== 'object' || Array.isArray(recipe.bundle)))) {
-      throw new RSIRecoveryRequired('Standalone Recipe lookup returned an invalid result');
-    }
-    if (!Array.isArray(memory?.items) || !memory.items.every((x: unknown) => !!x && typeof x === 'object' && !Array.isArray(x))) {
-      throw new RSIRecoveryRequired('Standalone Memory recall items are missing or invalid');
-    }
-    return structuredClone({ recipe, context: { query, task_family: taskFamily, source: 'public_recipe_and_memory' }, snapshot: { evidence: memory.items, memory_recall: memory } });
+  async recallContext({query,taskFamily='general',tokenBudget=1000}:{query:string;taskFamily?:string;tokenBudget?:number}):Promise<RecallContext>{
+    const page=await this.listRecipeCandidates({status:'candidate',limit:100});
+    const candidates=[];for(const item of page.items.filter((x:any)=>x.current).slice(0,20)){candidates.push(await this.getRecipeCandidate(item.recipe_candidate_id));}
+    const memory=await this.memoryRecall({query,tokenBudget});
+    return {recipe:{status:'not_found',candidates},context:{query,task_family:taskFamily,source:'workflow_recipes'},snapshot:{evidence:memory.items,memory_recall:memory}};
   }
-  getActiveRecipe({ taskFamily = 'general' }: { taskFamily?: string } = {}) { return this.http.request('GET', `/v1/recipes/active?${new URLSearchParams({ task_family: taskFamily })}`); }
   async memoryRecall({ query, tokenBudget = 1000 }: { query: string; tokenBudget?: number }) { return this.http.request('POST', '/v1/memory/recall', { query, token_budget: boundedInteger(tokenBudget, 'tokenBudget', 8000) }); }
   memoryIngest({ content, requestKey: key, sourceKind = 'decision', durable = true, sourceId, expectedRevision }:
     { content: string; requestKey: string; sourceKind?: string; durable?: boolean; sourceId?: string; expectedRevision?: number }) {
@@ -104,9 +100,6 @@ export class Atoms {
     if (!Number.isInteger(expectedContextVersion) || expectedContextVersion < 1) throw new TypeError('expectedContextVersion must be a positive integer');
     return this.http.request('POST', `/v1/tasks/${pathPart(taskId)}/context`, { expected_context_version: expectedContextVersion, ...(objective === undefined ? {} : { objective }), ...(artifacts === undefined ? {} : { artifacts }), ...(selfContained === undefined ? {} : { self_contained: selfContained }) });
   }
-  startExternalAnalysis(taskId: string, { key, modelApi }: { key: string; modelApi?: BusinessModelAPI }) { const c = modelApi && modelAPIData(modelApi); return this.http.request('POST', `/v1/tasks/${pathPart(taskId)}/analysis`, c ? { data: { model_api: c.wire } } : undefined, requestKey(key), c?.secrets); }
-  getExternalAnalysis(analysisId: string) { return this.http.request('GET', `/v1/task-analyses/${pathPart(analysisId)}`); }
-  resumeExternalAnalysis(analysisId: string, modelApi?: BusinessModelAPI) { const c = modelApi && modelAPIData(modelApi); return this.http.request('POST', `/v1/task-analyses/${pathPart(analysisId)}/resume`, c ? { data: { model_api: c.wire } } : undefined, undefined, c?.secrets); }
   startExecution(taskId: string, { key, modelApi, recipeId, includeMemory = false }: { key: string; modelApi?: BusinessModelAPI; recipeId?: string; includeMemory?: boolean }) {
     if (typeof includeMemory !== 'boolean') throw new TypeError('includeMemory must be boolean');
     if (recipeId !== undefined) pathPart(recipeId);
@@ -118,14 +111,6 @@ export class Atoms {
   }
   getTaskRecipe(taskId: string) { return this.http.request('GET', `/v1/tasks/${pathPart(taskId)}/recipe`); }
   getRecipeVersions(recipeId: string) { return this.http.request('GET', `/v1/recipe-chains/${pathPart(recipeId)}/versions`); }
-  improveTask(taskId: string, { revisionId, feedback, key, modelApi }: { revisionId: string; feedback: string; key: string; modelApi?: BusinessModelAPI }) {
-    pathPart(revisionId);
-    if (typeof feedback !== 'string' || !feedback.trim() || feedback.length > 4_000) throw new TypeError('feedback must be 1–4,000 characters');
-    const connection = modelApi === undefined ? undefined : modelAPIData(modelApi);
-    return this.http.request('POST', `/v1/tasks/${pathPart(taskId)}/improvements`,
-      { revision_id: revisionId, feedback, ...(connection ? { model_api: connection.wire } : {}) }, requestKey(key), connection?.secrets);
-  }
-  startReconstruction(taskId: string, { key }: { key: string }) { return this.http.request('POST', `/v1/tasks/${pathPart(taskId)}/reconstructions`, undefined, requestKey(key)); }
   getExecution(executionId: string) { return this.http.request('GET', `/v1/executions/${pathPart(executionId)}`); }
   submitExecution(executionId: string, { requestSha256, outcome, artifacts, events = [], traceCoverage = 'unknown' }: { requestSha256: string; outcome: 'completed' | 'failed' | 'cancelled'; artifacts: WorkflowOutputRef[]; events?: WorkflowEvent[]; traceCoverage?: 'full' | 'partial' | 'unknown' }) {
     if (!requestSha256?.trim()) throw new TypeError('requestSha256 is required');
@@ -141,138 +126,31 @@ export class Atoms {
     return this.http.request('POST', `/v1/executions/${pathPart(executionId)}/result`, body);
   }
   getRevision(revisionId: string) { return this.http.request('GET', `/v1/revisions/${pathPart(revisionId)}`); }
-  startAttribution(revisionId: string, { key, feedback, modelApi }: { key: string; feedback?: string; modelApi?: BusinessModelAPI }) {
-    if (feedback !== undefined && (typeof feedback !== 'string' || !feedback.trim() || feedback.length > 4_000)) throw new TypeError('feedback must be 1–4,000 characters');
-    const c = modelApi && modelAPIData(modelApi);
-    return this.http.request('POST', `/v1/revisions/${pathPart(revisionId)}/attributions`, { data: { ...(feedback === undefined ? {} : { feedback }), ...(c ? { model_api: c.wire } : {}) } }, requestKey(key), c?.secrets);
-  }
-  getAttribution(attributionId: string) { return this.http.request('GET', `/v1/attributions/${pathPart(attributionId)}`); }
-  resumeAttribution(attributionId: string, modelApi?: BusinessModelAPI) { const c = modelApi && modelAPIData(modelApi); return this.http.request('POST', `/v1/attributions/${pathPart(attributionId)}/resume`, c ? { data: { model_api: c.wire } } : undefined, undefined, c?.secrets); }
-  selectCause(attributionId: string, { candidateSha256, candidateId, customReason }: { candidateSha256?: string; candidateId?: string; customReason?: string }) {
-    return this.http.request('POST', `/v1/attributions/${pathPart(attributionId)}/selection`, workflowSelection(candidateSha256, candidateId, customReason));
-  }
-  startRevision(revisionId: string, { attributionId, key }: { attributionId: string; key: string }) {
-    return this.http.request('POST', `/v1/revisions/${pathPart(revisionId)}/revisions`, { data: { attribution_id: attributionId } }, requestKey(key));
-  }
-  acceptRevision(revisionId: string, { artifactHashes }: { artifactHashes: Record<string, string> }) {
-    return this.http.request('POST', `/v1/revisions/${pathPart(revisionId)}/acceptance`, { data: { artifact_hashes: artifactHashes } });
-  }
-  startRecipeCandidate(taskId: string, { revisionId, key, includeMemory = false, modelApi }: { revisionId: string; key: string; includeMemory?: boolean; modelApi?: BusinessModelAPI }) {
-    const c = modelApi && modelAPIData(modelApi);
-    return this.http.request('POST', `/v1/tasks/${pathPart(taskId)}/recipe-candidates`, { data: { revision_id: revisionId, include_memory: includeMemory, ...(c ? { model_api: c.wire } : {}) } }, requestKey(key), c?.secrets);
-  }
+  startRevision(revisionId:string,{key}:{key:string}) {return this.http.request('POST',`/v1/revisions/${pathPart(revisionId)}/revisions`,{data:{}},requestKey(key));}
+  startRecipeCandidate(taskId:string,{revisionId,key,modelApi}:{revisionId:string;key:string;modelApi?:BusinessModelAPI}) {
+ const c=modelApi&&modelAPIData(modelApi);return this.http.request('POST',`/v1/tasks/${pathPart(taskId)}/recipe-candidates`,{data:{revision_id:revisionId,...(c?{model_api:c.wire}:{})}},requestKey(key),c?.secrets);
+ }
   getRecipeCandidate(recipeId: string) { return this.http.request('GET', `/v1/recipe-candidates/${pathPart(recipeId)}`); }
   resumeRecipeCandidate(recipeId: string, modelApi?: BusinessModelAPI) { const c = modelApi && modelAPIData(modelApi); return this.http.request('POST', `/v1/recipe-candidates/${pathPart(recipeId)}/resume`, c ? { data: { model_api: c.wire } } : undefined, undefined, c?.secrets); }
-  startVerification(recipeId: string, { key }: { key: string }) { return this.http.request('POST', `/v1/recipe-candidates/${pathPart(recipeId)}/verifications`, undefined, requestKey(key)); }
-  getVerification(verificationId: string) { return this.http.request('GET', `/v1/recipe-verifications/${pathPart(verificationId)}`); }
-  async waitWorkflowJob(kind: 'analysis' | 'attribution' | 'recipe_candidate', id: string, { timeout = 300 }: { timeout?: number } = {}) {
-    const allowed: Record<string, readonly string[]> = {
-      analysis: ['queued', 'running', 'awaiting_runner', 'completed', 'failed'],
-      attribution: ['queued', 'running', 'awaiting_runner', 'awaiting_selection', 'inconclusive', 'selected', 'failed'],
-      recipe_candidate: ['queued', 'running', 'awaiting_runner', 'awaiting_parent', 'awaiting_material', 'candidate', 'failed'],
-    };
-    if (!(kind in allowed)) throw new TypeError('job kind must be analysis, attribution or recipe_candidate');
-    const deadline = performance.now() + boundedTimeout(boundedTimeout(timeout) * 1000);
-    let delay = 2_000;
-    while (true) {
-      const job = kind === 'analysis' ? await this.getExternalAnalysis(id) : kind === 'attribution' ? await this.getAttribution(id) : await this.getRecipeCandidate(id);
-      if (!allowed[kind]!.includes(job?.status)) throw new RSIRecoveryRequired(`Unexpected workflow ${kind} status: ${job?.status}`);
-      if (!['queued', 'running', 'awaiting_parent'].includes(job.status)) return job;
-      const remaining = deadline - performance.now();
-      if (remaining <= 0) throw new Error(`Workflow ${kind} ${id} is still ${job.status}; resume polling the same ID`);
-      await new Promise(resolve => setTimeout(resolve, Math.min(delay, remaining)));
-      delay = Math.min(delay * 2, 30_000);
-    }
-  }
-  prepare({ objective, key, taskFamily = 'general', inputArtifactIds = [], executionMode, ...options }: { objective: string; key: string; taskFamily?: string; inputArtifactIds?: string[]; executionMode?: 'assist' | 'guided'; [key: string]: unknown }) {
-    const mode = executionMode ?? options.execution_mode ?? 'assist';
-    if (mode !== 'assist' && mode !== 'guided') throw new TypeError('executionMode must be assist or guided');
-    if (executionMode !== undefined && options.execution_mode !== undefined) throw new TypeError('set only executionMode');
-    return this.http.request('POST', '/v1/runs/prepare', { objective, task_family: taskFamily, input_artifact_ids: inputArtifactIds,
-      ...options, ...(executionMode === undefined ? {} : { execution_mode: executionMode }) }, requestKey(key));
-  }
-  async prepareReady(options: Parameters<Atoms['prepare']>[0], timeoutMs = 300_000) {
-    const deadline = performance.now() + boundedTimeout(timeoutMs);
-    while (true) {
-      const prepared = await this.prepare(options);
-      if (prepared?.status === 'ready' && prepared.run_id) return prepared;
-      if (prepared?.status !== 'processing') throw new RSIRecoveryRequired(`Unexpected CoSens prepare status: ${prepared?.status}`);
-      const remaining = deadline - performance.now();
-      if (remaining <= 0) throw new RSIRecoveryRequired('CoSens prepare did not become ready before timeout');
-      const retryAfter = prepared.retry_after_seconds;
-      const delay = retryAfter == null || retryAfter === '' || !Number.isFinite(Number(retryAfter)) ? 2 : Number(retryAfter);
-      await new Promise(resolve => setTimeout(resolve, Math.min(Math.max(delay, 0) * 1000, 30_000, remaining)));
-    }
-  }
-  getRun(runId: string) { return this.http.request('GET', `/v1/runs/${pathPart(runId)}`); }
-  getRecipeStep(runId: string, nodeId: string) { return this.http.request('GET', `/v1/runs/${pathPart(runId)}/recipe/steps/${pathPart(nodeId)}`); }
-  sessionEvents(runId: string, events: any[]) { return this.http.request('POST', `/v1/runs/${pathPart(runId)}/session-events`, { events }); }
-  initialInputs(runId: string, artifactIds: string[]) { return this.http.request('POST', `/v1/runs/${pathPart(runId)}/initial-inputs`, { artifact_ids: artifactIds }); }
-  guidance(runId: string, { data }: { data: unknown }) { return this.http.request('POST', `/v1/runs/${pathPart(runId)}/guidance`, { data }); }
-  checkpoint(runId: string, { data }: { data: unknown }) { return this.http.request('POST', `/v1/runs/${pathPart(runId)}/checkpoint`, { data }); }
-  getDecision(runId: string, decisionId: string) { return this.http.request('GET', `/v1/runs/${pathPart(runId)}/decisions/${pathPart(decisionId)}`); }
-  getTrace(runId: string) { return this.http.request('GET', `/v1/runs/${pathPart(runId)}/trace`); }
-  nextStep(runId: string) { return this.http.request('POST', `/v1/runs/${pathPart(runId)}/steps/next`); }
-  submitStep(runId: string, attemptId: string, { attemptToken, outputs, decisionId, actualActionId }:
-    { attemptToken: string; outputs: Record<string, unknown>; decisionId?: string; actualActionId?: string }) {
-    if (typeof attemptToken !== 'string' || !attemptToken) throw new TypeError('attemptToken is required');
-    if (!outputs || typeof outputs !== 'object' || Array.isArray(outputs)) throw new TypeError('outputs must be an object');
-    return this.http.request('POST', `/v1/runs/${pathPart(runId)}/steps/${pathPart(attemptId)}/submit`,
-      { attempt_token: attemptToken, outputs, ...(decisionId === undefined ? {} : { decision_id: decisionId }),
-        ...(actualActionId === undefined ? {} : { actual_action_id: actualActionId }) });
-  }
-  completeGuided(runId: string) { return this.http.request('POST', `/v1/runs/${pathPart(runId)}/complete`); }
-  getEvents(runId: string) { return this.http.request('GET', `/v1/runs/${pathPart(runId)}/events`); }
-  submit(runId: string, { data = {}, key }: { data?: unknown; key?: string } = {}) { return this.http.request('POST', `/v1/runs/${pathPart(runId)}/submit`, { data }, key === undefined ? undefined : requestKey(key)); }
-  feedback(runId: string, { data, key }: { data: unknown; key?: string }) { return this.http.request('POST', `/v1/runs/${pathPart(runId)}/feedback`, { data }, key === undefined ? undefined : requestKey(key)); }
-  improve(runId: string, { reason, key, feedback, modelApi }: { reason: string; key?: string; feedback?: string; modelApi?: BusinessModelAPI }) {
-    if (!reason?.trim()) throw new TypeError('reason is required');
-    if (feedback !== undefined && (typeof feedback !== 'string' || !feedback.trim() || feedback.length > 4000)) throw new TypeError('feedback must be nonempty text of at most 4000 characters');
-    const connection = modelApi === undefined ? undefined : modelAPIData(modelApi);
-    const data = { reason, ...(feedback === undefined ? {} : { feedback }), ...(connection ? { model_api: connection.wire } : {}) };
-    return this.http.request('POST', `/v1/runs/${pathPart(runId)}/improvements`, { data }, key === undefined ? undefined : requestKey(key), connection?.secrets);
-  }
-  getImprovement(jobId: string) { return this.http.request('GET', `/v1/improvements/${pathPart(jobId)}`); }
-  resumeImprovement(jobId: string, { modelApi }: { modelApi?: BusinessModelAPI } = {}) {
-    const connection = modelApi === undefined ? undefined : modelAPIData(modelApi);
-    return this.http.request('POST', `/v1/improvements/${pathPart(jobId)}/resume`, connection ? { data: { model_api: connection.wire } } : undefined, undefined, connection?.secrets);
-  }
-  confirmAttribution(jobId: string, { candidateId, candidateSha256 }: { candidateId: string; candidateSha256: string }) {
-    return this.http.request('POST', `/v1/improvements/${pathPart(jobId)}/attribution/confirm`, { data: { candidate_id: candidateId, candidate_sha256: candidateSha256 } });
-  }
-  async waitImprovement(jobId: string, { timeout = 300 }: { timeout?: number } = {}) {
-    const deadline = performance.now() + boundedTimeout(boundedTimeout(timeout) * 1000);
-    let delay = 2_000;
-    while (true) {
-      const job = await this.getImprovement(jobId);
-      if (!['queued', 'running'].includes(job.status)) return job;
-      const remaining = deadline - performance.now();
-      if (remaining <= 0) throw new Error(`improvement ${jobId} did not finish within ${timeout} seconds`);
-      await new Promise(resolve => setTimeout(resolve, Math.min(delay, remaining)));
-      delay = Math.min(delay * 2, 30_000);
-    }
+
+  listTasks({limit=20,cursor}:{limit?:number;cursor?:string}={}) {return this.http.request('GET','/v1/tasks?'+new URLSearchParams({limit:String(limit),...(cursor?{cursor}:{})}));}
+  recordFeedback(revisionId:string,{feedback,key}:{feedback:string;key:string}) {return this.http.request('POST',`/v1/revisions/${pathPart(revisionId)}/feedback`,{feedback},requestKey(key));}
+  startSession(sessionId?:string) {return this.http.request('POST','/v1/sessions/start',sessionId?{session_id:sessionId}:{});}
+  appendSessionEvents(sessionId:string,events:Array<{event_id:string;kind:string;payload:Record<string,unknown>;task_id?:string;revision_id?:string}>) {return this.http.request('POST',`/v1/sessions/${pathPart(sessionId)}/events`,{events});}
+  getSessionContext(sessionId:string,after=0) {return this.http.request('GET',`/v1/sessions/${pathPart(sessionId)}/context?after=${after}`);}
+  endSession(sessionId:string) {return this.http.request('POST',`/v1/sessions/${pathPart(sessionId)}/end`);}
+  async waitWorkflowJob(kind:'recipe_candidate',id:string,{timeout=300}:{timeout?:number}={}) {
+    const deadline=performance.now()+boundedTimeout(timeout*1000);
+    while(true){const value=await this.getRecipeCandidate(id);if(!['queued','running','awaiting_parent'].includes(value.status))return value;
+    if(performance.now()>=deadline)throw new Error('Poll or resume the same candidate');await new Promise(r=>setTimeout(r,100));}
   }
 }
-
-export class AdminAtoms {
-  constructor(private readonly http: Transport) {}
-  bootstrapBundle({ taskFamily, bundle, reason }: { taskFamily: string; bundle: unknown; reason: string }) { return this.http.request('POST', '/internal/admin/v1/recipes/bootstrap-bundle', { task_family: taskFamily, bundle, reason }); }
-  evaluateDecision(runId: string, decisionId: string, { evaluation }: { evaluation: unknown }) { return this.http.request('POST', `/internal/admin/v1/runs/${pathPart(runId)}/decisions/${pathPart(decisionId)}/evaluations`, evaluation); }
-  evaluateRecipe(runId: string, { record, artifactId, contentHash }: { record: unknown; artifactId: string; contentHash: string }) { return this.http.request('POST', `/internal/admin/v1/runs/${pathPart(runId)}/recipe-evaluation`, { record, artifact_id: artifactId, content_hash: contentHash }); }
-  publish(jobId: string, { expectedRevision, reason }: { expectedRevision: number; reason: string }) {
-    if (!reason?.trim()) throw new TypeError('reason is required');
-    return this.http.request('POST', `/internal/admin/v1/improvements/${pathPart(jobId)}/publish`, { expected_revision: expectedRevision, reason });
-  }
-}
-
 export class CoSensClient {
   readonly transport: Transport;
   readonly atoms: Atoms;
-  readonly admin: { atoms: AdminAtoms };
   constructor(options: TransportOptions & { statePath?: string } = {}) {
     this.transport = new Transport(options);
     this.atoms = new Atoms(this.transport);
-    this.admin = { atoms: new AdminAtoms(this.transport) };
   }
   start(snapshot: WorkflowSnapshot | string, options: WorkflowStartOptions = {}) { return startWorkflow(this.atoms, snapshot, options); }
   async close() { /* fetch has no owned socket lifecycle */ }

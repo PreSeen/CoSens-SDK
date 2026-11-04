@@ -11,7 +11,7 @@ from .workflow import _bounded_timeout
 from .atoms_helpers import path_part as _part, stable_key as _key
 from .workflow_atoms import AsyncWorkflowAtoms, SyncWorkflowAtoms, validate_artifact
 from .document_atoms import AsyncDocumentAtoms, SyncDocumentAtoms
-from .model_api import improvement_data
+from .model_api import model_connection_data
 
 
 def _recall_context(recipe, memory, query, task_family):
@@ -39,7 +39,7 @@ def _recipe_list_path(limit, cursor, task_id, status):
                 raise ValueError(f"{name} must be a nonempty string of at most 128 characters")
             params[name] = value
     if status is not None:
-        if not isinstance(status, str) or status not in {"queued", "running", "awaiting_runner", "awaiting_parent", "awaiting_material", "candidate", "failed"}:
+        if not isinstance(status, str) or status not in {"queued", "running", "awaiting_runner", "awaiting_parent", "awaiting_material", "candidate", "failed", "interrupted"}:
             raise ValueError("invalid Recipe candidate status")
         params["status"] = status
     return "/v1/recipe-candidates?" + urlencode(params)
@@ -56,26 +56,6 @@ def _ingest_body(content, request_key, source_kind, durable, source_id, expected
     return body
 
 
-def _step_body(attempt_token, outputs, decision_id, actual_action_id):
-    if not isinstance(attempt_token, str) or not attempt_token:
-        raise ValueError("attempt_token is required")
-    if not isinstance(outputs, dict):
-        raise TypeError("outputs must be an object")
-    body = {"attempt_token": attempt_token, "outputs": outputs}
-    if decision_id is not None:
-        body["decision_id"] = decision_id
-    if actual_action_id is not None:
-        body["actual_action_id"] = actual_action_id
-    return body
-
-
-def _prepare_body(objective, task_family, input_artifact_ids, options):
-    execution_mode = options.get("execution_mode", "assist")
-    if execution_mode not in {"assist", "guided"}:
-        raise ValueError("execution_mode must be assist or guided")
-    return {"objective": objective, "task_family": task_family, "input_artifact_ids": input_artifact_ids or [], **options}
-
-
 class AsyncAtoms(AsyncWorkflowAtoms, AsyncDocumentAtoms):
     def __init__(self, transport):
         self._http = transport
@@ -85,12 +65,11 @@ class AsyncAtoms(AsyncWorkflowAtoms, AsyncDocumentAtoms):
 
     async def recall_context(self, *, query, task_family="general", token_budget=1000):
         """Read Recipe and Memory without creating a Run; freeze per turn upstream."""
-        recipe = await self.get_active_recipe(task_family=task_family)
+        page = await self.list_recipe_candidates(status='candidate', limit=100)
+        recipe = {'status': 'not_found', 'candidates': page['items']}
         memory = await self.memory_recall(query=query, token_budget=token_budget)
         return _recall_context(recipe, memory, query, task_family)
 
-    async def get_active_recipe(self, *, task_family="general"):
-        return await self._http.request("GET", "/v1/recipes/active?" + urlencode({"task_family": task_family}))
 
     async def memory_recall(self, *, query, token_budget=1000):
         return await self._http.request("POST", "/v1/memory/recall", body={"query": query, "token_budget": _bounded_integer(token_budget, name="token_budget", minimum=1, maximum=8000)})
@@ -111,117 +90,10 @@ class AsyncAtoms(AsyncWorkflowAtoms, AsyncDocumentAtoms):
     async def get_memory(self):
         return await self._http.request("GET", "/v1/memory")
 
-    async def get_recipe_step(self, run_id, node_id):
-        return await self._http.request("GET", f"/v1/runs/{_part(run_id)}/recipe/steps/{_part(node_id)}")
-
-    async def guidance(self, run_id, *, data):
-        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/guidance", body={"data": data})
-
-    async def checkpoint(self, run_id, *, data):
-        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/checkpoint", body={"data": data})
-
-    async def get_decision(self, run_id, decision_id):
-        return await self._http.request("GET", f"/v1/runs/{_part(run_id)}/decisions/{_part(decision_id)}")
-
-    async def get_trace(self, run_id):
-        return await self._http.request("GET", f"/v1/runs/{_part(run_id)}/trace")
-
-    async def next_step(self, run_id):
-        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/steps/next")
-
-    async def submit_step(self, run_id, attempt_id, *, attempt_token, outputs, decision_id=None, actual_action_id=None):
-        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/steps/{_part(attempt_id)}/submit",
-                                        body=_step_body(attempt_token, outputs, decision_id, actual_action_id))
-
-    async def complete_guided(self, run_id):
-        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/complete")
-
-    async def get_events(self, run_id):
-        return await self._http.request("GET", f"/v1/runs/{_part(run_id)}/events")
 
     async def artifact(self, *, name, content):
         validate_artifact(name, content)
         return await self._http.request("POST", "/v1/artifacts", body={"name": name, "content": content})
-
-    async def prepare(self, *, objective, key, task_family="general", input_artifact_ids=None, **options):
-        body = _prepare_body(objective, task_family, input_artifact_ids, options)
-        return await self._http.request("POST", "/v1/runs/prepare", body=body, key=_key(key))
-
-    async def get_run(self, run_id):
-        return await self._http.request("GET", f"/v1/runs/{_part(run_id)}")
-
-    async def session_events(self, run_id, events):
-        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/session-events", body={"events": events})
-
-    async def initial_inputs(self, run_id, artifact_ids):
-        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/initial-inputs", body={"artifact_ids": artifact_ids})
-
-    async def submit(self, run_id, *, data=None, key=None):
-        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/submit", body={"data": data or {}}, key=_key(key) if key is not None else None)
-
-    async def feedback(self, run_id, *, data, key=None):
-        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/feedback", body={"data": data}, key=_key(key) if key is not None else None)
-
-    async def improve(self, run_id, *, reason, key=None, feedback=None, model_api=None):
-        if not isinstance(reason, str) or not reason.strip():
-            raise ValueError("reason is required")
-        data, secrets = improvement_data(reason=reason, feedback=feedback, model_api=model_api)
-        options = {"sensitive_values": secrets} if secrets else {}
-        return await self._http.request("POST", f"/v1/runs/{_part(run_id)}/improvements", body={"data": data}, key=_key(key) if key is not None else None, **options)
-
-    async def get_improvement(self, job_id):
-        return await self._http.request("GET", f"/v1/improvements/{_part(job_id)}")
-
-    async def resume_improvement(self, job_id, *, model_api=None):
-        if model_api is None:
-            return await self._http.request("POST", f"/v1/improvements/{_part(job_id)}/resume")
-        data, secrets = improvement_data(model_api=model_api)
-        return await self._http.request("POST", f"/v1/improvements/{_part(job_id)}/resume", body={"data": data}, sensitive_values=secrets)
-
-    async def confirm_attribution(self, job_id, *, candidate_id, candidate_sha256):
-        return await self._http.request("POST", f"/v1/improvements/{_part(job_id)}/attribution/confirm",
-                                        body={"data": {"candidate_id": candidate_id, "candidate_sha256": candidate_sha256}})
-
-    async def wait_improvement(self, job_id, *, timeout=300, initial_delay=2, max_delay=30):
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + _bounded_timeout(timeout)
-        delay = initial_delay
-        while True:
-            job = await self.get_improvement(job_id)
-            if job.status not in {"queued", "running", "awaiting_parent"}:
-                return job
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                raise TimeoutError(f"improvement {job_id} did not finish within {timeout} seconds")
-            await asyncio.sleep(min(delay, remaining))
-            delay = min(delay * 2, max_delay)
-
-
-class AdminAtoms:
-    def __init__(self, transport):
-        self._http = transport
-
-    async def bootstrap_bundle(self, *, task_family, bundle, reason):
-        return await self._http.request("POST", "/internal/admin/v1/recipes/bootstrap-bundle", body={"task_family": task_family, "bundle": bundle, "reason": reason})
-
-    async def evaluate_decision(self, run_id, decision_id, *, evaluation):
-        return await self._http.request("POST", f"/internal/admin/v1/runs/{_part(run_id)}/decisions/{_part(decision_id)}/evaluations", body=evaluation)
-
-    async def evaluate_recipe(self, run_id, *, record, artifact_id, content_hash):
-        return await self._http.request("POST", f"/internal/admin/v1/runs/{_part(run_id)}/recipe-evaluation", body={"record": record, "artifact_id": artifact_id, "content_hash": content_hash})
-
-    async def publish(self, job_id, *, expected_revision, reason):
-        if not isinstance(reason, str) or not reason.strip():
-            raise ValueError("reason is required")
-        return await self._http.request(
-            "POST", f"/internal/admin/v1/improvements/{_part(job_id)}/publish",
-            body={"expected_revision": expected_revision, "reason": reason},
-        )
-
-
-class _AdminClient:
-    def __init__(self, transport):
-        self.atoms = AdminAtoms(transport)
 
 
 class SyncAtoms(SyncWorkflowAtoms, SyncDocumentAtoms):
@@ -235,12 +107,11 @@ class SyncAtoms(SyncWorkflowAtoms, SyncDocumentAtoms):
 
     def recall_context(self, *, query, task_family="general", token_budget=1000):
         """Read Recipe and Memory without creating a Run; freeze per turn upstream."""
-        recipe = self.get_active_recipe(task_family=task_family)
+        page = self.list_recipe_candidates(status='candidate', limit=100)
+        recipe = {'status': 'not_found', 'candidates': page['items']}
         memory = self.memory_recall(query=query, token_budget=token_budget)
         return _recall_context(recipe, memory, query, task_family)
 
-    def get_active_recipe(self, *, task_family="general"):
-        return self._http.request("GET", "/v1/recipes/active?" + urlencode({"task_family": task_family}))
 
     def memory_recall(self, *, query, token_budget=1000):
         return self._http.request("POST", "/v1/memory/recall", body={"query": query, "token_budget": _bounded_integer(token_budget, name="token_budget", minimum=1, maximum=8000)})
@@ -261,53 +132,10 @@ class SyncAtoms(SyncWorkflowAtoms, SyncDocumentAtoms):
     def get_memory(self):
         return self._http.request("GET", "/v1/memory")
 
-    def get_recipe_step(self, run_id, node_id):
-        return self._http.request("GET", f"/v1/runs/{_part(run_id)}/recipe/steps/{_part(node_id)}")
-
-    def guidance(self, run_id, *, data):
-        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/guidance", body={"data": data})
-
-    def checkpoint(self, run_id, *, data):
-        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/checkpoint", body={"data": data})
-
-    def get_decision(self, run_id, decision_id):
-        return self._http.request("GET", f"/v1/runs/{_part(run_id)}/decisions/{_part(decision_id)}")
-
-    def get_trace(self, run_id):
-        return self._http.request("GET", f"/v1/runs/{_part(run_id)}/trace")
-
-    def next_step(self, run_id):
-        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/steps/next")
-
-    def submit_step(self, run_id, attempt_id, *, attempt_token, outputs, decision_id=None, actual_action_id=None):
-        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/steps/{_part(attempt_id)}/submit",
-                                  body=_step_body(attempt_token, outputs, decision_id, actual_action_id))
-
-    def complete_guided(self, run_id):
-        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/complete")
-
-    def get_events(self, run_id):
-        return self._http.request("GET", f"/v1/runs/{_part(run_id)}/events")
 
     def artifact(self, *, name, content):
         validate_artifact(name, content)
         return self._http.request("POST", "/v1/artifacts", body={"name": name, "content": content})
-
-    def prepare(self, *, objective, key, task_family="general", input_artifact_ids=None, **options):
-        body = _prepare_body(objective, task_family, input_artifact_ids, options)
-        return self._http.request("POST", "/v1/runs/prepare", body=body, key=_key(key))
-
-    def get_run(self, run_id):
-        return self._http.request("GET", f"/v1/runs/{_part(run_id)}")
-
-    def session_events(self, run_id, events):
-        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/session-events", body={"events": events})
-
-    def initial_inputs(self, run_id, artifact_ids):
-        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/initial-inputs", body={"artifact_ids": artifact_ids})
-
-    def submit(self, run_id, *, data=None, key=None):
-        return self._http.request("POST", f"/v1/runs/{_part(run_id)}/submit", body={"data": data or {}}, key=_key(key) if key is not None else None)
 
 
 class CoSensClient:
@@ -315,16 +143,13 @@ class CoSensClient:
         self._service = resolve_service(region)
         api_key = resolve_api_key(api_key, self._service)
         self._transport = AsyncTransport(api_key=api_key, transport=_http_transport, service=self._service)
-        self._admin_transport = AsyncTransport(api_key=api_key, transport=_http_transport, service=self._service)
         self._sync_transport = SyncTransport(api_key=api_key, transport=_http_transport, service=self._service)
         self.atoms = AsyncAtoms(self._transport)
         self.sync_atoms = SyncAtoms(self._sync_transport)
-        self.admin = _AdminClient(self._admin_transport)
         self.state_path = state_path
 
     async def aclose(self):
         await self._transport.aclose()
-        await self._admin_transport.aclose()
         self._sync_transport.close()
 
     async def start(self, session_context, *, phase="prepare", mode="auto", request_key=None, authorize=None, recipe_id=None, model_api=None, include_memory=False):

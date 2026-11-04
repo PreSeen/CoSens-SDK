@@ -3,7 +3,6 @@ import asyncio
 from copy import deepcopy
 import json
 
-from . import auto_policy
 from .errors import RSIRecoveryRequired
 from .responses_adapter import inject, summary, terminal, tool_continuation, user_text
 from .workflow import freeze_recall_context
@@ -29,15 +28,9 @@ class AutoExecution:
                 raise
         return response
 
-    def _plan_learning(self, record):
-        context = {key: record.get(key) for key in (
-            'source', 'feedback', 'used_recipe_id', 'used_recipe_version', 'used_recipe_candidate_id')}
-        return auto_policy.parse(self._auto_model(record['turn_id'], auto_policy.request(context)))
-
     def _lookup_auto(self, state, kwargs):
         atoms = self.client.sync_atoms
-        # Workflow candidates carry lineage and can be revised. The legacy public
-        # active-Recipe registry belongs to the opt-out Run compatibility path.
+        # Select only the usable current version of each Recipe chain.
         page = atoms.list_recipe_candidates(limit=100, status='candidate')
         items = page.get('items')
         if not isinstance(items, list):
@@ -117,7 +110,13 @@ class AutoExecution:
                 'request': kwargs.get('messages') or kwargs.get('input') or [],
                 'session': snapshot.items if snapshot else [],
                 'instructions': kwargs.get('instructions'), 'tools': kwargs.get('tools', [])})
-        if decision['activate'] and not state.get('execution_id'):
+        feedback_target = self.turns.get(decision.get('feedback_turn_id')) if decision.get('feedback_turn_id') else None
+        revision_execution = None
+        if feedback_target and not state.get('execution_id'):
+            revision_execution = atoms.start_revision(feedback_target['revision_id'], key='auto-revision:' + state['turn_id'])
+            state['task_id'] = feedback_target['task_id']
+            self._save(state)
+        if (decision['activate'] or feedback_target) and not state.get('execution_id'):
             if not state.get('task_id'):
                 ref = self._auto_artifact(state, 'input_artifact', json.dumps({
                     'objective': state['objective'], 'messages': state['agent_context'],
@@ -134,7 +133,7 @@ class AutoExecution:
                 options['recipe_id'] = state['used_recipe_id']
             if self.auto_learning.model_api is not None:
                 options['model_api'] = self.auto_learning.model_api
-            execution = atoms.start_execution(state['task_id'], key='auto-execution:' + state['turn_id'], **options)
+            execution = revision_execution or atoms.start_execution(state['task_id'], key='auto-execution:' + state['turn_id'], **options)
             if execution.get('status') != 'awaiting_execution' or not execution.get('execution_id') or not execution.get('request_sha256'):
                 raise RSIRecoveryRequired('Auto execution is not ready')
             # Verify the service bound the same immutable method we will inject.

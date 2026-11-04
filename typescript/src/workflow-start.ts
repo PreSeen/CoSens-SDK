@@ -5,11 +5,11 @@ import type { BusinessModelAPI } from './model-api.js';
 import { RSIApprovalUnavailable, RSIRecoveryRequired } from './errors.js';
 import { requestKey } from './http.js';
 
-export type WorkflowPhase = 'prepare' | 'analyze' | 'attribute' | 'improve' | 'revise' | 'recipe' | 'verify';
+export type WorkflowPhase = 'prepare' | 'revise' | 'recipe';
 export interface WorkflowSnapshot {
   task?: { source: 'new_task' | 'external_artifact'; objective?: string; artifacts?: WorkflowArtifactRef[]; self_contained?: boolean };
-  task_id?: string; revision_id?: string; attribution_id?: string; recipe_candidate_id?: string;
-  feedback?: string; include_memory?: boolean;
+  task_id?: string; revision_id?: string; recipe_candidate_id?: string;
+  feedback?: string;
 }
 export interface WorkflowStartOptions {
   phase?: WorkflowPhase; mode?: 'auto' | 'approval' | 'disable'; requestKey?: string;
@@ -52,11 +52,7 @@ export async function startWorkflow(atoms: Atoms, snapshot: WorkflowSnapshot | s
       execution_id: execution?.execution_id, request_sha256: execution?.request_sha256,
       execution_request: execution?.request, execution };
   }
-  if (phase === 'analyze') return atoms.startExternalAnalysis(snapshot.task_id!, { key: stable, modelApi });
-  if (phase === 'attribute') return atoms.startAttribution(snapshot.revision_id!, { feedback: snapshot.feedback, key: stable, modelApi });
-  if (phase === 'improve') return atoms.improveTask(snapshot.task_id!, { revisionId: snapshot.revision_id!, feedback: snapshot.feedback!, key: stable, modelApi });
-  if (phase === 'revise') return atoms.startRevision(snapshot.revision_id!, { attributionId: snapshot.attribution_id!, key: stable });
-  if (phase === 'recipe') return atoms.startRecipeCandidate(snapshot.task_id!, { revisionId: snapshot.revision_id!, includeMemory: snapshot.include_memory, key: stable, modelApi });
-  if (phase === 'verify') return atoms.startVerification(snapshot.recipe_candidate_id!, { key: stable });
-  throw new RSIRecoveryRequired('phase must be prepare, analyze, attribute, improve, revise, recipe or verify');
+  if(phase==='revise')return atoms.startRevision(snapshot.revision_id!,{key:stable});
+  if(phase==='recipe')return atoms.startRecipeCandidate(snapshot.task_id!,{revisionId:snapshot.revision_id!,key:stable,modelApi});
+  throw new RSIRecoveryRequired('phase must be prepare, revise or recipe');
 }

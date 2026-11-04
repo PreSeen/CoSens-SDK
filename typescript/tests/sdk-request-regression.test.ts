@@ -32,12 +32,10 @@ test('R02 oversized key is rejected before sending', async t => {
   assert.equal(seen.length, 0);
 });
 
-test('R03 explicit empty optional key is not silently omitted', async t => {
-  const { a, seen } = sdk(t);
-  for (const call of [() => a.submit('run-1', { key: '' }), () => a.feedback('run-1', { data: {}, key: '' }), () => a.improve('run-1', { reason: 'revise', key: '' })]) {
-    await assert.rejects(async () => call(), /key/);
-  }
-  assert.equal(seen.length, 0);
+test('R03 empty generation keys are rejected before sending',async t=>{
+ const {a,seen}=sdk(t);
+ await assert.rejects(async()=>a.startRecipeCandidate('task',{revisionId:'revision',key:''}),/key/);
+ assert.equal(seen.length,0);
 });
 
 test('R04 control characters in keys are rejected before sending', async t => {
@@ -60,7 +58,7 @@ test('R06 key does not leak into following read request', async t => {
   const { a, seen } = sdk(t);
   await a.startExecution('task-1', { key: 'execution-key' });
   await a.getTask('task-1');
-  await a.submit('run-1');
+  await a.getRevision('revision-1');
   assert.equal(seen.length, 3);
   assert.equal(seen[0]!.headers.get('idempotency-key'), 'execution-key');
   assert.ok(seen.slice(1).every(r => r.headers.get('idempotency-key') === null));

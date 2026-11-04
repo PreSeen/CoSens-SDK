@@ -1,18 +1,10 @@
-"""Explicit business-model connection for server-side improvement jobs."""
+"""Explicit business-model connection for server-side Recipe generation."""
 import math
 from urllib.parse import urlsplit
 
 
-def improvement_data(*, reason=None, feedback=None, model_api=None):
+def model_connection_data(*, model_api=None):
     data = {}
-    if reason is not None:
-        if not isinstance(reason, str) or not reason.strip() or len(reason) > 4000:
-            raise ValueError("reason must be nonempty text of at most 4000 characters")
-        data["reason"] = reason
-    if feedback is not None:
-        if not isinstance(feedback, str) or not feedback.strip() or len(feedback) > 4000:
-            raise ValueError("feedback must be nonempty text of at most 4000 characters")
-        data["feedback"] = feedback
     if model_api is None:
         return data, ()
     if not isinstance(model_api, dict) or set(model_api) - {"base_url", "model", "api_key", "temperature", "max_tokens", "friday_auth_type"}:

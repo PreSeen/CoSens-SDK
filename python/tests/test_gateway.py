@@ -19,18 +19,18 @@ async def test_gateway_retains_service_paths_queries_and_headers_for_both_transp
     sync = SyncTransport(api_key="test-gateway", transport=httpx.MockTransport(server))
     async_transport = AsyncTransport(api_key="test-gateway", transport=httpx.MockTransport(server))
     try:
-        sync.request("GET", "/v1/runs/r1?include_context=true")
-        await async_transport.request("POST", "/v1/runs/prepare", body={"objective": "task"}, key="turn-key")
+        sync.request("GET", "/v1/tasks/r1?include_context=true")
+        await async_transport.request("POST", "/v1/tasks", body={"objective": "task"}, key="turn-key")
         async with CoSensClient(api_key="test-gateway", _http_transport=httpx.MockTransport(server)) as client:
-            await client.admin.atoms.publish("j1", expected_revision=2, reason="verified")
+            await client.atoms.get_recipe_candidate("candidate1")
     finally:
         sync.close()
         await async_transport.aclose()
 
     assert [str(r.url) for r in requests] == [
-        "https://friday-rsi-cn.stardust-ai.com/api/v1/runs/r1?include_context=true",
-        "https://friday-rsi-cn.stardust-ai.com/api/v1/runs/prepare",
-        "https://friday-rsi-cn.stardust-ai.com/api/internal/admin/v1/improvements/j1/publish",
+        "https://friday-rsi-cn.stardust-ai.com/api/v1/tasks/r1?include_context=true",
+        "https://friday-rsi-cn.stardust-ai.com/api/v1/tasks",
+        "https://friday-rsi-cn.stardust-ai.com/api/v1/recipe-candidates/candidate1",
     ]
     assert [r.headers["authorization"] for r in requests] == ["Bearer test-gateway"] * 3
     assert [r.headers["x-auth-type"] for r in requests] == ["api_key"] * 3
@@ -46,8 +46,8 @@ async def test_gateway_key_is_the_only_caller_credential(monkeypatch):
         requests.append(request)
         return httpx.Response(200, json={"run_id": "r1", "status": "ready"})
     async with CoSensClient(api_key="test-gateway", _http_transport=httpx.MockTransport(server)) as client:
-        await client.atoms.prepare(objective="task", key="key")
-        client.sync_atoms.get_run("r1")
+        await client.atoms.create_task(source="new_task", objective="task", key="key")
+        client.sync_atoms.get_task("r1")
     assert len(requests) == 2
     assert all(r.headers["authorization"] == "Bearer test-gateway" and r.headers["x-auth-type"] == "api_key" and "api-key" not in r.headers for r in requests)
 
@@ -59,7 +59,7 @@ async def test_missing_gateway_key_fails_before_network(monkeypatch):
     requests = []
     async with CoSensClient( _http_transport=httpx.MockTransport(lambda r: (requests.append(r), httpx.Response(200, json={}))[1])) as client:
         with pytest.raises(ValueError, match="api_key"):
-            await client.atoms.get_run("r1")
+            await client.atoms.get_task("r1")
     assert requests == []
 
 
@@ -99,7 +99,7 @@ async def test_plain_text_gateway_rejection_retains_http_status_and_request_id()
         lambda r: httpx.Response(401, text="Unauthorized", headers={"x-request-id": "gateway-request"})
     )) as client:
         with pytest.raises(RSIHTTPError) as exc:
-            await client.atoms.get_run("r1")
+            await client.atoms.get_task("r1")
     assert exc.value.status_code == 401
     assert exc.value.request_id == "gateway-request"
 
@@ -110,7 +110,7 @@ async def test_gateway_error_text_redacts_the_friday_key():
         lambda r: httpx.Response(401, json={"error": {"code": "denied", "message": "Rejected Bearer secret-key"}})
     )) as client:
         with pytest.raises(RSIHTTPError) as exc:
-            await client.atoms.get_run("r1")
+            await client.atoms.get_task("r1")
     assert exc.value.status_code == 401
     assert exc.value.code == "denied"
     assert "secret-key" not in str(exc.value)
@@ -122,7 +122,7 @@ def test_invalid_key_is_rejected_without_network_or_secret_in_error(key):
     transport = SyncTransport(api_key=key, transport=httpx.MockTransport(lambda r: (requests.append(r), httpx.Response(200, json={}))[1]))
     try:
         with pytest.raises(ValueError, match="api_key"):
-            transport.request("GET", "/v1/runs/r1")
+            transport.request("GET", "/v1/tasks/r1")
         assert requests == []
     finally:
         transport.close()
@@ -135,9 +135,9 @@ async def test_documented_environment_key_and_explicit_key_precedence(monkeypatc
     headers = []
     transport = httpx.MockTransport(lambda r: (headers.append(r.headers["authorization"]), httpx.Response(200, json={}))[1])
     async with CoSensClient(_http_transport=transport) as client:
-        await client.atoms.get_run("r1")
+        await client.atoms.get_task("r1")
     async with CoSensClient(api_key="explicit-key", _http_transport=transport) as client:
-        await client.atoms.get_run("r1")
+        await client.atoms.get_task("r1")
     assert headers == ["Bearer environment-key", "Bearer explicit-key"]
 
 
@@ -163,9 +163,9 @@ async def test_gateway_rejects_redirect_without_forwarding_key(asynchronous):
     try:
         with pytest.raises(RSIHTTPError) as exc:
             if asynchronous:
-                await transport.request("GET", "/v1/runs/r1")
+                await transport.request("GET", "/v1/tasks/r1")
             else:
-                transport.request("GET", "/v1/runs/r1")
+                transport.request("GET", "/v1/tasks/r1")
         assert exc.value.status_code == 307
         assert len(requests) == 1
         assert requests[0].url.scheme == "https"
@@ -178,7 +178,7 @@ async def test_gateway_rejects_redirect_without_forwarding_key(asynchronous):
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("path", ["http://friday-rsi-cn.stardust-ai.com/api/v1/runs/r1", "https://other.example/collect", "//other.example/collect", "/api/v1/runs/r1", "/api?debug=1", "/v1\\runs\\r1"])
+@pytest.mark.parametrize("path", ["http://friday-rsi-cn.stardust-ai.com/api/v1/tasks/r1", "https://other.example/collect", "//other.example/collect", "/api/v1/tasks/r1", "/api?debug=1", "/v1\\runs\\r1"])
 @pytest.mark.asyncio
 async def test_gateway_never_sends_key_to_absolute_or_external_paths(asynchronous, path):
     requests = []

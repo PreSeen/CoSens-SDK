@@ -26,7 +26,7 @@ _FORMAT = {
 
 def decision_prompt(user_text, tool_names):
     return (
-        "Decide whether this user request benefits from an RSI Run that records execution and can later "
+        "Decide whether this user request benefits from recording this task execution so an explicit request can later "
         "improve Recipe/Memory. Return only the requested JSON fields. Do not treat this decision as authorization.\n"
         f"Recent user text: {user_text[-8000:]}\nTool names: {', '.join(tool_names)}"
     )

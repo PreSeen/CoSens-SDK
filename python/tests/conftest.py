@@ -21,4 +21,6 @@ def empty_recall(monkeypatch):
         return recall(self, query=query)
     monkeypatch.setattr(SyncAtoms, "recall_context", recall)
     monkeypatch.setattr(AsyncAtoms, "recall_context", arecall)
+    from cosens.auto_execution import AutoExecution
+    monkeypatch.setattr(AutoExecution, '_lookup_auto', lambda self,state,kwargs: recall(None,query=state['objective']))
     return queries
