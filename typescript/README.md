@@ -26,3 +26,19 @@ Submission and feedback only record evidence. Explicit generation creates or upd
 See [transparent capture](examples/01_transparent.ts), [Agent execution](examples/02_explicit_run.ts), and [atomic calls](examples/03_atomic.ts). Use `CoSensClient.atoms` for Task, Execution, Revision, feedback, Recipe, Session and Memory operations. Keep the same request key when retrying an uncertain response.
 
 `npm run check` runs the build, type checks and current tests. For real local algorithm HTTP tests, set `COSENS_TEST_ALGORITHM_HTTP_URL` as described in the repository README.
+
+Recipe token budgets can be supplied as `maxCompletionTokens`:
+
+```ts
+await client.atoms.startRecipeCandidate(taskId, {
+  revisionId, key: 'confirmed-v1', maxCompletionTokens: 200000,
+});
+await wrapped.cosens.generateRecipe({ turnId, maxCompletionTokens: 200000 });
+await client.atoms.resumeRecipeCandidate(candidateId, { maxCompletionTokens: 300000 });
+```
+
+The value must be an integer from 1 to 1,000,000. The upgraded algorithm service defaults
+new candidates to 200,000 and stores the setting per candidate for attribution and Recipe
+generation. Resume preserves it unless explicitly overridden. Upstream model limits still
+apply. The old positional model string on `resumeRecipeCandidate(id, model)` remains
+supported. Older algorithm servers reject the new field; upgrade the server first.

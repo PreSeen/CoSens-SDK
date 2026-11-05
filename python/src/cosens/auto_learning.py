@@ -8,6 +8,7 @@ import math
 from .atoms import CoSensClient
 from .errors import RSIRecoveryRequired
 from .state import TurnStore
+from .workflow_atoms import _completion_tokens
 
 
 @dataclass(frozen=True)
@@ -58,16 +59,26 @@ class LearningCoordinator:
         self.store.put(self._key(turn_id),value)
         return value
 
-    def generate(self, turn_id, request_key=None):
+    def generate(self, turn_id, request_key=None, max_completion_tokens=None):
         """Calling this is the host's explicit confirmation signal."""
+        _completion_tokens(max_completion_tokens)
         value=self._record(turn_id)
         key=request_key or value.get('request_key') or 'explicit-generation:'+turn_id
+        budget = max_completion_tokens
+        if key == value.get('request_key'):
+            previous_budget = value.get('request_max_completion_tokens', value.get('max_completion_tokens'))
+            if budget is None:
+                budget = previous_budget
+            elif previous_budget != budget:
+                raise ValueError('request key reused with a different max_completion_tokens')
         if value.get('recipe_candidate_id') and key==value.get('request_key'):
             return value
-        value.update(request_key=key,state='request_pending',reason='explicit_generation_requested')
+        value.update(request_key=key,state='request_pending',reason='explicit_generation_requested',max_completion_tokens=budget,request_max_completion_tokens=budget)
         self.store.put(self._key(turn_id),value)
-        receipt=self.atoms.start_recipe_candidate(value['task_id'],revision_id=value['revision_id'],key=key)
+        options = {'max_completion_tokens': budget} if budget is not None else {}
+        receipt=self.atoms.start_recipe_candidate(value['task_id'],revision_id=value['revision_id'],key=key,**options)
         value.update(recipe_candidate_id=receipt['recipe_candidate_id'],state=receipt['status'],
+                     max_completion_tokens=receipt.get('max_completion_tokens',budget),
                      action='revise' if receipt.get('parent_candidate_id') else 'create')
         self.store.put(self._key(turn_id),value)
         return value
@@ -77,21 +88,28 @@ class LearningCoordinator:
         if not value.get('recipe_candidate_id'):
             return value
         candidate=self.atoms.get_recipe_candidate(value['recipe_candidate_id'])
+        if candidate.get('max_completion_tokens') is not None:
+            value['max_completion_tokens'] = candidate['max_completion_tokens']
         value.update(recipe=deepcopy(candidate),state='completed' if candidate['status']=='candidate' else candidate['status'])
         self.store.put(self._key(turn_id),value)
         return value
 
-    def resume(self,turn_id):
+    def resume(self,turn_id,max_completion_tokens=None):
+        _completion_tokens(max_completion_tokens)
         value=self._record(turn_id)
         if value['state']=='awaiting_confirmation':
             return value
         if not value.get('recipe_candidate_id'):
-            return self.generate(turn_id,value['request_key'])
+            return self.generate(turn_id,value['request_key'],max_completion_tokens if max_completion_tokens is not None else value.get('request_max_completion_tokens'))
         value=self._refresh(turn_id)
         if value['state'] in {'failed','interrupted','awaiting_runner'}:
-            self.atoms.resume_recipe_candidate(value['recipe_candidate_id'])
+            options = {'max_completion_tokens': max_completion_tokens} if max_completion_tokens is not None else {}
+            receipt = self.atoms.resume_recipe_candidate(value['recipe_candidate_id'], **options)
+            value['max_completion_tokens'] = receipt.get('max_completion_tokens', max_completion_tokens if max_completion_tokens is not None else value.get('max_completion_tokens'))
             value['state']='queued'
             self.store.put(self._key(turn_id),value)
+        elif max_completion_tokens is not None and max_completion_tokens != value.get('max_completion_tokens'):
+            raise ValueError('cannot change the completion budget of an active or completed candidate')
         return value
 
     def wait(self,turn_id,timeout=None):

@@ -34,7 +34,7 @@ export interface CoSensProxyStatus {
   getTurn(id: string | null): Turn | undefined;
   reconcile(id: string): Promise<Turn>;
   feedback(message:string,options?:{turnId?:string;requestKey?:string}):Promise<any>;
-  generateRecipe(options?:{turnId?:string;requestKey?:string}):Promise<any>;
+  generateRecipe(options?:{turnId?:string;requestKey?:string;maxCompletionTokens?:number}):Promise<any>;
   scope<T>(ids: { sessionId?: string; turnId?: string }, fn: () => T): T;
 }
 export interface CoSensProxyExtras<T> { native: T; cosens: CoSensProxyStatus; close(): Promise<void> }
@@ -70,7 +70,7 @@ export class OpenAIWrapper {
       getTurn: id => id ? this.turns.get<Turn>(id) : undefined,
       reconcile: id => this.reconcile(id),
       feedback: async(message,options={})=>{const turn=this.turns.get<Turn>(options.turnId??this.cosens.lastTurnId!);if(!turn?.revisionId)throw new RSIRecoveryRequired('No recorded revision');return this.client.atoms.recordFeedback(turn.revisionId,{feedback:message,key:options.requestKey??'feedback:'+hash([turn.turnId,message])});},
-      generateRecipe:async(options={})=>{const turn=this.turns.get<Turn>(options.turnId??this.cosens.lastTurnId!);if(!turn?.revisionId)throw new RSIRecoveryRequired('No recorded revision');const receipt=await this.client.atoms.startRecipeCandidate(turn.taskId!,{revisionId:turn.revisionId,key:options.requestKey??'generation:'+turn.turnId});turn.recipeCandidateId=receipt.recipe_candidate_id;this.save(turn);return receipt;},
+      generateRecipe:async(options={})=>{const turn=this.turns.get<Turn>(options.turnId??this.cosens.lastTurnId!);if(!turn?.revisionId)throw new RSIRecoveryRequired('No recorded revision');const receipt=await this.client.atoms.startRecipeCandidate(turn.taskId!,{revisionId:turn.revisionId,key:options.requestKey??'generation:'+turn.turnId,maxCompletionTokens:options.maxCompletionTokens});turn.recipeCandidateId=receipt.recipe_candidate_id;this.save(turn);return receipt;},
       scope: (ids, fn) => this.scopeStore.run(ids, fn),
     };
   }

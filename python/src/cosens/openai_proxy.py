@@ -97,11 +97,11 @@ class _Status:
     def feedback(self, message, *, turn_id=None):
         return self._learning_call('feedback', self._learning_turn(turn_id), message)
 
-    def generate_recipe(self, turn_id=None, *, request_key=None):
-        return self._learning_call('generate', self._learning_turn(turn_id), request_key)
+    def generate_recipe(self, turn_id=None, *, request_key=None, max_completion_tokens=None):
+        return self._learning_call('generate', self._learning_turn(turn_id), request_key, max_completion_tokens)
 
-    def resume_learning(self, turn_id=None):
-        return self._learning_call('resume', self._learning_turn(turn_id))
+    def resume_learning(self, turn_id=None, *, max_completion_tokens=None):
+        return self._learning_call('resume', self._learning_turn(turn_id), max_completion_tokens)
 
     def wait_learning(self, turn_id=None, *, timeout=1800):
         return self._learning_call('wait', self._learning_turn(turn_id), timeout)

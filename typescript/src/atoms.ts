@@ -132,11 +132,11 @@ export class Atoms {
   }
   getRevision(revisionId: string) { return this.http.request('GET', `/v1/revisions/${pathPart(revisionId)}`); }
   startRevision(revisionId:string,{key}:{key:string}) {return this.http.request('POST',`/v1/revisions/${pathPart(revisionId)}/revisions`,{data:{}},requestKey(key));}
-  startRecipeCandidate(taskId:string,{revisionId,key,model}:{revisionId:string;key:string;model?:string}) {
-    return this.http.request('POST',`/v1/tasks/${pathPart(taskId)}/recipe-candidates`,{data:{revision_id:revisionId,...modelData(model)}},requestKey(key));
+  startRecipeCandidate(taskId:string,{revisionId,key,model,maxCompletionTokens}:{revisionId:string;key:string;model?:string;maxCompletionTokens?:number}) {
+    return this.http.request('POST',`/v1/tasks/${pathPart(taskId)}/recipe-candidates`,{data:{revision_id:revisionId,...modelData(model),...(maxCompletionTokens===undefined?{}:{max_completion_tokens:boundedInteger(maxCompletionTokens,'maxCompletionTokens',1_000_000)})}},requestKey(key));
   }
   getRecipeCandidate(recipeId:string){return this.http.request('GET',`/v1/recipe-candidates/${pathPart(recipeId)}`);}
-  resumeRecipeCandidate(recipeId:string,model?:string){const data=modelData(model);return this.http.request('POST',`/v1/recipe-candidates/${pathPart(recipeId)}/resume`,Object.keys(data).length?{data}:undefined);}
+  resumeRecipeCandidate(recipeId:string,options?:string|{model?:string;maxCompletionTokens?:number}){const {model,maxCompletionTokens}=typeof options==='string'?{model:options}:options??{};const data={...modelData(model),...(maxCompletionTokens===undefined?{}:{max_completion_tokens:boundedInteger(maxCompletionTokens,'maxCompletionTokens',1_000_000)})};return this.http.request('POST',`/v1/recipe-candidates/${pathPart(recipeId)}/resume`,Object.keys(data).length?{data}:undefined);}
 
   listTasks({limit=20,cursor}:{limit?:number;cursor?:string}={}) {return this.http.request('GET','/v1/tasks?'+new URLSearchParams({limit:String(limit),...(cursor?{cursor}:{})}));}
   recordFeedback(revisionId:string,{feedback,key}:{feedback:string;key:string}) {return this.http.request('POST',`/v1/revisions/${pathPart(revisionId)}/feedback`,{feedback},requestKey(key));}

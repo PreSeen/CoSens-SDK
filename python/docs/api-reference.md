@@ -9,7 +9,7 @@
 | Prepare/read execution | `start_execution`, `get_execution` |
 | Submit/read revision | `submit_execution`, `get_revision` |
 | Feedback/correction | `record_feedback`, `start_revision` |
-| Explicit Recipe generation/update | `start_recipe_candidate(task_id, revision_id=..., key=..., model=...)` |
+| Explicit Recipe generation/update | `start_recipe_candidate(task_id, revision_id=..., key=..., model=..., max_completion_tokens=...)` |
 | Read/list/resume generation | `get_recipe_candidate`, `list_recipe_candidates`, `resume_recipe_candidate` |
 | Associated Recipe/version chain | `get_task_recipe`, `get_recipe_versions` |
 | Poll generation | `wait_workflow_job("recipe_candidate", id)` |
@@ -21,3 +21,22 @@ Call generation only after external artifact confirmation. It creates V1 if no R
 `create_task` requires `source="new_task"` or `source="external_artifact"`. `start_revision` takes the previous revision and a request key, without an attribution ID. `submit_execution` takes the exact frozen request SHA, actual outcome, artifacts and optional events. Stable keys and event IDs are required for reliable retries. The public model ID is supplied with `model`. Model calls reuse the existing Authorization API Key, with the gateway URL and auth type determined internally. There is no `model_api` connection object or second credential.
 
 Current HTTP and MCP schemas are supplied by the algorithm service. Old Run, attribution, acceptance, rubric, learning-job and administrative Recipe publication operations are absent.
+
+### Recipe completion budget
+
+`start_recipe_candidate(..., max_completion_tokens=200000)` and
+`resume_recipe_candidate(..., max_completion_tokens=300000)` accept an optional integer
+from 1 through 1,000,000. Omitting it leaves the initial default to the algorithm service
+(200,000 in the updated service); a resumed candidate keeps its stored budget unless
+explicitly overridden. The same budget applies to both feedback attribution and Recipe
+creation/update. Model/gateway limits still apply; an accepted SDK value is not a promise
+that every upstream model supports it.
+
+The sync/async auto wrapper exposes the same option on
+`client.cosens.generate_recipe(turn_id, max_completion_tokens=200000)` and
+`client.cosens.resume_learning(turn_id, max_completion_tokens=300000)`. Task/Agent Runner
+wrappers forward it from `generate_recipe` as well. It does not change business response
+limits or `decision_max_output_tokens`. Reusing a generation key with a different explicit
+budget is rejected; use resume to adjust a failed candidate, or a new generation key for
+a new version. The Recipe service must be upgraded before using this field; older servers
+reject unknown request fields. Published packages are not updated by a source checkout.

@@ -21,6 +21,19 @@ def _model_data(model):
     return {'model': model.strip()}
 
 
+def _completion_tokens(value):
+    if value is not None and (type(value) is not int or not 1 <= value <= 1_000_000):
+        raise ValueError('max_completion_tokens must be an integer from 1 to 1000000')
+    return value
+
+
+def _recipe_data(model, max_completion_tokens):
+    data = _model_data(model)
+    if _completion_tokens(max_completion_tokens) is not None:
+        data['max_completion_tokens'] = max_completion_tokens
+    return data
+
+
 _ROLES = {"original_input", "submitted_output", "acceptance", "external_trace"}
 _JOB_STATES = {
     "recipe_candidate": {"queued", "running", "awaiting_runner", "awaiting_parent", "awaiting_material", "candidate", "failed", "interrupted"},
@@ -184,8 +197,8 @@ class AsyncWorkflowAtoms:
                                         body={"data": {}}, key=stable_key(key))
 
 
-    async def start_recipe_candidate(self, task_id, *, revision_id, key, model=None):
-        data = _model_data(model)
+    async def start_recipe_candidate(self, task_id, *, revision_id, key, model=None, max_completion_tokens=None):
+        data = _recipe_data(model, max_completion_tokens)
         data.update(revision_id=revision_id)
         return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/recipe-candidates",
                                         body={"data": data}, key=stable_key(key))
@@ -193,8 +206,8 @@ class AsyncWorkflowAtoms:
     async def get_recipe_candidate(self, recipe_id):
         return await self._http.request("GET", f"/v1/recipe-candidates/{path_part(recipe_id)}")
 
-    async def resume_recipe_candidate(self, recipe_id, *, model=None):
-        data = _model_data(model)
+    async def resume_recipe_candidate(self, recipe_id, *, model=None, max_completion_tokens=None):
+        data = _recipe_data(model, max_completion_tokens)
         return await self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/resume", body={"data": data} if data else None)
 
     async def list_tasks(self, *, limit=20, cursor=None):
@@ -286,8 +299,8 @@ class SyncWorkflowAtoms:
                                   body={"data": {}}, key=stable_key(key))
 
 
-    def start_recipe_candidate(self, task_id, *, revision_id, key, model=None):
-        data = _model_data(model)
+    def start_recipe_candidate(self, task_id, *, revision_id, key, model=None, max_completion_tokens=None):
+        data = _recipe_data(model, max_completion_tokens)
         data.update(revision_id=revision_id)
         return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/recipe-candidates",
                                   body={"data": data}, key=stable_key(key))
@@ -295,8 +308,8 @@ class SyncWorkflowAtoms:
     def get_recipe_candidate(self, recipe_id):
         return self._http.request("GET", f"/v1/recipe-candidates/{path_part(recipe_id)}")
 
-    def resume_recipe_candidate(self, recipe_id, *, model=None):
-        data = _model_data(model)
+    def resume_recipe_candidate(self, recipe_id, *, model=None, max_completion_tokens=None):
+        data = _recipe_data(model, max_completion_tokens)
         return self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/resume", body={"data": data} if data else None)
 
     def list_tasks(self, *, limit=20, cursor=None):
