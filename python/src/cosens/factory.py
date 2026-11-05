@@ -5,7 +5,7 @@ from .openai_proxy import CoSensOpenAIProxy, _Runtime
 from .task_runner import TaskWorkflowRunner
 
 
-def cosens(native, *, api_key=None, mode=None, decision_model=None, decision_timeout=5, decision_max_output_tokens=None, auto_learning=None, session=None, state_path=None, result_adapter=None, trace_adapter=None, on_rsi_event=None, _http_transport=None, _runner=None):
+def cosens(native, *, api_key=None, mode=None, decision_model=None, decision_timeout=60, decision_max_output_tokens=None, auto_learning=None, session=None, state_path=None, result_adapter=None, trace_adapter=None, on_rsi_event=None, _http_transport=None, _runner=None):
     if mode is not None and mode not in {"auto", "approval", "disable"}:
         raise ValueError("mode must be auto, approval, or disable")
     if hasattr(native, "cosens") and hasattr(native, "native"):

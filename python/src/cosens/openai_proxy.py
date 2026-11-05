@@ -397,7 +397,7 @@ class _DeferredAsyncManager:
 
 
 class _Runtime(AutoExecution):
-    def __init__(self, *, mode, decision_model, session, api_key, state_path, http_transport, asynchronous=False, decision_timeout=5, decision_max_output_tokens=None, auto_learning=None):
+    def __init__(self, *, mode, decision_model, session, api_key, state_path, http_transport, asynchronous=False, decision_timeout=60, decision_max_output_tokens=None, auto_learning=None):
         if auto_learning is not None and auto_learning is not False and not isinstance(auto_learning, AutoLearning):
             raise TypeError('auto_learning must be AutoLearning, False, or None')
         if auto_learning not in (None, False) and mode != 'auto':
@@ -852,6 +852,9 @@ class _Runtime(AutoExecution):
     def _preflight_sync(self, native, path, kwargs):
         self._guard_request(kwargs,path)
         decision=self._decide_sync(native,path,kwargs)
+        if decision.get('capture') == 'decision_failed':
+            self.status.last_turn_id = None
+            return None, kwargs
         state,updated=self._setup_auto(decision,path,kwargs,native)
         self._policy_bindings[state['turn_id']]=(native,self._decision_model_for(kwargs),None)
         return state,updated
@@ -859,6 +862,9 @@ class _Runtime(AutoExecution):
     async def _preflight_async(self, native, path, kwargs):
         self._guard_request(kwargs,path)
         decision=await self._decide_async(native,path,kwargs)
+        if decision.get('capture') == 'decision_failed':
+            self.status.last_turn_id = None
+            return None, kwargs
         state,updated=await asyncio.to_thread(self._setup_auto,decision,path,kwargs,native,asyncio.get_running_loop())
         self._policy_bindings[state['turn_id']]=(native,self._decision_model_for(kwargs),asyncio.get_running_loop())
         return state,updated
@@ -889,6 +895,8 @@ class _Runtime(AutoExecution):
             self.status.rsi_capture = "unsupported"
             return method(*args, **kwargs)
         state, updated = self._preflight_sync(native, path, kwargs)
+        if state is None:
+            return method(**updated)
         try:
             response = method(**updated)
         except Exception as exc:
@@ -913,6 +921,8 @@ class _Runtime(AutoExecution):
             self.status.rsi_capture = "unsupported"
             return await method(*args, **kwargs)
         state, updated = await self._preflight_async(native, path, kwargs)
+        if state is None:
+            return await method(**updated)
         try:
             response = await method(**updated)
         except Exception as exc:

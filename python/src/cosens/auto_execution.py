@@ -98,7 +98,15 @@ class AutoExecution:
         self._save(state)
         atoms = self.client.sync_atoms
         if 'frozen_context' not in state:
-            context = self._lookup_auto(state, kwargs)
+            try:
+                context = self._lookup_auto(state, kwargs)
+            except Exception as error:
+                # No Task or Execution has been started yet. Preserve the
+                # caller's native request when read-only policy lookup fails.
+                state['capture'] = 'policy_failed'
+                state['policy_error_type'] = type(error).__name__
+                self._save(state)
+                return state, dict(kwargs)
             state['frozen_context'] = dict(context)
             recipe = context['recipe']
             if recipe.get('status') == 'matched':

@@ -68,7 +68,7 @@ def _request(user_text, tool_names, feedback_context):
     return prompt, output_format
 
 
-def decide_sync(native, model, user_text, tool_names, *, timeout=5, max_output_tokens=None, feedback_context=None):
+def decide_sync(native, model, user_text, tool_names, *, timeout=60, max_output_tokens=None, feedback_context=None):
     prompt, output_format = _request(user_text, tool_names, feedback_context)
     options = {} if max_output_tokens is None else {"max_output_tokens": max_output_tokens}
     response = structured_sync(native,
@@ -82,7 +82,7 @@ def decide_sync(native, model, user_text, tool_names, *, timeout=5, max_output_t
     return parse_decision(response, feedback_context=feedback_context)
 
 
-async def decide_async(native, model, user_text, tool_names, *, timeout=5, max_output_tokens=None, feedback_context=None):
+async def decide_async(native, model, user_text, tool_names, *, timeout=60, max_output_tokens=None, feedback_context=None):
     prompt, output_format = _request(user_text, tool_names, feedback_context)
     options = {} if max_output_tokens is None else {"max_output_tokens": max_output_tokens}
     response = await structured_async(native,

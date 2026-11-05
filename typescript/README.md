@@ -10,10 +10,15 @@ const turnId = client.cosens.lastTurnId;
 
 Set `COSENS_API_KEY` and optionally `COSENS_REGION=cn|us` (default `cn`). Both clients reuse this key. Use a public model ID from the selected regional gateway.
 
+`auto` uses a 60-second timeout for structured decisions by default; tune it with `decisionTimeoutMs`. If decision or read-only Recipe lookup fails, the native model request still runs without CoSens capture.
+
 From the application's artifact-confirmation handler:
 
 ```ts
-const receipt = await client.cosens.generateRecipe({ turnId, requestKey: 'confirmed-report-1' });
+const turn = client.cosens.getTurn(turnId);
+if (turn?.revisionId) {
+  const receipt = await client.cosens.generateRecipe({ turnId, requestKey: 'confirmed-report-1' });
+}
 ```
 
 Submission and feedback only record evidence. Explicit generation creates or updates the associated Recipe, recalls related Memory by default and analyzes feedback internally. There is no generation `includeMemory` option.
