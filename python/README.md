@@ -1,20 +1,48 @@
 # CoSens Python SDK
 
-Install with `pip install .` from this directory. Agent support: `pip install '.[agents]'`.
+CoSens records the tasks your application runs through an OpenAI client or an OpenAI Agents agent, and turns a confirmed result into a reusable Recipe.
+
+## Install
+
+```bash
+pip install cosens-sdk
+```
+
+For OpenAI Agents support: `pip install 'cosens-sdk[agents]'`. Requires Python 3.10+.
+
+## Configure
+
+| Variable | Read by | Value |
+| --- | --- | --- |
+| `COSENS_API_KEY` | SDK and your model client | Your CoSens API Key |
+| `COSENS_REGION` | SDK | `cn` (default) or `us`; the key must belong to that region |
+| `COSENS_MODEL_BASE_URL` | Your model client | The OpenAI-compatible model gateway for your region; for `us` it is `https://llm.cosens.ai/v1` |
+
+The SDK reads the process environment; load any `.env` file in your application. The model gateway for other regions and the model IDs you can use are listed in the [CoSens documentation](https://cosens.ai/docs/).
+
+## Wrap an OpenAI client
+
+Build a standard OpenAI client for your model gateway and pass it to `cosens(...)`:
 
 ```python
-from cosens import cosens, friday_gateway_client
+import os
 
-client = cosens(friday_gateway_client(), mode="auto")
+from openai import OpenAI
+from cosens import cosens
+
+model_client = OpenAI(base_url=os.environ["COSENS_MODEL_BASE_URL"], api_key=os.environ["COSENS_API_KEY"])
+client = cosens(model_client, mode="auto")
 result = client.responses.create(model="<public-model-id>", input="Produce a report")
 turn_id = client.cosens.last_turn_id
 ```
 
-Set `COSENS_API_KEY` and optionally `COSENS_REGION=cn|us` (default `cn`). Model and CoSens clients reuse the same Friday user API Key. The application loads `.env`; the SDK reads process environment. Use a model ID from the regional gateway catalog.
+The response is the native OpenAI result. `AsyncOpenAI` works the same way and exposes async CoSens calls.
 
-`auto` uses a 60-second timeout for its structured decision call by default. Pass `decision_timeout=<seconds>` to tune it for your gateway. If the decision or read-only Recipe lookup fails, the native model request still runs without CoSens capture.
+In `auto` mode the SDK first makes a short structured decision call through your client (Chat Completions with a JSON schema `response_format`), so the model must support structured output. The call uses a 60-second timeout by default; pass `decision_timeout=<seconds>` to tune it. If the decision or the read-only Recipe lookup fails, your request still runs without CoSens capture. A short request can be skipped (`activate: false`), leaving no Task or Revision.
 
-The response is the native OpenAI result. In `auto` mode, a short request can be skipped (`activate: false`), leaving no Task or Revision. Check that the turn has a submitted Revision before offering Recipe generation. After your application obtains user confirmation of that artifact, call from its confirmation handler:
+## Generate a Recipe after confirmation
+
+Check that the turn has a submitted Revision before offering Recipe generation. After your application obtains user confirmation of that artifact, call from its confirmation handler:
 
 ```python
 turn = client.cosens.get_turn(turn_id) if turn_id else None
@@ -22,8 +50,28 @@ if turn and turn.get("revision_id"):
     receipt = client.cosens.generate_recipe(turn_id, request_key="confirmed-report-1")
 ```
 
-This is the only generation action. `feedback` records feedback; it does not update a Recipe. Existing Recipes are updated through the same explicit generation API. Generation reads relevant Memory by default and performs attribution internally when feedback is present.
+This is the only generation action. It creates the first Recipe version or updates the associated Recipe, always reads relevant Memory, and performs feedback attribution internally. `feedback` records feedback; it does not update a Recipe.
 
-[Agent execution](examples/02_explicit_run.py) and [atomic calls](examples/03_atomic.py) follow the same rule. Async OpenAI clients expose async confirmation calls; atomic operations are available through `CoSensClient.atoms` (async) and `.sync_atoms` (sync). Keep stable idempotency keys across retries.
+## Run an OpenAI Agents agent
 
-[API reference](docs/api-reference.md). Run tests with `PYTHONPATH=src pytest tests`.
+```python
+import os
+
+from agents import Agent, set_default_openai_client
+from openai import AsyncOpenAI
+from cosens import cosens
+
+set_default_openai_client(AsyncOpenAI(base_url=os.environ["COSENS_MODEL_BASE_URL"], api_key=os.environ["COSENS_API_KEY"]))
+agent = Agent(name="assistant", instructions="Complete the requested task.", model="<public-model-id>")
+client = cosens(agent, mode="auto")
+result = await client.run(agent, "Produce a report")
+```
+
+## Atomic operations
+
+`CoSensClient().atoms` (async) and `.sync_atoms` (sync) expose Task, Execution, Revision, feedback, Recipe, Session and Memory operations directly. Keep stable idempotency keys across retries.
+
+## More
+
+- Documentation: https://cosens.ai/docs/
+- Source, examples and issues: https://github.com/PreSeen/CoSens-SDK

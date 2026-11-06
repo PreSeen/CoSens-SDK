@@ -1,10 +1,13 @@
-"""Agents and CoSens reuse COSENS_API_KEY through the regional model gateway."""
+"""Agents use a standard AsyncOpenAI client; COSENS_API_KEY authenticates both the model gateway and CoSens."""
+import os
+
 from agents import Agent, set_default_openai_client, set_tracing_disabled
-from cosens import cosens, friday_gateway_client
+from openai import AsyncOpenAI
+from cosens import cosens
 
 
 async def run_task(task, model):
-    set_default_openai_client(friday_gateway_client(asynchronous=True))
+    set_default_openai_client(AsyncOpenAI(base_url=os.environ["COSENS_MODEL_BASE_URL"], api_key=os.environ["COSENS_API_KEY"]))
     set_tracing_disabled(True)
     agent = Agent(name="assistant", instructions="Complete the requested task.", model=model)
     client = cosens(agent, mode="auto")

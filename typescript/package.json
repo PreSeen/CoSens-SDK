@@ -1,6 +1,23 @@
 {
   "name": "cosens-sdk",
   "version": "0.5.3",
+  "description": "CoSens TypeScript SDK: record OpenAI and OpenAI Agents executions and generate reusable Recipes",
+  "keywords": [
+    "cosens",
+    "openai",
+    "agents",
+    "llm",
+    "recipes"
+  ],
+  "homepage": "https://cosens.ai/docs/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PreSeen/CoSens-SDK.git",
+    "directory": "typescript"
+  },
+  "bugs": {
+    "url": "https://github.com/PreSeen/CoSens-SDK/issues"
+  },
   "type": "module",
   "files": [
     "dist/",
