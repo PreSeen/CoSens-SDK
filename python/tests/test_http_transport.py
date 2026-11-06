@@ -28,9 +28,9 @@ async def test_gateway_retains_service_paths_queries_and_headers_for_both_transp
         await async_transport.aclose()
 
     assert [str(r.url) for r in requests] == [
-        "https://friday-rsi-cn.stardust-ai.com/api/v1/tasks/r1?include_context=true",
-        "https://friday-rsi-cn.stardust-ai.com/api/v1/tasks",
-        "https://friday-rsi-cn.stardust-ai.com/api/v1/recipe-candidates/candidate1",
+        "https://rsi.cosens.ai/api/v1/tasks/r1?include_context=true",
+        "https://rsi.cosens.ai/api/v1/tasks",
+        "https://rsi.cosens.ai/api/v1/recipe-candidates/candidate1",
     ]
     assert [r.headers["authorization"] for r in requests] == ["Bearer test-gateway"] * 3
     assert [r.headers["x-auth-type"] for r in requests] == ["api_key"] * 3
@@ -168,7 +168,7 @@ async def test_gateway_rejects_redirect_without_forwarding_key(asynchronous):
         assert exc.value.status_code == 307
         assert len(requests) == 1
         assert requests[0].url.scheme == "https"
-        assert requests[0].url.host == "friday-rsi-cn.stardust-ai.com"
+        assert requests[0].url.host == "rsi.cosens.ai"
     finally:
         if asynchronous:
             await transport.aclose()
@@ -177,7 +177,7 @@ async def test_gateway_rejects_redirect_without_forwarding_key(asynchronous):
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("path", ["http://friday-rsi-cn.stardust-ai.com/api/v1/tasks/r1", "https://other.example/collect", "//other.example/collect", "/api/v1/tasks/r1", "/api?debug=1", "/v1\\runs\\r1"])
+@pytest.mark.parametrize("path", ["http://rsi.cosens.ai/api/v1/tasks/r1", "https://other.example/collect", "//other.example/collect", "/api/v1/tasks/r1", "/api?debug=1", "/v1\\runs\\r1"])
 @pytest.mark.asyncio
 async def test_gateway_never_sends_key_to_absolute_or_external_paths(asynchronous, path):
     requests = []

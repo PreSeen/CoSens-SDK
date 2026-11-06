@@ -15,10 +15,10 @@ For OpenAI Agents support: `pip install 'cosens-sdk[agents]'`. Requires Python 3
 | Variable | Read by | Value |
 | --- | --- | --- |
 | `COSENS_API_KEY` | SDK and your model client | Your CoSens API Key |
-| `COSENS_REGION` | SDK | `cn` (default) or `us`; the key must belong to that region |
-| `COSENS_MODEL_BASE_URL` | Your model client | The OpenAI-compatible model gateway for your region; for `us` it is `https://llm.cosens.ai/v1` |
+| `COSENS_REGION` | SDK | `us` (default and only supported value) |
+| `COSENS_MODEL_BASE_URL` | Your model client | `https://llm.cosens.ai/v1` |
 
-The SDK reads the process environment; load any `.env` file in your application. The model gateway for other regions and the model IDs you can use are listed in the [CoSens documentation](https://cosens.ai/docs/).
+The SDK reads the process environment; load any `.env` file in your application. The model IDs you can use are listed in the [CoSens documentation](https://cosens.ai/docs/).
 
 ## Wrap an OpenAI client
 

@@ -1,13 +1,12 @@
-export type Region = 'cn' | 'us';
+export type Region = 'us';
 export interface Service { region: Region; url: string; identity: string }
 const SERVICES: Record<Region, Service> = {
-  cn: { region: 'cn', url: 'https://friday-rsi-cn.stardust-ai.com/api', identity: 'friday-rsi-cn.stardust-ai.com/api' },
   us: { region: 'us', url: 'https://rsi.cosens.ai/api', identity: 'rsi.cosens.ai/api' },
 };
 
 export function resolveService(region?: string): Service {
-  const chosen = (region ?? process.env.COSENS_REGION ?? 'cn').trim().toLowerCase();
-  if (chosen !== 'cn' && chosen !== 'us') throw new TypeError('COSENS_REGION must be cn or us');
+  const chosen = (region ?? process.env.COSENS_REGION ?? 'us').trim().toLowerCase();
+  if (chosen !== 'us') throw new TypeError('COSENS_REGION must be us');
   return SERVICES[chosen];
 }
 
