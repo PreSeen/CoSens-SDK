@@ -97,6 +97,16 @@ class AutoExecution:
         state['capture'] = decision['capture']
         self._save(state)
         atoms = self.client.sync_atoms
+        feedback_target = self.turns.get(decision.get('feedback_turn_id')) if decision.get('feedback_turn_id') else None
+        if not decision['activate'] and not feedback_target and not state.get('execution_id'):
+            # A declined turn must not recall or inject context without an
+            # execution that records the method actually used by the host.
+            # Also discard context left by older SDKs on a continued noop turn.
+            for field in ('frozen_context', 'used_recipe_id', 'used_recipe_version', 'used_recipe_candidate_id'):
+                state.pop(field, None)
+            state['state'] = 'native_running'
+            self._save(state)
+            return state, dict(kwargs)
         if 'frozen_context' not in state:
             try:
                 context = self._lookup_auto(state, kwargs)
@@ -119,7 +129,6 @@ class AutoExecution:
                 'request': kwargs.get('messages') or kwargs.get('input') or [],
                 'session': snapshot.items if snapshot else [],
                 'instructions': kwargs.get('instructions'), 'tools': kwargs.get('tools', [])})
-        feedback_target = self.turns.get(decision.get('feedback_turn_id')) if decision.get('feedback_turn_id') else None
         revision_execution = None
         if feedback_target and not state.get('execution_id'):
             revision_execution = atoms.start_revision(feedback_target['revision_id'], key='auto-revision:' + state['turn_id'])
