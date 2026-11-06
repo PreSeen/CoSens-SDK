@@ -2,7 +2,9 @@
 import httpx
 import pytest
 
-from cosens import cosens, friday_gateway_client
+from openai import AsyncOpenAI, OpenAI
+
+from cosens import cosens
 from test_explicit_recipe_protocol import native_response
 
 
@@ -33,7 +35,7 @@ def test_auto_decision_timeout_configuration(monkeypatch, tmp_path, configured_t
             return httpx.Response(200, json={'items': []})
         return _unexpected_algorithm(request)
 
-    native = friday_gateway_client(api_key='test-only-gateway-key', region='us',
+    native = OpenAI(base_url='https://llm.cosens.ai/v1', api_key='test-only-gateway-key',
         http_client=httpx.Client(transport=httpx.MockTransport(native_response)))
     options = {} if configured_timeout is None else {'decision_timeout': configured_timeout}
     wrapped = cosens(native, mode='auto', api_key='test-only-gateway-key',
@@ -71,7 +73,7 @@ def test_auto_recipe_match_timeout_returns_native_response(tmp_path):
                 'when_not': '', 'steps': []}})
         return _unexpected_algorithm(request)
 
-    native = friday_gateway_client(api_key='test-only-gateway-key', region='us',
+    native = OpenAI(base_url='https://llm.cosens.ai/v1', api_key='test-only-gateway-key',
         http_client=httpx.Client(transport=httpx.MockTransport(gateway)))
     wrapped = cosens(native, mode='auto', api_key='test-only-gateway-key',
         state_path=tmp_path/'match.sqlite', _http_transport=httpx.MockTransport(algorithm))
@@ -86,7 +88,7 @@ def test_auto_recipe_match_timeout_returns_native_response(tmp_path):
 
 
 def test_auto_decision_timeout_returns_native_response(tmp_path):
-    native = friday_gateway_client(api_key='test-only-gateway-key', region='us',
+    native = OpenAI(base_url='https://llm.cosens.ai/v1', api_key='test-only-gateway-key',
         http_client=httpx.Client(transport=httpx.MockTransport(_gateway)))
     wrapped = cosens(native, mode='auto', api_key='test-only-gateway-key',
         state_path=tmp_path/'sync.sqlite', _http_transport=httpx.MockTransport(_unexpected_algorithm))
@@ -102,7 +104,7 @@ def test_auto_decision_timeout_returns_native_response(tmp_path):
 
 @pytest.mark.asyncio
 async def test_async_auto_decision_timeout_returns_native_response(tmp_path):
-    native = friday_gateway_client(api_key='test-only-gateway-key', region='us', asynchronous=True,
+    native = AsyncOpenAI(base_url='https://llm.cosens.ai/v1', api_key='test-only-gateway-key',
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(_gateway)))
     wrapped = cosens(native, mode='auto', api_key='test-only-gateway-key',
         state_path=tmp_path/'async.sqlite', _http_transport=httpx.MockTransport(_unexpected_algorithm))

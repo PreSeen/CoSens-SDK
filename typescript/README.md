@@ -1,18 +1,46 @@
 # CoSens TypeScript SDK
 
-```ts
-import { cosens, fridayGatewayClient } from 'cosens-sdk';
+CoSens records the tasks your application runs through an OpenAI client or an OpenAI Agents agent, and turns a confirmed result into a reusable Recipe.
 
-const client = cosens(fridayGatewayClient(), { mode: 'auto' });
+## Install
+
+```bash
+npm install cosens-sdk
+```
+
+Requires Node.js 22+. The package is ESM-only.
+
+## Configure
+
+| Variable | Read by | Value |
+| --- | --- | --- |
+| `COSENS_API_KEY` | SDK and your model client | Your CoSens API Key |
+| `COSENS_REGION` | SDK | `us` (default and only supported value) |
+| `COSENS_MODEL_BASE_URL` | Your model client | `https://llm.cosens.ai/v1` |
+
+The SDK reads the process environment; load any `.env` file in your application. The model IDs you can use are listed in the [CoSens documentation](https://cosens.ai/docs/).
+
+## Wrap an OpenAI client
+
+Build a standard OpenAI client for your model gateway and pass it to `cosens(...)`:
+
+```ts
+import OpenAI from 'openai';
+import { cosens } from 'cosens-sdk';
+
+const modelClient = new OpenAI({ baseURL: process.env.COSENS_MODEL_BASE_URL, apiKey: process.env.COSENS_API_KEY });
+const client = cosens(modelClient, { mode: 'auto' });
 const result = await client.responses.create({ model: '<public-model-id>', input: 'Produce a report' });
 const turnId = client.cosens.lastTurnId;
 ```
 
-Set `COSENS_API_KEY` and optionally `COSENS_REGION=cn|us` (default `cn`). Both clients reuse this key. Use a public model ID from the selected regional gateway.
+The response is the native OpenAI result.
 
-`auto` uses a 60-second timeout for structured decisions by default; tune it with `decisionTimeoutMs`. If decision or read-only Recipe lookup fails, the native model request still runs without CoSens capture.
+In `auto` mode the SDK first makes a short structured decision call through your client (Chat Completions with a JSON schema `response_format`), so the model must support structured output. The call uses a 60-second timeout by default; tune it with `decisionTimeoutMs`. If the decision or the read-only Recipe lookup fails, your request still runs without CoSens capture.
 
-From the application's artifact-confirmation handler:
+## Generate a Recipe after confirmation
+
+From your application's artifact-confirmation handler:
 
 ```ts
 const turn = client.cosens.getTurn(turnId);
@@ -23,9 +51,22 @@ if (turn?.revisionId) {
 
 Submission and feedback only record evidence. Explicit generation creates or updates the associated Recipe, recalls related Memory by default and analyzes feedback internally. There is no generation `includeMemory` option.
 
-See [transparent capture](examples/01_transparent.ts), [Agent execution](examples/02_explicit_run.ts), and [atomic calls](examples/03_atomic.ts). Use `CoSensClient.atoms` for Task, Execution, Revision, feedback, Recipe, Session and Memory operations. Keep the same request key when retrying an uncertain response.
+## Run an OpenAI Agents agent
 
-`npm run check` runs the build, type checks and current tests. For real local algorithm HTTP tests, set `COSENS_TEST_ALGORITHM_HTTP_URL` as described in the repository README.
+```ts
+import OpenAI from 'openai';
+import { Agent, setDefaultOpenAIClient } from '@openai/agents';
+import { CoSensAgentRunner } from 'cosens-sdk';
+
+setDefaultOpenAIClient(new OpenAI({ baseURL: process.env.COSENS_MODEL_BASE_URL, apiKey: process.env.COSENS_API_KEY }));
+const agent = new Agent({ name: 'assistant', instructions: 'Complete the requested task.', model: '<public-model-id>' });
+const runner = new CoSensAgentRunner(agent, { mode: 'auto' });
+const result = await runner.run(agent, 'Produce a report');
+```
+
+## Atomic operations
+
+Use `CoSensClient.atoms` for Task, Execution, Revision, feedback, Recipe, Session and Memory operations. Keep the same request key when retrying an uncertain response.
 
 Recipe token budgets can be supplied as `maxCompletionTokens`:
 
@@ -37,8 +78,9 @@ await wrapped.cosens.generateRecipe({ turnId, maxCompletionTokens: 200000 });
 await client.atoms.resumeRecipeCandidate(candidateId, { maxCompletionTokens: 300000 });
 ```
 
-The value must be an integer from 1 to 1,000,000. The upgraded algorithm service defaults
-new candidates to 200,000 and stores the setting per candidate for attribution and Recipe
-generation. Resume preserves it unless explicitly overridden. Upstream model limits still
-apply. The old positional model string on `resumeRecipeCandidate(id, model)` remains
-supported. Older algorithm servers reject the new field; upgrade the server first.
+The value must be an integer from 1 to 1,000,000. New candidates default to 200,000, and the setting is stored per candidate for attribution and Recipe generation. Resume preserves it unless explicitly overridden. Upstream model limits still apply. The positional form `resumeRecipeCandidate(id, model)` remains supported.
+
+## More
+
+- Documentation: https://cosens.ai/docs/
+- Source, examples and issues: https://github.com/PreSeen/CoSens-SDK

@@ -6,40 +6,39 @@ from cosens.session_cursor import CursorStore
 from cosens.state import TurnStore
 
 
-@pytest.mark.parametrize('region,host', [('cn','friday-rsi-cn.stardust-ai.com'),('us','rsi.cosens.ai')])
 @pytest.mark.asyncio
-async def test_region_routes_all_transports_and_freezes_at_client_creation(monkeypatch, region, host):
-    monkeypatch.setenv('COSENS_REGION',region)
+async def test_us_routes_all_transports_and_freezes_at_client_creation(monkeypatch):
+    monkeypatch.setenv('COSENS_REGION','us')
     requests=[]
     def server(request):
         requests.append(request)
         return httpx.Response(200,json={'status':'completed','run_id':'r1'})
     async with CoSensClient(api_key='regional-key',_http_transport=httpx.MockTransport(server)) as client:
-        monkeypatch.setenv('COSENS_REGION','us' if region=='cn' else 'cn')
+        monkeypatch.delenv('COSENS_REGION')
         client.sync_atoms.get_task('t1')
         await client.atoms.get_task('t1')
         await client.atoms.get_revision('revision1')
     assert [str(r.url) for r in requests]==[
-        f'https://{host}/api/v1/tasks/t1',f'https://{host}/api/v1/tasks/t1',
-        f'https://{host}/api/v1/revisions/revision1']
+        'https://rsi.cosens.ai/api/v1/tasks/t1','https://rsi.cosens.ai/api/v1/tasks/t1',
+        'https://rsi.cosens.ai/api/v1/revisions/revision1']
     assert all(r.headers['authorization']=='Bearer regional-key' for r in requests)
     assert all(not any(k.lower().replace('_','-')=='x-user-id' for k in r.headers) for r in requests)
 
 
-def test_unknown_region_is_rejected_before_any_client_is_created(monkeypatch):
-    monkeypatch.setenv('COSENS_REGION','https://untrusted.example')
+@pytest.mark.parametrize('region', ['cn', 'https://untrusted.example'])
+def test_unknown_region_is_rejected_before_any_client_is_created(monkeypatch, region):
+    monkeypatch.setenv('COSENS_REGION',region)
     with pytest.raises(ValueError,match='COSENS_REGION'):
         CoSensClient(api_key='regional-key')
 
 
-@pytest.mark.parametrize('region,expected', [('cn','shared-key'), ('us','shared-key')])
-def test_client_uses_key_for_selected_region(monkeypatch, region, expected):
-    monkeypatch.setenv('COSENS_REGION', region)
+def test_client_uses_key_for_us(monkeypatch):
+    monkeypatch.setenv('COSENS_REGION', 'us')
     monkeypatch.setenv('COSENS_API_KEY', 'shared-key')
     client = CoSensClient()
     try:
-        assert client._transport.api_key == expected
-        assert client._sync_transport.api_key == expected
+        assert client._transport.api_key == 'shared-key'
+        assert client._sync_transport.api_key == 'shared-key'
     finally:
         client.close()
 
@@ -58,27 +57,24 @@ def test_client_falls_back_to_generic_key_and_explicit_key_wins(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_regions_do_not_share_turns_or_message_ack_with_same_key_and_session(tmp_path, monkeypatch):
+async def test_service_identities_do_not_share_turns_or_message_ack_with_same_key_and_session(tmp_path):
     class Session:
         session_id='same-session'
         def get_items(self):
             return [{'id':'m1','role':'user','content':'hello'}]
     path=tmp_path/'shared.sqlite3'; session=Session()
-    monkeypatch.setenv('COSENS_REGION','cn')
-    cn_turns=TurnStore(path,principal='same-key'); cn_cursor=CursorStore(path,principal='same-key')
-    monkeypatch.setenv('COSENS_REGION','us')
+    old_turns=TurnStore(path,principal='same-key',service_id='old-service'); old_cursor=CursorStore(path,principal='same-key',service_id='old-service')
     us_turns=TurnStore(path,principal='same-key'); us_cursor=CursorStore(path,principal='same-key')
     try:
-        # The existing CN store stays CN even after the environment changes.
-        cn_turns.put('turn-1',{'run_id':'cn-run'})
-        cn_snapshot=await cn_cursor.snapshot(session)
-        cn_cursor.begin_batch('cn-run',cn_snapshot,cn_cursor.pending(cn_snapshot))
-        cn_cursor.ack(cn_snapshot,{'durable_ack':['chat:m1']})
+        old_turns.put('turn-1',{'run_id':'old-run'})
+        old_snapshot=await old_cursor.snapshot(session)
+        old_cursor.begin_batch('old-run',old_snapshot,old_cursor.pending(old_snapshot))
+        old_cursor.ack(old_snapshot,{'durable_ack':['chat:m1']})
         assert us_turns.get('turn-1') is None
         assert [e['id'] for e in us_cursor.pending(await us_cursor.snapshot(session))]==['chat:m1']
-        assert cn_cursor.pending(await cn_cursor.snapshot(session))==[]
+        assert old_cursor.pending(await old_cursor.snapshot(session))==[]
         us_turns.put('turn-1',{'run_id':'us-run'})
-        assert cn_turns.get('turn-1')=={'run_id':'cn-run'}
+        assert old_turns.get('turn-1')=={'run_id':'old-run'}
         assert us_turns.get('turn-1')=={'run_id':'us-run'}
     finally:
-        for store in [cn_turns,us_turns,cn_cursor,us_cursor]: store.close()
+        for store in [old_turns,us_turns,old_cursor,us_cursor]: store.close()

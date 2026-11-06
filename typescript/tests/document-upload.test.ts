@@ -3,12 +3,12 @@ import { test } from 'node:test';
 import { CoSensClient, RSIHTTPError, RSITransportError } from '../src/index.ts';
 
 const grant = { status: 'awaiting_upload', method: 'PUT',
-  upload_url: 'https://friday-rsi-cn.stardust-ai.com/api/v1/document/uploads/test_token',
+  upload_url: 'https://rsi.cosens.ai/api/v1/document/uploads/test_token',
   expires_at: '2099-01-01T00:00:00Z', max_bytes: 20 };
 
 test('document grant and raw upload preserve binary bytes and gateway identity', async () => {
   const seen: Request[] = [];
-  const c = new CoSensClient({ apiKey: 'document-key', region: 'cn', fetch: async (input, init) => {
+  const c = new CoSensClient({ apiKey: 'document-key', region: 'us', fetch: async (input, init) => {
     const request = new Request(String(input), init); seen.push(request);
     return new Response(JSON.stringify(request.url.endsWith('upload-grants') ? grant : { document_id: 'doc-1', status: 'processing' }));
   } });
@@ -45,14 +45,14 @@ test('ordinary document upload uses multipart with unmodified bytes and explicit
 
 test('upload grant rejects foreign origins, traversal and URL credentials before sending', async () => {
   let calls = 0;
-  const c = new CoSensClient({ apiKey: 'document-key', region: 'cn', fetch: async () => { calls++; return new Response('{}'); } });
+  const c = new CoSensClient({ apiKey: 'document-key', region: 'us', fetch: async () => { calls++; return new Response('{}'); } });
   try {
     for (const upload_url of [
-      'https://attacker.example/api/v1/document/uploads/token', 'https://rsi.cosens.ai/api/v1/document/uploads/token',
-      'http://friday-rsi-cn.stardust-ai.com/api/v1/document/uploads/token',
-      'https://user:password@friday-rsi-cn.stardust-ai.com/api/v1/document/uploads/token',
-      'https://@friday-rsi-cn.stardust-ai.com/api/v1/document/uploads/token',
-      'https://friday-rsi-cn.stardust-ai.com:444/api/v1/document/uploads/token',
+      'https://attacker.example/api/v1/document/uploads/token', 'https://rsi.cosens.ai.evil.example/api/v1/document/uploads/token',
+      'http://rsi.cosens.ai/api/v1/document/uploads/token',
+      'https://user:password@rsi.cosens.ai/api/v1/document/uploads/token',
+      'https://@rsi.cosens.ai/api/v1/document/uploads/token',
+      'https://rsi.cosens.ai:444/api/v1/document/uploads/token',
       '/v1/document/uploads/../token', '/v1/document/uploads/%2e%2e', '/v1/document/uploads/token?x=y',
       '/v1/document/uploads/token#fragment', '/v1/document/uploads/a/b', '/v1/other/token', '//attacker.example/v1/document/uploads/token',
     ]) await assert.rejects(async () => c.atoms.uploadDocumentToGrant({ ...grant, upload_url }, Buffer.from('data')), /invalid document upload target/);
@@ -63,7 +63,7 @@ test('upload grant rejects foreign origins, traversal and URL credentials before
 test('relative upload paths preserve prefix and ignore untrusted grant instructions', async () => {
   for (const upload_url of ['/v1/document/uploads/test_token', '/api/v1/document/uploads/test_token']) {
     const seen: Request[] = [];
-    const c = new CoSensClient({ apiKey: 'document-key', region: 'cn', fetch: async (input, init) => {
+    const c = new CoSensClient({ apiKey: 'document-key', region: 'us', fetch: async (input, init) => {
       seen.push(new Request(String(input), init));
       return new Response('{"ok":false,"status":"failed","failure_kind":"unsupported_format"}');
     } });

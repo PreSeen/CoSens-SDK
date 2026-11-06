@@ -166,7 +166,7 @@ def _record(seen):
     return httpx.MockTransport(handler)
 
 
-@pytest.mark.parametrize("region", ["cn", "us"])
+@pytest.mark.parametrize("region", ["us"])
 def test_http_requests_do_not_contain_internal_names(monkeypatch, region):
     monkeypatch.setenv("COSENS_REGION", region)
     api_requests = []

@@ -9,7 +9,7 @@ import pytest
 from agents import Agent
 from openai import OpenAI
 
-from cosens import CoSensClient, cosens, friday_gateway_client
+from cosens import CoSensClient, cosens
 from test_explicit_recipe_protocol import native_response
 
 URL=os.environ.get('COSENS_TEST_ALGORITHM_HTTP_URL')
@@ -33,7 +33,7 @@ async def test_three_entries_against_local_algorithm(tmp_path,entry):
     native=None;wrapped=None
     try:
         if entry=='transparent':
-            native=friday_gateway_client(api_key='local-test-key',region='us',http_client=httpx.Client(transport=httpx.MockTransport(native_response)))
+            native=OpenAI(base_url='https://llm.cosens.ai/v1',api_key='local-test-key',http_client=httpx.Client(transport=httpx.MockTransport(native_response)))
             wrapped=cosens(native,mode='auto',api_key='local-test-key',state_path=tmp_path/'wrapper.sqlite',_http_transport=transport)
             wrapped.responses.create(model='model',input='Produce a structured report')
             turn=wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)

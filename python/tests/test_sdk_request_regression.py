@@ -167,7 +167,7 @@ async def test_r12_upload_exact_byte_limit_and_timezone_offset_are_accepted():
         async with sdk(mode, payload={"document_id": "doc-1"}) as (call, seen):
             content = "中文".encode("utf-8")
             for index, expiry in enumerate(("2099-01-01T08:00:00+08:00", "2104-02-29T00:00:00Z", "2400-02-29T00:00:00.123456Z")):
-                grant = {"method": "PUT", "upload_url": f"https://friday-rsi-cn.stardust-ai.com:443/api/v1/document/uploads/token_{index}", "expires_at": expiry, "max_bytes": 6}
+                grant = {"method": "PUT", "upload_url": f"https://rsi.cosens.ai:443/api/v1/document/uploads/token_{index}", "expires_at": expiry, "max_bytes": 6}
                 receipt = await call("upload_document_to_grant", grant, content=content)
                 assert receipt["document_id"] == "doc-1"
             assert len(seen) == 3 and all(r.content == b"\xe4\xb8\xad\xe6\x96\x87" for r in seen)
@@ -194,5 +194,5 @@ async def test_r15_upload_port_zero_is_not_treated_as_default_https_port():
     for mode in MODES:
         async with sdk(mode) as (call, seen):
             with pytest.raises(ValueError, match="upload target"):
-                await call("upload_document_to_grant", {**GRANT, "upload_url": "https://friday-rsi-cn.stardust-ai.com:0/api/v1/document/uploads/regression_token"}, content=b"x")
+                await call("upload_document_to_grant", {**GRANT, "upload_url": "https://rsi.cosens.ai:0/api/v1/document/uploads/regression_token"}, content=b"x")
             assert not seen

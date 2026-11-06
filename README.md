@@ -4,9 +4,21 @@ Python and TypeScript clients for the current CoSens Task/Execution/Revision API
 
 | Entry | Python | TypeScript |
 | --- | --- | --- |
-| Transparent OpenAI | `cosens(friday_gateway_client())` | `cosens(fridayGatewayClient())` |
+| Transparent OpenAI | `cosens(model_client)` | `cosens(modelClient)` |
 | Explicit Agent execution | `cosens(agent).run(agent, input)` | `cosens(agent).run(agent, input)` |
 | Atomic HTTP operations | `client.atoms` / `client.sync_atoms` | `client.atoms` |
+
+The SDK does not create model clients. Build the standard OpenAI client for your model gateway and pass it in:
+
+```python
+model_client = OpenAI(base_url=os.environ["COSENS_MODEL_BASE_URL"], api_key=os.environ["COSENS_API_KEY"])
+client = cosens(model_client, mode="auto")
+```
+
+```ts
+const modelClient = new OpenAI({ baseURL: process.env.COSENS_MODEL_BASE_URL, apiKey: process.env.COSENS_API_KEY });
+const client = cosens(modelClient, { mode: 'auto' });
+```
 
 After the host obtains user confirmation of the artifact, call `generate_recipe` / `generateRecipe`, or the atomic Recipe endpoint. That single endpoint creates V1 or updates the associated Recipe. Feedback is recorded separately; attribution happens inside explicit generation. Generation always recalls related Memory and has no `include_memory` option.
 
@@ -18,6 +30,6 @@ Tests: `PYTHONPATH=python/src pytest python/tests` and `npm --prefix typescript 
 
 ## One API Key
 
-Set `COSENS_API_KEY` to your Friday user API Key and optionally `COSENS_REGION=cn|us` (default `cn`). The SDK uses this same key for CoSens and the corresponding regional LLM gateway. `RSI_API_KEY*`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, `COSENS_MODE` and `COSENS_INPUT` are not SDK configuration. The application loads any `.env` file.
+Set `COSENS_API_KEY` to your CoSens API Key. The SDK uses the US CoSens API; `COSENS_REGION` defaults to `us` and accepts only `us`. Your application passes the same key as the model client's `api_key` and sets `COSENS_MODEL_BASE_URL` to `https://llm.cosens.ai/v1`. The SDK itself reads only `COSENS_API_KEY` and `COSENS_REGION`; `RSI_API_KEY*`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, `COSENS_MODE` and `COSENS_INPUT` are not SDK configuration. The application loads any `.env` file.
 
 Pass a public model ID in the model call. Algorithm operations accept only `model`, never a second API Key, base URL, auth type or provider settings. Model credentials are carried in Authorization. The algorithm gateway must forward that header alongside the authenticated user ID. Recipe generation still requires external artifact confirmation.

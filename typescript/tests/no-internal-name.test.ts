@@ -127,7 +127,7 @@ function recorder(seen: Request[]): typeof fetch {
   };
 }
 
-for (const region of ['cn', 'us'] as const) test(`${region} HTTP requests do not contain internal names`, async () => {
+for (const region of ['us'] as const) test(`${region} HTTP requests do not contain internal names`, async () => {
   const apiRequests: Request[] = [];
   const client = new sdk.CoSensClient({ apiKey: 'test-only-api-key', region, fetch: recorder(apiRequests) });
   await client.atoms.getTask('t');

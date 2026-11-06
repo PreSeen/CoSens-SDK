@@ -29,7 +29,7 @@ test('the pinned OpenAI Responses stream keeps event and final-response methods 
     return new Response(JSON.stringify(path.endsWith('/recipe-candidates') ? { items: [], has_more: false } : { items: [] }));
   };
   const native = new OpenAI({ apiKey: 'native-key', baseURL: 'https://model.example/v1', fetch: modelFetch });
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: gatewayFetch, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: gatewayFetch, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const stream = client.responses.stream({ model: 'test-model', input: 'hello' });
   assert.equal(typeof stream.on, 'function');
   assert.equal(typeof stream.finalResponse, 'function');
@@ -64,7 +64,7 @@ test('the pinned OpenAI Chat stream keeps content events and finalChatCompletion
   };
   const gatewayFetch: typeof fetch = async input => new Response(JSON.stringify(new URL(String(input)).pathname.endsWith('/recipe-candidates') ? { items: [], has_more: false } : { items: [] }));
   const native = new OpenAI({ apiKey: 'native-key', baseURL: 'https://model.example/v1', fetch: modelFetch });
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: gatewayFetch, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: gatewayFetch, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const stream = client.chat.completions.stream({ model: 'test-model', messages: [{ role: 'user', content: 'hello' }] });
   const pieces: string[] = [];
   stream.on('content', (delta: string) => pieces.push(delta));
@@ -81,6 +81,8 @@ test('the pinned OpenAI Chat stream keeps a tool call on the same CoSens executi
   let modelCalls = 0, prepares = 0, submits = 0;
   const events: any[] = [];
   const modelFetch: typeof fetch = async (_input, init) => {
+    if (JSON.parse(String(init?.body)).response_format?.json_schema?.name === 'cosens_decision')
+      return new Response(JSON.stringify({ id: 'decision', object: 'chat.completion', created: 1, model: 'test-model', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify({ activate: true, objective: 'hello', task_family: 'general', reason: 'useful' }) } }] }), { headers: { 'content-type': 'application/json' } });
     modelCalls++;
     if (modelCalls === 1) {
       const chunks = [
@@ -103,8 +105,7 @@ test('the pinned OpenAI Chat stream keeps a tool call on the same CoSens executi
     throw Error(path);
   };
   const native = new OpenAI({ apiKey: 'native-key', baseURL: 'https://model.example/v1', fetch: modelFetch });
-  (native.responses as any).create = async () => ({ output_text: JSON.stringify({ activate: true, objective: 'hello', task_family: 'general', reason: 'useful' }) });
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'auto', fetch: gatewayFetch, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'auto', fetch: gatewayFetch, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const stream = client.chat.completions.stream({ model: 'test-model', messages: [{ role: 'user', content: 'hello' }] });
   for await (const _chunk of stream) { /* consume native stream */ }
   const toolMessage = (await stream.finalChatCompletion()).choices[0]!.message;
@@ -124,7 +125,7 @@ test('OpenAI withOptions keeps CoSens on the derived native client', async () =>
     modelUrls.push(String(input));
     return new Response(JSON.stringify(response), { headers: { 'content-type': 'application/json' } });
   } });
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: async input => {
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: async input => {
     const path = new URL(String(input)).pathname; gatewayCalls.push(path);
     return new Response(JSON.stringify(path.endsWith('/recipe-candidates') ? { items: [], has_more: false } : { items: [] }));
   }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
@@ -140,14 +141,14 @@ test('OpenAI withOptions keeps CoSens on the derived native client', async () =>
 test('native resource getters backed by private fields remain readable', async () => {
   class NativeResource { #value = 'native'; get metadata() { return this.#value; } }
   const native = { metadata: new NativeResource() };
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   assert.equal(client.metadata.metadata, 'native');
   await client.close();
 });
 
 test('the pinned OpenAI public resource methods preserve call arguments, return values and errors', async () => {
   const native = new OpenAI({ apiKey: 'native-key' });
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const resources = ['decisions', 'completions', 'chat', 'embeddings', 'files', 'images', 'contentProvenanceChecks', 'audio', 'moderations', 'models', 'fineTuning', 'graders', 'vectorStores', 'safety', 'webhooks', 'beta', 'batches', 'uploads', 'admin', 'responses', 'live', 'realtime', 'conversations', 'evals', 'containers', 'skills', 'videos'] as const;
   const inventory = JSON.parse(readFileSync(new URL('./fixtures/openai-public-methods.json', import.meta.url), 'utf8')) as { version: string; roots: string[]; methods: string[] };
   const installed = JSON.parse(readFileSync(new URL('../node_modules/openai/package.json', import.meta.url), 'utf8')) as { version: string };
@@ -204,7 +205,7 @@ test('pinned OpenAI models.list keeps its native pagination object and does not 
   let gatewayCalls = 0;
   const native = new OpenAI({ apiKey: 'native-key', baseURL: 'https://model.example/v1', fetch: async () =>
     new Response(JSON.stringify({ object: 'list', data: [{ id: 'model-1', object: 'model', created: 1, owned_by: 'test' }] }), { headers: { 'content-type': 'application/json' } }) });
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('CoSens should not be called'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('CoSens should not be called'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const page = await client.models.list();
   assert.deepEqual(page.data.map(model => model.id), ['model-1']);
   assert.equal(typeof page.getNextPage, 'function');
@@ -228,7 +229,7 @@ test('pinned OpenAI JSON resources keep native requests across model and managem
     return new Response(JSON.stringify(data), { headers: { 'content-type': 'application/json' } });
   };
   const native = new OpenAI({ apiKey: 'native-key', adminAPIKey: 'native-admin-key', baseURL: 'https://model.example/v1', fetch: modelFetch });
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const embedding = await client.embeddings.create({ model: 'embedding-model', input: 'hello' });
   const moderation = await client.moderations.create({ model: 'moderation-model', input: 'hello' });
   const image = await client.images.generate({ model: 'image-model', prompt: 'a circle' });
@@ -258,7 +259,7 @@ test('pinned OpenAI read-only resources keep native HTTP behavior across additio
       : { object: 'list', data: [{ id: 'item-1' }], has_more: false };
     return new Response(JSON.stringify(data), { headers: { 'content-type': 'application/json' } });
   } });
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const calls: Array<() => Promise<any>> = [
     () => client.fineTuning.jobs.list(),
     () => client.webhooks.eventTypes.list(),
@@ -290,7 +291,7 @@ test('pinned OpenAI files.content preserves the native binary Response', async (
     assert.equal(String(input), 'https://model.example/v1/files/file-1/content');
     return new Response(bytes, { headers: { 'content-type': 'application/octet-stream', 'x-request-id': 'native-binary' } });
   } });
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const response = await client.files.content('file-1');
   assert.deepEqual(new Uint8Array(await response.arrayBuffer()), bytes);
   assert.equal(response.headers.get('x-request-id'), 'native-binary');
@@ -311,7 +312,7 @@ test('pinned OpenAI file and transcription uploads preserve native multipart bod
       ? { id: 'file-1', object: 'file', filename: 'source.txt', purpose: 'assistants', bytes: 6, created_at: 1 }
       : { text: 'transcribed' }), { headers: { 'content-type': 'application/json' } });
   } });
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const file = await client.files.create({ file: new File(['source'], 'source.txt', { type: 'text/plain' }), purpose: 'assistants' });
   const transcription = await client.audio.transcriptions.create({ file: new File(['speech'], 'speech.mp3', { type: 'audio/mpeg' }), model: 'whisper-1' });
   assert.equal(file.id, 'file-1');
@@ -341,7 +342,7 @@ test('pinned OpenAI nested upload parts preserve multipart data and request opti
     };
     return new Response(JSON.stringify({ id: 'part-1', object: 'upload.part', created_at: 1, upload_id: 'upload-1' }), { headers: { 'content-type': 'application/json' } });
   } });
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const part = await client.uploads.parts.create('upload-1', { data: new File([new Uint8Array([0, 1, 255])], 'chunk.bin') }, { headers: { 'x-request-id': 'upload-test' } });
   assert.equal(part.id, 'part-1');
   assert.deepEqual(observed, { path: '/v1/uploads/upload-1/parts', dataName: 'chunk.bin', bytes: [0, 1, 255], auth: 'Bearer native-key', requestId: 'upload-test' });
@@ -356,7 +357,7 @@ test('pinned Realtime call creation preserves native SDP transport', async () =>
     observed = { url: String(input), headers: new Headers(init?.headers), body: init?.body };
     return new Response('answer-sdp', { headers: { 'content-type': 'application/sdp' } });
   } });
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const result = await client.realtime.calls.create({ sdp: 'offer-sdp' });
   assert.equal(await result.text(), 'answer-sdp');
   assert.equal(observed?.url, 'https://model.example/v1/realtime/calls');
@@ -379,7 +380,7 @@ test('pinned OpenAI batches.list keeps native cursor pagination', async () => {
     const after = url.searchParams.get('after');
     return new Response(JSON.stringify({ object: 'list', data: [{ id: after ? 'batch-2' : 'batch-1', object: 'batch' }], has_more: !after }), { headers: { 'content-type': 'application/json' } });
   } });
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const first = await client.batches.list({ limit: 1 });
   assert.equal(first.data[0]?.id, 'batch-1');
   assert.equal(first.hasNextPage(), true);
@@ -398,7 +399,7 @@ test('pinned OpenAI APIPromise retains withResponse and asResponse behavior', as
     modelCalls++;
     return new Response(JSON.stringify(response), { headers: { 'content-type': 'application/json', 'x-request-id': `req-${modelCalls}` } });
   } });
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: gatewayFetch, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: gatewayFetch, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const withResponse = await client.responses.create({ model: 'test-model', input: 'hello' }).withResponse();
   assert.equal(withResponse.data.id, response.id);
   assert.equal(withResponse.response.headers.get('x-request-id'), 'req-1');
@@ -414,7 +415,7 @@ test('pinned OpenAI read-only resource errors retain native error type and skip 
   let gatewayCalls = 0;
   const native = new OpenAI({ apiKey: 'native-key', baseURL: 'https://model.example/v1', maxRetries: 0, fetch: async () =>
     new Response(JSON.stringify({ error: { message: 'missing model', type: 'invalid_request_error' } }), { status: 404, headers: { 'content-type': 'application/json' } }) });
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   await assert.rejects(client.models.retrieve('absent'), error => error instanceof OpenAI.NotFoundError && error.status === 404);
   assert.equal(gatewayCalls, 0);
   await client.close();
@@ -432,7 +433,7 @@ test('pinned OpenAI Responses parse and Chat create/parse use the same preflight
     };
     return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
   } });
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: async input => {
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: async input => {
     const path = new URL(String(input)).pathname;
     gatewayPaths.push(path);
     return new Response(JSON.stringify(path.endsWith('/recipe-candidates') ? { items: [], has_more: false } : { items: [] }));
@@ -458,7 +459,7 @@ test('pinned legacy Completions stays callable and reports unsupported RSI captu
     assert.equal(String(input), 'https://model.example/v1/completions');
     return new Response(JSON.stringify({ id: 'completion-1', object: 'text_completion', created: 1, model: 'test-model', choices: [{ index: 0, text: 'done', finish_reason: 'stop' }] }), { headers: { 'content-type': 'application/json' } });
   } });
-  const client = cosens(native, { apiKey: 'friday-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
+  const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: async () => { gatewayCalls++; throw Error('unexpected recall'); }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const result = await client.completions.create({ model: 'test-model', prompt: 'hello' });
   assert.equal(result.choices[0]?.text, 'done');
   assert.equal(client.cosens.rsiCapture, 'unsupported');

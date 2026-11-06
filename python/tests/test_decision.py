@@ -25,16 +25,19 @@ async def test_decision_only_sends_output_limit_when_explicit(limit, asynchronou
 
     def create(**kwargs):
         calls.append(kwargs)
-        return SimpleNamespace(output_text=json.dumps(decision))
+        message = SimpleNamespace(content=json.dumps(decision))
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
     async def async_create(**kwargs):
         return create(**kwargs)
 
-    native = SimpleNamespace(responses=SimpleNamespace(create=async_create if asynchronous else create))
+    completions = SimpleNamespace(create=async_create if asynchronous else create)
+    native = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     options = {} if limit is None else {"max_output_tokens": limit}
     result = await decide_async(native, "model", "task", [], **options) if asynchronous else decide_sync(native, "model", "task", [], **options)
     assert result == decision
+    assert calls[0]["response_format"]["json_schema"]["name"] == "cosens_decision"
     if limit is None:
-        assert "max_output_tokens" not in calls[0]
+        assert "max_completion_tokens" not in calls[0]
     else:
-        assert calls[0]["max_output_tokens"] == limit
+        assert calls[0]["max_completion_tokens"] == limit

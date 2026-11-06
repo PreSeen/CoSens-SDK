@@ -8,7 +8,7 @@ const GRANT = { method: 'PUT', upload_url: '/v1/document/uploads/regression_toke
 
 function sdk(t: TestContext, options: { status?: number; payload?: unknown; raw?: string; headers?: Record<string, string> } = {}) {
   const seen: Request[] = [];
-  const client = new CoSensClient({ apiKey: API_KEY, region: 'cn', fetch: async (input, init) => {
+  const client = new CoSensClient({ apiKey: API_KEY, region: 'us', fetch: async (input, init) => {
     seen.push(new Request(String(input), init));
     return new Response(options.raw ?? JSON.stringify(options.payload ?? {}), { status: options.status ?? 200, headers: options.headers });
   } });
@@ -104,7 +104,7 @@ test('R09 malformed success body reports uncertain upload without retry', async 
   });
   assert.equal(seen.length, 1); assert.equal(seen[0]!.method, 'PUT');
   let calls = 0;
-  const interrupted = new CoSensClient({ apiKey: API_KEY, region: 'cn', fetch: async () => {
+  const interrupted = new CoSensClient({ apiKey: API_KEY, region: 'us', fetch: async () => {
     calls++;
     return new Response(new ReadableStream({ start(controller) { controller.error(new Error(`socket interrupted ${API_KEY}`)); } }));
   } });
@@ -130,7 +130,7 @@ test('R11 concurrent requests keep their own keys and bodies', { timeout: 3000 }
   const seen: Request[] = [];
   let release!: () => void;
   const entered = new Promise<void>(resolve => { release = resolve; });
-  const client = new CoSensClient({ apiKey: API_KEY, region: 'cn', fetch: async (input, init) => {
+  const client = new CoSensClient({ apiKey: API_KEY, region: 'us', fetch: async (input, init) => {
     const request = new Request(String(input), init); seen.push(request);
     if (seen.length === 2) release();
     await entered;
@@ -149,7 +149,7 @@ test('R11 concurrent requests keep their own keys and bodies', { timeout: 3000 }
 test('R12 upload exact byte limit and timezone offset are accepted', async t => {
   const { a, seen } = sdk(t, { payload: { document_id: 'doc-1' } });
   for (const [index, expires_at] of ['2099-01-01T08:00:00+08:00', '2104-02-29T00:00:00Z', '2400-02-29T00:00:00.123456Z'].entries()) {
-    const receipt = await a.uploadDocumentToGrant({ method: 'PUT', upload_url: `https://friday-rsi-cn.stardust-ai.com:443/api/v1/document/uploads/token_${index}`, expires_at, max_bytes: 6 }, Buffer.from('中文'));
+    const receipt = await a.uploadDocumentToGrant({ method: 'PUT', upload_url: `https://rsi.cosens.ai:443/api/v1/document/uploads/token_${index}`, expires_at, max_bytes: 6 }, Buffer.from('中文'));
     assert.equal(receipt.document_id, 'doc-1');
   }
   assert.equal(seen.length, 3);
@@ -174,7 +174,7 @@ test('R14 reserved characters in resource ID remain one encoded segment', async 
 
 test('R15 upload port zero is not treated as default HTTPS port', async t => {
   const { a, seen } = sdk(t);
-  await assert.rejects(a.uploadDocumentToGrant({ ...GRANT, upload_url: 'https://friday-rsi-cn.stardust-ai.com:0/api/v1/document/uploads/regression_token' }, Buffer.from('x')), /upload target/);
+  await assert.rejects(a.uploadDocumentToGrant({ ...GRANT, upload_url: 'https://rsi.cosens.ai:0/api/v1/document/uploads/regression_token' }, Buffer.from('x')), /upload target/);
   assert.equal(seen.length, 0);
 });
 

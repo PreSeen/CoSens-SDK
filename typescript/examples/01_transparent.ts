@@ -1,6 +1,8 @@
-import { cosens, fridayGatewayClient } from '../src/index.js';
+import OpenAI from 'openai';
+import { cosens } from '../src/index.js';
 export async function runTask(task:string,model:string){
- const client=cosens(fridayGatewayClient(),{mode:'auto'});
+ const modelClient=new OpenAI({baseURL:process.env.COSENS_MODEL_BASE_URL,apiKey:process.env.COSENS_API_KEY});
+ const client=cosens(modelClient,{mode:'auto'});
  const response=await client.responses.create({model,input:task,store:false});
  return {client,response,turnId:client.cosens.lastTurnId};
 }

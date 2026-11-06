@@ -12,21 +12,19 @@ class Service:
 
 
 _SERVICES = {
-    'cn': Service('cn', 'https://friday-rsi-cn.stardust-ai.com/api', 'friday-rsi-cn.stardust-ai.com/api'),
     'us': Service('us', 'https://rsi.cosens.ai/api', 'rsi.cosens.ai/api'),
 }
-# Preserve the original CN identity so existing persisted state remains readable.
-SERVICE_URL = _SERVICES['cn'].url
-SERVICE_ID = _SERVICES['cn'].identity
+SERVICE_URL = _SERVICES['us'].url
+SERVICE_ID = _SERVICES['us'].identity
 
 
 def resolve_service(region=None):
-    region = os.getenv('COSENS_REGION', 'cn') if region is None else region
+    region = os.getenv('COSENS_REGION', 'us') if region is None else region
     if not isinstance(region, str):
-        raise ValueError('region must be cn or us')
+        raise ValueError('region must be us')
     region = region.strip().lower()
     if region not in _SERVICES:
-        raise ValueError('COSENS_REGION must be cn or us')
+        raise ValueError('COSENS_REGION must be us')
     return _SERVICES[region]
 
 

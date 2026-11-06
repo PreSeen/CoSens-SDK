@@ -9,7 +9,7 @@ from cosens.errors import RSIHTTPError, RSITransportError
 
 
 GRANT = {"status": "awaiting_upload", "method": "PUT",
-         "upload_url": "https://friday-rsi-cn.stardust-ai.com/api/v1/document/uploads/test_token",
+         "upload_url": "https://rsi.cosens.ai/api/v1/document/uploads/test_token",
          "expires_at": "2099-01-01T00:00:00Z", "max_bytes": 20}
 
 
@@ -60,11 +60,11 @@ async def test_document_multipart_has_file_bytes_and_explicit_metadata(asynchron
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url", [
     "https://attacker.example/api/v1/document/uploads/token",
-    "https://rsi.cosens.ai/api/v1/document/uploads/token",
-    "http://friday-rsi-cn.stardust-ai.com/api/v1/document/uploads/token",
-    "https://user:password@friday-rsi-cn.stardust-ai.com/api/v1/document/uploads/token",
-    "https://@friday-rsi-cn.stardust-ai.com/api/v1/document/uploads/token",
-    "https://friday-rsi-cn.stardust-ai.com:444/api/v1/document/uploads/token",
+    "https://rsi.cosens.ai.evil.example/api/v1/document/uploads/token",
+    "http://rsi.cosens.ai/api/v1/document/uploads/token",
+    "https://user:password@rsi.cosens.ai/api/v1/document/uploads/token",
+    "https://@rsi.cosens.ai/api/v1/document/uploads/token",
+    "https://rsi.cosens.ai:444/api/v1/document/uploads/token",
     "/v1/document/uploads/../token", "/v1/document/uploads/%2e%2e", "/v1/document/uploads/token?x=y",
     "/v1/document/uploads/token#fragment", "/v1/document/uploads/a/b", "/v1/other/token",
     "//attacker.example/v1/document/uploads/token",
