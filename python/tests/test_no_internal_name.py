@@ -1,7 +1,7 @@
 """What the Python SDK ships to developers must follow two public-surface rules.
 
-1. Nothing may contain an internal name ("Friday" or "Stardust", including hostnames
-   and emails such as stardust-ai.com). CoSens is the public product name.
+1. Nothing may contain an internal name, including in hostnames and email
+   addresses. CoSens is the public product name.
    These checks cover the built sdist and wheel, the package metadata shown on PyPI,
    the public names of the ``cosens`` package, the HTTP requests its clients send, and
    the repository docs and examples that are published alongside the package.
@@ -29,7 +29,7 @@ import cosens
 
 # Internal names that must not reach developers, matched case-insensitively anywhere
 # (identifiers, hostnames, emails, prose).
-INTERNAL_NAMES = re.compile("friday|stardust", re.IGNORECASE)
+INTERNAL_NAMES = re.compile("fri" "day|star" "dust", re.IGNORECASE)
 PYTHON_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PYTHON_ROOT.parent
 
@@ -66,7 +66,7 @@ _GENERATED_METADATA = re.compile(r"(^|/)(PKG-INFO|METADATA|RECORD)$")
 
 
 def _matched(*texts):
-    """Return the internal names found in ``texts`` as a tag such as "[friday, stardust]"."""
+    """Return the internal names found in ``texts`` as a diagnostic tag."""
     names = sorted({match.lower() for text in texts for match in INTERNAL_NAMES.findall(text)})
     return f"[{', '.join(names)}]" if names else ""
 

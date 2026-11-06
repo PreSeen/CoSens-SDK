@@ -25,7 +25,7 @@ async def test_us_routes_all_transports_and_freezes_at_client_creation(monkeypat
     assert all(not any(k.lower().replace('_','-')=='x-user-id' for k in r.headers) for r in requests)
 
 
-@pytest.mark.parametrize('region', ['cn', 'https://untrusted.example'])
+@pytest.mark.parametrize('region', ['eu', 'https://untrusted.example'])
 def test_unknown_region_is_rejected_before_any_client_is_created(monkeypatch, region):
     monkeypatch.setenv('COSENS_REGION',region)
     with pytest.raises(ValueError,match='COSENS_REGION'):

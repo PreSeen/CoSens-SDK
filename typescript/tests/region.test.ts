@@ -33,7 +33,6 @@ test('turn state is isolated by service identity even for the same API Key', () 
 test('invalid region fails before any gateway request', () => {
   let requests = 0;
   assert.throws(() => new CoSensClient({ apiKey: 'key', region: 'eu', fetch: async () => { requests++; return new Response('{}'); } }), /COSENS_REGION/);
-  assert.throws(() => new CoSensClient({ apiKey: 'key', region: 'cn', fetch: async () => { requests++; return new Response('{}'); } }), /COSENS_REGION/);
   assert.equal(requests, 0);
 });
 

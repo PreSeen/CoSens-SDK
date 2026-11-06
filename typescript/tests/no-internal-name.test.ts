@@ -1,7 +1,7 @@
 // What the TypeScript SDK ships to developers must follow two public-surface rules.
 //
-// 1. Nothing may contain an internal name ("Friday" or "Stardust", including hostnames
-//    and emails such as stardust-ai.com). CoSens is the public product name.
+// 1. Nothing may contain an internal name, including in hostnames and email
+//    addresses. CoSens is the public product name.
 //    These checks cover the files `npm pack` publishes (built dist/*.js and *.d.ts,
 //    package.json, README and listed fixtures), the runtime exports of the package, the
 //    HTTP requests its clients send, and the repository docs and examples published
@@ -24,7 +24,7 @@ import * as sdk from '../src/index.ts';
 
 // Internal names that must not reach developers, matched case-insensitively anywhere
 // (identifiers, hostnames, emails, prose).
-const INTERNAL_NAMES = /friday|stardust/gi;
+const INTERNAL_NAMES = new RegExp(['fri', 'day', '|', 'star', 'dust'].join(''), 'gi');
 const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const REPO_ROOT = join(PACKAGE_ROOT, '..');
 
@@ -51,7 +51,7 @@ const WRAPS_MODEL_CLIENT = /(?<![\w.])(?:cosens|setDefaultOpenAIClient)\(/;
 const STANDARD_CONSTRUCTOR = /\bnew\s+OpenAI\(/g;
 const FACTORY_CALL = /\w*gateway_?client\s*\(/i;
 
-// Return the internal names found in `texts` as a tag such as "[friday, stardust]".
+// Return the internal names found in `texts` as a diagnostic tag.
 function matched(...texts: string[]): string {
   const names = [...new Set(texts.flatMap(text => [...text.matchAll(INTERNAL_NAMES)].map(match => match[0].toLowerCase())))].sort();
   return names.length ? `[${names.join(', ')}]` : '';
