@@ -105,7 +105,7 @@ async def test_plain_text_gateway_rejection_retains_http_status_and_request_id()
 
 
 @pytest.mark.asyncio
-async def test_gateway_error_text_redacts_the_friday_key():
+async def test_gateway_error_text_redacts_the_api_key():
     async with CoSensClient(api_key="secret-key", _http_transport=httpx.MockTransport(
         lambda r: httpx.Response(401, json={"error": {"code": "denied", "message": "Rejected Bearer secret-key"}})
     )) as client:

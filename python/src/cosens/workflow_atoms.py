@@ -17,7 +17,7 @@ def _model_data(model):
     if model is None:
         return {}
     if not isinstance(model, str) or not model.strip() or len(model) > 256:
-        raise ValueError('model must be a public Friday model ID')
+        raise ValueError('model must be a public model ID')
     return {'model': model.strip()}
 
 

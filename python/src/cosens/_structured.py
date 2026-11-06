@@ -1,12 +1,12 @@
-"""Structured internal decisions using each gateway's declared contract."""
+"""Structured internal decisions through the developer's native client.
+
+Decisions use Chat Completions with a JSON schema response format, which
+OpenAI-compatible model gateways support, so no provider URL is special-cased.
+"""
 from types import SimpleNamespace
 
-_GATEWAYS = {"https://llm.cosens.ai/v1", "https://friday-llm-gateway.corpintra.rosettalab.top/v1"}
 
-
-def _chat_options(native, options):
-    if str(getattr(native, "base_url", "")).rstrip("/") not in _GATEWAYS:
-        return None
+def _chat_options(options):
     schema = options["text"]["format"]
     body = {"model": options["model"], "messages": [{"role": "user", "content": options["input"]}],
             "response_format": {"type": "json_schema", "json_schema": {key: schema[key] for key in ("name", "strict", "schema")}}}
@@ -18,16 +18,10 @@ def _chat_options(native, options):
 
 
 def structured_sync(native, **options):
-    body = _chat_options(native, options)
-    if body is None:
-        return native.responses.create(**options)
-    response = native.chat.completions.create(**body)
+    response = native.chat.completions.create(**_chat_options(options))
     return SimpleNamespace(output_text=response.choices[0].message.content)
 
 
 async def structured_async(native, **options):
-    body = _chat_options(native, options)
-    if body is None:
-        return await native.responses.create(**options)
-    response = await native.chat.completions.create(**body)
+    response = await native.chat.completions.create(**_chat_options(options))
     return SimpleNamespace(output_text=response.choices[0].message.content)

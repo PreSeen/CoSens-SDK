@@ -13,6 +13,6 @@ export function resolveService(region?: string): Service {
 
 export function resolveApiKey(key?: string): string {
   const value = key ?? process.env.COSENS_API_KEY;
-  if (!value || /\s/.test(value)) throw new TypeError('CoSens apiKey must be the bare Friday API Key');
+  if (!value || /\s/.test(value)) throw new TypeError('CoSens apiKey must be the bare CoSens API Key');
   return value;
 }

@@ -6,7 +6,7 @@ import { documentBytes, documentMetadata, documentStatusBody, uploadTarget, type
 
 function modelData(model?:string):Record<string,string>{
  if(model===undefined)return {};
- if(typeof model!=='string'||!model.trim()||model.length>256)throw new TypeError('model must be a public Friday model ID');
+ if(typeof model!=='string'||!model.trim()||model.length>256)throw new TypeError('model must be a public model ID');
  return {model:model.trim()};
 }
 

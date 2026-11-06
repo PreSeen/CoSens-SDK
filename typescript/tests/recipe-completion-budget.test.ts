@@ -53,9 +53,8 @@ test('auto generateRecipe forwards its budget separately from business output to
   const f=fixture();
   const business:any[]=[];
   const native={responses:{create:async(params:any)=>{
-    if(params.text?.format?.name==='cosens_decision')return {output_text:JSON.stringify({activate:true,objective:'Produce output',task_family:'report',reason:'task'})};
     business.push(params);return {output_text:'final output',output:[{type:'message'}]};
-  }}};
+  }},chat:{completions:{create:async()=>({choices:[{message:{content:JSON.stringify({activate:true,objective:'Produce output',task_family:'report',reason:'task'})}}]})}}};
   const wrapped=cosens(native,{apiKey:'key',mode:'auto',fetch:f.fetcher,statePath:f.statePath});
   try {
     await wrapped.responses.create({model:'model',input:'Produce output',max_output_tokens:4096});
