@@ -14,6 +14,18 @@ def _gateway(request):
     return native_response(request)
 
 
+def assert_failed_decision_turn(wrapped, previous):
+    turn_id = wrapped.cosens.last_turn_id
+    assert turn_id and turn_id != previous
+    turn = wrapped.cosens.get_turn(turn_id)
+    assert turn['state'] == 'completed' and turn['capture'] == 'decision_failed'
+    assert turn['decision']['reason'] == 'decision_failed' and turn['decision']['activate'] is False
+    assert turn['decision']['error_type'] == 'APITimeoutError'
+    assert not turn.get('execution_id') and not turn.get('frozen_context')
+    auto = wrapped.cosens.get_auto(turn_id)
+    assert auto['capture'] == 'decision_failed' and auto['decision_error_type'] == 'APITimeoutError'
+
+
 def _unexpected_algorithm(request):
     raise AssertionError(f'Auto fallback must not call CoSens: {request.url.path}')
 
@@ -97,7 +109,8 @@ def test_auto_decision_timeout_returns_native_response(tmp_path):
         response = wrapped.responses.create(model='model', input='Produce a report')
         assert response.output_text == 'final artifact'
         assert wrapped.cosens.rsi_capture == 'decision_failed'
-        assert wrapped.cosens.last_turn_id is None
+        # The fallback is recorded on a new turn so callers can see why nothing was captured.
+        assert_failed_decision_turn(wrapped, 'previous-turn')
     finally:
         wrapped.close(); native.close()
 
@@ -112,6 +125,49 @@ async def test_async_auto_decision_timeout_returns_native_response(tmp_path):
         response = await wrapped.responses.create(model='model', input='Produce a report')
         assert response.output_text == 'final artifact'
         assert wrapped.cosens.rsi_capture == 'decision_failed'
-        assert wrapped.cosens.last_turn_id is None
+        # The fallback is recorded on a new turn so callers can see why nothing was captured.
+        assert_failed_decision_turn(wrapped, 'previous-turn')
     finally:
         await wrapped.close(); await native.close()
+
+
+@pytest.mark.parametrize('asynchronous', [False, True])
+async def test_truncated_reasoning_decision_is_recorded_as_failed(tmp_path, asynchronous):
+    """A reasoning model that spends max tokens before the JSON (finish_reason=length)."""
+    def gateway(request):
+        if request.url.path.endswith('/chat/completions'):
+            return httpx.Response(200, json={'id': 'd', 'object': 'chat.completion', 'created': 0, 'model': 'model',
+                'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': ''}, 'finish_reason': 'length'}]})
+        return native_response(request)
+
+    if asynchronous:
+        native = AsyncOpenAI(api_key='k', http_client=httpx.AsyncClient(transport=httpx.MockTransport(gateway)))
+    else:
+        native = OpenAI(api_key='k', http_client=httpx.Client(transport=httpx.MockTransport(gateway)))
+    wrapped = cosens(native, mode='auto', api_key='test-only-gateway-key', state_path=tmp_path/'t.sqlite',
+        _http_transport=httpx.MockTransport(_unexpected_algorithm))
+    try:
+        call = wrapped.responses.create(model='model', input='What is the capital of France? One word.')
+        response = await call if asynchronous else call
+        assert response.output_text == 'final artifact'
+        turn = wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
+        assert turn['capture'] == 'decision_failed'
+        assert turn['decision']['error_type'] == 'RSIDecisionUnavailable'
+        assert 'finish_reason=length' in turn['decision']['error'] and 'max_output_tokens=64' in turn['decision']['error']
+    finally:
+        if asynchronous:
+            await wrapped.close(); await native.close()
+        else:
+            wrapped.close(); native.close()
+
+
+def test_get_turn_without_an_id(tmp_path):
+    native = OpenAI(api_key='k')
+    wrapped = cosens(native, mode='auto', api_key='test-only-gateway-key', state_path=tmp_path/'t.sqlite')
+    try:
+        assert wrapped.cosens.last_turn_id is None
+        assert wrapped.cosens.get_turn(None) is None
+        with pytest.raises(ValueError, match='turn_id'):
+            wrapped.cosens.get_turn(123)
+    finally:
+        wrapped.close(); native.close()

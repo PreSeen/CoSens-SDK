@@ -50,6 +50,31 @@ test('auto decision failure still returns the native response', async () => {
     const response = await wrapped.responses.create({ model: 'model', input: 'task' });
     assert.equal(response.output_text, 'answer');
     assert.equal(wrapped.cosens.rsiCapture, 'decision_failed');
+    const turn = wrapped.cosens.getTurn(wrapped.cosens.lastTurnId);
+    assert.equal(turn?.state, 'completed');
+    assert.equal(turn?.decision.capture, 'decision_failed');
+    assert.equal(turn?.decision.error, 'decision timed out');
+    assert.equal(turn?.executionId, undefined);
+    assert.equal(wrapped.cosens.getTurn(null), undefined);
+  } finally { await wrapped.close(); }
+});
+
+test('a truncated reasoning decision (finish_reason=length) is recorded on the turn', async () => {
+  const native = {
+    responses: { create: async () => ({ id: 'response', status: 'completed', output_text: 'answer', output: [{ type: 'message' }] }) },
+    chat: { completions: { create: async () => ({ choices: [{ finish_reason: 'length', message: { content: '' } }] }) } },
+  };
+  const wrapped = cosens(native, { apiKey: 'test-key', mode: 'auto',
+    fetch: async () => { throw new Error('a failed decision makes no CoSens call'); },
+    statePath: join(mkdtempSync(join(tmpdir(), 'cosens-truncated-')), 'state.sqlite') });
+  try {
+    const response = await wrapped.responses.create({ model: 'model', input: 'What is the capital of France? One word.' });
+    assert.equal(response.output_text, 'answer');
+    const decision = wrapped.cosens.getTurn(wrapped.cosens.lastTurnId)?.decision;
+    assert.equal(decision?.capture, 'decision_failed');
+    assert.equal(decision?.error_type, 'RSIDecisionUnavailable');
+    assert.match(decision?.error ?? '', /finish_reason=length/);
+    assert.match(decision?.error ?? '', /max_output_tokens=64/);
   } finally { await wrapped.close(); }
 });
 

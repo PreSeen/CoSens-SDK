@@ -18,7 +18,7 @@ def cosens(native, *, api_key=None, mode=None, decision_model=None, decision_tim
     seconds and is capped at ``decision_max_output_tokens``. ``decision_client`` is
     an optional separate OpenAI client (sync or async to match ``native``) for the
     decision and Recipe-match calls; ``decision_extra_body`` is forwarded to both,
-    e.g. ``{"enable_thinking": False}`` for reasoning models. ``max_context_chars``
+    e.g. a reasoning switch your gateway accepts. ``max_context_chars``
     bounds the Recipe/Memory text injected into requests and Agent instructions.
     """
     if mode is not None and mode not in {"auto", "approval", "disable"}:

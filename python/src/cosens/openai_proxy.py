@@ -49,6 +49,10 @@ class _Status:
         self._scope = contextvars.ContextVar("cosens_scope", default=None)
 
     def get_turn(self, turn_id):
+        if turn_id is None:
+            return None
+        if not isinstance(turn_id, str):
+            raise ValueError("turn_id must be a string")
         value = self._runtime.turns.get(turn_id)
         if value and self._runtime._learning is not None:
             value['learning'] = self._runtime._learning.get(turn_id)
@@ -68,17 +72,21 @@ class _Status:
         turn = self._runtime.turns.get(request_turn)
         if not turn:
             return None
-        target = (turn.get('decision') or {}).get('feedback_turn_id') or request_turn
+        decision = turn.get('decision') or {}
+        target = decision.get('feedback_turn_id') or request_turn
+        # What the auto decision did on this request, including a failed decision call.
+        outcome = {'capture': turn.get('capture'), 'decision_reason': decision.get('reason'),
+                   'decision_error_type': decision.get('error_type')}
         learning = self._runtime.learning().get(target)
         if learning:
             return {**{key: learning.get(key) for key in (
                 'action', 'reason', 'used_recipe_id', 'used_recipe_version', 'recipe_candidate_id', 'error_type')},
                 'turn_id': target, 'request_turn_id': request_turn, 'status': learning['state'],
-                'job_id': learning.get('recipe_candidate_id')}
+                'job_id': learning.get('recipe_candidate_id'), **outcome}
         return {'action': 'noop', 'reason': turn.get('state'), 'turn_id': request_turn,
                 'used_recipe_id': turn.get('used_recipe_id'), 'used_recipe_version': turn.get('used_recipe_version'),
                 'status': 'blocked' if turn.get('state') == 'completion_pending' else 'pending',
-                'error_type': turn.get('last_error_type') or turn.get('learning_error_type')}
+                'error_type': turn.get('last_error_type') or turn.get('learning_error_type'), **outcome}
 
     def _learning_call(self, method, *args):
         function = getattr(self._runtime.learning(), method)
@@ -601,6 +609,12 @@ class _Runtime(AutoExecution):
             return self.decision_client
         return native.with_options(max_retries=0)
 
+    def _failed_decision(self, path, kwargs, error):
+        """A declined decision that records why the policy call failed (timeout, truncation, HTTP error)."""
+        decision = self._no_run_decision(path, kwargs, "decision_failed")
+        decision.update(error_type=type(error).__name__, error=str(error)[:500])
+        return decision
+
     def _decision_model_for(self, kwargs):
         model = self.decision_model or kwargs.get("model")
         if not isinstance(model, str) or not model.strip():
@@ -665,7 +679,7 @@ class _Runtime(AutoExecution):
         except Exception as exc:
             if self.mode == "approval":
                 raise RSIDecisionUnavailable(str(exc)) from exc
-            decision = self._no_run_decision(path, kwargs, "decision_failed")
+            decision = self._failed_decision(path, kwargs, exc)
         if target is not None:
             self._policy_bindings[target["turn_id"]] = (native, model, None)
         decision = self._route_feedback(decision, target, path, kwargs)
@@ -687,7 +701,7 @@ class _Runtime(AutoExecution):
         except Exception as exc:
             if self.mode == "approval":
                 raise RSIDecisionUnavailable(str(exc)) from exc
-            decision = self._no_run_decision(path, kwargs, "decision_failed")
+            decision = self._failed_decision(path, kwargs, exc)
         if target is not None:
             self._policy_bindings[target["turn_id"]] = (native, model, asyncio.get_running_loop())
         decision = self._route_feedback(decision, target, path, kwargs)
@@ -876,9 +890,6 @@ class _Runtime(AutoExecution):
     def _preflight_sync(self, native, path, kwargs):
         self._guard_request(kwargs,path)
         decision=self._decide_sync(native,path,kwargs)
-        if decision.get('capture') == 'decision_failed':
-            self.status.last_turn_id = None
-            return None, kwargs
         state,updated=self._setup_auto(decision,path,kwargs,native)
         self._policy_bindings[state['turn_id']]=(self._policy_client(native),self._decision_model_for(kwargs),None)
         return state,updated
@@ -886,9 +897,6 @@ class _Runtime(AutoExecution):
     async def _preflight_async(self, native, path, kwargs):
         self._guard_request(kwargs,path)
         decision=await self._decide_async(native,path,kwargs)
-        if decision.get('capture') == 'decision_failed':
-            self.status.last_turn_id = None
-            return None, kwargs
         state,updated=await asyncio.to_thread(self._setup_auto,decision,path,kwargs,native,asyncio.get_running_loop())
         self._policy_bindings[state['turn_id']]=(self._policy_client(native),self._decision_model_for(kwargs),asyncio.get_running_loop())
         return state,updated

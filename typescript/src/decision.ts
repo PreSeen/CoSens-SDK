@@ -4,7 +4,7 @@ import { RSIDecisionUnavailable } from './errors.js';
 export const DEFAULT_DECISION_TIMEOUT_MS = 5000;
 export const DEFAULT_DECISION_MAX_OUTPUT_TOKENS = 64;
 
-export interface Decision { activate: boolean; objective: string; task_family: string; reason: string; capture?: string }
+export interface Decision { activate: boolean; objective: string; task_family: string; reason: string; capture?: string; error_type?: string; error?: string }
 const FORMAT = { type: 'json_schema', name: 'cosens_decision', strict: true, schema: { type: 'object', properties: { activate: { type: 'boolean' }, objective: { type: 'string' }, task_family: { type: 'string' }, reason: { type: 'string' } }, required: ['activate', 'objective', 'task_family', 'reason'], additionalProperties: false } };
 /** One unretried policy call through `native` (the decision client), bounded by `timeoutMs` and `maxOutputTokens`. */
 export async function decide(native: any, model: string, user: string, tools: string[], timeoutMs: number, maxOutputTokens: number, extraBody?: Record<string, unknown>): Promise<Decision> {

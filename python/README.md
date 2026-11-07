@@ -38,7 +38,7 @@ turn_id = client.cosens.last_turn_id
 
 The response is the native OpenAI result. `AsyncOpenAI` works the same way and exposes async CoSens calls.
 
-In `auto` mode the SDK first makes a short structured decision call through your client (Chat Completions with a JSON schema `response_format`), so the model must support structured output. The call is made once, without retries, with a 5-second timeout and at most 64 output tokens. If the decision or the read-only Recipe lookup fails or times out, your request still runs without CoSens capture. A short request can be skipped (`activate: false`); a skipped turn makes no Recipe or Memory lookup and leaves no Task or Revision.
+In `auto` mode the SDK first makes a short structured decision call through your client (Chat Completions with a JSON schema `response_format`), so the model must support structured output. The call is made once, without retries, with a 5-second timeout and at most 64 output tokens. If the decision or the read-only Recipe lookup fails or times out, your request still runs without CoSens capture, and the turn records why: `client.cosens.get_turn(client.cosens.last_turn_id)` has `capture == "decision_failed"` with `decision["error_type"]` and `decision["error"]` (for example a timeout, a gateway error, or output cut off at the token limit). A short request can be skipped (`activate: false`); a skipped turn makes no Recipe or Memory lookup and leaves no Task or Revision.
 
 | Option | Default | Effect |
 | --- | --- | --- |
@@ -48,10 +48,10 @@ In `auto` mode the SDK first makes a short structured decision call through your
 | `decision_extra_body` | none | Extra request body for those calls, e.g. `{"enable_thinking": False}` |
 | `max_context_chars` | `4000` | Upper bound for the Recipe/Memory text added to a request or Agent instructions |
 
-Reasoning models spend their output budget on reasoning, so a 64-token decision can be cut off and fall back to an uncaptured request. Disable reasoning for the decision with `decision_extra_body` (the field name depends on your gateway, for example `{"enable_thinking": False}` or `{"reasoning_effort": "low"}`), or pass a non-reasoning `decision_client` and `decision_model`.
+Reasoning models spend their output budget on reasoning, so a 64-token decision is cut off (`finish_reason=length`) and falls back to an uncaptured request; the turn's `decision["error"]` says so. Disable reasoning for the decision with `decision_extra_body` only if your gateway accepts that field (for example vLLM's `{"chat_template_kwargs": {"enable_thinking": False}}`); a gateway that rejects an unknown field fails the decision, which is recorded the same way. Otherwise pass a non-reasoning `decision_client` and `decision_model`, or raise `decision_max_output_tokens`.
 
 ```python
-client = cosens(model_client, mode="auto", decision_extra_body={"enable_thinking": False})
+client = cosens(model_client, mode="auto", decision_model="<small-non-reasoning-model-id>")
 ```
 
 When a usable Recipe matches, the SDK adds it as plain text: its title, when/when-not, numbered steps, related Memory text and, if room remains, lesson actions. The block never exceeds `max_context_chars`; a final line states what was omitted. A list with no usable Recipe is remembered for 60 seconds, so routine requests skip the lookup.

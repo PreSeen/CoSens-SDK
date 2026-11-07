@@ -171,7 +171,9 @@ export class OpenAIWrapper {
     } catch (error) {
       if (error instanceof RSIApprovalUnavailable) throw error;
       if (this.cosens.mode === 'approval') throw new RSIDecisionUnavailable('Decision model could not make a required decision');
-      return { activate: false, objective, task_family: 'general', reason: 'decision_failed', capture: 'decision_failed' };
+      // Recorded on the turn so callers can see why nothing was captured.
+      return { activate: false, objective, task_family: 'general', reason: 'decision_failed', capture: 'decision_failed',
+        error_type: error instanceof Error ? error.name : typeof error, error: String(error instanceof Error ? error.message : error).slice(0, 500) };
     }
   }
   private async visibleEvents(turn: Turn, response: any, includeOutput = true): Promise<SessionEvent[]> {
