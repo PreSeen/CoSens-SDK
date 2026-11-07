@@ -76,7 +76,8 @@ class _Status:
         target = decision.get('feedback_turn_id') or request_turn
         # What the auto decision did on this request, including a failed decision call.
         outcome = {'capture': turn.get('capture'), 'decision_reason': decision.get('reason'),
-                   'decision_error_type': decision.get('error_type')}
+                   'decision_error_type': decision.get('error_type'),
+                   'recipe_match_error_type': (turn.get('recipe_match_error') or {}).get('type')}
         learning = self._runtime.learning().get(target)
         if learning:
             return {**{key: learning.get(key) for key in (
@@ -594,8 +595,10 @@ class _Runtime(AutoExecution):
         if self.mode == "approval" and decision["activate"]:
             raise RSIApprovalUnavailable("The configured CoSens service has no verified /v1/invocations approval contract")
         decision = dict(decision)
-        if not decision["objective"].strip():
+        # The model decides only whether to record; the task is the user's own text.
+        if not str(decision.get("objective") or "").strip():
             decision["objective"] = user_text(path, kwargs)
+        decision.setdefault("task_family", "general")
         decision.setdefault("capture", "active" if decision["activate"] else "skipped")
         self.status.rsi_capture = decision["capture"]
         return decision
@@ -669,6 +672,9 @@ class _Runtime(AutoExecution):
             return saved
         if self.mode == "disable":
             return self._no_run_decision(path, kwargs, "disabled")
+        if not user_text(path, kwargs).strip():
+            # No user text to describe a task: nothing to decide or record.
+            return self._decision_result(self._no_run_decision(path, kwargs, "no_user_text"), path, kwargs)
         model = self._decision_model_for(kwargs)
         target = self._feedback_target(path, kwargs)
         native = self._policy_client(native)
@@ -691,6 +697,9 @@ class _Runtime(AutoExecution):
             return saved
         if self.mode == "disable":
             return self._no_run_decision(path, kwargs, "disabled")
+        if not user_text(path, kwargs).strip():
+            # No user text to describe a task: nothing to decide or record.
+            return self._decision_result(self._no_run_decision(path, kwargs, "no_user_text"), path, kwargs)
         model = self._decision_model_for(kwargs)
         target = self._feedback_target(path, kwargs)
         native = self._policy_client(native)

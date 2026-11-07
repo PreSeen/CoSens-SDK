@@ -33,7 +33,7 @@ for(const entry of ['transparent','agent','atomic'])test(`explicit generation: $
  const client=new CoSensClient({apiKey:'test-key',fetch:fetcher,statePath});
  let wrapper:any;let taskId:string;let revisionId:string;
  if(entry==='transparent'){
-  const native={responses:{create:async()=>({id:'response_1',status:'completed',output_text:'final output',output:[{type:'message'}]})},chat:{completions:{create:async()=>({choices:[{message:{content:JSON.stringify({activate:true,objective:'Produce output',task_family:'report',reason:'task'})}}]})}}};
+  const native={responses:{create:async()=>({id:'response_1',status:'completed',output_text:'final output',output:[{type:'message'}]})},chat:{completions:{create:async()=>({choices:[{message:{content:JSON.stringify({activate:true,reason:'task'})}}]})}}};
   wrapper=cosens(native,{apiKey:'test-key',mode:'auto',fetch:fetcher,statePath});
   const response=await wrapper.responses.create({model:'model',input:'Produce output'});assert.equal(response.output_text,'final output');
   const turn=wrapper.cosens.getTurn(wrapper.cosens.lastTurnId);assert.equal(turn.state,'completed');taskId=turn.taskId;revisionId=turn.revisionId;

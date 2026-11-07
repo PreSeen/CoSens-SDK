@@ -59,7 +59,10 @@ def test_auto_decision_timeout_configuration(monkeypatch, tmp_path, configured_t
         wrapped.close(); native.close()
 
 
-def test_auto_recipe_match_timeout_returns_native_response(tmp_path):
+def test_auto_recipe_match_timeout_still_captures_without_a_recipe(tmp_path):
+    """Reusing a Recipe is optional: a match timeout must not discard the capture."""
+    from test_auto_latency import Algorithm, _candidate
+
     def gateway(request):
         if request.url.path.endswith('/chat/completions'):
             import json
@@ -67,24 +70,13 @@ def test_auto_recipe_match_timeout_returns_native_response(tmp_path):
             name = body['response_format']['json_schema']['name']
             if name == 'cosens_recipe_match':
                 raise httpx.ReadTimeout('recipe match timed out')
-            content = json.dumps({'activate': True, 'objective': 'Produce a report',
-                'task_family': 'report', 'reason': 'task'})
+            content = json.dumps({'activate': True, 'reason': 'task'})
             return httpx.Response(200, json={'id': 'decision', 'object': 'chat.completion',
                 'created': 0, 'model': 'model', 'choices': [{'index': 0,
                 'message': {'role': 'assistant', 'content': content}, 'finish_reason': 'stop'}]})
         return native_response(request)
 
-    def algorithm(request):
-        if request.url.path.endswith('/recipe-candidates'):
-            return httpx.Response(200, json={'items': [{'recipe_candidate_id': 'candidate_1',
-                'status': 'candidate', 'current': True}], 'has_more': False})
-        if request.url.path.endswith('/recipe-candidates/candidate_1'):
-            return httpx.Response(200, json={'recipe_candidate_id': 'candidate_1',
-                'recipe_id': 'recipe_1', 'status': 'candidate', 'current': True,
-                'version': 1, 'recipe': {'title': 'Report', 'when': 'Reports',
-                'when_not': '', 'steps': []}})
-        return _unexpected_algorithm(request)
-
+    algorithm = Algorithm([_candidate()])
     native = OpenAI(base_url='https://llm.cosens.ai/v1', api_key='test-only-gateway-key',
         http_client=httpx.Client(transport=httpx.MockTransport(gateway)))
     wrapped = cosens(native, mode='auto', api_key='test-only-gateway-key',
@@ -92,9 +84,12 @@ def test_auto_recipe_match_timeout_returns_native_response(tmp_path):
     try:
         response = wrapped.responses.create(model='model', input='Produce a report')
         assert response.output_text == 'final artifact'
-        assert wrapped.cosens.rsi_capture == 'policy_failed'
+        assert wrapped.cosens.rsi_capture == 'active'
         turn = wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
-        assert turn['state'] == 'completed' and not turn.get('execution_id')
+        assert turn['state'] == 'completed' and turn['revision_id'] == 'revision_1'
+        assert not turn.get('used_recipe_id')
+        assert turn['recipe_match_error']['type'] == 'APITimeoutError'
+        assert wrapped.cosens.get_auto()['recipe_match_error_type'] == 'APITimeoutError'
     finally:
         wrapped.close(); native.close()
 
@@ -153,7 +148,7 @@ async def test_truncated_reasoning_decision_is_recorded_as_failed(tmp_path, asyn
         turn = wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
         assert turn['capture'] == 'decision_failed'
         assert turn['decision']['error_type'] == 'RSIDecisionUnavailable'
-        assert 'finish_reason=length' in turn['decision']['error'] and 'max_output_tokens=64' in turn['decision']['error']
+        assert 'finish_reason=length' in turn['decision']['error'] and 'max_output_tokens=1024' in turn['decision']['error']
     finally:
         if asynchronous:
             await wrapped.close(); await native.close()

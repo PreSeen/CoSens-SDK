@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import OpenAI from 'openai';
 import { cosens } from '../src/index.ts';
+import { DEFAULT_DECISION_MAX_OUTPUT_TOKENS } from '../src/decision.ts';
 
 const statePath = () => join(mkdtempSync(join(tmpdir(), 'cosens-latency-')), 'state.sqlite3');
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
@@ -12,7 +13,7 @@ const chat = (content: unknown) => json({ id: 'decision', object: 'chat.completi
   choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify(content) } }] });
 const RESPONSE = { id: 'resp-1', object: 'response', created_at: 1, model: 'm', status: 'completed',
   output: [{ id: 'msg-1', type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'done', annotations: [] }] }] };
-const ACTIVATE = { activate: true, objective: 'Produce a report', task_family: 'report', reason: 'task' };
+const ACTIVATE = { activate: true, reason: 'task' };
 
 function candidate(steps = 3) {
   return { recipe_candidate_id: 'candidate_1', recipe_id: 'recipe_1', status: 'candidate', current: true, version: 1,
@@ -56,7 +57,7 @@ test('the decision is a single unretried call and falls back to the native reque
     const response = await client.responses.create({ model: 'm', input: 'Produce a report' });
     assert.equal(response.id, 'resp-1');
     assert.equal(decisionBodies.length, 1);
-    assert.equal(decisionBodies[0].max_completion_tokens, 64);
+    assert.equal(decisionBodies[0].max_completion_tokens, 1024);
     assert.equal(client.cosens.rsiCapture, 'decision_failed');
     assert.equal(native.maxRetries, 2);
   } finally { await client.close(); }
@@ -78,7 +79,7 @@ test('decisionClient and decisionExtraBody cover the decision and Recipe match',
     await client.responses.create({ model: 'm', input: 'Produce a report' });
     assert.deepEqual(nativePaths, ['/v1/responses']);
     assert.deepEqual(decisionBodies.map(body => body.response_format.json_schema.name), ['cosens_decision', 'cosens_recipe_match']);
-    assert.ok(decisionBodies.every(body => body.enable_thinking === false && body.max_completion_tokens === 64));
+    assert.ok(decisionBodies.every(body => body.enable_thinking === false && body.max_completion_tokens === 1024));
     const matchInput = decisionBodies[1].messages[0].content;
     assert.ok(matchInput.includes('Writing a report') && !matchInput.includes('Do step 1') && !matchInput.includes('evidence_refs'));
     assert.equal(client.cosens.getTurn(client.cosens.lastTurnId)?.frozenContext.recipe.recipe_id, 'recipe_1');
@@ -128,7 +129,7 @@ test('a declined turn makes no Recipe or Memory lookup and sends the request unc
   const sent: any[] = [];
   const native = new OpenAI({ apiKey: 'model-key', baseURL: 'https://model.example/v1', fetch: async (input, init) => {
     const body = JSON.parse(String(init?.body));
-    if (String(input).endsWith('/chat/completions')) return chat({ activate: false, objective: 'Say hi', task_family: 'general', reason: 'routine' });
+    if (String(input).endsWith('/chat/completions')) return chat({ activate: false, reason: 'routine' });
     sent.push(body);
     return json(RESPONSE);
   } });
@@ -150,4 +151,45 @@ test('maxContextChars and decisionExtraBody are validated', () => {
   const native = new OpenAI({ apiKey: 'model-key' });
   assert.throws(() => cosens(native, { apiKey: 'k', maxContextChars: 10, statePath: statePath() }), /maxContextChars/);
   assert.throws(() => cosens(new OpenAI({ apiKey: 'model-key' }), { apiKey: 'k', decisionExtraBody: [] as any, statePath: statePath() }), /decisionExtraBody/);
+});
+
+// Largest completion (reasoning + JSON) of a successful policy call measured on the docs'
+// default model deepseek-flash via llm.cosens.ai, 2026-11-06: 139 tokens for a decision,
+// 294 with a linked feedback turn, 146 for a Recipe match (84 calls). Keep at least 3x headroom.
+const MEASURED_POLICY_COMPLETION_TOKENS = 294;
+
+test('the default decision budget fits a measured reasoning reply', async () => {
+  assert.ok(DEFAULT_DECISION_MAX_OUTPUT_TOKENS >= 3 * MEASURED_POLICY_COMPLETION_TOKENS);
+  const budgets: number[] = [];
+  const bodies: any[] = [];
+  const native = new OpenAI({ apiKey: 'model-key', baseURL: 'https://model.example/v1', fetch: async (input, init) => {
+    if (!String(input).endsWith('/chat/completions')) return json(RESPONSE);
+    const body = JSON.parse(String(init?.body));
+    budgets.push(body.max_completion_tokens); bodies.push(body);
+    // Behaves like a reasoning model: a budget below the reply size is cut off.
+    if (body.max_completion_tokens < MEASURED_POLICY_COMPLETION_TOKENS) return json({ id: 'd', object: 'chat.completion', created: 1, model: 'm', choices: [{ index: 0, finish_reason: 'length', message: { role: 'assistant', content: '' } }] });
+    return chat({ activate: true, reason: 'multi-step report' });
+  } });
+  const service = algorithm();
+  const client = cosens(native, { apiKey: 'service-key', mode: 'auto', fetch: service.fetcher, statePath: statePath() });
+  try {
+    await client.responses.create({ model: 'deepseek-flash', input: 'Produce a quarterly report' });
+    assert.deepEqual(budgets, [DEFAULT_DECISION_MAX_OUTPUT_TOKENS]);
+    assert.deepEqual(bodies[0].response_format.json_schema.schema.required, ['activate', 'reason']);
+    const turn = client.cosens.getTurn(client.cosens.lastTurnId);
+    assert.equal(turn?.decision.capture, 'active');
+    assert.equal(turn?.objective, 'Produce a quarterly report');
+    assert.equal(turn?.executionId, 'execution_1');
+  } finally { await client.close(); }
+});
+
+test('a request without user text makes no decision call', async () => {
+  const paths: string[] = [];
+  const native = new OpenAI({ apiKey: 'model-key', baseURL: 'https://model.example/v1', fetch: async input => { paths.push(new URL(String(input)).pathname); return json(RESPONSE); } });
+  const client = cosens(native, { apiKey: 'service-key', mode: 'auto', fetch: algorithm().fetcher, statePath: statePath() });
+  try {
+    await client.responses.create({ model: 'm', input: [{ role: 'user', content: [{ type: 'input_image', image_url: 'data:,' }] }] as any });
+    assert.deepEqual(paths, ['/v1/responses']);
+    assert.equal(client.cosens.getTurn(client.cosens.lastTurnId)?.decision.capture, 'no_user_text');
+  } finally { await client.close(); }
 });

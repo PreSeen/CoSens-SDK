@@ -82,7 +82,7 @@ test('the pinned OpenAI Chat stream keeps a tool call on the same CoSens executi
   const events: any[] = [];
   const modelFetch: typeof fetch = async (_input, init) => {
     if (JSON.parse(String(init?.body)).response_format?.json_schema?.name === 'cosens_decision')
-      return new Response(JSON.stringify({ id: 'decision', object: 'chat.completion', created: 1, model: 'test-model', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify({ activate: true, objective: 'hello', task_family: 'general', reason: 'useful' }) } }] }), { headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ id: 'decision', object: 'chat.completion', created: 1, model: 'test-model', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify({ activate: true, reason: 'useful' }) } }] }), { headers: { 'content-type': 'application/json' } });
     modelCalls++;
     if (modelCalls === 1) {
       const chunks = [

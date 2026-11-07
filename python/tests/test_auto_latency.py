@@ -14,8 +14,8 @@ def _chat(content):
         'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': json.dumps(content)}, 'finish_reason': 'stop'}]})
 
 
-ACTIVATE = {'activate': True, 'objective': 'Produce a report', 'task_family': 'report', 'reason': 'task'}
-DECLINE = {'activate': False, 'objective': 'Say hi', 'task_family': 'general', 'reason': 'routine'}
+ACTIVATE = {'activate': True, 'reason': 'task'}
+DECLINE = {'activate': False, 'reason': 'routine'}
 
 
 class Algorithm:
@@ -80,7 +80,7 @@ def test_decision_defaults_cap_tokens_and_do_not_retry(tmp_path):
         assert wrapped.responses.create(model='model', input='Produce a report').output_text == 'final artifact'
         # One attempt only; the default client would have retried twice.
         assert len(calls) == 1
-        assert calls[0]['max_completion_tokens'] == 64
+        assert calls[0]['max_completion_tokens'] == 1024
         assert wrapped.cosens.rsi_capture == 'decision_failed'
         assert native.max_retries == 2  # the caller's own client is unchanged
     finally:
@@ -112,7 +112,7 @@ def test_decision_client_and_extra_body_cover_decision_and_match(tmp_path):
         assert native_paths == ['/v1/responses']
         names = [body['response_format']['json_schema']['name'] for body in decision_bodies]
         assert names == ['cosens_decision', 'cosens_recipe_match']
-        assert all(body['enable_thinking'] is False and body['max_completion_tokens'] == 64 for body in decision_bodies)
+        assert all(body['enable_thinking'] is False and body['max_completion_tokens'] == 1024 for body in decision_bodies)
         # The matcher sees applicability only, never the steps or evidence.
         match_input = decision_bodies[1]['messages'][0]['content']
         assert 'Writing a report' in match_input and 'Do step 1' not in match_input and 'evidence_refs' not in match_input
@@ -192,5 +192,82 @@ def test_declined_turn_makes_no_lookup(tmp_path):
     try:
         wrapped.responses.create(model='model', input='Say hi')
         assert algorithm.paths == [] and wrapped.cosens.rsi_capture == 'skipped'
+    finally:
+        wrapped.close(); native.close()
+
+
+# Largest completion (reasoning + JSON) of a successful policy call measured on the docs'
+# default model deepseek-flash via llm.cosens.ai, 2026-11-06: 139 tokens for a decision,
+# 294 for a decision with a linked feedback turn, 146 for a Recipe match (84 calls).
+# The default budget must leave at least 3x headroom over that.
+MEASURED_POLICY_COMPLETION_TOKENS = 294
+
+
+def test_default_decision_budget_fits_a_measured_reasoning_reply(tmp_path):
+    from cosens.decision import DEFAULT_DECISION_MAX_OUTPUT_TOKENS
+    assert DEFAULT_DECISION_MAX_OUTPUT_TOKENS >= 3 * MEASURED_POLICY_COMPLETION_TOKENS
+    budgets = []
+
+    def reasoning_model(request):
+        if not request.url.path.endswith('/chat/completions'):
+            return native_response(request)
+        body = json.loads(request.content)
+        budgets.append(body['max_completion_tokens'])
+        # Behaves like a reasoning model: a budget below the reply size is cut off.
+        if body['max_completion_tokens'] < MEASURED_POLICY_COMPLETION_TOKENS:
+            return httpx.Response(200, json={'id': 'd', 'object': 'chat.completion', 'created': 0, 'model': 'model',
+                'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': ''}, 'finish_reason': 'length'}]})
+        return _chat(DECLINE)
+
+    native = OpenAI(api_key='model-key', http_client=httpx.Client(transport=httpx.MockTransport(reasoning_model)))
+    wrapped = cosens(native, mode='auto', api_key='service-key', state_path=tmp_path / 's.sqlite',
+                     _http_transport=httpx.MockTransport(Algorithm()))
+    try:
+        wrapped.responses.create(model='deepseek-flash', input='Say hi')
+        turn = wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
+        assert budgets == [DEFAULT_DECISION_MAX_OUTPUT_TOKENS]
+        assert turn['capture'] == 'skipped' and turn['decision']['reason'] == 'routine'
+    finally:
+        wrapped.close(); native.close()
+
+
+def test_decision_model_writes_only_activate_and_reason(tmp_path):
+    bodies = []
+
+    def model(request):
+        if request.url.path.endswith('/chat/completions'):
+            bodies.append(json.loads(request.content))
+            return _chat({'activate': True, 'reason': 'multi-step report'})
+        return native_response(request)
+
+    algorithm = Algorithm()
+    native = OpenAI(api_key='model-key', http_client=httpx.Client(transport=httpx.MockTransport(model)))
+    wrapped = cosens(native, mode='auto', api_key='service-key', state_path=tmp_path / 's.sqlite',
+                     _http_transport=httpx.MockTransport(algorithm))
+    try:
+        wrapped.responses.create(model='m', input='Produce a quarterly report')
+        schema = bodies[0]['response_format']['json_schema']['schema']
+        assert schema['required'] == ['activate', 'reason']
+        turn = wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
+        # The task objective is the user's own text.
+        assert turn['objective'] == 'Produce a quarterly report' and turn['execution_id'] == 'execution_1'
+    finally:
+        wrapped.close(); native.close()
+
+
+def test_request_without_user_text_makes_no_decision_call(tmp_path):
+    calls = []
+
+    def model(request):
+        calls.append(request.url.path)
+        return native_response(request)
+
+    native = OpenAI(api_key='model-key', http_client=httpx.Client(transport=httpx.MockTransport(model)))
+    wrapped = cosens(native, mode='auto', api_key='service-key', state_path=tmp_path / 's.sqlite',
+                     _http_transport=httpx.MockTransport(Algorithm()))
+    try:
+        wrapped.responses.create(model='m', input=[{'role': 'user', 'content': [{'type': 'input_image', 'image_url': 'data:,'}]}])
+        assert calls == ['/v1/responses']
+        assert wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)['capture'] == 'no_user_text'
     finally:
         wrapped.close(); native.close()

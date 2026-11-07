@@ -7,7 +7,9 @@ Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned
 ### Breaking
 
 - The provider-specific model client factory and its base URL constant were removed from both SDKs. Build a standard OpenAI client for your model gateway and pass it to `cosens(...)`.
-- The `auto` decision defaults changed: 5-second timeout (was 60), 64 output tokens (was uncapped in Python, 256 in TypeScript), and no retries.
+- The `auto` decision defaults changed: 5-second timeout (was 60), a 1024-token output budget including reasoning (was uncapped in Python, 256 in TypeScript), and no retries.
+- The decision model now writes only `activate` and `reason` (plus `feedback` for a linked turn). The task objective is the user's text and `task_family` is `"general"`. Successful decisions on `deepseek-flash` used at most 139 output tokens (294 with feedback) instead of up to 826.
+- A Recipe-match call that times out, is cut off or returns an invalid result no longer discards the capture: the turn is recorded without a Recipe and carries `recipe_match_error`.
 - The wait helpers (`wait_workflow_job`, `wait_learning`, `waitWorkflowJob`) raise `RSICandidateFailed` / `RSICandidateFailedError` when a Recipe candidate failed, instead of returning it.
 - Injected Recipe/Memory context is plain text bounded by `max_context_chars` / `maxContextChars` (default 4000), not the raw JSON bundle. Evidence references and Memory scores are no longer sent to the model. Nothing is injected when there is no matched Recipe and no Memory.
 
@@ -20,6 +22,8 @@ Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned
 - `key` is optional on `start_recipe_candidate` / `startRecipeCandidate`; the default is derived from the task, revision and completion budget, identically in both SDKs.
 
 ### Fixed
+
+- A request without user text makes no decision call and is recorded as `capture: "no_user_text"`.
 
 - Python: a failed or timed-out decision now records a turn (`last_turn_id` is set) with `capture: "decision_failed"` and `decision.error_type` / `decision.error`, as TypeScript already did. Output cut off at the token limit (`finish_reason=length`) is reported as such. `get_auto()` includes `capture`, `decision_reason` and `decision_error_type`.
 - Python: `client.cosens.get_turn(None)` returns `None` instead of raising `TypeError`.

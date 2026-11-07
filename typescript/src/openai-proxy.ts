@@ -161,13 +161,16 @@ export class OpenAIWrapper {
     }
     const objective = userText(path, params);
     if (this.cosens.mode === 'disable') return { activate: false, objective, task_family: 'general', reason: 'disabled', capture: 'disabled' };
+    // No user text to describe a task: nothing to decide or record.
+    if (!objective.trim()) return { activate: false, objective, task_family: 'general', reason: 'no_user_text', capture: 'no_user_text' };
     const model = this.options.decisionModel ?? params.model;
     if (typeof model !== 'string' || !model.trim()) throw new RSIDecisionUnavailable('Set model on the native request so CoSens can use it for its decision');
     try {
       const decision = await decide(this.options.decisionClient ?? this.native, model, objective, toolNames(params),
         this.options.decisionTimeoutMs ?? DEFAULT_DECISION_TIMEOUT_MS, this.options.decisionMaxOutputTokens ?? DEFAULT_DECISION_MAX_OUTPUT_TOKENS, this.options.decisionExtraBody);
       if (this.cosens.mode === 'approval' && decision.activate) throw new RSIApprovalUnavailable('The configured CoSens service has no verified /v1/invocations approval contract');
-      return { ...decision, objective: decision.objective.trim() || objective, capture: decision.activate ? 'active' : 'skipped' };
+      // The model decides only whether to record; the task is the user's own text.
+      return { ...decision, objective, task_family: 'general', capture: decision.activate ? 'active' : 'skipped' };
     } catch (error) {
       if (error instanceof RSIApprovalUnavailable) throw error;
       if (this.cosens.mode === 'approval') throw new RSIDecisionUnavailable('Decision model could not make a required decision');
@@ -295,7 +298,21 @@ export class OpenAIWrapper {
   private async lookup(objective: string, params: any): Promise<any> {
     const { candidates, complete } = await this.usableRecipeCandidates();
     let recipe: any = { status: 'not_found' };
+    let matchError: { type: string; message: string } | undefined;
     if (candidates.length) {
+      try { recipe = await this.matchRecipe(objective, params, candidates); }
+      catch (error) {
+        // Reusing a Recipe is optional. A match that times out, is cut off or is
+        // invalid leaves the turn captured without a Recipe, and says why.
+        matchError = { type: error instanceof Error ? error.name : typeof error, message: String(error instanceof Error ? error.message : error).slice(0, 500) };
+      }
+    }
+    const memory = await this.client.atoms.memoryRecall({ query: objective });
+    return { recipe, context: { source: 'workflow_recipe_lookup', lookup_complete: complete, ...(matchError ? { recipe_match_error: matchError } : {}) }, snapshot: { evidence: memory.items } };
+  }
+  private async matchRecipe(objective: string, params: any, candidates: any[]): Promise<any> {
+    let recipe: any = { status: 'not_found' };
+    {
       // Applicability fields only: the matcher never needs the steps.
       const descriptions = candidates.map(c => ({ candidate_id: c.recipe_candidate_id, title: c.recipe.title, when: c.recipe.when, when_not: c.recipe.when_not }));
       const response = await structuredResponse(this.options.decisionClient ?? this.native, {
@@ -313,8 +330,7 @@ export class OpenAIWrapper {
         recipe = { status: 'matched', recipe_id: selected.recipe_id, recipe_candidate_id: selected.recipe_candidate_id, version: selected.version, bundle: selected.recipe, provisional: true };
       }
     }
-    const memory = await this.client.atoms.memoryRecall({ query: objective });
-    return { recipe, context: { source: 'workflow_recipe_lookup', lookup_complete: complete }, snapshot: { evidence: memory.items } };
+    return recipe;
   }
   private async complete(turn:Turn,response:any):Promise<void>{
  if(!terminal(response)){

@@ -36,17 +36,28 @@ const turnId = client.cosens.lastTurnId;
 
 The response is the native OpenAI result.
 
-In `auto` mode the SDK first makes a short structured decision call through your client (Chat Completions with a JSON schema `response_format`), so the model must support structured output. The call is made once (`maxRetries: 0`) with a 5-second timeout and at most 64 output tokens. If the decision or the read-only Recipe lookup fails or times out, your request still runs without CoSens capture, and the turn records why: `client.cosens.getTurn(client.cosens.lastTurnId)?.decision` has `capture: 'decision_failed'` with `error_type` and `error` (for example a timeout, a gateway error, or output cut off at the token limit). A skipped turn (`activate: false`) makes no Recipe or Memory lookup.
+In `auto` mode the SDK first makes a short structured decision call through your client (Chat Completions with a JSON schema `response_format`), so the model must support structured output. The model writes only `{ activate, reason }`; the task objective is your user's text. The call is made once (`maxRetries: 0`) with a 5-second timeout and a 1024-token output budget (reasoning included). If the decision or the read-only Recipe lookup fails or times out, your request still runs without CoSens capture, and the turn records why: `client.cosens.getTurn(client.cosens.lastTurnId)?.decision` has `capture: 'decision_failed'` with `error_type` and `error` (for example a timeout, a gateway error, or output cut off at the token limit). A request without user text is skipped without a model call (`capture: 'no_user_text'`).
 
 | Option | Default | Effect |
 | --- | --- | --- |
 | `decisionTimeoutMs` | `5000` | Time allowed for the decision and Recipe-match calls |
-| `decisionMaxOutputTokens` | `64` | Output cap for the decision and Recipe-match calls |
+| `decisionMaxOutputTokens` | `1024` | Output budget, reasoning included, for the decision and Recipe-match calls |
 | `decisionClient` | the wrapped client | Separate OpenAI-compatible client for those calls, e.g. a small fast model |
 | `decisionExtraBody` | none | Merged into those request bodies, e.g. `{ enable_thinking: false }` |
 | `maxContextChars` | `4000` | Upper bound for the Recipe/Memory text added to a request or Agent instructions (also on `TaskWorkflowRunner`) |
 
-Reasoning models spend their output budget on reasoning, so a 64-token decision is cut off (`finish_reason=length`) and falls back to an uncaptured request; the turn's `decision.error` says so. Disable reasoning for the decision with `decisionExtraBody` only if your gateway accepts that field (for example vLLM's `{ chat_template_kwargs: { enable_thinking: false } }`); a gateway that rejects an unknown field fails the decision, which is recorded the same way. Otherwise pass a non-reasoning `decisionClient` and `decisionModel`, or raise `decisionMaxOutputTokens`.
+Both models above reason before answering, which is why the budget is not smaller. Reasoning models that think longer can still hit the timeout or the token budget; the turn then records `decision_failed` with the cause. Use a small non-reasoning `decisionModel` (or a separate `decisionClient`), raise `decisionTimeoutMs` / `decisionMaxOutputTokens`, or switch reasoning off with `decisionExtraBody` if your gateway accepts such a field (vLLM accepts `{ chat_template_kwargs: { enable_thinking: false } }`; the LiteLLM gateway above rejects it with HTTP 500, which also records `decision_failed`).
+
+Measured on 2026-11-06 with the SDK's own decision request (output tokens include reasoning):
+
+| Model (gateway) | Decision tokens p50 / max | With linked feedback, max | Success at defaults | Decision latency p50 / max |
+| --- | --- | --- | --- | --- |
+| `deepseek-flash` (llm.cosens.ai) | 50 / 139 | 294 | 24 / 24 | 1.6 s / 3.7 s |
+| `qwen3.8-27b` (vLLM via LiteLLM) | 189 / 469 | 337 | 23 / 24 (one 5 s timeout) | 1.6 s / 5.0 s |
+
+The default budget leaves more than 3x headroom over the largest reply measured on the default model.
+
+If the decision activates, a Recipe-match call picks a usable Recipe with the same limits. A match that times out or is cut off does not stop the capture: the turn is recorded without a Recipe and `turn.frozenContext.context.recipe_match_error` says why. With 20 usable Recipes, `deepseek-flash` matched within 5 s in 9 of 12 measured calls.
 
 ```ts
 const client = cosens(modelClient, { mode: 'auto', decisionModel: '<small-non-reasoning-model-id>' });

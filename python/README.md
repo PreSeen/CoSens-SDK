@@ -38,17 +38,28 @@ turn_id = client.cosens.last_turn_id
 
 The response is the native OpenAI result. `AsyncOpenAI` works the same way and exposes async CoSens calls.
 
-In `auto` mode the SDK first makes a short structured decision call through your client (Chat Completions with a JSON schema `response_format`), so the model must support structured output. The call is made once, without retries, with a 5-second timeout and at most 64 output tokens. If the decision or the read-only Recipe lookup fails or times out, your request still runs without CoSens capture, and the turn records why: `client.cosens.get_turn(client.cosens.last_turn_id)` has `capture == "decision_failed"` with `decision["error_type"]` and `decision["error"]` (for example a timeout, a gateway error, or output cut off at the token limit). A short request can be skipped (`activate: false`); a skipped turn makes no Recipe or Memory lookup and leaves no Task or Revision.
+In `auto` mode the SDK first makes a short structured decision call through your client (Chat Completions with a JSON schema `response_format`), so the model must support structured output. The model writes only `{"activate": ..., "reason": ...}`; the task objective is your user's text. The call is made once, without retries, with a 5-second timeout and a 1024-token output budget (reasoning included). If the decision or the read-only Recipe lookup fails or times out, your request still runs without CoSens capture, and the turn records why: `client.cosens.get_turn(client.cosens.last_turn_id)` has `capture == "decision_failed"` with `decision["error_type"]` and `decision["error"]` (for example a timeout, a gateway error, or output cut off at the token limit). A request without user text is skipped without a model call (`capture == "no_user_text"`).
 
 | Option | Default | Effect |
 | --- | --- | --- |
 | `decision_timeout` | `5` | Seconds allowed for the decision and Recipe-match calls |
-| `decision_max_output_tokens` | `64` | Output cap for the decision and Recipe-match calls |
+| `decision_max_output_tokens` | `1024` | Output budget, reasoning included, for the decision and Recipe-match calls |
 | `decision_client` | the wrapped client | Separate `OpenAI` / `AsyncOpenAI` client (matching the wrapped one) for those calls, e.g. a small fast model |
 | `decision_extra_body` | none | Extra request body for those calls, e.g. `{"enable_thinking": False}` |
 | `max_context_chars` | `4000` | Upper bound for the Recipe/Memory text added to a request or Agent instructions |
 
-Reasoning models spend their output budget on reasoning, so a 64-token decision is cut off (`finish_reason=length`) and falls back to an uncaptured request; the turn's `decision["error"]` says so. Disable reasoning for the decision with `decision_extra_body` only if your gateway accepts that field (for example vLLM's `{"chat_template_kwargs": {"enable_thinking": False}}`); a gateway that rejects an unknown field fails the decision, which is recorded the same way. Otherwise pass a non-reasoning `decision_client` and `decision_model`, or raise `decision_max_output_tokens`.
+Both models above reason before answering, which is why the budget is not smaller. Reasoning models that think longer can still hit the timeout or the token budget; the turn then records `decision_failed` with the cause. Use a small non-reasoning `decision_model` (or a separate `decision_client`), raise `decision_timeout` / `decision_max_output_tokens`, or switch reasoning off with `decision_extra_body` if your gateway accepts such a field (vLLM accepts `{"chat_template_kwargs": {"enable_thinking": False}}`; the LiteLLM gateway above rejects it with HTTP 500, which also records `decision_failed`).
+
+Measured on 2026-11-06 with the SDK's own decision request (output tokens include reasoning):
+
+| Model (gateway) | Decision tokens p50 / max | With linked feedback, max | Success at defaults | Decision latency p50 / max |
+| --- | --- | --- | --- | --- |
+| `deepseek-flash` (llm.cosens.ai) | 50 / 139 | 294 | 24 / 24 | 1.6 s / 3.7 s |
+| `qwen3.8-27b` (vLLM via LiteLLM) | 189 / 469 | 337 | 23 / 24 (one 5 s timeout) | 1.6 s / 5.0 s |
+
+The default budget leaves more than 3x headroom over the largest reply measured on the default model.
+
+If the decision activates, a Recipe-match call picks a usable Recipe with the same limits. A match that times out or is cut off does not stop the capture: the turn is recorded without a Recipe and `turn["recipe_match_error"]` says why. With 20 usable Recipes, `deepseek-flash` matched within 5 s in 9 of 12 measured calls.
 
 ```python
 client = cosens(model_client, mode="auto", decision_model="<small-non-reasoning-model-id>")
