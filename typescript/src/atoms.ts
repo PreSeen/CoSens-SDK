@@ -1,5 +1,5 @@
-import { RSIRecoveryRequired } from './errors.js';
-import { pathPart, requestKey, Transport, type TransportOptions } from './http.js';
+import { RSICandidateFailedError, RSIRecoveryRequired } from './errors.js';
+import { pathPart, recipeRequestKey, requestKey, Transport, type TransportOptions } from './http.js';
 import { performance } from 'node:perf_hooks';
 import { startWorkflow, type WorkflowSnapshot, type WorkflowStartOptions } from './workflow-start.js';
 import { documentBytes, documentMetadata, documentStatusBody, uploadTarget, type DocumentUploadGrant, type DocumentUploadMetadata } from './document-upload.js';
@@ -132,8 +132,9 @@ export class Atoms {
   }
   getRevision(revisionId: string) { return this.http.request('GET', `/v1/revisions/${pathPart(revisionId)}`); }
   startRevision(revisionId:string,{key}:{key:string}) {return this.http.request('POST',`/v1/revisions/${pathPart(revisionId)}/revisions`,{data:{}},requestKey(key));}
-  startRecipeCandidate(taskId:string,{revisionId,key,model,maxCompletionTokens}:{revisionId:string;key:string;model?:string;maxCompletionTokens?:number}) {
-    return this.http.request('POST',`/v1/tasks/${pathPart(taskId)}/recipe-candidates`,{data:{revision_id:revisionId,...modelData(model),...(maxCompletionTokens===undefined?{}:{max_completion_tokens:boundedInteger(maxCompletionTokens,'maxCompletionTokens',1_000_000)})}},requestKey(key));
+  /** Create or update the Recipe from a confirmed revision. Without `key`, repeated calls for the same revision and budget return the same candidate. */
+  startRecipeCandidate(taskId:string,{revisionId,key,model,maxCompletionTokens}:{revisionId:string;key?:string;model?:string;maxCompletionTokens?:number}) {
+    return this.http.request('POST',`/v1/tasks/${pathPart(taskId)}/recipe-candidates`,{data:{revision_id:revisionId,...modelData(model),...(maxCompletionTokens===undefined?{}:{max_completion_tokens:boundedInteger(maxCompletionTokens,'maxCompletionTokens',1_000_000)})}},requestKey(key??recipeRequestKey(taskId,revisionId,maxCompletionTokens)));
   }
   getRecipeCandidate(recipeId:string){return this.http.request('GET',`/v1/recipe-candidates/${pathPart(recipeId)}`);}
   resumeRecipeCandidate(recipeId:string,options?:string|{model?:string;maxCompletionTokens?:number}){const {model,maxCompletionTokens}=typeof options==='string'?{model:options}:options??{};const data={...modelData(model),...(maxCompletionTokens===undefined?{}:{max_completion_tokens:boundedInteger(maxCompletionTokens,'maxCompletionTokens',1_000_000)})};return this.http.request('POST',`/v1/recipe-candidates/${pathPart(recipeId)}/resume`,Object.keys(data).length?{data}:undefined);}
@@ -144,10 +145,11 @@ export class Atoms {
   appendSessionEvents(sessionId:string,events:Array<{event_id:string;kind:string;payload:Record<string,unknown>;task_id?:string;revision_id?:string}>) {return this.http.request('POST',`/v1/sessions/${pathPart(sessionId)}/events`,{events});}
   getSessionContext(sessionId:string,after=0) {return this.http.request('GET',`/v1/sessions/${pathPart(sessionId)}/context?after=${after}`);}
   endSession(sessionId:string) {return this.http.request('POST',`/v1/sessions/${pathPart(sessionId)}/end`);}
+  /** Poll an existing candidate until it leaves queued/running/awaiting_parent; throws RSICandidateFailedError when it failed. */
   async waitWorkflowJob(kind:'recipe_candidate',id:string,{timeout=300}:{timeout?:number}={}) {
     if(kind!=='recipe_candidate')throw new TypeError('job kind must be recipe_candidate');
     const deadline=performance.now()+boundedTimeout(timeout*1000);
-    while(true){const value=await this.getRecipeCandidate(id);if(!['queued','running','awaiting_parent'].includes(value.status))return value;
+    while(true){const value=await this.getRecipeCandidate(id);if(value.status==='failed')throw RSICandidateFailedError.fromCandidate(value);if(!['queued','running','awaiting_parent'].includes(value.status))return value;
     if(performance.now()>=deadline)throw new Error('Poll or resume the same candidate');await new Promise(r=>setTimeout(r,100));}
   }
 }

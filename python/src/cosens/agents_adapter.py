@@ -10,7 +10,7 @@ from .errors import RSIRecoveryRequired
 
 
 class CoSensAgentRunner:
-    def __init__(self, agent, *, mode, session, api_key, state_path, http_transport, runner):
+    def __init__(self, agent, *, mode, session, api_key, state_path, http_transport, runner, max_context_chars=None):
         if runner is None:
             from agents import Runner
             runner = Runner
@@ -18,7 +18,8 @@ class CoSensAgentRunner:
         self._session = session
         # An explicit run records execution even when automatic decisions are disabled.
         self._workflow = TaskWorkflowRunner(runner, mode='approval' if mode=='approval' else 'auto',
-            api_key=api_key,state_path=state_path,_http_transport=http_transport)
+            api_key=api_key,state_path=state_path,_http_transport=http_transport,
+            **({} if max_context_chars is None else {'max_context_chars': max_context_chars}))
         self._client = self._workflow._client
         self.cosens = self._workflow.cosens
         self.cosens.mode = mode

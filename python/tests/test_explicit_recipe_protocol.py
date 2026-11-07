@@ -38,10 +38,10 @@ class Backend:
 def native_response(r):
     data=json.loads(r.content)
     if r.url.path.endswith('/chat/completions'):
-        text=json.dumps({'activate':True,'objective':'Produce a report','task_family':'report','reason':'task'})
+        text=json.dumps({'activate':True,'reason':'task'})
         return httpx.Response(200,json={'id':'decision','object':'chat.completion','created':0,'model':'model','choices':[{'index':0,'message':{'role':'assistant','content':text},'finish_reason':'stop'}]})
     fmt=data.get('text',{}).get('format',{})
-    text=json.dumps({'activate':True,'objective':'Produce a report','task_family':'report','reason':'task'}) if fmt.get('name')=='cosens_decision' else 'final artifact'
+    text=json.dumps({'activate':True,'reason':'task'}) if fmt.get('name')=='cosens_decision' else 'final artifact'
     return httpx.Response(200,json={'id':'response_1','object':'response','status':'completed','created_at':1,'model':'model',
         'output':[{'type':'message','id':'message_1','status':'completed','role':'assistant','content':[{'type':'output_text','text':text,'annotations':[]}]}]})
 

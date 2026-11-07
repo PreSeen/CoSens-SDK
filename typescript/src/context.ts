@@ -1,4 +1,4 @@
-import { RSIRecoveryRequired } from './errors.js';
+import { DEFAULT_MAX_CONTEXT_CHARS, renderGuidance } from './render.js';
 
 
 export function userText(path: string[], params: any): string {
@@ -13,9 +13,11 @@ export function userText(path: string[], params: any): string {
   return texts.join('\n').slice(-8000);
 }
 export function toolNames(params: any): string[] { return (params.tools ?? []).map((x: any) => x?.name ?? x?.function?.name).filter((x: any) => typeof x === 'string'); }
-export function inject(path: string[], params: any, context: any): any {
-  const source = 'CoSens task context';
-  const block = `\n\n[CoSens frozen context; source: ${source}]\n${JSON.stringify({ recipe: context.recipe, snapshot: context.snapshot, context: context.context })}`;
+/** Append the frozen Recipe/Memory context as compact text, or return the request unchanged. */
+export function inject(path: string[], params: any, context: any, maxChars = DEFAULT_MAX_CONTEXT_CHARS): any {
+  const text = renderGuidance(context?.recipe?.status === 'matched' ? context.recipe.bundle : undefined, context?.snapshot?.evidence, maxChars);
+  if (text === undefined) return params;
+  const block = `\n\n${text}`;
   if (path[0] === 'responses') {
     if (params.instructions !== undefined && typeof params.instructions !== 'string') throw new TypeError('Cannot safely append CoSens context to non-text Responses instructions');
     return { ...params, instructions: (params.instructions ?? '') + block };

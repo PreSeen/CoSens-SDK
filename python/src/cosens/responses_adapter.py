@@ -1,6 +1,6 @@
 """Normalize supported OpenAI generation requests without changing originals."""
 
-import json
+from .context_render import DEFAULT_MAX_CONTEXT_CHARS, render_guidance
 
 
 SUPPORTED = {
@@ -50,12 +50,15 @@ def tool_names(kwargs):
     return names
 
 
-def inject(path, kwargs, run):
-    frozen = {"recipe": run.get("recipe"), "snapshot": run.get("snapshot"), "context": run.get("context")}
-    if not any(frozen.values()):
+def inject(path, kwargs, run, *, max_chars=DEFAULT_MAX_CONTEXT_CHARS):
+    """Append the frozen Recipe/Memory context as compact text, or return the request unchanged."""
+    recipe = run.get("recipe") or {}
+    snapshot = run.get("snapshot") or {}
+    text = render_guidance(recipe.get("bundle") if recipe.get("status") == "matched" else None,
+                           snapshot.get("evidence"), max_chars=max_chars)
+    if text is None:
         return dict(kwargs)
-    source = "CoSens task context"
-    block = "\n\n[CoSens frozen context; source: " + source + "]\n" + json.dumps(frozen, ensure_ascii=False, default=str)
+    block = "\n\n" + text
     updated = dict(kwargs)
     base = base_path(path)
     if base[0] == "responses":

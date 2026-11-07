@@ -6,7 +6,7 @@ import time
 import math
 
 from .atoms import CoSensClient
-from .errors import RSIRecoveryRequired
+from .errors import RSICandidateFailed, RSIRecoveryRequired
 from .state import TurnStore
 from .workflow_atoms import _completion_tokens
 
@@ -119,7 +119,10 @@ class LearningCoordinator:
         deadline=time.monotonic()+timeout
         while True:
             value=self._refresh(turn_id)
-            if value['state'] in {'awaiting_confirmation','completed','failed','interrupted','awaiting_runner'}:
+            if value['state']=='failed':
+                # The failed state is stored first, so resume_learning can retry it.
+                raise RSICandidateFailed.from_candidate(value['recipe'])
+            if value['state'] in {'awaiting_confirmation','completed','interrupted','awaiting_runner'}:
                 return value
             if time.monotonic()>=deadline:
                 raise TimeoutError('Poll or resume the same Recipe candidate; do not rerun the model')

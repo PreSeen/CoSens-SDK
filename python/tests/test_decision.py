@@ -8,8 +8,8 @@ from cosens.errors import RSIDecisionUnavailable
 
 
 @pytest.mark.parametrize("value", [
-    {"activate": True, "objective": "task", "task_family": "general"},
-    {"activate": True, "objective": "task", "task_family": "general", "reason": "yes", "unauthorized": True},
+    {"activate": True},
+    {"activate": True, "reason": "yes", "objective": "the model no longer writes this"},
 ])
 def test_decision_parser_rejects_missing_or_extra_fields(value):
     with pytest.raises(RSIDecisionUnavailable):
@@ -21,7 +21,7 @@ def test_decision_parser_rejects_missing_or_extra_fields(value):
 @pytest.mark.asyncio
 async def test_decision_only_sends_output_limit_when_explicit(limit, asynchronous):
     calls = []
-    decision = {"activate": False, "objective": "task", "task_family": "general", "reason": "routine"}
+    decision = {"activate": False, "reason": "routine"}
 
     def create(**kwargs):
         calls.append(kwargs)

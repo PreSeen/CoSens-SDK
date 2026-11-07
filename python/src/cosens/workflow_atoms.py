@@ -9,8 +9,8 @@ import json
 import math
 import time
 
-from .atoms_helpers import path_part, stable_key
-from .errors import RSIRecoveryRequired
+from .atoms_helpers import path_part, recipe_request_key, stable_key
+from .errors import RSICandidateFailed, RSIRecoveryRequired
 
 
 def _model_data(model):
@@ -131,7 +131,11 @@ def _result(request_sha256, outcome, artifacts, events, trace_coverage):
 
 class AsyncWorkflowAtoms:
     async def wait_workflow_job(self, kind, job_id, *, timeout=300):
-        """Bounded polling of an existing job ID; never creates or resumes a job."""
+        """Bounded polling of an existing job ID; never creates or resumes a job.
+
+        Returns the job once it leaves queued/running/awaiting_parent, and raises
+        ``RSICandidateFailed`` when it ended ``failed``.
+        """
         getter = _job_getter(self, kind)
         deadline = asyncio.get_running_loop().time() + _job_timeout(timeout)
         delay = 2.0
@@ -140,6 +144,8 @@ class AsyncWorkflowAtoms:
             status = job.get("status")
             if status not in _JOB_STATES[kind]:
                 raise RSIRecoveryRequired(f"Unexpected workflow {kind} status: {status}")
+            if status == "failed":
+                raise RSICandidateFailed.from_candidate(job)
             if status not in {"queued", "running", "awaiting_parent"}:
                 return job
             remaining = deadline - asyncio.get_running_loop().time()
@@ -197,9 +203,15 @@ class AsyncWorkflowAtoms:
                                         body={"data": {}}, key=stable_key(key))
 
 
-    async def start_recipe_candidate(self, task_id, *, revision_id, key, model=None, max_completion_tokens=None):
+    async def start_recipe_candidate(self, task_id, *, revision_id, key=None, model=None, max_completion_tokens=None):
+        """Create or update the Recipe from a confirmed revision.
+
+        Without ``key`` the request key is derived from task, revision and budget,
+        so repeated calls for the same revision return the same candidate.
+        """
         data = _recipe_data(model, max_completion_tokens)
         data.update(revision_id=revision_id)
+        key = recipe_request_key(task_id, revision_id, max_completion_tokens) if key is None else key
         return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/recipe-candidates",
                                         body={"data": data}, key=stable_key(key))
 
@@ -242,6 +254,8 @@ class SyncWorkflowAtoms:
             status = job.get("status")
             if status not in _JOB_STATES[kind]:
                 raise RSIRecoveryRequired(f"Unexpected workflow {kind} status: {status}")
+            if status == "failed":
+                raise RSICandidateFailed.from_candidate(job)
             if status not in {"queued", "running", "awaiting_parent"}:
                 return job
             remaining = deadline - time.monotonic()
@@ -299,9 +313,10 @@ class SyncWorkflowAtoms:
                                   body={"data": {}}, key=stable_key(key))
 
 
-    def start_recipe_candidate(self, task_id, *, revision_id, key, model=None, max_completion_tokens=None):
+    def start_recipe_candidate(self, task_id, *, revision_id, key=None, model=None, max_completion_tokens=None):
         data = _recipe_data(model, max_completion_tokens)
         data.update(revision_id=revision_id)
+        key = recipe_request_key(task_id, revision_id, max_completion_tokens) if key is None else key
         return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/recipe-candidates",
                                   body={"data": data}, key=stable_key(key))
 

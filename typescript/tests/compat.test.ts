@@ -46,7 +46,7 @@ test('the pinned OpenAI Responses stream keeps event and final-response methods 
   assert.deepEqual(seen, ['completed']);
   assert.deepEqual(filteredEvents, ['response.completed']);
   assert.equal((await stream.finalResponse()).id, 'resp-model-1');
-  assert.deepEqual(gatewayCalls, ['/api/v1/recipe-candidates', '/api/v1/memory/recall']);
+  assert.deepEqual(gatewayCalls, []);
   assert.equal(modelRequests.length, 1);
   assert.equal(modelRequests[0]!.url, 'https://model.example/v1/responses');
   assert.equal(modelRequests[0]!.headers.get('authorization'), 'Bearer native-key');
@@ -82,7 +82,7 @@ test('the pinned OpenAI Chat stream keeps a tool call on the same CoSens executi
   const events: any[] = [];
   const modelFetch: typeof fetch = async (_input, init) => {
     if (JSON.parse(String(init?.body)).response_format?.json_schema?.name === 'cosens_decision')
-      return new Response(JSON.stringify({ id: 'decision', object: 'chat.completion', created: 1, model: 'test-model', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify({ activate: true, objective: 'hello', task_family: 'general', reason: 'useful' }) } }] }), { headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ id: 'decision', object: 'chat.completion', created: 1, model: 'test-model', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify({ activate: true, reason: 'useful' }) } }] }), { headers: { 'content-type': 'application/json' } });
     modelCalls++;
     if (modelCalls === 1) {
       const chunks = [
@@ -91,7 +91,7 @@ test('the pinned OpenAI Chat stream keeps a tool call on the same CoSens executi
       ];
       return new Response(chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join('') + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
     }
-    assert.equal(JSON.parse(String(init?.body)).messages.at(-2)?.tool_call_id, 'call-1');
+    assert.equal(JSON.parse(String(init?.body)).messages.at(-1)?.tool_call_id, 'call-1');
     return new Response(JSON.stringify({ id: 'chat-final', object: 'chat.completion', created: 1, model: 'test-model', choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: 'done' } }] }), { headers: { 'content-type': 'application/json' } });
   };
   const gatewayFetch: typeof fetch = async (input, init) => {
@@ -132,7 +132,7 @@ test('OpenAI withOptions keeps CoSens on the derived native client', async () =>
   const derived = client.withOptions({ baseURL: 'https://other-model.example/v1' });
   assert.equal(typeof (derived as any).cosens.getTurn, 'function');
   await derived.responses.create({ model: 'test-model', input: 'hello' });
-  assert.deepEqual(gatewayCalls, ['/api/v1/recipe-candidates', '/api/v1/memory/recall']);
+  assert.deepEqual(gatewayCalls, []);
   assert.deepEqual(modelUrls, ['https://other-model.example/v1/responses']);
   await (derived as any).close();
   await client.close();
@@ -445,11 +445,7 @@ test('pinned OpenAI Responses parse and Chat create/parse use the same preflight
   assert.equal(chatCreated.choices[0]?.message.content, 'done');
   assert.equal(chatParsed.choices[0]?.message.content, 'done');
   assert.deepEqual(modelPaths, ['/v1/responses', '/v1/chat/completions', '/v1/chat/completions']);
-  assert.deepEqual(gatewayPaths, [
-    '/api/v1/recipe-candidates', '/api/v1/memory/recall',
-    '/api/v1/recipe-candidates', '/api/v1/memory/recall',
-    '/api/v1/recipe-candidates', '/api/v1/memory/recall',
-  ]);
+  assert.deepEqual(gatewayPaths, []);
   await client.close();
 });
 

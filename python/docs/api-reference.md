@@ -9,16 +9,18 @@
 | Prepare/read execution | `start_execution`, `get_execution` |
 | Submit/read revision | `submit_execution`, `get_revision` |
 | Feedback/correction | `record_feedback`, `start_revision` |
-| Explicit Recipe generation/update | `start_recipe_candidate(task_id, revision_id=..., key=..., model=..., max_completion_tokens=...)` |
+| Explicit Recipe generation/update | `start_recipe_candidate(task_id, revision_id=..., key=None, model=..., max_completion_tokens=...)` |
 | Read/list/resume generation | `get_recipe_candidate`, `list_recipe_candidates`, `resume_recipe_candidate` |
 | Associated Recipe/version chain | `get_task_recipe`, `get_recipe_versions` |
-| Poll generation | `wait_workflow_job("recipe_candidate", id)` |
+| Poll generation | `wait_workflow_job("recipe_candidate", id)` (raises `RSICandidateFailed` on failure) |
 | Sessions | `start_session`, `append_session_events`, `get_session_context`, `end_session` |
 | Memory | `user_get`, `memory_recall`, `memory_get`, `timeline_get`, `memory_write`, `memory_delete`, `document_upload` |
 
 Call generation only after external artifact confirmation. It creates V1 if no Recipe exists, otherwise a new version. Related Memory is always read, with no `include_memory` parameter. Feedback attribution happens inside generation. A failed candidate does not replace the usable current version. Resume retries the same candidate; polling does not create one.
 
 `create_task` requires `source="new_task"` or `source="external_artifact"`. `start_revision` takes the previous revision and a request key, without an attribution ID. `submit_execution` takes the exact frozen request SHA, actual outcome, artifacts and optional events. Stable keys and event IDs are required for reliable retries. The public model ID is supplied with `model`. Model calls reuse the existing Authorization API Key, with the gateway URL and auth type determined internally. There is no `model_api` connection object or second credential.
+
+Without `key`, `start_recipe_candidate` uses `"recipe-" + sha256("recipe:<task_id>:<revision_id>:<max_completion_tokens or empty>")`, the same key the TypeScript SDK derives. A failed candidate raises `RSICandidateFailed` from the wait helpers with the service's stable `code`, `phase`, `retryable`, `upstream_status` and `upstream_code` (from `error_detail`; older servers give only `code`). Every returned JSON object exposes the response's `x-request-id` as `.request_id`.
 
 Current HTTP and MCP schemas are supplied by the algorithm service. Old Run, attribution, acceptance, rubric, learning-job and administrative Recipe publication operations are absent.
 
