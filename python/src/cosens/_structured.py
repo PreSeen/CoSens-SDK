@@ -2,6 +2,8 @@
 
 Decisions use Chat Completions with a JSON schema response format, which
 OpenAI-compatible model gateways support, so no provider URL is special-cased.
+``extra_body`` (for example ``{"enable_thinking": False}``) is forwarded unchanged.
+The caller passes a client that does not retry (see ``_Runtime._policy_client``).
 """
 from types import SimpleNamespace
 
@@ -14,6 +16,8 @@ def _chat_options(options):
         body["max_completion_tokens"] = options["max_output_tokens"]
     if "timeout" in options:
         body["timeout"] = options["timeout"]
+    if options.get("extra_body"):
+        body["extra_body"] = options["extra_body"]
     return body
 
 

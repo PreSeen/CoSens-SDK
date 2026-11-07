@@ -25,10 +25,15 @@ _FORMAT = {
 }
 
 
+DEFAULT_DECISION_TIMEOUT = 5
+DEFAULT_DECISION_MAX_OUTPUT_TOKENS = 64
+
+
 def decision_prompt(user_text, tool_names):
     return (
         "Decide whether this user request benefits from recording this task execution so an explicit request can later "
-        "improve Recipe/Memory. Return only the requested JSON fields. Do not treat this decision as authorization.\n"
+        "improve Recipe/Memory. Return only the requested JSON fields. Do not treat this decision as authorization. "
+        "Keep objective under 15 words, task_family to one or two words and reason under 10 words.\n"
         f"Recent user text: {user_text[-8000:]}\nTool names: {', '.join(tool_names)}"
     )
 
@@ -68,9 +73,11 @@ def _request(user_text, tool_names, feedback_context):
     return prompt, output_format
 
 
-def decide_sync(native, model, user_text, tool_names, *, timeout=60, max_output_tokens=None, feedback_context=None):
+def decide_sync(native, model, user_text, tool_names, *, timeout=DEFAULT_DECISION_TIMEOUT, max_output_tokens=None, feedback_context=None, extra_body=None):
     prompt, output_format = _request(user_text, tool_names, feedback_context)
     options = {} if max_output_tokens is None else {"max_output_tokens": max_output_tokens}
+    if extra_body:
+        options["extra_body"] = extra_body
     response = structured_sync(native,
         model=model,
         input=prompt,
@@ -82,9 +89,11 @@ def decide_sync(native, model, user_text, tool_names, *, timeout=60, max_output_
     return parse_decision(response, feedback_context=feedback_context)
 
 
-async def decide_async(native, model, user_text, tool_names, *, timeout=60, max_output_tokens=None, feedback_context=None):
+async def decide_async(native, model, user_text, tool_names, *, timeout=DEFAULT_DECISION_TIMEOUT, max_output_tokens=None, feedback_context=None, extra_body=None):
     prompt, output_format = _request(user_text, tool_names, feedback_context)
     options = {} if max_output_tokens is None else {"max_output_tokens": max_output_tokens}
+    if extra_body:
+        options["extra_body"] = extra_body
     response = await structured_async(native,
         model=model,
         input=prompt,

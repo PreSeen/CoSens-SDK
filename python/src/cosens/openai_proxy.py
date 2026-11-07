@@ -15,7 +15,8 @@ from types import SimpleNamespace
 from .atoms import CoSensClient
 from .auto_learning import AutoLearning, LearningCoordinator
 from .auto_execution import AutoExecution
-from .decision import decide_async, decide_sync
+from .context_render import DEFAULT_MAX_CONTEXT_CHARS, validate_max_context_chars
+from .decision import DEFAULT_DECISION_MAX_OUTPUT_TOKENS, DEFAULT_DECISION_TIMEOUT, decide_async, decide_sync
 from .errors import RSIApprovalUnavailable, RSIDecisionUnavailable, RSIRecoveryRequired
 from .responses_adapter import SUPPORTED, base_path, inject, summary, terminal, tool_continuation, tool_names, user_text
 from .session_cursor import CursorStore
@@ -85,7 +86,8 @@ class _Status:
             turn = self._runtime.turns.get(args[0]) or {}
             model = self._runtime.decision_model or turn.get('policy_model')
             if model and self._runtime._policy_native is not None:
-                self._runtime._policy_bindings[args[0]] = (self._runtime._policy_native, model, loop)
+                policy = self._runtime._policy_client(self._runtime._policy_native)
+                self._runtime._policy_bindings[args[0]] = (policy, model, loop)
         if self._runtime.asynchronous:
             async def call():
                 bind(asyncio.get_running_loop())
@@ -397,7 +399,9 @@ class _DeferredAsyncManager:
 
 
 class _Runtime(AutoExecution):
-    def __init__(self, *, mode, decision_model, session, api_key, state_path, http_transport, asynchronous=False, decision_timeout=60, decision_max_output_tokens=None, auto_learning=None):
+    def __init__(self, *, mode, decision_model, session, api_key, state_path, http_transport, asynchronous=False,
+                 decision_timeout=DEFAULT_DECISION_TIMEOUT, decision_max_output_tokens=DEFAULT_DECISION_MAX_OUTPUT_TOKENS,
+                 decision_client=None, decision_extra_body=None, max_context_chars=DEFAULT_MAX_CONTEXT_CHARS, auto_learning=None):
         if auto_learning is not None and auto_learning is not False and not isinstance(auto_learning, AutoLearning):
             raise TypeError('auto_learning must be AutoLearning, False, or None')
         if auto_learning not in (None, False) and mode != 'auto':
@@ -415,6 +419,14 @@ class _Runtime(AutoExecution):
             raise ValueError("Decision timeout and output token limit must be positive")
         self.decision_timeout = decision_timeout
         self.decision_max_output_tokens = decision_max_output_tokens
+        if decision_extra_body is not None and not isinstance(decision_extra_body, dict):
+            raise TypeError("decision_extra_body must be a dict")
+        self.decision_extra_body = dict(decision_extra_body) if decision_extra_body else None
+        # The decision blocks the caller's request: one attempt, bounded by decision_timeout.
+        self.decision_client_source = decision_client
+        self.decision_client = decision_client.with_options(max_retries=0) if decision_client is not None else None
+        self.max_context_chars = validate_max_context_chars(max_context_chars)
+        self._recipe_lookup_empty_until = 0.0
         self.session = session
         self.client = CoSensClient(api_key=api_key, state_path=state_path, _http_transport=http_transport)
         self.cursor = CursorStore(state_path, principal=self.client._transport.api_key, service_id=self.client._service.identity)
@@ -583,6 +595,12 @@ class _Runtime(AutoExecution):
     def _no_run_decision(self, path, kwargs, capture):
         return {"activate": False, "objective": user_text(path, kwargs), "task_family": "general", "reason": capture, "capture": capture}
 
+    def _policy_client(self, native):
+        """Client for policy calls (decision, Recipe match): never retried."""
+        if self.decision_client is not None:
+            return self.decision_client
+        return native.with_options(max_retries=0)
+
     def _decision_model_for(self, kwargs):
         model = self.decision_model or kwargs.get("model")
         if not isinstance(model, str) or not model.strip():
@@ -639,8 +657,11 @@ class _Runtime(AutoExecution):
             return self._no_run_decision(path, kwargs, "disabled")
         model = self._decision_model_for(kwargs)
         target = self._feedback_target(path, kwargs)
+        native = self._policy_client(native)
         try:
-            decision = decide_sync(native, model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens, feedback_context=self._feedback_context(target))
+            decision = decide_sync(native, model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout,
+                                   max_output_tokens=self.decision_max_output_tokens, feedback_context=self._feedback_context(target),
+                                   extra_body=self.decision_extra_body)
         except Exception as exc:
             if self.mode == "approval":
                 raise RSIDecisionUnavailable(str(exc)) from exc
@@ -658,8 +679,11 @@ class _Runtime(AutoExecution):
             return self._no_run_decision(path, kwargs, "disabled")
         model = self._decision_model_for(kwargs)
         target = self._feedback_target(path, kwargs)
+        native = self._policy_client(native)
         try:
-            decision = await decide_async(native, model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout, max_output_tokens=self.decision_max_output_tokens, feedback_context=self._feedback_context(target))
+            decision = await decide_async(native, model, user_text(path, kwargs), tool_names(kwargs), timeout=self.decision_timeout,
+                                          max_output_tokens=self.decision_max_output_tokens, feedback_context=self._feedback_context(target),
+                                          extra_body=self.decision_extra_body)
         except Exception as exc:
             if self.mode == "approval":
                 raise RSIDecisionUnavailable(str(exc)) from exc
@@ -856,7 +880,7 @@ class _Runtime(AutoExecution):
             self.status.last_turn_id = None
             return None, kwargs
         state,updated=self._setup_auto(decision,path,kwargs,native)
-        self._policy_bindings[state['turn_id']]=(native,self._decision_model_for(kwargs),None)
+        self._policy_bindings[state['turn_id']]=(self._policy_client(native),self._decision_model_for(kwargs),None)
         return state,updated
 
     async def _preflight_async(self, native, path, kwargs):
@@ -866,7 +890,7 @@ class _Runtime(AutoExecution):
             self.status.last_turn_id = None
             return None, kwargs
         state,updated=await asyncio.to_thread(self._setup_auto,decision,path,kwargs,native,asyncio.get_running_loop())
-        self._policy_bindings[state['turn_id']]=(native,self._decision_model_for(kwargs),asyncio.get_running_loop())
+        self._policy_bindings[state['turn_id']]=(self._policy_client(native),self._decision_model_for(kwargs),asyncio.get_running_loop())
         return state,updated
 
 

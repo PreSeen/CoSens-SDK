@@ -18,7 +18,7 @@ def _unexpected_algorithm(request):
     raise AssertionError(f'Auto fallback must not call CoSens: {request.url.path}')
 
 
-@pytest.mark.parametrize('configured_timeout,expected', [(None, 60), (12, 12)])
+@pytest.mark.parametrize('configured_timeout,expected', [(None, 5), (12, 12)])
 def test_auto_decision_timeout_configuration(monkeypatch, tmp_path, configured_timeout, expected):
     import cosens.openai_proxy as proxy
     seen = []

@@ -7,6 +7,7 @@ import inspect
 import json
 
 from .atoms import CoSensClient
+from .context_render import DEFAULT_MAX_CONTEXT_CHARS, render_execution_request, validate_max_context_chars
 from .errors import RSIApprovalRequired, RSIApprovalUnavailable, RSIRecoveryRequired
 from .state import TurnStore
 from .workflow_start import _derived_key
@@ -42,8 +43,8 @@ def _observed_native_items(result):
     return {"events": events, "trace_coverage": "partial" if events else "unknown"}
 
 
-def _agent_with_request(agent, request):
-    block = "\n\n[CoSens frozen task execution request]\n" + json.dumps(request, ensure_ascii=False, default=str)
+def _agent_with_request(agent, request, max_chars=DEFAULT_MAX_CONTEXT_CHARS):
+    block = "\n\n" + render_execution_request(request, max_chars=max_chars)
     original = getattr(agent, "instructions", None)
     if not hasattr(agent, "clone"):
         raise TypeError("Agent must support clone to receive the frozen execution request")
@@ -140,7 +141,8 @@ class TaskWorkflowRunner:
     """Wrap an Agents Runner using the unified Task/Execution protocol."""
 
     def __init__(self, native_runner, *, mode="disable", api_key=None, state_path=None,
-                 result_adapter=None, trace_adapter=None, on_rsi_event=None, _http_transport=None):
+                 result_adapter=None, trace_adapter=None, on_rsi_event=None,
+                 max_context_chars=DEFAULT_MAX_CONTEXT_CHARS, _http_transport=None):
         if mode not in {"auto", "approval", "disable"}:
             raise ValueError("mode must be auto, approval or disable")
         self.native = native_runner
@@ -150,6 +152,7 @@ class TaskWorkflowRunner:
         self._result_adapter = result_adapter
         self._trace_adapter = trace_adapter
         self._on_rsi_event = on_rsi_event
+        self._max_context_chars = validate_max_context_chars(max_context_chars)
         self.cosens = _WorkflowStatus(self)
 
     def _save(self, state):
@@ -429,7 +432,7 @@ class TaskWorkflowRunner:
         if self.mode == "disable" or rsi is None:
             return await self.native.run(agent, user_input, **native_options)
         state = await self._prepare(rsi, agent=agent, user_input=user_input, session=native_options.get("session"))
-        active_agent = _agent_with_request(agent, state["request"])
+        active_agent = _agent_with_request(agent, state["request"], self._max_context_chars)
         self._claim_native(state, "pre_execution_pending")
         try:
             native_result = await self.native.run(active_agent, user_input, **native_options)
@@ -448,7 +451,7 @@ class TaskWorkflowRunner:
         if self.mode == "disable" or rsi is None:
             return self.native.run_streamed(agent, user_input, **native_options)
         state = self._prepare_sync(rsi, agent=agent, user_input=user_input, session=native_options.get("session"))
-        active_agent = _agent_with_request(agent, state["request"])
+        active_agent = _agent_with_request(agent, state["request"], self._max_context_chars)
         self._claim_native(state, "pre_execution_pending")
         try:
             native = self.native.run_streamed(active_agent, user_input, **native_options)
@@ -463,7 +466,7 @@ class TaskWorkflowRunner:
         if self.mode == "disable" or rsi is None:
             return self.native.run_sync(agent, user_input, **native_options)
         state = self._prepare_sync(rsi, agent=agent, user_input=user_input, session=native_options.get("session"))
-        active_agent = _agent_with_request(agent, state["request"])
+        active_agent = _agent_with_request(agent, state["request"], self._max_context_chars)
         self._claim_native(state, "pre_execution_pending")
         try:
             native_result = self.native.run_sync(active_agent, user_input, **native_options)
@@ -516,7 +519,7 @@ class TaskWorkflowRunner:
             raise RSIRecoveryRequired("Turn has no pending native approval")
         self._require_session(state, session)
         from agents import RunState
-        return await RunState.from_json(_agent_with_request(agent, state["request"]), state["native_state"])
+        return await RunState.from_json(_agent_with_request(agent, state["request"], self._max_context_chars), state["native_state"])
 
     async def resume(self, agent, turn_id, native_state, **native_options):
         state = self._store.get(turn_id)
@@ -525,7 +528,7 @@ class TaskWorkflowRunner:
         self._require_session(state, native_options.get("session"))
         self._claim_native(state, "awaiting_native_approval")
         try:
-            native_result = await self.native.run(_agent_with_request(agent, state["request"]), native_state, **native_options)
+            native_result = await self.native.run(_agent_with_request(agent, state["request"], self._max_context_chars), native_state, **native_options)
         except Exception as exc:
             state["state"] = "native_failed"
             state["last_error"] = str(exc)
