@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { resolveApiKey, resolveService, type Service } from './config.js';
 import { RSIHTTPError, RSITransportError } from './errors.js';
 
@@ -63,6 +64,10 @@ export class Transport {
       const code = error?.code ?? detail?.code;
       throw new RSIHTTPError(response.status, redact(error?.message ?? detail?.message ?? payload?.detail ?? response.statusText), code == null ? undefined : redact(code), requestId);
     }
+    // Expose x-request-id without changing the object's enumerable fields or JSON.
+    if (payload && typeof payload === 'object' && !Array.isArray(payload) && !Object.hasOwn(payload, 'requestId')) {
+      Object.defineProperty(payload, 'requestId', { value: requestId, enumerable: false, configurable: true, writable: true });
+    }
     return payload;
   }
 }
@@ -74,4 +79,13 @@ export function pathPart(id: string): string {
 export function requestKey(key: string): string {
   if (typeof key !== 'string' || !key.trim() || key.length > 256 || /[\x00-\x1f\x7f]/.test(key)) throw new TypeError('key must be 1–256 characters without control characters');
   return key;
+}
+
+/**
+ * Deterministic generation key: one candidate per revision and completion budget.
+ * The Python SDK computes the same key.
+ */
+export function recipeRequestKey(taskId: string, revisionId: string, maxCompletionTokens?: number): string {
+  const budget = maxCompletionTokens === undefined ? '' : String(maxCompletionTokens);
+  return 'recipe-' + createHash('sha256').update(`recipe:${taskId}:${revisionId}:${budget}`, 'utf8').digest('hex');
 }
