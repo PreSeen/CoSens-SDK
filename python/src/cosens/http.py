@@ -6,7 +6,7 @@ import httpx
 
 from ._config import resolve_service
 from .errors import RSIHTTPError, RSITransportError
-from .models import result
+from .models import Result, result
 
 
 def _redact(value, api_key, *sensitive_values):
@@ -20,13 +20,14 @@ def _redact(value, api_key, *sensitive_values):
 def _decode(response, api_key, sensitive_values=()):
     def redact(value):
         return _redact(value, api_key, *sensitive_values)
+    request_id = redact(response.headers.get("x-request-id")) if response.headers.get("x-request-id") else None
     if 300 <= response.status_code < 400:
-        raise RSIHTTPError(response.status_code, "CoSens gateway redirects are not followed", request_id=redact(response.headers.get("x-request-id")) if response.headers.get("x-request-id") else None)
+        raise RSIHTTPError(response.status_code, "CoSens gateway redirects are not followed", request_id=request_id)
     try:
         payload = response.json()
     except (json.JSONDecodeError, ValueError) as exc:
         if response.status_code >= 400:
-            raise RSIHTTPError(response.status_code, redact(response.reason_phrase), request_id=redact(response.headers.get("x-request-id")) if response.headers.get("x-request-id") else None) from None
+            raise RSIHTTPError(response.status_code, redact(response.reason_phrase), request_id=request_id) from None
         raise RSITransportError(f"CoSens returned invalid JSON (HTTP {response.status_code})") from exc
     if response.status_code >= 400:
         error = payload.get("error", {}) if isinstance(payload, dict) else {}
@@ -40,9 +41,12 @@ def _decode(response, api_key, sensitive_values=()):
             response.status_code,
             redact(message),
             code=redact(code) if code is not None else None,
-            request_id=redact(response.headers.get("x-request-id")) if response.headers.get("x-request-id") else None,
+            request_id=request_id,
         )
-    return result(payload)
+    value = result(payload)
+    if isinstance(value, Result):
+        value._request_id = request_id
+    return value
 
 
 def _headers(api_key, key):
