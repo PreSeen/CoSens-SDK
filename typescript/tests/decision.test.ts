@@ -12,12 +12,14 @@ function chatContent(value: unknown) {
   return { choices: [{ message: { content: JSON.stringify(value) } }] };
 }
 
-test('auto wrapper defaults to a 60 second decision timeout', async () => {
+test('auto wrapper defaults to a 5 second, unretried decision call capped at 64 tokens', async () => {
   let timeout: number | undefined;
+  let maxRetries: number | undefined;
+  let maxTokens: number | undefined;
   const native = {
     responses: { create: async () => ({ id: 'response', status: 'completed', output_text: 'answer', output: [{ type: 'message' }] }) },
     chat: { completions: { create: async (_body: any, options?: any) => {
-      timeout = options?.timeout;
+      timeout = options?.timeout; maxRetries = options?.maxRetries; maxTokens = _body.max_completion_tokens;
       return chatContent({ activate: false, objective: 'task', task_family: 'general', reason: 'routine' });
     } } },
   };
@@ -30,7 +32,9 @@ test('auto wrapper defaults to a 60 second decision timeout', async () => {
     statePath: join(mkdtempSync(join(tmpdir(), 'cosens-timeout-')), 'state.sqlite') });
   try {
     await wrapped.responses.create({ model: 'model', input: 'task' });
-    assert.equal(timeout, 60000);
+    assert.equal(timeout, 5000);
+    assert.equal(maxRetries, 0);
+    assert.equal(maxTokens, 64);
   } finally { await wrapped.close(); }
 });
 
@@ -60,9 +64,11 @@ test('auto recipe match timeout returns the native response', async () => {
   const fetcher: typeof fetch = async input => {
     const path = new URL(String(input)).pathname;
     const value = path.endsWith('/recipe-candidates')
-      ? { items: [{ recipe_candidate_id: 'candidate', recipe_id: 'recipe', version: 1,
-          status: 'candidate', current: true, recipe: { title: 'Test', steps: [] } }], has_more: false }
-      : { items: [] };
+      ? { items: [{ recipe_candidate_id: 'candidate', status: 'candidate', current: true, title: 'Test' }], has_more: false }
+      : path.endsWith('/recipe-candidates/candidate')
+        ? { recipe_candidate_id: 'candidate', recipe_id: 'recipe', version: 1, status: 'candidate', current: true,
+            recipe: { title: 'Test', when: 'tests', when_not: 'never', steps: [] } }
+        : { items: [] };
     return new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } });
   };
   const wrapped = cosens(native, { apiKey: 'test-key', mode: 'auto', fetch: fetcher,

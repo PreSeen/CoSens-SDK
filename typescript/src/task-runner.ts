@@ -5,6 +5,7 @@ import { RSIApprovalUnavailable, RSIRecoveryRequired } from './errors.js';
 import type { CoSensMode } from './openai-proxy.js';
 import { canonical, hash, TurnStore } from './state.js';
 import type { WorkflowPhase, WorkflowSnapshot } from './workflow-start.js';
+import { DEFAULT_MAX_CONTEXT_CHARS, renderExecutionRequest, validateMaxContextChars } from './render.js';
 
 interface TaskTurn {
   turnId: string; mode: CoSensMode; state: string; taskSpec: WorkflowSnapshot['task'];
@@ -20,15 +21,17 @@ export interface TaskRunnerOptions {
   resultAdapter?: (output: unknown) => Array<{ name: string; content: string }> | Promise<Array<{ name: string; content: string }>>;
   traceAdapter?: (result: unknown) => { events: Array<{ id: string; kind: string; payload: Record<string, unknown> }>; traceCoverage: 'full' | 'partial' | 'unknown' } | Promise<{ events: Array<{ id: string; kind: string; payload: Record<string, unknown> }>; traceCoverage: 'full' | 'partial' | 'unknown' }>;
   onRsiEvent?: (name: string, state: TaskTurn) => void | Promise<void>;
+  /** Upper bound for the execution request text added to Agent instructions (default 4000). */
+  maxContextChars?: number;
 }
 export interface TaskRunOptions {
   rsi?: { turnId: string; task: NonNullable<WorkflowSnapshot['task']>; authorize?: (phase: WorkflowPhase, snapshot: WorkflowSnapshot) => boolean | Promise<boolean> };
   [key: string]: any;
 }
 
-function withRequest(agent: any, request: unknown): any {
+function withRequest(agent: any, request: unknown, maxChars = DEFAULT_MAX_CONTEXT_CHARS): any {
   if (typeof agent?.clone !== 'function') throw new TypeError('Agent must support clone to receive the frozen execution request');
-  const block = `\n\n[CoSens frozen task execution request]\n${JSON.stringify(request)}`;
+  const block = `\n\n${renderExecutionRequest(request, maxChars)}`;
   const original = agent.instructions;
   if (original == null || typeof original === 'string') return agent.clone({ instructions: (original ?? '') + block });
   if (typeof original === 'function') return agent.clone({ instructions: async (...args: any[]) => String(await original(...args)) + block });
@@ -57,6 +60,7 @@ export class TaskWorkflowRunner {
   private readonly turns?: TurnStore;
   constructor(nativeRunner: Runner | typeof Runner, private readonly options: TaskRunnerOptions = {}) {
     this.native = typeof nativeRunner === 'function' ? new nativeRunner() : nativeRunner;
+    validateMaxContextChars(options.maxContextChars ?? DEFAULT_MAX_CONTEXT_CHARS);
     if ((options.mode ?? 'disable') !== 'disable') {
       this.client = new CoSensClient(options);
       this.turns = new TurnStore(options.statePath, this.client.transport.apiKey, this.client.transport.service.identity);
@@ -224,7 +228,7 @@ export class TaskWorkflowRunner {
   async run(agent: any, input: any, { rsi, ...nativeOptions }: TaskRunOptions = {}): Promise<any> {
     if (this.cosens.mode === 'disable' || !rsi) return this.native.run(agent, input, nativeOptions);
     const state = await this.prepare(rsi, agent, input, nativeOptions.session);
-    const activeAgent = withRequest(agent, state.request);
+    const activeAgent = withRequest(agent, state.request, this.options.maxContextChars);
     this.claimNative(state, 'pre_execution_pending');
     let result: any;
     try { result = await this.native.run(activeAgent, input, nativeOptions); }
@@ -239,7 +243,7 @@ export class TaskWorkflowRunner {
     const state = this.turns?.get<TaskTurn>(turnId);
     if (state?.state !== 'awaiting_native_approval' || !state.nativeState) throw new RSIRecoveryRequired('Turn has no pending native approval');
     await this.requireSession(state, options.session);
-    return RunState.fromString(withRequest(agent, state.request), state.nativeState);
+    return RunState.fromString(withRequest(agent, state.request, this.options.maxContextChars), state.nativeState);
   }
   async resume(agent: any, turnId: string, nativeState: any, options: Record<string, any> = {}) {
     const state = this.turns?.get<TaskTurn>(turnId);
@@ -247,7 +251,7 @@ export class TaskWorkflowRunner {
     await this.requireSession(state, options.session);
     this.claimNative(state, 'awaiting_native_approval');
     let result: any;
-    try { result = await this.native.run(withRequest(agent, state.request), nativeState, options); }
+    try { result = await this.native.run(withRequest(agent, state.request, this.options.maxContextChars), nativeState, options); }
     catch (error) { state.state = 'native_failed'; state.lastError = String(error); this.save(state); throw error; }
     if (options.stream && typeof result?.[Symbol.asyncIterator] === 'function') return this.streamed(state, result);
     if (result.interruptions?.length) this.interrupted(state, result);
