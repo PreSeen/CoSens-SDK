@@ -36,7 +36,23 @@ const turnId = client.cosens.lastTurnId;
 
 The response is the native OpenAI result.
 
-In `auto` mode the SDK first makes a short structured decision call through your client (Chat Completions with a JSON schema `response_format`), so the model must support structured output. The call uses a 60-second timeout by default; tune it with `decisionTimeoutMs`. If the decision or the read-only Recipe lookup fails, your request still runs without CoSens capture.
+In `auto` mode the SDK first makes a short structured decision call through your client (Chat Completions with a JSON schema `response_format`), so the model must support structured output. The call is made once (`maxRetries: 0`) with a 5-second timeout and at most 64 output tokens. If the decision or the read-only Recipe lookup fails or times out, your request still runs without CoSens capture. A skipped turn (`activate: false`) makes no Recipe or Memory lookup.
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `decisionTimeoutMs` | `5000` | Time allowed for the decision and Recipe-match calls |
+| `decisionMaxOutputTokens` | `64` | Output cap for the decision and Recipe-match calls |
+| `decisionClient` | the wrapped client | Separate OpenAI-compatible client for those calls, e.g. a small fast model |
+| `decisionExtraBody` | none | Merged into those request bodies, e.g. `{ enable_thinking: false }` |
+| `maxContextChars` | `4000` | Upper bound for the Recipe/Memory text added to a request or Agent instructions (also on `TaskWorkflowRunner`) |
+
+Reasoning models spend their output budget on reasoning, so a 64-token decision can be cut off and fall back to an uncaptured request. Disable reasoning for the decision with `decisionExtraBody` (the field depends on your gateway, for example `{ enable_thinking: false }` or `{ reasoning_effort: 'low' }`), or pass a non-reasoning `decisionClient` and `decisionModel`.
+
+```ts
+const client = cosens(modelClient, { mode: 'auto', decisionExtraBody: { enable_thinking: false } });
+```
+
+When a usable Recipe matches, the SDK adds it as plain text: its title, when/when-not, numbered steps, related Memory text and, if room remains, lesson actions. The block never exceeds `maxContextChars`; a final line states what was omitted. A list with no usable Recipe is remembered for 60 seconds, so routine requests skip the lookup.
 
 ## Generate a Recipe after confirmation
 
@@ -79,6 +95,23 @@ await client.atoms.resumeRecipeCandidate(candidateId, { maxCompletionTokens: 300
 ```
 
 The value must be an integer from 1 to 1,000,000. New candidates default to 200,000, and the setting is stored per candidate for attribution and Recipe generation. Resume preserves it unless explicitly overridden. Upstream model limits still apply. The positional form `resumeRecipeCandidate(id, model)` remains supported.
+
+`key` is optional on `startRecipeCandidate`; the default is derived from the task, revision and `maxCompletionTokens`, so repeating the call returns the same candidate. Returned objects have a non-enumerable `requestId` holding the response's `x-request-id`.
+
+`waitWorkflowJob('recipe_candidate', id)` throws `RSICandidateFailedError` when the candidate failed:
+
+```ts
+import { RSICandidateFailedError } from 'cosens-sdk';
+
+try {
+  await client.atoms.waitWorkflowJob('recipe_candidate', candidateId);
+} catch (error) {
+  if (error instanceof RSICandidateFailedError && error.retryable) await client.atoms.resumeRecipeCandidate(candidateId);
+  else throw error;
+}
+```
+
+The error has `code`, `phase`, `retryable`, `upstreamStatus`, `upstreamCode`, `candidateId` and `requestId`. Older servers report only `code`; `retryable` is then undefined.
 
 ## More
 

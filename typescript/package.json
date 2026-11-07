@@ -1,6 +1,6 @@
 {
   "name": "cosens-sdk",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "description": "CoSens TypeScript SDK: record OpenAI and OpenAI Agents executions and generate reusable Recipes",
   "keywords": [
     "cosens",
