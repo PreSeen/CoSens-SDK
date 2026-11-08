@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { Agent, Runner } from '@openai/agents';
 import { CoSensAgentRunner, type AgentRunnerOptions } from './agent-runner.js';
 import { TaskWorkflowRunner, type TaskRunnerOptions } from './task-runner.js';
-import { CoSensClient } from './atoms.js';
+import { CoSensClient, type FeedbackSource } from './atoms.js';
 import { resolveApiKey, resolveService } from './config.js';
 import { CursorStore, type SessionLike, type SessionEvent, type Snapshot } from './cursor.js';
 import { structuredResponse } from './structured.js';
@@ -48,7 +48,7 @@ export interface CoSensProxyStatus {
   rsiCapture: string | null;
   getTurn(id: string | null): Turn | undefined;
   reconcile(id: string): Promise<Turn>;
-  feedback(message:string,options?:{turnId?:string;requestKey?:string}):Promise<any>;
+  feedback(message:string,options:{source:FeedbackSource;turnId?:string;requestKey?:string}):Promise<any>;
   generateRecipe(options?:{turnId?:string;requestKey?:string;maxCompletionTokens?:number}):Promise<any>;
   scope<T>(ids: { sessionId?: string; turnId?: string }, fn: () => T): T;
 }
@@ -89,7 +89,7 @@ export class OpenAIWrapper {
       mode: options.mode ?? 'auto', session: options.session, lastTurnId: null, rsiCapture: null,
       getTurn: id => id ? this.turns.get<Turn>(id) : undefined,
       reconcile: id => this.reconcile(id),
-      feedback: async(message,options={})=>{const turn=this.turns.get<Turn>(options.turnId??this.cosens.lastTurnId!);if(!turn?.revisionId)throw new RSIRecoveryRequired('No recorded revision');return this.client.atoms.recordFeedback(turn.revisionId,{feedback:message,key:options.requestKey??'feedback:'+hash([turn.turnId,message])});},
+      feedback: async(message,options)=>{const turn=this.turns.get<Turn>(options.turnId??this.cosens.lastTurnId!);if(!turn?.revisionId)throw new RSIRecoveryRequired('No recorded revision');return this.client.atoms.recordFeedback(turn.revisionId,{feedback:message,source:options.source,key:options.requestKey??'feedback:'+hash([turn.turnId,message])});},
       generateRecipe:async(options={})=>{const turn=this.turns.get<Turn>(options.turnId??this.cosens.lastTurnId!);if(!turn?.revisionId)throw new RSIRecoveryRequired('No recorded revision');const receipt=await this.client.atoms.startRecipeCandidate(turn.taskId!,{revisionId:turn.revisionId,key:options.requestKey??'generation:'+turn.turnId,maxCompletionTokens:options.maxCompletionTokens});turn.recipeCandidateId=receipt.recipe_candidate_id;this.save(turn);return receipt;},
       scope: (ids, fn) => this.scopeStore.run(ids, fn),
     };

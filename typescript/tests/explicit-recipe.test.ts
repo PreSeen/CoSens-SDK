@@ -23,8 +23,8 @@ for(const entry of ['transparent','agent','atomic'])test(`explicit generation: $
   else if(path==='/v1/tasks')value={task_id:'task_1',status:'ready'};
   else if(path.endsWith('/executions')||path.endsWith('/revisions'))value={execution_id:'execution_1',request_sha256:'hash',status:'awaiting_execution',request:{context:{objective:'Produce output'}}};
   else if(path.endsWith('/result'))value={revision_id:'revision_1',status:'completed'};
-  else if(path.endsWith('/feedback'))value={feedback_id:'feedback_1'};
-  else if(path.endsWith('/recipe-candidates')){assert.equal(body.data.include_memory,undefined);value={recipe_candidate_id:'candidate_'+(++generations),recipe_id:'recipe_1',version:generations,status:'queued'};}
+  else if(path.endsWith('/feedback')){assert.equal(body.source,'human');value={feedback_id:'feedback_1'};}
+  else if(path.endsWith('/recipe-candidates')){assert.equal(body.data.include_memory,undefined);assert.equal(body.data.recall_memory,undefined);value={recipe_candidate_id:'candidate_'+(++generations),recipe_id:'recipe_1',version:generations,status:'queued'};}
   else if(path.startsWith('/v1/recipe-candidates/candidate_'))value={status:'candidate',version:generations,recipe_id:'recipe_1',recipe_candidate_id:'candidate_'+generations,attribution:{possible_causes:[{reason:'format'}]}};
   else throw new Error(path);
   return new Response(JSON.stringify(value),{headers:{'Content-Type':'application/json'}});
@@ -52,7 +52,7 @@ for(const entry of ['transparent','agent','atomic'])test(`explicit generation: $
  assert.ok(!paths.some(p=>p.endsWith('/recipe-candidates')&&p!=='/v1/recipe-candidates'));
  const first=entry==='transparent'?await wrapper.cosens.generateRecipe():entry==='agent'?await wrapper.cosens.generateRecipe():await client.atoms.startRecipeCandidate(taskId!,{revisionId:revisionId!,key:'confirmed-v1'});
  const v1=await client.atoms.waitWorkflowJob('recipe_candidate',first.recipe_candidate_id,{timeout:10});assert.equal(v1.status,'candidate');assert.equal(v1.version,1);
- await client.atoms.recordFeedback(revisionId!,{feedback:'Use JSON without code fences',key:'feedback'});
+ await client.atoms.recordFeedback(revisionId!,{feedback:'Use JSON without code fences',source:'human',key:'feedback'});
  const correction=await client.atoms.startRevision(revisionId!,{key:'correction'});
  const artifact=await client.atoms.artifact({name:'corrected.json',content:'{"answer":42}'});
  const final=await client.atoms.submitExecution(correction.execution_id,{requestSha256:correction.request_sha256,outcome:'completed',artifacts:[{artifact_id:artifact.artifact_id,role:'submitted_output'}]});

@@ -20,7 +20,7 @@ const modelClient = new OpenAI({ baseURL: process.env.COSENS_MODEL_BASE_URL, api
 const client = cosens(modelClient, { mode: 'auto' });
 ```
 
-After the host obtains user confirmation of the artifact, call `generate_recipe` / `generateRecipe`, or the atomic Recipe endpoint. That single endpoint creates V1 or updates the associated Recipe. Feedback is recorded separately; attribution happens inside explicit generation. Generation always recalls related Memory and has no `include_memory` option.
+After the host obtains user confirmation of the artifact, call `generate_recipe` / `generateRecipe`, or the atomic Recipe endpoint. That single endpoint creates V1 or updates the associated Recipe. Feedback is recorded separately; attribution happens inside explicit generation. Generation has no Memory option: it recalls related Memory only when the execution behind the revision was started with `recall_memory` / `recallMemory`. Feedback carries a `source` (`human`, `evaluator`, `reference`, `automated_check` or `downstream`).
 
 The `auto` mode selects useful existing context and records the task. It does not authorize Recipe generation. Submission, feedback, Session ACK, polling and recovery do not initiate a new generation request.
 

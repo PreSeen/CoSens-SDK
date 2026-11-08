@@ -51,10 +51,10 @@ class LearningCoordinator:
             raise RSIRecoveryRequired('Turn has no submitted Task/Revision')
         return value
 
-    def feedback(self, turn_id, message):
+    def feedback(self, turn_id, message, source):
         value=self._record(turn_id)
         key='feedback:'+hashlib.sha256((turn_id+'\0'+message).encode()).hexdigest()
-        receipt=self.atoms.record_feedback(value['revision_id'], feedback=message, key=key)
+        receipt=self.atoms.record_feedback(value['revision_id'], feedback=message, source=source, key=key)
         value['feedback']=receipt
         self.store.put(self._key(turn_id),value)
         return value

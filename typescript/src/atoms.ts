@@ -26,6 +26,13 @@ export interface RecallContext { recipe: any; context: { query: string; task_fam
 export type WorkflowArtifactRef = string | { artifact_id: string; role: 'original_input' | 'submitted_output' | 'acceptance' | 'external_trace' };
 export type WorkflowOutputRef = { artifact_id: string; role: 'submitted_output' };
 export type WorkflowEvent = { id: string; kind: string; payload: Record<string, unknown> };
+/** Where a feedback text comes from; the service weighs feedback by its source. */
+export const FEEDBACK_SOURCES = ['human', 'evaluator', 'reference', 'automated_check', 'downstream'] as const;
+export type FeedbackSource = typeof FEEDBACK_SOURCES[number];
+function feedbackSource(source: FeedbackSource) {
+  if (!(FEEDBACK_SOURCES as readonly string[]).includes(source)) throw new TypeError(`source must be one of ${FEEDBACK_SOURCES.join(', ')}`);
+  return source;
+}
 
 function workflowSelection(candidateSha256?: string, candidateId?: string, customReason?: string) {
   if (Boolean(candidateId) === Boolean(customReason)) throw new TypeError('provide exactly one candidateId or customReason');
@@ -105,12 +112,12 @@ export class Atoms {
     if (!Number.isInteger(expectedContextVersion) || expectedContextVersion < 1) throw new TypeError('expectedContextVersion must be a positive integer');
     return this.http.request('POST', `/v1/tasks/${pathPart(taskId)}/context`, { expected_context_version: expectedContextVersion, ...(objective === undefined ? {} : { objective }), ...(artifacts === undefined ? {} : { artifacts }), ...(selfContained === undefined ? {} : { self_contained: selfContained }) });
   }
-  startExecution(taskId: string, { key, model, recipeId, includeMemory = false }: { key: string; model?: string; recipeId?: string; includeMemory?: boolean }) {
-    if (typeof includeMemory !== 'boolean') throw new TypeError('includeMemory must be boolean');
+  startExecution(taskId: string, { key, model, recipeId, recallMemory = false }: { key: string; model?: string; recipeId?: string; recallMemory?: boolean }) {
+    if (typeof recallMemory !== 'boolean') throw new TypeError('recallMemory must be boolean');
     if (recipeId !== undefined) pathPart(recipeId);
     const connection = modelData(model);
     const body = { ...connection,
-      ...(recipeId === undefined ? {} : { recipe_id: recipeId }), ...(includeMemory ? { include_memory: true } : {}) };
+      ...(recipeId === undefined ? {} : { recipe_id: recipeId }), ...(recallMemory ? { recall_memory: true } : {}) };
     return this.http.request('POST', `/v1/tasks/${pathPart(taskId)}/executions`,
       Object.keys(body).length ? body : undefined, requestKey(key), undefined);
   }
@@ -140,7 +147,7 @@ export class Atoms {
   resumeRecipeCandidate(recipeId:string,options?:string|{model?:string;maxCompletionTokens?:number}){const {model,maxCompletionTokens}=typeof options==='string'?{model:options}:options??{};const data={...modelData(model),...(maxCompletionTokens===undefined?{}:{max_completion_tokens:boundedInteger(maxCompletionTokens,'maxCompletionTokens',1_000_000)})};return this.http.request('POST',`/v1/recipe-candidates/${pathPart(recipeId)}/resume`,Object.keys(data).length?{data}:undefined);}
 
   listTasks({limit=20,cursor}:{limit?:number;cursor?:string}={}) {return this.http.request('GET','/v1/tasks?'+new URLSearchParams({limit:String(limit),...(cursor?{cursor}:{})}));}
-  recordFeedback(revisionId:string,{feedback,key}:{feedback:string;key:string}) {return this.http.request('POST',`/v1/revisions/${pathPart(revisionId)}/feedback`,{feedback},requestKey(key));}
+  recordFeedback(revisionId:string,{feedback,source,key}:{feedback:string;source:FeedbackSource;key:string}) {return this.http.request('POST',`/v1/revisions/${pathPart(revisionId)}/feedback`,{feedback,source:feedbackSource(source)},requestKey(key));}
   startSession(sessionId?:string) {return this.http.request('POST','/v1/sessions/start',sessionId?{session_id:sessionId}:{});}
   appendSessionEvents(sessionId:string,events:Array<{event_id:string;kind:string;payload:Record<string,unknown>;task_id?:string;revision_id?:string}>) {return this.http.request('POST',`/v1/sessions/${pathPart(sessionId)}/events`,{events});}
   getSessionContext(sessionId:string,after=0) {return this.http.request('GET',`/v1/sessions/${pathPart(sessionId)}/context?after=${after}`);}

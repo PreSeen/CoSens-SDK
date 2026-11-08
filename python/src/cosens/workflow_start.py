@@ -16,13 +16,13 @@ def _derived_key(key, operation):
     return hashlib.sha256(f"workflow-start:{operation}:{stable_key(key)}".encode()).hexdigest()
 
 
-async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto", request_key=None, authorize=None, recipe_id=None, model=None, include_memory=False):
+async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto", request_key=None, authorize=None, recipe_id=None, model=None, recall_memory=False):
     if mode not in {"auto", "approval", "disable"}:
         raise ValueError("mode must be auto, approval or disable")
     if mode == "disable":
         return result({"status": "disabled", "phase": phase})
-    if type(include_memory) is not bool:
-        raise ValueError('include_memory must be boolean')
+    if type(recall_memory) is not bool:
+        raise ValueError('recall_memory must be boolean')
     if isinstance(session_context, str) and phase == 'prepare':
         if not session_context.strip():
             raise ValueError('task Prompt must be nonempty')
@@ -62,8 +62,8 @@ async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto"
             options['recipe_id'] = recipe_id
         if model is not None:
             options['model'] = model
-        if include_memory:
-            options['include_memory'] = True
+        if recall_memory:
+            options['recall_memory'] = True
         execution = await atoms.start_execution(task_id, key=_derived_key(request_key, "execution"), **options)
         return result({"phase": phase, "status": execution.get("status"), "task_id": task_id,
                        "task": task, "execution_id": execution.get("execution_id"),

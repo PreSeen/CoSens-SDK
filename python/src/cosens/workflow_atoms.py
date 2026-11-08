@@ -13,6 +13,16 @@ from .atoms_helpers import path_part, recipe_request_key, stable_key
 from .errors import RSICandidateFailed, RSIRecoveryRequired
 
 
+# Where a feedback text comes from; the service weighs feedback by its source.
+FEEDBACK_SOURCES = ('human', 'evaluator', 'reference', 'automated_check', 'downstream')
+
+
+def feedback_source(source):
+    if source not in FEEDBACK_SOURCES:
+        raise ValueError('source must be one of ' + ', '.join(FEEDBACK_SOURCES))
+    return source
+
+
 def _model_data(model):
     if model is None:
         return {}
@@ -168,12 +178,12 @@ class AsyncWorkflowAtoms:
                                         body=_context(expected_context_version, objective, artifacts, self_contained))
 
 
-    async def start_execution(self, task_id, *, key, recipe_id=None, model=None, include_memory=False):
+    async def start_execution(self, task_id, *, key, recipe_id=None, model=None, recall_memory=False):
         data = _model_data(model)
-        if type(include_memory) is not bool:
-            raise ValueError('include_memory must be boolean')
-        if include_memory:
-            data['include_memory'] = True
+        if type(recall_memory) is not bool:
+            raise ValueError('recall_memory must be boolean')
+        if recall_memory:
+            data['recall_memory'] = True
         if recipe_id is not None:
             path_part(recipe_id)
             data['recipe_id'] = recipe_id
@@ -226,8 +236,9 @@ class AsyncWorkflowAtoms:
         from urllib.parse import urlencode
         return await self._http.request('GET', '/v1/tasks?'+urlencode({'limit':limit, **({'cursor':cursor} if cursor else {})}))
 
-    async def record_feedback(self, revision_id, *, feedback, key):
-        return await self._http.request('POST', f'/v1/revisions/{path_part(revision_id)}/feedback', body={'feedback':feedback}, key=stable_key(key))
+    async def record_feedback(self, revision_id, *, feedback, source, key):
+        return await self._http.request('POST', f'/v1/revisions/{path_part(revision_id)}/feedback',
+                                        body={'feedback':feedback, 'source':feedback_source(source)}, key=stable_key(key))
 
     async def start_session(self, *, session_id=None):
         return await self._http.request('POST', '/v1/sessions/start', body={'session_id':session_id} if session_id else {})
@@ -278,12 +289,12 @@ class SyncWorkflowAtoms:
                                   body=_context(expected_context_version, objective, artifacts, self_contained))
 
 
-    def start_execution(self, task_id, *, key, recipe_id=None, model=None, include_memory=False):
+    def start_execution(self, task_id, *, key, recipe_id=None, model=None, recall_memory=False):
         data = _model_data(model)
-        if type(include_memory) is not bool:
-            raise ValueError('include_memory must be boolean')
-        if include_memory:
-            data['include_memory'] = True
+        if type(recall_memory) is not bool:
+            raise ValueError('recall_memory must be boolean')
+        if recall_memory:
+            data['recall_memory'] = True
         if recipe_id is not None:
             path_part(recipe_id)
             data['recipe_id'] = recipe_id
@@ -331,8 +342,9 @@ class SyncWorkflowAtoms:
         from urllib.parse import urlencode
         return self._http.request('GET', '/v1/tasks?'+urlencode({'limit':limit, **({'cursor':cursor} if cursor else {})}))
 
-    def record_feedback(self, revision_id, *, feedback, key):
-        return self._http.request('POST', f'/v1/revisions/{path_part(revision_id)}/feedback', body={'feedback':feedback}, key=stable_key(key))
+    def record_feedback(self, revision_id, *, feedback, source, key):
+        return self._http.request('POST', f'/v1/revisions/{path_part(revision_id)}/feedback',
+                                  body={'feedback':feedback, 'source':feedback_source(source)}, key=stable_key(key))
 
     def start_session(self, *, session_id=None):
         return self._http.request('POST', '/v1/sessions/start', body={'session_id':session_id} if session_id else {})

@@ -24,9 +24,11 @@ class Backend:
         if path.endswith('/executions') or path.endswith('/revisions') and r.method=='POST':
             return httpx.Response(200,json={'task_id':'task_1','execution_id':'execution_1','request_sha256':'request-hash','status':'awaiting_execution','request':{'context':{'objective':'task'}}})
         if path.endswith('/result'):return httpx.Response(200,json={'status':'completed','revision_id':'revision_1'})
-        if path.endswith('/feedback'):return httpx.Response(200,json={'feedback_id':'feedback_1'})
+        if path.endswith('/feedback'):
+            assert body['source']=='human'
+            return httpx.Response(200,json={'feedback_id':'feedback_1'})
         if path.endswith('/recipe-candidates'):
-            assert 'include_memory' not in body['data']
+            assert 'recall_memory' not in body['data'] and 'include_memory' not in body['data']
             self.generations+=1
             return httpx.Response(200,json={'recipe_candidate_id':'candidate_1','recipe_id':'recipe_1','status':'queued','version':1,'parent_candidate_id':None})
         if path=='/v1/recipe-candidates/candidate_1':return httpx.Response(200,json={'status':'candidate','recipe_candidate_id':'candidate_1','recipe':{'steps':[]}})
@@ -54,7 +56,7 @@ def test_transparent_sync_waits_for_explicit_generation(tmp_path):
     assert response.output_text=='final artifact'
     assert backend.generations==0
     assert wrapped.cosens.wait_learning(timeout=0)['state']=='awaiting_confirmation'
-    wrapped.cosens.feedback('Check the format')
+    wrapped.cosens.feedback('Check the format', source='human')
     assert backend.generations==0
     receipt=wrapped.cosens.generate_recipe()
     assert receipt['recipe_candidate_id']=='candidate_1' and backend.generations==1
@@ -89,7 +91,7 @@ async def test_explicit_agent_run_records_task_without_generating(tmp_path):
     assert response is final
     turn=wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
     assert turn['revision_id']=='revision_1' and backend.generations==0
-    await wrapped.cosens.feedback('Check the format')
+    await wrapped.cosens.feedback('Check the format', source='human')
     assert backend.generations==0
     await wrapped.cosens.generate_recipe()
     assert backend.generations==1
@@ -105,9 +107,29 @@ async def test_atomic_feedback_revision_and_recipe_request(tmp_path):
         execution=await a.start_execution(task['task_id'],key='execution')
         artifact=await a.artifact(name='output.txt',content='final')
         result=await a.submit_execution(execution['execution_id'],request_sha256=execution['request_sha256'],outcome='completed',artifacts=[{'artifact_id':artifact['artifact_id'],'role':'submitted_output'}])
-        await a.record_feedback(result['revision_id'],feedback='Check the format',key='feedback')
+        await a.record_feedback(result['revision_id'],feedback='Check the format',source='human',key='feedback')
         await a.start_revision(result['revision_id'],key='revision')
         assert backend.generations==0
         await a.start_recipe_candidate(task['task_id'],revision_id=result['revision_id'],key='confirmed')
         assert backend.generations==1
         assert not hasattr(a,'prepare') and not hasattr(a,'start_attribution')
+
+
+@pytest.mark.asyncio
+async def test_recall_memory_and_feedback_source_reach_the_service(tmp_path):
+    bodies={}
+    def handler(r):
+        body=json.loads(r.content or b'{}')
+        bodies[r.url.path.rsplit('/',1)[-1]]=body
+        if r.url.path.endswith('/executions'):
+            return httpx.Response(200,json={'execution_id':'execution_1','request_sha256':'h','status':'awaiting_execution'})
+        return httpx.Response(200,json={'feedback_id':'feedback_1','source':body.get('source')})
+    async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(handler)) as sdk:
+        await sdk.atoms.start_execution('task_1',key='execution',recall_memory=True)
+        await sdk.atoms.record_feedback('revision_1',feedback='score=1.0',source='evaluator',key='feedback')
+        with pytest.raises(ValueError, match='source must be one of'):
+            await sdk.atoms.record_feedback('revision_1',feedback='x',source='judge',key='bad')
+        with pytest.raises(TypeError):
+            await sdk.atoms.start_execution('task_1',key='old',include_memory=True)
+    assert bodies['executions']=={'recall_memory':True}
+    assert bodies['feedback']=={'feedback':'score=1.0','source':'evaluator'}
