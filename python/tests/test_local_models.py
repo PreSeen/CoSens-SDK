@@ -16,9 +16,18 @@ def client(handler):
                               http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
 
+def chunk(content, finish_reason=None):
+    return "data: " + json.dumps({"id": "c", "object": "chat.completion.chunk", "created": 1, "model": "m", "choices": [
+        {"index": 0, "finish_reason": finish_reason, "delta": {"content": content}}]}) + "\n\n"
+
+
+def stream_response(body):
+    return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body.encode())
+
+
 def completion(content, finish_reason="stop"):
-    return httpx.Response(200, json={"id": "c", "object": "chat.completion", "created": 1, "model": "m", "choices": [
-        {"index": 0, "finish_reason": finish_reason, "message": {"role": "assistant", "content": content}}]})
+    middle = len(content) // 2
+    return stream_response(chunk(content[:middle]) + chunk(content[middle:], finish_reason) + "data: [DONE]\n\n")
 
 
 async def test_sends_one_schema_constrained_request_with_inline_context():
@@ -31,7 +40,7 @@ async def test_sends_one_schema_constrained_request_with_inline_context():
     model = ChatCompletionsModel(client(handler), "m", max_completion_tokens=100, extra_body={"enable_thinking": False})
     assert await model.call(instruction="do", schema=SCHEMA, context={"role": "r", "context": {"x": "inline"}}) == {"ok": True}
     body = seen[0]
-    assert len(seen) == 1 and body["model"] == "m" and body["max_completion_tokens"] == 100
+    assert len(seen) == 1 and body["model"] == "m" and body["max_completion_tokens"] == 100 and body["stream"] is True
     assert body["response_format"]["json_schema"]["schema"] == SCHEMA
     assert body["response_format"]["json_schema"]["strict"] is True
     assert body["enable_thinking"] is False
@@ -46,6 +55,32 @@ async def test_maps_http_status_to_failure_code(status, code, retryable):
     with pytest.raises(ModelUnavailable) as caught:
         await model.call(instruction="do", schema=SCHEMA, context={})
     assert (caught.value.code, caught.value.retryable, caught.value.upstream_status) == (code, retryable, status)
+
+
+async def test_a_stream_without_a_finish_reason_is_retryable():
+    response = stream_response(chunk('{"ok": tr') + "data: [DONE]\n\n")
+    with pytest.raises(ModelUnavailable, match="ended before") as caught:
+        await ChatCompletionsModel(client(lambda request: response), "m").call(instruction="do", schema=SCHEMA, context={})
+    assert caught.value.code == "upstream_unavailable" and caught.value.retryable
+
+
+async def test_a_stream_cut_part_way_is_retryable():
+    class CutStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield chunk('{"ok": tr').encode()
+            raise httpx.RemoteProtocolError("peer closed connection")
+
+    def handler(request):
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=CutStream())
+
+    with pytest.raises(ModelUnavailable, match="did not complete"):
+        await ChatCompletionsModel(client(handler), "m").call(instruction="do", schema=SCHEMA, context={})
+
+
+async def test_an_error_event_in_the_stream_is_retryable():
+    body = 'data: {"error": {"message": "overloaded"}}\n\n'
+    with pytest.raises(ModelUnavailable, match="did not complete"):
+        await ChatCompletionsModel(client(lambda request: stream_response(body)), "m").call(instruction="do", schema=SCHEMA, context={})
 
 
 async def test_a_failing_call_is_not_retried_by_the_client():
@@ -81,7 +116,7 @@ async def test_connection_failure_is_retryable():
 async def test_invalid_json_and_cut_off_output_raise_value_error():
     with pytest.raises(ValueError):
         await ChatCompletionsModel(client(lambda r: completion("not json")), "m").call(instruction="d", schema=SCHEMA, context={})
-    with pytest.raises(ValueError, match="max_output_tokens"):
+    with pytest.raises(ValueError, match="max_completion_tokens"):
         await ChatCompletionsModel(client(lambda r: completion('{"a"', "length")), "m").call(instruction="d", schema=SCHEMA, context={})
 
 

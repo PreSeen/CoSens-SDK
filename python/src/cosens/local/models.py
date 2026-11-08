@@ -4,10 +4,9 @@ import asyncio
 import json
 from typing import Protocol
 
+import httpx
 import openai
 
-from .._structured import structured_async
-from ..errors import RSIDecisionUnavailable
 from ..workflow_atoms import _completion_tokens
 
 PROMPT_PREAMBLE = (
@@ -70,9 +69,10 @@ def _status_failure(exc):
 
 
 class ChatCompletionsModel:
-    """Calls a developer-built ``AsyncOpenAI`` client with one schema-constrained request per stage.
+    """Calls a developer-built ``AsyncOpenAI`` client with one schema-constrained, streamed request per stage.
 
-    Retries are off so one call stays within ``timeout``; a failed stage is retried with ``resume_recipe_candidate``.
+    The response is streamed because proxies cut a request that sends no bytes for about two minutes. Retries are off so
+    one call stays within ``timeout``; a failed stage is retried with ``resume_recipe_candidate``.
     """
 
     def __init__(self, client, model, *, max_completion_tokens=32000, timeout=300, extra_body=None):
@@ -87,19 +87,35 @@ class ChatCompletionsModel:
         self.timeout = positive_timeout(timeout)
         self.identity = self._model
 
+    async def _streamed_text(self, prompt, schema):
+        stream = await self._client.chat.completions.create(
+            model=self._model, messages=[{"role": "user", "content": prompt}], stream=True, timeout=self.timeout,
+            response_format={"type": "json_schema", "json_schema": {"name": "recipe_output", "strict": True, "schema": schema}},
+            max_completion_tokens=self._max_completion_tokens,
+            **({"extra_body": self._extra_body} if self._extra_body else {}),
+        )
+        parts, finish_reason = [], None
+        async with stream:
+            async for chunk in stream:
+                if chunk.choices:
+                    choice = chunk.choices[0]
+                    if choice.delta is not None and choice.delta.content:
+                        parts.append(choice.delta.content)
+                    finish_reason = choice.finish_reason or finish_reason
+        return "".join(parts), finish_reason
+
     async def call(self, *, instruction, schema, context):
+        prompt = role_prompt(instruction, schema, context)
         try:
-            response = await asyncio.wait_for(structured_async(
-                self._client, model=self._model, input=role_prompt(instruction, schema, context),
-                text={"format": {"name": "recipe_output", "strict": True, "schema": schema}},
-                max_output_tokens=self._max_completion_tokens, timeout=self.timeout, extra_body=self._extra_body,
-            ), self.timeout)
+            text, finish_reason = await asyncio.wait_for(self._streamed_text(prompt, schema), self.timeout)
         except asyncio.TimeoutError as exc:
             raise ModelUnavailable(f"The model did not answer within {self.timeout} seconds.") from exc
-        except RSIDecisionUnavailable as exc:
-            raise ValueError(str(exc)) from exc
         except openai.APIStatusError as exc:
             raise _status_failure(exc) from exc
-        except openai.APIConnectionError as exc:  # includes timeouts
+        except (openai.APIError, httpx.HTTPError) as exc:  # connection failures and streams cut part way
             raise ModelUnavailable("The model call did not complete; resume to retry.") from exc
-        return parse_object(response.output_text)
+        if finish_reason is None:
+            raise ModelUnavailable("The model stream ended before the response was complete; resume to retry.")
+        if finish_reason == "length":
+            raise ValueError(f"the response was cut off at max_completion_tokens={self._max_completion_tokens}")
+        return parse_object(text)
