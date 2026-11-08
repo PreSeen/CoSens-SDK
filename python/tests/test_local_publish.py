@@ -136,6 +136,39 @@ async def test_recall_failure_is_raised_not_skipped(tmp_path):
         await rsi.start_execution(task.task_id, key="e", recall_memory=True)
 
 
+async def test_published_recipes_are_not_frozen_as_memory_evidence(tmp_path):
+    rsi, _, server = setup(tmp_path, recipe_reply("V1"))
+    task, _, done = await first_revision(rsi)
+    await generate(rsi, task, done.revision_id)
+    server.sources["fact"] = {"revision": 1, "text": "a useful fact"}
+    other = await rsi.create_task(source="new_task", key="other", objective="Other")
+    started = await rsi.start_execution(other.task_id, key="e", recall_memory=True)
+    assert [item["id"] for item in started.request["memory"]["items"]] == ["fact"]
+
+
+async def test_a_publish_lost_to_a_crash_is_recovered_on_the_next_wait(tmp_path):
+    rsi, _, server = setup(tmp_path, recipe_reply("V1"))
+    task, _, done = await first_revision(rsi)
+    job = await generate(rsi, task, done.revision_id)
+    server.sources.clear()
+    with rsi._store.transaction() as db:
+        db.execute("UPDATE recipe_candidates SET publish_state='pending'")
+        db.execute("UPDATE recipe_heads SET memory_source_id=NULL,memory_revision=0")
+    assert (await rsi.wait_workflow_job("recipe_candidate", job.recipe_candidate_id)).publish_state == "published"
+    assert server.sources["src1"]["revision"] == 1
+
+
+async def test_import_continues_the_published_version_number(tmp_path):
+    rsi, _, _ = setup(tmp_path, recipe_reply("Next"))
+    item = {"source_id": "s", "revision": 2, "version": 3, "score": 0.9,
+            "recipe": {"title": "T", "when": "W", "when_not": "N", "steps": [{"id": "s1", "instruction": "I"}], "lessons": []}}
+    task = await rsi.create_task(source="new_task", key="k", objective="A", recipe=item)
+    started = await rsi.start_execution(task.task_id, key="e")
+    assert started.request["method"]["version"] == 3
+    done = await complete_execution(rsi, started, key="o")
+    assert (await generate(rsi, task, done.revision_id)).version == 4
+
+
 async def test_only_memory_routes_are_called(tmp_path):
     rsi, _, server = setup(tmp_path, recipe_reply("V1"), recipe_reply("V2"))
     task, _, done = await first_revision(rsi, recall_memory=True)

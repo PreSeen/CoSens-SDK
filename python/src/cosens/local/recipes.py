@@ -2,22 +2,29 @@
 
 import asyncio
 import json
-import math
+import logging
 import time
 from uuid import uuid4
+
+from jsonschema import Draft202012Validator
 
 from ..atoms_helpers import recipe_request_key, stable_key
 from ..errors import RSICandidateFailed, RSIError, RSIHTTPError
 from ..models import result
+from ..workflow_atoms import _job_timeout
 from .models import ModelUnavailable
 from .publish import PUBLICATION_SCHEMA, publication_text, publish_text
-from .recipe_stages import (MAX_CONTEXT_BYTES, MAX_HISTORY_REVISIONS, MODEL_OUTPUT_ATTEMPTS, NO_ACTIONABLE_FEEDBACK,
-                            ModelOutputInvalid, run_recipe_stages)
+from .recipe_stages import MAX_CONTEXT_BYTES, MAX_HISTORY_REVISIONS, MODEL_OUTPUT_ATTEMPTS, ModelOutputInvalid, run_recipe_stages
 from .store import canonical_json, fingerprint
 
-_IN_FLIGHT = ("queued", "running")
-_LIST_STATES = {"queued", "running", "awaiting_material", "candidate", "failed", "interrupted"}
+_IN_FLIGHT = ("queued", "awaiting_parent", "running")
+_LIST_STATES = {"queued", "awaiting_parent", "running", "awaiting_material", "candidate", "failed", "interrupted"}
 _STAGES = 2
+_LOG = logging.getLogger("cosens.local")
+PARENT_FAILED = {"code": "parent_failed", "message": "The Recipe this candidate builds on failed; resume it first.",
+                 "retryable": True, "phase": None, "upstream_status": None, "upstream_code": None}
+INTERRUPTED = {"code": "interrupted", "message": "The process generating this candidate stopped; resume to retry.",
+               "retryable": True, "phase": None, "upstream_status": None, "upstream_code": None}
 
 
 class ParentChanged(ValueError):
@@ -54,16 +61,20 @@ class LocalRecipeLifecycle:
 
     def _view(self, db, row):
         context = json.loads(row["context_json"])
+        if fingerprint(context) != row["context_sha"]:
+            raise ValueError("Recipe context changed")
+        if row["recipe_json"] and fingerprint(json.loads(row["recipe_json"])) != row["recipe_sha"]:
+            raise ValueError("Recipe content changed")
         lineage = self._lineage(db, row["id"])
         attribution = json.loads(row["attribution_json"]) if row["attribution_json"] else None
         models = attribution.pop("models", None) if attribution else None
-        detail = json.loads(row["error"]) if row["error"] and row["error"].startswith("{") else None
+        detail = json.loads(row["error"]) if row["error"] else None
         return {"recipe_candidate_id": row["id"], "recipe_id": lineage["recipe_id"], "version": lineage["version"],
                 "parent_candidate_id": lineage["parent_candidate_id"], "current": lineage["current_candidate_id"] == row["id"],
                 "task_id": row["task_id"], "revision_id": row["revision_id"], "status": row["state"],
                 "context_sha256": row["context_sha"], "recipe_sha256": row["recipe_sha"], "phase": row["phase"],
                 "attribution": attribution, "recipe": json.loads(row["recipe_json"]) if row["recipe_json"] else None,
-                "error": detail["code"] if detail else row["error"], "error_detail": detail, "models": models,
+                "error": detail["code"] if detail else None, "error_detail": detail, "models": models,
                 "memory_context": context["memory"]["status"], "initial": bool(context.get("initial", False)),
                 "material_gap": context.get("material_gap"), "publish_state": row["publish_state"]}
 
@@ -102,9 +113,8 @@ class LocalRecipeLifecycle:
 
     def _import_recipe(self, db, task_id, item):
         """Start this Task's chain from a Recipe another machine published."""
-        from jsonschema import Draft202012Validator
-
-        if not isinstance(item, dict) or not isinstance(item.get("source_id"), str) or type(item.get("revision")) is not int:
+        if (not isinstance(item, dict) or not isinstance(item.get("source_id"), str) or type(item.get("revision")) is not int
+                or type(item.get("version")) is not int or item["version"] < 1):
             raise ValueError("recipe must be an item returned by recall_recipes")
         Draft202012Validator(PUBLICATION_SCHEMA["properties"]["recipe"]).validate(item.get("recipe"))
         recipe = json.loads(json.dumps(item["recipe"]))
@@ -116,7 +126,7 @@ class LocalRecipeLifecycle:
                    (candidate_id, task_id, canonical_json(context), fingerprint(context), canonical_json(recipe), fingerprint(recipe)))
         db.execute("INSERT INTO recipe_heads VALUES(?,?,?,?,?)",
                    (candidate_id, candidate_id, candidate_id, item["source_id"], item["revision"]))
-        db.execute("INSERT INTO recipe_versions VALUES(?,?,1,NULL)", (candidate_id, candidate_id))
+        db.execute("INSERT INTO recipe_versions VALUES(?,?,?,NULL)", (candidate_id, candidate_id, item["version"]))
         db.execute("INSERT INTO task_recipes VALUES(?,?)", (task_id, candidate_id))
 
     def _history(self, db, task_id, revision_id):
@@ -203,22 +213,26 @@ class LocalRecipeLifecycle:
             if row["state"] == "running":
                 if row["lease_expires_at"] > time.time():
                     return {"action": "wait"}
-                db.execute("UPDATE recipe_candidates SET state='interrupted',error='interrupted',lease_expires_at=NULL WHERE id=?",
-                           (candidate_id,))
+                db.execute("UPDATE recipe_candidates SET state='interrupted',error=?,lease_expires_at=NULL WHERE id=?",
+                           (canonical_json(INTERRUPTED), candidate_id))
                 return {"action": "done"}
-            if row["state"] != "queued":
+            if row["state"] not in ("queued", "awaiting_parent"):
                 return {"action": "done"}
             parent_id = self._lineage(db, candidate_id)["parent_candidate_id"]
             parent_state = db.execute("SELECT state FROM recipe_candidates WHERE id=?", (parent_id,)).fetchone()["state"] if parent_id else None
             if parent_state in _IN_FLIGHT:
                 return {"action": "settle_parent", "parent": parent_id}
             if parent_state in ("failed", "interrupted"):
-                db.execute("UPDATE recipe_candidates SET state='failed',error='parent_failed' WHERE id=?", (candidate_id,))
-                return {"action": "done"}
+                return {"action": "wait"}  # blocked until the parent is resumed
             lease = time.time() + self._model.timeout * _STAGES * MODEL_OUTPUT_ATTEMPTS
             db.execute("UPDATE recipe_candidates SET state='running',lease_expires_at=? WHERE id=?", (lease, candidate_id))
             parent = self._view(db, self._candidate(db, parent_id)) if parent_id else None
             return {"action": "generate", "row": dict(row), "parent": parent}
+
+    def _save_attribution(self, row, analysis, models):
+        with self._store.transaction() as db:
+            db.execute("UPDATE recipe_candidates SET attribution_json=? WHERE id=? AND state='running' AND generation=?",
+                       (canonical_json({**analysis, "models": models}), row["id"], row["generation"]))
 
     def _set_phase(self, candidate_id, generation, phase):
         with self._store.transaction() as db:
@@ -243,7 +257,7 @@ class LocalRecipeLifecycle:
             db.execute("UPDATE recipe_heads SET current_candidate_id=? WHERE recipe_id=?", (row["id"], lineage["recipe_id"]))
 
     def _keep_previous(self, row, stages):
-        context = {**json.loads(row["context_json"]), "material_gap": NO_ACTIONABLE_FEEDBACK}
+        context = {**json.loads(row["context_json"]), "material_gap": stages.material_gap}
         with self._store.transaction() as db:
             lineage = self._lineage(db, row["id"])
             updated = db.execute(
@@ -263,8 +277,9 @@ class LocalRecipeLifecycle:
             if updated.rowcount == 1:
                 db.execute("WITH RECURSIVE descendants AS (SELECT candidate_id FROM recipe_versions WHERE parent_candidate_id=? "
                            "UNION ALL SELECT v.candidate_id FROM recipe_versions v JOIN descendants d ON v.parent_candidate_id=d.candidate_id) "
-                           "UPDATE recipe_candidates SET state='failed',error='parent_failed' "
-                           "WHERE id IN (SELECT candidate_id FROM descendants) AND state='queued'", (row["id"],))
+                           "UPDATE recipe_candidates SET state='failed',error=? "
+                           "WHERE id IN (SELECT candidate_id FROM descendants) AND state IN ('queued','awaiting_parent')",
+                           (row["id"], canonical_json(PARENT_FAILED)))
 
     def _requeue(self, row):
         with self._store.transaction() as db:
@@ -282,7 +297,10 @@ class LocalRecipeLifecycle:
             context = json.loads(row["context_json"])
             if fingerprint(context) != row["context_sha"]:
                 raise ValueError("recipe context changed")
-            stages = await run_recipe_stages(self._model, context, parent, on_phase=on_phase)
+            if parent and fingerprint(parent["recipe"]) != parent["recipe_sha256"]:
+                raise ValueError("parent Recipe content changed")
+            stages = await run_recipe_stages(self._model, context, parent, on_phase=on_phase,
+                                             on_attribution=lambda analysis, models: self._save_attribution(row, analysis, models))
             if stages.recipe is None:
                 self._keep_previous(row, stages)
                 return
@@ -292,10 +310,8 @@ class LocalRecipeLifecycle:
             self._requeue(row)  # nothing was committed, so the next wait starts over
             raise
         except Exception as exc:  # noqa: BLE001 -- recorded as the candidate's failure
+            _LOG.exception("Recipe candidate %s failed in phase %s", row["id"], phases[-1])
             self._record_failure(row, exc, phases[-1])
-            return
-        if self._atoms is not None:
-            await self._publish_candidate(row["id"])
 
     async def _settle(self, candidate_id):
         delay = 0.2
@@ -311,23 +327,36 @@ class LocalRecipeLifecycle:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 5.0)
 
+    def _settling_task(self, candidate_id):
+        """One generation per candidate in this process; a later wait attaches to it."""
+        task = self._settling.get(candidate_id)
+        if task is None or task.done():
+            task = asyncio.create_task(self._settle(candidate_id))
+            self._settling[candidate_id] = task
+        return task
+
     async def wait_workflow_job(self, kind, job_id, *, timeout=300):
-        """Run the candidate's generation here and return once it has settled."""
+        """Generate the candidate in this process. A timeout leaves it running; wait on the same ID to continue."""
         if kind != "recipe_candidate":
             raise ValueError("job kind must be recipe_candidate")
-        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout < 0:
-            raise ValueError("timeout must be a finite nonnegative number")
-        try:
-            await asyncio.wait_for(self._settle(job_id), timeout)
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"Workflow {kind} {job_id} did not finish; wait on the same ID to retry") from None
+        timeout = _job_timeout(timeout)
         job = await self.get_recipe_candidate(job_id)
+        if job["status"] in _IN_FLIGHT:
+            task = self._settling_task(job_id)
+            done, _ = await asyncio.wait({task}, timeout=timeout)
+            if not done:
+                raise TimeoutError(f"Workflow {kind} {job_id} is still {job['status']}; wait on the same ID to continue")
+            task.result()
+            job = await self.get_recipe_candidate(job_id)
         if job["status"] == "failed":
             raise RSICandidateFailed.from_candidate(job)
+        if job["current"] and job["publish_state"] == "pending":  # also recovers a publish lost to a crash
+            await self._publish_candidate(job_id)
+            job = await self.get_recipe_candidate(job_id)
         return job
 
     async def get_recipe_candidate(self, recipe_id):
-        with self._store.transaction() as db:
+        with self._store.reading() as db:
             return result(self._view(db, self._candidate(db, recipe_id)))
 
     async def list_recipe_candidates(self, *, limit=20, cursor=None, task_id=None, status=None):
@@ -336,7 +365,7 @@ class LocalRecipeLifecycle:
         if status is not None and status not in _LIST_STATES:
             raise ValueError("invalid Recipe status")
         conditions, parameters = ["1=1"], []
-        with self._store.transaction() as db:
+        with self._store.reading() as db:
             if cursor is not None:
                 previous = db.execute("SELECT rowid AS position FROM recipe_candidates WHERE id=?", (cursor,)).fetchone()
                 if previous is None:
@@ -363,14 +392,19 @@ class LocalRecipeLifecycle:
     async def resume_recipe_candidate(self, recipe_id):
         with self._store.transaction() as db:
             row = self._candidate(db, recipe_id)
+            if row["state"] in ("queued", "awaiting_parent", "running", "candidate"):
+                return result(self._view(db, row))  # a retry of a resume whose response was lost
             if row["state"] not in ("failed", "interrupted"):
                 raise ValueError("only a failed or interrupted candidate can resume")
-            db.execute("UPDATE recipe_candidates SET state='queued',phase='queued',error=NULL,lease_expires_at=NULL,"
-                       "generation=generation+1 WHERE id=?", (recipe_id,))
-        return result({"recipe_candidate_id": recipe_id, "status": "queued"})
+            parent_id = self._lineage(db, recipe_id)["parent_candidate_id"]
+            ready = parent_id is None or self._candidate(db, parent_id)["state"] == "candidate"
+            state = "queued" if ready else "awaiting_parent"
+            db.execute("UPDATE recipe_candidates SET state=?,phase='queued',error=NULL,lease_expires_at=NULL,"
+                       "generation=generation+1 WHERE id=?", (state, recipe_id))
+        return result({"recipe_candidate_id": recipe_id, "status": state})
 
     async def get_task_recipe(self, task_id):
-        with self._store.transaction() as db:
+        with self._store.reading() as db:
             if db.execute("SELECT id FROM tasks WHERE id=?", (task_id,)).fetchone() is None:
                 raise LookupError("task not found")
             head = self._head(db, task_id)
@@ -381,7 +415,7 @@ class LocalRecipeLifecycle:
         return result({"task_id": task_id, "recipe_id": head["recipe_id"], "status": latest["status"], "current": current, "latest": latest})
 
     async def get_recipe_versions(self, recipe_id):
-        with self._store.transaction() as db:
+        with self._store.reading() as db:
             head = db.execute("SELECT * FROM recipe_heads WHERE recipe_id=?", (recipe_id,)).fetchone()
             if head is None:
                 raise LookupError("Recipe not found")
@@ -392,7 +426,7 @@ class LocalRecipeLifecycle:
 
     async def _publish_candidate(self, candidate_id):
         """Write this version to Memory. The local version stands whatever happens here."""
-        with self._store.transaction() as db:
+        with self._store.reading() as db:
             row = self._candidate(db, candidate_id)
             lineage = self._lineage(db, candidate_id)
             head = db.execute("SELECT * FROM recipe_heads WHERE recipe_id=?", (lineage["recipe_id"],)).fetchone()

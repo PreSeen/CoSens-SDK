@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import os
+import signal
 import tempfile
 from pathlib import Path
 
@@ -64,6 +66,7 @@ class CodexCLIModel:
                 process = await asyncio.create_subprocess_exec(
                     *self._command(workdir, schema_path, output_path), cwd=workdir,
                     stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                    start_new_session=True,  # its own process group, so a kill also reaches what the launcher starts
                 )
             except OSError as exc:
                 raise ModelUnavailable(f"Could not start {self._executable}.") from exc
@@ -74,7 +77,10 @@ class CodexCLIModel:
                 raise ModelUnavailable(f"Codex did not finish within {self.timeout} seconds.") from exc
             finally:
                 if process.returncode is None:
-                    process.kill()
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass  # it exited after the check above
                     await process.wait()
             failure = _turn_failure(stdout.decode(errors="replace"))
             if process.returncode or failure is not None:
@@ -84,7 +90,7 @@ class CodexCLIModel:
     @staticmethod
     def _raise_failure(returncode, failure):
         status = _failure_status(failure) if failure else None
-        if status is not None and status < 500 and status not in (408, 429):
+        if status is not None and status < 500 and status not in (401, 402, 403, 408, 429):  # login and quota can recover
             raise ModelUnavailable("Codex rejected the request.", code="upstream_rejected", retryable=False,
                                    upstream_status=status)
         raise ModelUnavailable(f"Codex did not complete (exit code {returncode}); check that it is logged in and has quota.",

@@ -110,6 +110,20 @@ async def test_recall_memory_requires_a_memory_client(tmp_path):
         await rsi.start_execution(task.task_id, key="e", recall_memory=True)
 
 
+async def test_context_changed_during_recall_is_refused(tmp_path):
+    rsi = LocalRSI(memory=None, model=FakeModel(), state_path=tmp_path / "s.sqlite3")
+    task = await rsi.create_task(source="new_task", key="k", objective="Old")
+
+    class Atoms:
+        async def memory_recall(self, *, query, token_budget):
+            await rsi.supplement_task_context(task.task_id, expected_context_version=1, objective="New")
+            return {"items": []}
+
+    rsi._atoms = Atoms()
+    with pytest.raises(ValueError, match="changed while recalling"):
+        await rsi.start_execution(task.task_id, key="e", recall_memory=True)
+
+
 async def test_unknown_ids_raise_lookup_error(tmp_path):
     rsi = LocalRSI(memory=None, model=FakeModel(), state_path=tmp_path / "s.sqlite3")
     for call in (rsi.get_task("x"), rsi.get_execution("x"), rsi.get_revision("x"), rsi.get_artifact("x")):

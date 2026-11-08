@@ -66,5 +66,5 @@ async def recall_published(atoms, query, token_budget):
         publication = parse_publication(item.get("text"))
         if publication is not None and isinstance(item.get("id"), str) and type(item.get("revision")) is int:
             found.append({"source_id": item["id"], "revision": item["revision"], "recipe": publication["recipe"],
-                          "recipe_id": publication["recipe_id"], "version": publication["version"], "score": item.get("score")})
+                          "version": publication["version"], "score": item.get("score")})
     return found

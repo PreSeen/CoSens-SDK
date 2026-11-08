@@ -59,7 +59,6 @@ class LocalStore:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(path, check_same_thread=False, isolation_level=None, timeout=30)
         self._db.row_factory = sqlite3.Row
-        self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.executescript(SCHEMA)
         self._lock = threading.RLock()
@@ -75,6 +74,16 @@ class LocalStore:
                 self._db.execute("ROLLBACK")
                 raise
             self._db.execute("COMMIT")
+
+    @contextmanager
+    def reading(self):
+        """A consistent view for several reads, without taking the write lock."""
+        with self._lock:
+            self._db.execute("BEGIN")
+            try:
+                yield self._db
+            finally:
+                self._db.execute("COMMIT")
 
     def read(self, sql, parameters=()):
         with self._lock:

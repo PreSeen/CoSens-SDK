@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -45,6 +46,27 @@ async def test_maps_http_status_to_failure_code(status, code, retryable):
     with pytest.raises(ModelUnavailable) as caught:
         await model.call(instruction="do", schema=SCHEMA, context={})
     assert (caught.value.code, caught.value.retryable, caught.value.upstream_status) == (code, retryable, status)
+
+
+async def test_a_failing_call_is_not_retried_by_the_client():
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(503, json={"error": {"message": "busy"}})
+
+    native = openai.AsyncOpenAI(api_key="k", base_url="https://models.test/v1", http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    with pytest.raises(ModelUnavailable):
+        await ChatCompletionsModel(native, "m").call(instruction="do", schema=SCHEMA, context={})
+    assert len(requests) == 1
+
+
+async def test_a_slow_model_stops_at_the_timeout():
+    async def handler(request):
+        await asyncio.sleep(30)
+
+    with pytest.raises(ModelUnavailable, match="did not answer"):
+        await ChatCompletionsModel(client(handler), "m", timeout=0.2).call(instruction="do", schema=SCHEMA, context={})
 
 
 async def test_connection_failure_is_retryable():

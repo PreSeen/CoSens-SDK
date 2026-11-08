@@ -6,6 +6,7 @@ from uuid import uuid4
 from ..atoms_helpers import stable_key
 from ..models import result
 from ..workflow_atoms import _context, _result, _task, feedback_source, validate_artifact
+from .publish import parse_publication
 from .recipe_stages import MEMORY_TOKEN_BUDGET, memory_snapshot
 from .store import canonical_json, fingerprint
 
@@ -144,7 +145,9 @@ class LocalTaskWorkflow:
 
     async def _recall_snapshot(self, objective):
         recalled = await self._atoms.memory_recall(query=objective, token_budget=MEMORY_TOKEN_BUDGET)
-        return memory_snapshot(json.loads(json.dumps(recalled.get("items", []))))
+        items = json.loads(json.dumps(recalled.get("items", [])))
+        # A Recipe this SDK published is a method, not evidence about the task.
+        return memory_snapshot([item for item in items if parse_publication(item.get("text")) is None])
 
     def _execution_intent(self, db, task_id, key, recipe_id, recall_memory):
         """Return the replayed or needs-context response, or the frozen request to create."""
@@ -182,6 +185,8 @@ class LocalTaskWorkflow:
             intent = self._execution_intent(db, task_id, key, recipe_id, recall_memory)
             if "response" in intent:
                 return result(intent["response"])
+            if intent["intent"] != first["intent"]:
+                raise ValueError("task context changed while recalling Memory; start the execution again")
             request = intent["request"]
             head = self._head(db, task_id)
             if recipe_id is not None:

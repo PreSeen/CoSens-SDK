@@ -1,44 +1,280 @@
 {
   "context": {
-    "history": [{
-      "revision_id": "rev1",
-      "materials": [{"artifact_id": "input1"}],
-      "outputs": [{"artifact_id": "out1"}],
-      "events": [{"id": "e1"}],
-      "feedback": [{"feedback_id": "fb1"}]
-    }],
-    "memory": {"status": "captured", "items": [{"id": "mem1"}]}
+    "history": [
+      {
+        "revision_id": "rev1",
+        "materials": [
+          {
+            "artifact_id": "input1"
+          }
+        ],
+        "outputs": [
+          {
+            "artifact_id": "out1"
+          }
+        ],
+        "events": [
+          {
+            "id": "e1"
+          }
+        ],
+        "feedback": [
+          {
+            "feedback_id": "fb1"
+          }
+        ]
+      }
+    ],
+    "memory": {
+      "status": "captured",
+      "items": [
+        {
+          "id": "mem1"
+        }
+      ]
+    }
   },
   "cases": [
-    {"name": "recipe_accepts_every_reference_kind", "stage": "recipe", "expected": null, "output": {
-      "title": "T", "when": "W", "when_not": "N",
-      "steps": [
-        {"id": "s1", "instruction": "I", "evidence_refs": [{"revision_id": "rev1", "event_id": "e1"}]},
-        {"id": "s2", "instruction": "I", "evidence_refs": [{"artifact_id": "out1"}, {"memory_item_id": "mem1"}]}
-      ],
-      "lessons": [{"when": "W", "do": "D", "why": "Y", "when_not": "N", "evidence_refs": [{"feedback_id": "fb1"}]}]}},
-    {"name": "recipe_rejects_missing_field", "stage": "recipe", "expected": "schema", "output": {
-      "title": "T", "when": "W", "steps": [], "lessons": []}},
-    {"name": "recipe_rejects_step_without_evidence", "stage": "recipe", "expected": "schema", "output": {
-      "title": "T", "when": "W", "when_not": "N",
-      "steps": [{"id": "s1", "instruction": "I", "evidence_refs": []}], "lessons": []}},
-    {"name": "recipe_rejects_unknown_event", "stage": "recipe", "expected": "evidence", "output": {
-      "title": "T", "when": "W", "when_not": "N",
-      "steps": [{"id": "s1", "instruction": "I", "evidence_refs": [{"revision_id": "rev1", "event_id": "nope"}]}], "lessons": []}},
-    {"name": "recipe_rejects_unknown_memory", "stage": "recipe", "expected": "evidence", "output": {
-      "title": "T", "when": "W", "when_not": "N",
-      "steps": [{"id": "s1", "instruction": "I", "evidence_refs": [{"memory_item_id": "nope"}]}], "lessons": []}},
-    {"name": "recipe_rejects_duplicate_step_ids", "stage": "recipe", "expected": "duplicate_step", "output": {
-      "title": "T", "when": "W", "when_not": "N",
-      "steps": [
-        {"id": "s1", "instruction": "I", "evidence_refs": [{"artifact_id": "out1"}]},
-        {"id": "s1", "instruction": "J", "evidence_refs": [{"artifact_id": "out1"}]}
-      ], "lessons": []}},
-    {"name": "attribution_accepts_feedback_reference", "stage": "attribution", "expected": null, "output": {
-      "actionable": true, "limitations": "",
-      "possible_causes": [{"reason": "R", "uncertainty": "U", "evidence_refs": [{"feedback_id": "fb1"}]}]}},
-    {"name": "attribution_rejects_unknown_reference", "stage": "attribution", "expected": "evidence", "output": {
-      "actionable": true, "limitations": "",
-      "possible_causes": [{"reason": "R", "uncertainty": "U", "evidence_refs": [{"feedback_id": "nope"}]}]}}
+    {
+      "name": "recipe_accepts_every_reference_kind",
+      "stage": "recipe",
+      "expected": null,
+      "output": {
+        "title": "T",
+        "when": "W",
+        "when_not": "N",
+        "steps": [
+          {
+            "id": "s1",
+            "instruction": "I",
+            "evidence_refs": [
+              {
+                "revision_id": "rev1",
+                "event_id": "e1"
+              }
+            ]
+          },
+          {
+            "id": "s2",
+            "instruction": "I",
+            "evidence_refs": [
+              {
+                "artifact_id": "out1"
+              },
+              {
+                "memory_item_id": "mem1"
+              }
+            ]
+          }
+        ],
+        "lessons": [
+          {
+            "when": "W",
+            "do": "D",
+            "why": "Y",
+            "when_not": "N",
+            "evidence_refs": [
+              {
+                "feedback_id": "fb1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "recipe_rejects_missing_field",
+      "stage": "recipe",
+      "expected": "schema",
+      "output": {
+        "title": "T",
+        "when": "W",
+        "steps": [],
+        "lessons": []
+      }
+    },
+    {
+      "name": "recipe_rejects_step_without_evidence",
+      "stage": "recipe",
+      "expected": "schema",
+      "output": {
+        "title": "T",
+        "when": "W",
+        "when_not": "N",
+        "steps": [
+          {
+            "id": "s1",
+            "instruction": "I",
+            "evidence_refs": []
+          }
+        ],
+        "lessons": []
+      }
+    },
+    {
+      "name": "recipe_rejects_unknown_event",
+      "stage": "recipe",
+      "expected": "evidence",
+      "output": {
+        "title": "T",
+        "when": "W",
+        "when_not": "N",
+        "steps": [
+          {
+            "id": "s1",
+            "instruction": "I",
+            "evidence_refs": [
+              {
+                "revision_id": "rev1",
+                "event_id": "nope"
+              }
+            ]
+          }
+        ],
+        "lessons": []
+      }
+    },
+    {
+      "name": "recipe_rejects_unknown_memory",
+      "stage": "recipe",
+      "expected": "evidence",
+      "output": {
+        "title": "T",
+        "when": "W",
+        "when_not": "N",
+        "steps": [
+          {
+            "id": "s1",
+            "instruction": "I",
+            "evidence_refs": [
+              {
+                "memory_item_id": "nope"
+              }
+            ]
+          }
+        ],
+        "lessons": []
+      }
+    },
+    {
+      "name": "recipe_rejects_duplicate_step_ids",
+      "stage": "recipe",
+      "expected": "duplicate_step",
+      "output": {
+        "title": "T",
+        "when": "W",
+        "when_not": "N",
+        "steps": [
+          {
+            "id": "s1",
+            "instruction": "I",
+            "evidence_refs": [
+              {
+                "artifact_id": "out1"
+              }
+            ]
+          },
+          {
+            "id": "s1",
+            "instruction": "J",
+            "evidence_refs": [
+              {
+                "artifact_id": "out1"
+              }
+            ]
+          }
+        ],
+        "lessons": []
+      }
+    },
+    {
+      "name": "attribution_accepts_feedback_reference",
+      "stage": "attribution",
+      "expected": null,
+      "output": {
+        "actionable": true,
+        "verified_success": false,
+        "new_evidence": [],
+        "limitations": "",
+        "possible_causes": [
+          {
+            "reason": "R",
+            "uncertainty": "U",
+            "evidence_refs": [
+              {
+                "feedback_id": "fb1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "attribution_rejects_unknown_reference",
+      "stage": "attribution",
+      "expected": "evidence",
+      "output": {
+        "actionable": true,
+        "verified_success": false,
+        "new_evidence": [],
+        "limitations": "",
+        "possible_causes": [
+          {
+            "reason": "R",
+            "uncertainty": "U",
+            "evidence_refs": [
+              {
+                "feedback_id": "nope"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "attribution_accepts_new_evidence",
+      "stage": "attribution",
+      "expected": null,
+      "output": {
+        "actionable": false,
+        "verified_success": true,
+        "new_evidence": [
+          {
+            "observation": "O",
+            "why_missing": "W",
+            "evidence_refs": [
+              {
+                "revision_id": "rev1",
+                "event_id": "e1"
+              }
+            ]
+          }
+        ],
+        "limitations": "",
+        "possible_causes": []
+      }
+    },
+    {
+      "name": "attribution_rejects_unknown_new_evidence_reference",
+      "stage": "attribution",
+      "expected": "evidence",
+      "output": {
+        "actionable": false,
+        "verified_success": true,
+        "new_evidence": [
+          {
+            "observation": "O",
+            "why_missing": "W",
+            "evidence_refs": [
+              {
+                "artifact_id": "nope"
+              }
+            ]
+          }
+        ],
+        "limitations": "",
+        "possible_causes": []
+      }
+    }
   ]
 }

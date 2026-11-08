@@ -74,15 +74,16 @@ async def test_provider_rejection_is_not_retryable(tmp_path):
     assert (caught.value.code, caught.value.retryable, caught.value.upstream_status) == ("upstream_rejected", False, 400)
 
 
-async def test_rate_limit_stays_retryable(tmp_path):
-    body = """
-        print(json.dumps({"type": "turn.failed", "error": {"message": json.dumps({"status": 429})}}))
+@pytest.mark.parametrize("status", [401, 402, 429])
+async def test_login_quota_and_rate_limits_stay_retryable(tmp_path, status):
+    body = f"""
+        print(json.dumps({{"type": "turn.failed", "error": {{"message": json.dumps({{"status": {status}}})}}}}))
         sys.exit(1)
     """
     path, _ = fake_codex(tmp_path, body)
     with pytest.raises(ModelUnavailable) as caught:
         await CodexCLIModel(executable=str(path)).call(instruction="d", schema=SCHEMA, context={})
-    assert caught.value.code == "upstream_unavailable" and caught.value.upstream_status == 429
+    assert caught.value.code == "upstream_unavailable" and caught.value.upstream_status == status
 
 
 async def test_timeout_kills_the_process(tmp_path):
@@ -93,13 +94,49 @@ async def test_timeout_kills_the_process(tmp_path):
     assert time.monotonic() - started < 10
 
 
-async def test_cancellation_kills_the_process(tmp_path):
-    path, _ = fake_codex(tmp_path, "import time\ntime.sleep(30)\n")
+def launcher_body(pid_file):
+    """A launcher like the npm wrapper: it starts the real program and waits, sharing its output pipe."""
+    return f"""
+        import subprocess, time
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        open({str(pid_file)!r}, "w").write(str(child.pid))
+        child.wait()
+    """
+
+
+async def assert_process_stops(pid_file):
+    pid = int(pid_file.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            with open(f"/proc/{pid}/stat") as stat_file:
+                if stat_file.read().rsplit(")", 1)[1].split()[0] == "Z":
+                    return
+        except FileNotFoundError:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("process is still running")
+
+
+async def test_timeout_stops_what_the_launcher_started(tmp_path):
+    pid_file = tmp_path / "child.pid"
+    path, _ = fake_codex(tmp_path, launcher_body(pid_file))
+    started = time.monotonic()
+    with pytest.raises(ModelUnavailable, match="did not finish"):
+        await CodexCLIModel(executable=str(path), timeout=1).call(instruction="d", schema=SCHEMA, context={})
+    assert time.monotonic() - started < 10
+    await assert_process_stops(pid_file)
+
+
+async def test_cancellation_stops_what_the_launcher_started(tmp_path):
+    pid_file = tmp_path / "child.pid"
+    path, _ = fake_codex(tmp_path, launcher_body(pid_file))
     task = asyncio.create_task(CodexCLIModel(executable=str(path)).call(instruction="d", schema=SCHEMA, context={}))
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(1)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    await assert_process_stops(pid_file)
 
 
 async def test_missing_executable_is_unavailable(tmp_path):

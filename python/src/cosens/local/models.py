@@ -1,5 +1,6 @@
 """The one interface local RSI uses to reach a model, and the developer-supplied client implementation."""
 
+import asyncio
 import json
 from typing import Protocol
 
@@ -69,14 +70,17 @@ def _status_failure(exc):
 
 
 class ChatCompletionsModel:
-    """Calls a developer-built ``AsyncOpenAI`` client with one schema-constrained request per stage."""
+    """Calls a developer-built ``AsyncOpenAI`` client with one schema-constrained request per stage.
+
+    Retries are off so one call stays within ``timeout``; a failed stage is retried with ``resume_recipe_candidate``.
+    """
 
     def __init__(self, client, model, *, max_completion_tokens=32000, timeout=300, extra_body=None):
         if not isinstance(client, openai.AsyncOpenAI):
             raise TypeError("client must be an AsyncOpenAI client")
         if not isinstance(model, str) or not model.strip():
             raise ValueError("model must be a nonempty model ID")
-        self._client = client
+        self._client = client.with_options(max_retries=0)
         self._model = model.strip()
         self._max_completion_tokens = _completion_tokens(max_completion_tokens)
         self._extra_body = extra_body
@@ -85,11 +89,13 @@ class ChatCompletionsModel:
 
     async def call(self, *, instruction, schema, context):
         try:
-            response = await structured_async(
+            response = await asyncio.wait_for(structured_async(
                 self._client, model=self._model, input=role_prompt(instruction, schema, context),
                 text={"format": {"name": "recipe_output", "strict": True, "schema": schema}},
                 max_output_tokens=self._max_completion_tokens, timeout=self.timeout, extra_body=self._extra_body,
-            )
+            ), self.timeout)
+        except asyncio.TimeoutError as exc:
+            raise ModelUnavailable(f"The model did not answer within {self.timeout} seconds.") from exc
         except RSIDecisionUnavailable as exc:
             raise ValueError(str(exc)) from exc
         except openai.APIStatusError as exc:

@@ -60,9 +60,21 @@ RECIPE_SCHEMA = {
 ATTRIBUTION_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["actionable", "limitations", "possible_causes"],
+    "required": ["actionable", "verified_success", "new_evidence", "limitations", "possible_causes"],
     "properties": {
         "actionable": {"type": "boolean"},
+        "verified_success": {"type": "boolean"},
+        "new_evidence": {
+            "type": "array", "maxItems": 10,
+            "items": {
+                "type": "object", "additionalProperties": False, "required": ["observation", "why_missing", "evidence_refs"],
+                "properties": {
+                    "observation": {"type": "string", "minLength": 1, "maxLength": 1000},
+                    "why_missing": {"type": "string", "minLength": 1, "maxLength": 1000},
+                    "evidence_refs": _EVIDENCE_REFS,
+                },
+            },
+        },
         "limitations": {"type": "string", "maxLength": 4000},
         "possible_causes": {
             "type": "array", "maxItems": 10,
@@ -83,6 +95,9 @@ MODEL_OUTPUT_ATTEMPTS = 3
 MAX_HISTORY_REVISIONS = 30
 MAX_CONTEXT_BYTES = 4_000_000
 NO_ACTIONABLE_FEEDBACK = "no_actionable_feedback"
+UNVERIFIED_NEW_EVIDENCE = "unverified_new_evidence"
+# Sources that can show a result is correct. A person's remark (`human`) is a claim to weigh, not a verification.
+VERIFYING_SOURCES = ("evaluator", "reference", "automated_check", "downstream")
 
 MEMORY_TOKEN_BUDGET = 2000
 MEMORY_MIN_SCORE = 0.35
@@ -96,18 +111,32 @@ ATTRIBUTION_INSTRUCTION = (
     "reference, automated_check or downstream), so weigh it by where it comes from. Use only supplied artifact, event, "
     "Memory or feedback references. Do not invent a failure when none is supported. "
     "Set actionable to false when the feedback only thanks, approves or acknowledges the result and asks for no change; "
-    "set it to true when it corrects the result, adds a constraint or preference, or reports a failure."
+    "set it to true when it corrects the result, adds a constraint or preference, or reports a failure. "
+    "Set verified_success to true only when feedback whose source is evaluator, reference, automated_check or downstream shows "
+    "that the result is correct, and false otherwise. "
+    "Always list new_evidence: what this execution did or found, seen in the events, artifacts or feedback, that base_recipe does not "
+    "already cover, each with the observation, why base_recipe lacks it, and evidence references. List it whether or not the "
+    "result is verified; the service uses it only when verified_success is true. Use an empty list when there is nothing new."
 )
-GENERATION_INSTRUCTION = (
+GENERATION_START = (
     "Extract a reusable procedure from the recorded task history and the supplied attribution. "
     "The host explicitly requested generation after external confirmation; this is not independent validation. "
     "Cite supplied event, artifact, Memory or feedback references for every step and lesson. "
     "An artifact proves content, not that an action occurred. Do not treat feedback or a possible cause as proven fact. "
     "Keep case-specific names and answers in evidence only. Describe applicability, exclusions and checks. "
     "Keep the Recipe proportional to the task: a simple task needs at most 3 steps and no lessons. "
-    "Every lesson must come from recorded feedback or an observed failure. Do not add steps or lessons about "
+    "Every lesson must come from recorded feedback, an observed failure"
+)
+VERIFIED_LESSON_SOURCE = " or the verified new_evidence in the attribution"
+GENERATION_END = (
+    ". Do not add steps or lessons about "
     "Memory screening, artifact persistence, feedback classification, evidence handling or other process "
     "meta-rules unless the recorded feedback explicitly asks for them."
+)
+VERIFIED_DISTILL_INSTRUCTION = (
+    " A trusted source confirmed this result is correct, and the attribution lists new_evidence that "
+    "base_recipe does not cover. Add the steps and lessons that evidence supports, citing it, and keep "
+    "what is already valid in base_recipe."
 )
 ACKNOWLEDGED_ONLY_INSTRUCTION = " The feedback only acknowledged the result; do not derive lessons from it."
 IMPROVE_INSTRUCTION = (
@@ -138,6 +167,7 @@ class StageResult:
     analysis: dict
     models: dict
     recipe: Optional[dict]  # None: the feedback gate kept the previous version
+    material_gap: Optional[str] = None  # why the gate kept it
 
 
 def evidence_index(context):
@@ -176,7 +206,7 @@ def recipe_text_chars(recipe):
 
 
 def attribution_rejection(value, index):
-    invalid = invalid_refs(value["possible_causes"], index)
+    invalid = invalid_refs(value["possible_causes"] + value["new_evidence"], index)
     if not invalid:
         return None
     return Rejection("evidence", "it cited references that are not in this context; copy every reference exactly from "
@@ -221,6 +251,24 @@ def output_problem(exc):
     return str(exc)[:300]
 
 
+def verified_new_evidence(analysis, source_feedback):
+    """True when new evidence may enter the Recipe: a trusted source confirmed the result, the attribution says so, and
+    it lists something the base Recipe lacks. The source check is mechanical; reading the feedback is the model's job."""
+    trusted = any(feedback.get("source") in VERIFYING_SOURCES for feedback in source_feedback)
+    return trusted and analysis.get("verified_success") is True and bool(analysis.get("new_evidence"))
+
+
+def generation_instruction(*, distill, acknowledged_only, improving):
+    instruction = GENERATION_START + (VERIFIED_LESSON_SOURCE if distill else "") + GENERATION_END
+    if distill:
+        instruction += VERIFIED_DISTILL_INSTRUCTION
+    elif acknowledged_only:
+        instruction += ACKNOWLEDGED_ONLY_INSTRUCTION
+    if improving:
+        instruction += IMPROVE_INSTRUCTION
+    return instruction
+
+
 async def validated_output(model, instruction, schema, payload, rejection):
     """Retry a stage whose output fails parsing, schema or evidence checks, saying why."""
     for attempt in range(MODEL_OUTPUT_ATTEMPTS):
@@ -238,7 +286,7 @@ async def validated_output(model, instruction, schema, payload, rejection):
         instruction += " Previous response was rejected: " + problem
 
 
-async def run_recipe_stages(model, context, parent, *, on_phase):
+async def run_recipe_stages(model, context, parent, *, on_phase, on_attribution=None):
     """Attribute feedback when there is any, apply the gate, and generate the next Recipe."""
     index = evidence_index(context)
     analysis = {"possible_causes": [], "limitations": "No corrective feedback was recorded."}
@@ -251,14 +299,15 @@ async def run_recipe_stages(model, context, parent, *, on_phase):
             lambda value: attribution_rejection(value, index),
         )
         models["attribution"] = model.identity
-    if parent and analysis.get("actionable") is False:
-        return StageResult(analysis, models, None)
+    distill = verified_new_evidence(analysis, context["history"][-1].get("feedback", []))
+    if parent and analysis.get("actionable") is False and not distill:
+        gap = UNVERIFIED_NEW_EVIDENCE if analysis.get("new_evidence") else NO_ACTIONABLE_FEEDBACK
+        return StageResult(analysis, models, None, gap)
+    if on_attribution is not None:
+        on_attribution(analysis, models)
     on_phase("generating")
-    instruction = GENERATION_INSTRUCTION
-    if analysis.get("actionable") is False:
-        instruction += ACKNOWLEDGED_ONLY_INSTRUCTION
-    if parent:
-        instruction += IMPROVE_INSTRUCTION
+    instruction = generation_instruction(distill=distill, acknowledged_only=analysis.get("actionable") is False,
+                                         improving=bool(parent))
     recipe = await validated_output(
         model, instruction, RECIPE_SCHEMA,
         {"role": "workflow_recipe_improvement" if parent else "workflow_recipe_distillation",

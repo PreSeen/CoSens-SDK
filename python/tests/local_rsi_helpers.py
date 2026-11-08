@@ -26,10 +26,12 @@ def recipe_reply(title="Recipe"):
     return reply
 
 
-def attribution_reply(actionable):
+def attribution_reply(actionable, *, verified_success=False, new_evidence=False):
     def reply(payload):
         feedback = next(f for h in payload["context"]["history"] for f in h["feedback"])
-        return {"actionable": actionable, "limitations": "",
+        found = [{"observation": "o", "why_missing": "w", "evidence_refs": [{"feedback_id": feedback["feedback_id"]}]}]
+        return {"actionable": actionable, "verified_success": verified_success, "new_evidence": found if new_evidence else [],
+                "limitations": "",
                 "possible_causes": [{"reason": "r", "uncertainty": "u", "evidence_refs": [{"feedback_id": feedback["feedback_id"]}]}]}
     return reply
 

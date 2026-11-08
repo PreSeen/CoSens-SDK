@@ -18,11 +18,12 @@ class LocalRSI(LocalTaskWorkflow, LocalRecipeLifecycle):
         self._atoms = memory.atoms if memory is not None else None
         self._model = model
         self._store = LocalStore(state_path)
+        self._settling = {}
 
     def close(self):
         self._store.close()
 
-    async def recall_recipes(self, query, *, token_budget=8000):
+    async def recall_recipes(self, query, token_budget=8000):
         """Find Recipes published to Memory, including from other machines."""
         if self._atoms is None:
             raise ValueError("recall_recipes requires a memory client")
@@ -32,7 +33,7 @@ class LocalRSI(LocalTaskWorkflow, LocalRecipeLifecycle):
         """Retry publishing the current version of a Recipe chain."""
         if self._atoms is None:
             raise ValueError("publish_recipe requires a memory client")
-        with self._store.transaction() as db:
+        with self._store.reading() as db:
             head = db.execute("SELECT current_candidate_id FROM recipe_heads WHERE recipe_id=?", (recipe_id,)).fetchone()
             if head is None or not head["current_candidate_id"]:
                 raise LookupError("usable Recipe not found")

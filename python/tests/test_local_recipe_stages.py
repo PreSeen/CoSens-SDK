@@ -17,6 +17,14 @@ def context(feedback=()):
             "memory": {"status": "not_requested", "items": []}}
 
 
+NEW_EVIDENCE = [{"observation": "O", "why_missing": "W", "evidence_refs": [EVENT_REF]}]
+
+
+def attribution(*, verified_success=False, new_evidence=()):
+    return {"actionable": False, "verified_success": verified_success, "new_evidence": list(new_evidence),
+            "limitations": "", "possible_causes": []}
+
+
 def recipe(**changes):
     return {"title": "T", "when": "W", "when_not": "N", "lessons": [],
             "steps": [{"id": "s1", "instruction": "I", "evidence_refs": [EVENT_REF]}], **changes}
@@ -35,11 +43,13 @@ def test_contract_rejects_recipe_over_the_text_limit():
 
 def test_prompts_match_the_contract():
     prompts = json.loads((CONTRACT / "prompts.json").read_text())
-    assert prompts == {"attribution": stages.ATTRIBUTION_INSTRUCTION, "generation": stages.GENERATION_INSTRUCTION,
+    assert prompts == {"attribution": stages.ATTRIBUTION_INSTRUCTION, "generation_start": stages.GENERATION_START,
+                       "verified_lesson_source": stages.VERIFIED_LESSON_SOURCE, "generation_end": stages.GENERATION_END,
+                       "verified_distill": stages.VERIFIED_DISTILL_INSTRUCTION,
                        "acknowledged_only": stages.ACKNOWLEDGED_ONLY_INSTRUCTION, "improve": stages.IMPROVE_INSTRUCTION}
 
 
-def test_every_schema_field_is_required_for_structured_output():
+def test_every_schema_field_is_required_for_structured_output():  # providers reject optional properties
     for schema in (stages.RECIPE_SCHEMA, stages.ATTRIBUTION_SCHEMA):
         assert set(schema["required"]) == set(schema["properties"])
 
@@ -56,15 +66,54 @@ async def test_no_feedback_skips_attribution_and_generates():
 
 async def test_gate_keeps_previous_version_when_feedback_needs_no_change():
     feedback = [{"feedback_id": "fb1"}]
-    model = FakeModel({"actionable": False, "limitations": "", "possible_causes": []})
+    model = FakeModel(attribution())
     outcome = await stages.run_recipe_stages(model, context(feedback), {"recipe": recipe()}, on_phase=lambda _: None)
-    assert outcome.recipe is None
+    assert outcome.recipe is None and outcome.material_gap == stages.NO_ACTIONABLE_FEEDBACK
     assert len(model.calls) == 1
+
+
+async def test_verified_new_evidence_updates_the_recipe():
+    feedback = [{"feedback_id": "fb1", "source": "evaluator"}]
+    model = FakeModel(attribution(verified_success=True, new_evidence=NEW_EVIDENCE), recipe())
+    outcome = await stages.run_recipe_stages(model, context(feedback), {"recipe": recipe()}, on_phase=lambda _: None)
+    assert outcome.recipe is not None
+    instruction = model.calls[1]["instruction"]
+    assert stages.VERIFIED_DISTILL_INSTRUCTION in instruction and stages.VERIFIED_LESSON_SOURCE in instruction
+    assert stages.ACKNOWLEDGED_ONLY_INSTRUCTION not in instruction
+
+
+@pytest.mark.parametrize("source,verified,evidence,gap", [
+    ("human", True, NEW_EVIDENCE, stages.UNVERIFIED_NEW_EVIDENCE),
+    ("evaluator", False, NEW_EVIDENCE, stages.UNVERIFIED_NEW_EVIDENCE),
+    ("evaluator", True, [], stages.NO_ACTIONABLE_FEEDBACK),
+], ids=["human_approval", "model_did_not_confirm", "nothing_new"])
+async def test_new_evidence_is_kept_out_unless_verified(source, verified, evidence, gap):
+    feedback = [{"feedback_id": "fb1", "source": source}]
+    model = FakeModel(attribution(verified_success=verified, new_evidence=evidence))
+    outcome = await stages.run_recipe_stages(model, context(feedback), {"recipe": recipe()}, on_phase=lambda _: None)
+    assert outcome.recipe is None and outcome.material_gap == gap
+
+
+async def test_only_the_latest_revisions_feedback_can_verify():
+    older = {"revision_id": "rev0", "materials": [], "outputs": [], "events": [], "feedback": [{"feedback_id": "fb0", "source": "evaluator"}]}
+    latest = context([{"feedback_id": "fb1", "source": "human"}])
+    latest["history"].insert(0, older)
+    model = FakeModel(attribution(verified_success=True, new_evidence=NEW_EVIDENCE))
+    outcome = await stages.run_recipe_stages(model, latest, {"recipe": recipe()}, on_phase=lambda _: None)
+    assert outcome.recipe is None
+
+
+async def test_new_evidence_with_an_unknown_reference_is_rewritten():
+    feedback = [{"feedback_id": "fb1", "source": "evaluator"}]
+    bad = [{"observation": "o", "why_missing": "w", "evidence_refs": [{"artifact_id": "nope"}]}]
+    model = FakeModel(attribution(verified_success=True, new_evidence=bad), attribution(), )
+    await stages.run_recipe_stages(model, context(feedback), {"recipe": recipe()}, on_phase=lambda _: None)
+    assert "Previous response was rejected" in model.calls[1]["instruction"]
 
 
 async def test_without_a_parent_unactionable_feedback_still_generates_without_lessons():
     feedback = [{"feedback_id": "fb1"}]
-    model = FakeModel({"actionable": False, "limitations": "", "possible_causes": []}, recipe())
+    model = FakeModel(attribution(), recipe())
     outcome = await stages.run_recipe_stages(model, context(feedback), None, on_phase=lambda _: None)
     assert outcome.recipe is not None
     assert stages.ACKNOWLEDGED_ONLY_INSTRUCTION in model.calls[1]["instruction"]
