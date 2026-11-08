@@ -96,6 +96,27 @@ client = cosens(agent, mode="auto")
 result = await client.run(agent, "Produce a report")
 ```
 
+## Run RSI locally
+
+Local RSI keeps Tasks, traces, feedback and Recipe versions on your machine and generates Recipes with your own model
+quota. CoSens is used only as Memory; pass `memory=None` to run without it. Python only for now.
+
+```bash
+pip install 'cosens-sdk[local]'
+```
+
+```python
+from openai import AsyncOpenAI
+from cosens import CoSensClient
+from cosens.local import ChatCompletionsModel, CodexCLIModel, LocalRSI
+
+rsi = LocalRSI(memory=CoSensClient(), model=ChatCompletionsModel(AsyncOpenAI(base_url=..., api_key=...), "model-id"))
+# Or use your Codex login: LocalRSI(memory=CoSensClient(), model=CodexCLIModel())
+```
+
+`LocalRSI` has the workflow methods of `client.atoms`. Generation runs inside `wait_workflow_job`, so always wait for a
+candidate. See `examples/04_local_rsi.py`.
+
 ## Atomic operations
 
 `CoSensClient().atoms` (async) and `.sync_atoms` (sync) expose Task, Execution, Revision, feedback, Recipe, Session and Memory operations directly. Keep stable idempotency keys across retries.

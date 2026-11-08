@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cosens-sdk"
-version = "0.5.0"
+version = "0.6.0"
 description = "CoSens Python SDK: record OpenAI and OpenAI Agents executions and generate reusable Recipes"
 readme = "README.md"
 license = "Apache-2.0"
