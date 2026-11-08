@@ -9,6 +9,7 @@
     "llm",
     "recipes"
   ],
+  "license": "Apache-2.0",
   "homepage": "https://cosens.ai/docs/",
   "repository": {
     "type": "git",
@@ -22,6 +23,8 @@
   "files": [
     "dist/",
     "README.md",
+    "LICENSE",
+    "NOTICE",
     "tests/fixtures/openai-public-methods.json"
   ],
   "engines": {
