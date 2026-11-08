@@ -1,5 +1,7 @@
 """Run RSI in the developer's process, with the developer's model and CoSens only as Memory."""
 
+import asyncio
+
 from ..models import result
 from .publish import recall_published
 from .recipes import LocalRecipeLifecycle
@@ -20,7 +22,13 @@ class LocalRSI(LocalTaskWorkflow, LocalRecipeLifecycle):
         self._store = LocalStore(state_path)
         self._settling = {}
 
-    def close(self):
+    async def aclose(self):
+        """Stop generations still running in this process, returning them to the queue, and close storage."""
+        running = list(self._settling.values())
+        for task in running:
+            task.cancel()
+        if running:
+            await asyncio.wait(running)
         self._store.close()
 
     async def recall_recipes(self, query, token_budget=8000):

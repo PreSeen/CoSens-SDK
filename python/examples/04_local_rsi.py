@@ -33,7 +33,7 @@ async def main():
         candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=finished.revision_id)
         job = await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
         print(job.status, job.recipe.title)
-        rsi.close()
+        await rsi.aclose()
     if memory is not None:
         await memory.aclose()
 

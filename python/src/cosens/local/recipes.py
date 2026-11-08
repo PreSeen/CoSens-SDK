@@ -59,12 +59,16 @@ class LocalRecipeLifecycle:
             raise LookupError("Recipe version not found")
         return dict(row)
 
-    def _view(self, db, row):
-        context = json.loads(row["context_json"])
-        if fingerprint(context) != row["context_sha"]:
+    def _checked_view(self, db, row):
+        """The candidate's view, refusing stored content that no longer matches its hash."""
+        if fingerprint(json.loads(row["context_json"])) != row["context_sha"]:
             raise ValueError("Recipe context changed")
         if row["recipe_json"] and fingerprint(json.loads(row["recipe_json"])) != row["recipe_sha"]:
             raise ValueError("Recipe content changed")
+        return self._view(db, row)
+
+    def _view(self, db, row):
+        context = json.loads(row["context_json"])
         lineage = self._lineage(db, row["id"])
         attribution = json.loads(row["attribution_json"]) if row["attribution_json"] else None
         models = attribution.pop("models", None) if attribution else None
@@ -88,7 +92,7 @@ class LocalRecipeLifecycle:
         head = db.execute("SELECT * FROM recipe_heads WHERE recipe_id=?", (recipe_id,)).fetchone()
         if head is None or not head["current_candidate_id"]:
             raise LookupError("usable Recipe not found")
-        view = self._view(db, self._candidate(db, head["current_candidate_id"]))
+        view = self._checked_view(db, self._candidate(db, head["current_candidate_id"]))
         return {k: view[k] for k in ("recipe_id", "recipe_candidate_id", "version", "recipe_sha256", "recipe")}
 
     def _register_version(self, db, candidate_id, task_id):
@@ -226,8 +230,7 @@ class LocalRecipeLifecycle:
                 return {"action": "wait"}  # blocked until the parent is resumed
             lease = time.time() + self._model.timeout * _STAGES * MODEL_OUTPUT_ATTEMPTS
             db.execute("UPDATE recipe_candidates SET state='running',lease_expires_at=? WHERE id=?", (lease, candidate_id))
-            parent = self._view(db, self._candidate(db, parent_id)) if parent_id else None
-            return {"action": "generate", "row": dict(row), "parent": parent}
+            return {"action": "generate", "row": dict(row), "parent_id": parent_id}
 
     def _save_attribution(self, row, analysis, models):
         with self._store.transaction() as db:
@@ -286,7 +289,7 @@ class LocalRecipeLifecycle:
             db.execute("UPDATE recipe_candidates SET state='queued',phase='queued',lease_expires_at=NULL "
                        "WHERE id=? AND state='running' AND generation=?", (row["id"], row["generation"]))
 
-    async def _generate(self, row, parent):
+    async def _generate(self, row, parent_id):
         phases = ["preparing"]
 
         def on_phase(phase):
@@ -297,8 +300,8 @@ class LocalRecipeLifecycle:
             context = json.loads(row["context_json"])
             if fingerprint(context) != row["context_sha"]:
                 raise ValueError("recipe context changed")
-            if parent and fingerprint(parent["recipe"]) != parent["recipe_sha256"]:
-                raise ValueError("parent Recipe content changed")
+            with self._store.reading() as db:
+                parent = self._checked_view(db, self._candidate(db, parent_id)) if parent_id else None
             stages = await run_recipe_stages(self._model, context, parent, on_phase=on_phase,
                                              on_attribution=lambda analysis, models: self._save_attribution(row, analysis, models))
             if stages.recipe is None:
@@ -320,7 +323,7 @@ class LocalRecipeLifecycle:
             if step["action"] == "done":
                 return
             if step["action"] == "generate":
-                await self._generate(step["row"], step["parent"])
+                await self._generate(step["row"], step["parent_id"])
             elif step["action"] == "settle_parent":
                 await self._settle(step["parent"])
             else:
@@ -333,6 +336,7 @@ class LocalRecipeLifecycle:
         if task is None or task.done():
             task = asyncio.create_task(self._settle(candidate_id))
             self._settling[candidate_id] = task
+            task.add_done_callback(lambda _: self._settling.pop(candidate_id, None))
         return task
 
     async def wait_workflow_job(self, kind, job_id, *, timeout=300):
@@ -345,19 +349,19 @@ class LocalRecipeLifecycle:
             task = self._settling_task(job_id)
             done, _ = await asyncio.wait({task}, timeout=timeout)
             if not done:
-                raise TimeoutError(f"Workflow {kind} {job_id} is still {job['status']}; wait on the same ID to continue")
+                raise TimeoutError(f"Workflow {kind} {job_id} has not settled; wait on the same ID to continue")
             task.result()
             job = await self.get_recipe_candidate(job_id)
         if job["status"] == "failed":
             raise RSICandidateFailed.from_candidate(job)
-        if job["current"] and job["publish_state"] == "pending":  # also recovers a publish lost to a crash
+        if self._atoms is not None and job["current"] and job["publish_state"] == "pending":  # also recovers a publish lost to a crash
             await self._publish_candidate(job_id)
             job = await self.get_recipe_candidate(job_id)
         return job
 
     async def get_recipe_candidate(self, recipe_id):
         with self._store.reading() as db:
-            return result(self._view(db, self._candidate(db, recipe_id)))
+            return result(self._checked_view(db, self._candidate(db, recipe_id)))
 
     async def list_recipe_candidates(self, *, limit=20, cursor=None, task_id=None, status=None):
         if type(limit) is not int or not 1 <= limit <= 100:
@@ -393,7 +397,7 @@ class LocalRecipeLifecycle:
         with self._store.transaction() as db:
             row = self._candidate(db, recipe_id)
             if row["state"] in ("queued", "awaiting_parent", "running", "candidate"):
-                return result(self._view(db, row))  # a retry of a resume whose response was lost
+                return result(self._checked_view(db, row))  # a retry of a resume whose response was lost
             if row["state"] not in ("failed", "interrupted"):
                 raise ValueError("only a failed or interrupted candidate can resume")
             parent_id = self._lineage(db, recipe_id)["parent_candidate_id"]
@@ -410,8 +414,8 @@ class LocalRecipeLifecycle:
             head = self._head(db, task_id)
             if head is None:
                 return result({"task_id": task_id, "status": "awaiting_execution", "recipe_id": None, "current": None, "latest": None})
-            current = self._view(db, self._candidate(db, head["current_candidate_id"])) if head["current_candidate_id"] else None
-            latest = self._view(db, self._candidate(db, head["latest_candidate_id"]))
+            current = self._checked_view(db, self._candidate(db, head["current_candidate_id"])) if head["current_candidate_id"] else None
+            latest = self._checked_view(db, self._candidate(db, head["latest_candidate_id"]))
         return result({"task_id": task_id, "recipe_id": head["recipe_id"], "status": latest["status"], "current": current, "latest": latest})
 
     async def get_recipe_versions(self, recipe_id):
@@ -420,7 +424,7 @@ class LocalRecipeLifecycle:
             if head is None:
                 raise LookupError("Recipe not found")
             rows = db.execute("SELECT candidate_id FROM recipe_versions WHERE recipe_id=? ORDER BY version", (recipe_id,)).fetchall()
-            versions = [self._view(db, self._candidate(db, r["candidate_id"])) for r in rows]
+            versions = [self._checked_view(db, self._candidate(db, r["candidate_id"])) for r in rows]
         return result({"recipe_id": recipe_id, "current_candidate_id": head["current_candidate_id"],
                        "latest_candidate_id": head["latest_candidate_id"], "versions": versions})
 
@@ -438,8 +442,10 @@ class LocalRecipeLifecycle:
             state = "published"
         except RSIHTTPError as exc:
             state = "publish_conflict" if exc.status_code == 409 else "failed"
-        except RSIError:
+            _LOG.warning("Publishing Recipe candidate %s to Memory returned HTTP %s", candidate_id, exc.status_code)
+        except RSIError as exc:
             state = "failed"
+            _LOG.warning("Publishing Recipe candidate %s to Memory failed: %s", candidate_id, type(exc).__name__)
         with self._store.transaction() as db:
             db.execute("UPDATE recipe_candidates SET publish_state=? WHERE id=?", (state, candidate_id))
             if receipt is not None:

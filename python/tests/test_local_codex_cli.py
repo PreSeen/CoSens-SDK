@@ -139,6 +139,12 @@ async def test_cancellation_stops_what_the_launcher_started(tmp_path):
     await assert_process_stops(pid_file)
 
 
+def test_windows_is_refused_up_front(monkeypatch):
+    monkeypatch.setattr("cosens.local.codex_cli.sys.platform", "win32")
+    with pytest.raises(RuntimeError, match="Linux or macOS"):
+        CodexCLIModel()
+
+
 async def test_missing_executable_is_unavailable(tmp_path):
     with pytest.raises(ModelUnavailable, match="Could not start"):
         await CodexCLIModel(executable=str(tmp_path / "absent")).call(instruction="d", schema=SCHEMA, context={})

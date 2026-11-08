@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import signal
+import sys
 import tempfile
 from pathlib import Path
 
@@ -33,9 +34,11 @@ def _turn_failure(stdout):
 
 
 class CodexCLIModel:
-    """Starts ``codex exec`` isolated from the user's hooks, MCP servers and working directory."""
+    """Starts ``codex exec`` isolated from the user's hooks, MCP servers and working directory. Linux and macOS only."""
 
     def __init__(self, *, model=None, reasoning_effort="medium", timeout=300, executable="codex"):
+        if sys.platform == "win32":
+            raise RuntimeError("CodexCLIModel requires Linux or macOS")
         if model is not None and (not isinstance(model, str) or not model.strip()):
             raise ValueError("model must be a nonempty model ID")
         if not isinstance(reasoning_effort, str) or not reasoning_effort.strip():

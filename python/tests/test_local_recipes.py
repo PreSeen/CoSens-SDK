@@ -243,9 +243,58 @@ async def test_wait_timeout_leaves_generation_running(tmp_path):
         await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id, timeout=0.1)
     assert (await rsi.get_recipe_candidate(candidate.recipe_candidate_id)).status == "running"
     generating = rsi._settling[candidate.recipe_candidate_id]
+    assert rsi._settling_task(candidate.recipe_candidate_id) is generating
     assert (await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)).status == "candidate"
-    assert rsi._settling[candidate.recipe_candidate_id] is generating
     assert len(model.calls) == 1
+    await asyncio.sleep(0)
+    assert rsi._settling == {}
+
+
+async def test_aclose_returns_a_running_generation_to_the_queue(tmp_path):
+    class Slow(FakeModel):
+        async def call(self, **kwargs):
+            await asyncio.sleep(30)
+
+    path = tmp_path / "s.sqlite3"
+    rsi = LocalRSI(memory=None, model=Slow(), state_path=path)
+    task, _, done = await first_revision(rsi)
+    candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
+    with pytest.raises(TimeoutError):
+        await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id, timeout=0.1)
+    await rsi.aclose()
+    reopened = LocalRSI(memory=None, model=FakeModel(), state_path=path)
+    assert (await reopened.get_recipe_candidate(candidate.recipe_candidate_id)).status == "queued"
+
+
+async def test_changed_parent_recipe_fails_the_candidate(tmp_path):
+    rsi, _ = make_rsi(tmp_path, recipe_reply("V1"))
+    task, _, done = await first_revision(rsi)
+    await generate(rsi, task, done)
+    _, second = await next_revision(rsi, task, "two")
+    child = await rsi.start_recipe_candidate(task.task_id, revision_id=second.revision_id)
+    with rsi._store.transaction() as db:
+        db.execute("UPDATE recipe_candidates SET recipe_json='{}' WHERE id=?", (child.parent_candidate_id,))
+    with pytest.raises(RSICandidateFailed) as caught:
+        await rsi.wait_workflow_job("recipe_candidate", child.recipe_candidate_id)
+    assert caught.value.code == "internal_error"
+
+
+async def test_one_bad_row_does_not_break_the_list(tmp_path):
+    rsi, _ = make_rsi(tmp_path, recipe_reply("V1"))
+    task, _, done = await first_revision(rsi)
+    await generate(rsi, task, done)
+    with rsi._store.transaction() as db:
+        db.execute("""UPDATE recipe_candidates SET recipe_json='{"title": "changed"}'""")
+    assert (await rsi.list_recipe_candidates())["items"][0]["title"] == "changed"
+
+
+async def test_a_process_without_memory_leaves_a_pending_publish_alone(tmp_path):
+    rsi, _ = make_rsi(tmp_path, recipe_reply("V1"))
+    task, _, done = await first_revision(rsi)
+    job = await generate(rsi, task, done)
+    with rsi._store.transaction() as db:
+        db.execute("UPDATE recipe_candidates SET publish_state='pending'")
+    assert (await rsi.wait_workflow_job("recipe_candidate", job.recipe_candidate_id)).publish_state == "pending"
 
 
 async def test_cancelled_generation_goes_back_to_the_queue(tmp_path):
@@ -261,6 +310,7 @@ async def test_cancelled_generation_goes_back_to_the_queue(tmp_path):
     running = rsi._settling[candidate.recipe_candidate_id]
     running.cancel()
     await asyncio.wait({running})
+    await asyncio.sleep(0)
     assert (await rsi.get_recipe_candidate(candidate.recipe_candidate_id)).status == "queued"
 
 
