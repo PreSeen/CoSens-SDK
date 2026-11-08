@@ -63,7 +63,7 @@ async def test_three_entries_against_local_algorithm(tmp_path,entry):
         v1=await sdk.atoms.wait_workflow_job('recipe_candidate',request['recipe_candidate_id'],timeout=10)
         assert v1['status']=='candidate' and v1['version']==1
         assert v1['memory_context']=='captured'
-        await sdk.atoms.record_feedback(turn['revision_id'],feedback='Use bare JSON without code fences',key='feedback')
+        await sdk.atoms.record_feedback(turn['revision_id'],feedback='Use bare JSON without code fences',source='human',key='feedback')
         correction=await sdk.atoms.start_revision(turn['revision_id'],key='correction')
         artifact=await sdk.atoms.artifact(name='corrected.json',content='{"answer":42}')
         result=await sdk.atoms.submit_execution(correction['execution_id'],request_sha256=correction['request_sha256'],outcome='completed',artifacts=[{'artifact_id':artifact['artifact_id'],'role':'submitted_output'}])

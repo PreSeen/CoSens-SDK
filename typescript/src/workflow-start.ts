@@ -12,7 +12,7 @@ export interface WorkflowSnapshot {
 }
 export interface WorkflowStartOptions {
   phase?: WorkflowPhase; mode?: 'auto' | 'approval' | 'disable'; requestKey?: string;
-  recipeId?: string; model?: string; includeMemory?: boolean;
+  recipeId?: string; model?: string; recallMemory?: boolean;
   authorize?: (phase: WorkflowPhase, snapshot: WorkflowSnapshot) => boolean | Promise<boolean>;
 }
 
@@ -20,10 +20,10 @@ function derivedKey(key: string, operation: string) {
   return createHash('sha256').update(`workflow-start:${operation}:${requestKey(key)}`).digest('hex');
 }
 
-export async function startWorkflow(atoms: Atoms, snapshot: WorkflowSnapshot | string, { phase = 'prepare', mode = 'auto', requestKey: key, authorize, recipeId, model, includeMemory = false }: WorkflowStartOptions = {}): Promise<any> {
+export async function startWorkflow(atoms: Atoms, snapshot: WorkflowSnapshot | string, { phase = 'prepare', mode = 'auto', requestKey: key, authorize, recipeId, model, recallMemory = false }: WorkflowStartOptions = {}): Promise<any> {
   if (!['auto', 'approval', 'disable'].includes(mode)) throw new TypeError('mode must be auto, approval or disable');
   if (mode === 'disable') return { status: 'disabled', phase };
-  if (typeof includeMemory !== 'boolean') throw new TypeError('includeMemory must be boolean');
+  if (typeof recallMemory !== 'boolean') throw new TypeError('recallMemory must be boolean');
   if (typeof snapshot === 'string' && phase === 'prepare') {
     if (!snapshot.trim()) throw new TypeError('task Prompt must be nonempty');
     snapshot = { task: { source: 'new_task', objective: snapshot } };
@@ -46,7 +46,7 @@ export async function startWorkflow(atoms: Atoms, snapshot: WorkflowSnapshot | s
     }
     if (task?.status === 'ready' && !taskId) throw new RSIRecoveryRequired('Ready task receipt has no task_id');
     if (task?.status !== 'ready') return { phase, task, status: task?.status };
-    const execution = await atoms.startExecution(taskId!, { key: derivedKey(stable, 'execution'), recipeId, model, includeMemory });
+    const execution = await atoms.startExecution(taskId!, { key: derivedKey(stable, 'execution'), recipeId, model, recallMemory });
     return { phase, status: execution?.status, task_id: taskId, task,
       execution_id: execution?.execution_id, request_sha256: execution?.request_sha256,
       execution_request: execution?.request, execution };

@@ -76,7 +76,7 @@ if (turn?.revisionId) {
 }
 ```
 
-Submission and feedback only record evidence. Explicit generation creates or updates the associated Recipe, recalls related Memory by default and analyzes feedback internally. There is no generation `includeMemory` option.
+Submission and feedback only record evidence. Explicit generation creates or updates the associated Recipe, recalls related Memory only when the execution behind the revision was started with `recallMemory: true`, and analyzes feedback internally. There is no generation Memory option. `recordFeedback` requires `source`: `human`, `evaluator`, `reference`, `automated_check` or `downstream`.
 
 ## Run an OpenAI Agents agent
 

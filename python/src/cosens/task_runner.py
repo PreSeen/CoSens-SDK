@@ -72,13 +72,13 @@ class _WorkflowStatus:
     def get_turn(self, turn_id):
         return self._owner._store.get(turn_id)
 
-    async def feedback(self, message, *, turn_id=None, request_key=None):
+    async def feedback(self, message, *, source, turn_id=None, request_key=None):
         turn_id = turn_id or self.last_turn_id
         state = self.get_turn(turn_id)
         if not state or not state.get('revision_id'):
             raise RSIRecoveryRequired('Turn has no recorded revision')
         key = request_key or 'feedback:'+hashlib.sha256((turn_id+'\0'+message).encode()).hexdigest()
-        return await self._owner._client.atoms.record_feedback(state['revision_id'], feedback=message, key=key)
+        return await self._owner._client.atoms.record_feedback(state['revision_id'], feedback=message, source=source, key=key)
 
     async def generate_recipe(self, turn_id=None, *, request_key=None, model=None, max_completion_tokens=None):
         turn_id = turn_id or self.last_turn_id

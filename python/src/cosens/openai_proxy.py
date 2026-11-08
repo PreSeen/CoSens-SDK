@@ -105,8 +105,8 @@ class _Status:
         bind(None)
         return function(*args)
 
-    def feedback(self, message, *, turn_id=None):
-        return self._learning_call('feedback', self._learning_turn(turn_id), message)
+    def feedback(self, message, *, source, turn_id=None):
+        return self._learning_call('feedback', self._learning_turn(turn_id), message, source)
 
     def generate_recipe(self, turn_id=None, *, request_key=None, max_completion_tokens=None):
         return self._learning_call('generate', self._learning_turn(turn_id), request_key, max_completion_tokens)
@@ -660,7 +660,7 @@ class _Runtime(AutoExecution):
         if target is not None and decision.get('feedback') is True:
             try:
                 self.learning().attach(target)
-                self.learning().feedback(target['turn_id'], user_text(path, kwargs))
+                self.learning().feedback(target['turn_id'], user_text(path, kwargs), source='human')
                 decision['feedback_turn_id'] = target['turn_id']
             except Exception as error:
                 decision['feedback_error_type'] = type(error).__name__

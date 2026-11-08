@@ -16,7 +16,7 @@
 | Sessions | `start_session`, `append_session_events`, `get_session_context`, `end_session` |
 | Memory | `user_get`, `memory_recall`, `memory_get`, `timeline_get`, `memory_write`, `memory_delete`, `document_upload` |
 
-Call generation only after external artifact confirmation. It creates V1 if no Recipe exists, otherwise a new version. Related Memory is always read, with no `include_memory` parameter. Feedback attribution happens inside generation. A failed candidate does not replace the usable current version. Resume retries the same candidate; polling does not create one.
+Call generation only after external artifact confirmation. It creates V1 if no Recipe exists, otherwise a new version. Related Memory is read only when the execution behind the revision was started with `recall_memory=True`; generation has no Memory parameter. `record_feedback` requires `source`: `human`, `evaluator`, `reference`, `automated_check` or `downstream`. Feedback attribution happens inside generation. A failed candidate does not replace the usable current version. Resume retries the same candidate; polling does not create one.
 
 `create_task` requires `source="new_task"` or `source="external_artifact"`. `start_revision` takes the previous revision and a request key, without an attribution ID. `submit_execution` takes the exact frozen request SHA, actual outcome, artifacts and optional events. Stable keys and event IDs are required for reliable retries. The public model ID is supplied with `model`. Model calls reuse the existing Authorization API Key, with the gateway URL and auth type determined internally. There is no `model_api` connection object or second credential.
 

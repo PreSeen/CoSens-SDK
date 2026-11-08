@@ -151,11 +151,11 @@ class CoSensClient:
         await self._transport.aclose()
         self._sync_transport.close()
 
-    async def start(self, session_context, *, phase="prepare", mode="auto", request_key=None, authorize=None, recipe_id=None, model=None, include_memory=False):
+    async def start(self, session_context, *, phase="prepare", mode="auto", request_key=None, authorize=None, recipe_id=None, model=None, recall_memory=False):
         """Start a workflow phase and return the host's next request or job receipt."""
         from .workflow_start import start_workflow
         return await start_workflow(self.atoms, session_context, phase=phase, mode=mode,
-                                    request_key=request_key, authorize=authorize, recipe_id=recipe_id, model=model, include_memory=include_memory)
+                                    request_key=request_key, authorize=authorize, recipe_id=recipe_id, model=model, recall_memory=recall_memory)
 
     def close(self):
         self._sync_transport.close()
