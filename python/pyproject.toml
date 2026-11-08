@@ -34,7 +34,8 @@ Issues = "https://github.com/PreSeen/CoSens-SDK/issues"
 [project.optional-dependencies]
 agents = ["openai-agents>=0.20,<0.21"]
 examples = ["openai-agents>=0.20,<0.21", "python-dotenv>=1,<2"]
-test = ["pytest>=8", "pytest-asyncio>=0.24", "build>=1", "hatchling>=1.27"]
+local = ["jsonschema>=4.23,<5"]
+test = ["pytest>=8", "pytest-asyncio>=0.24", "build>=1", "hatchling>=1.27", "jsonschema>=4.23,<5"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cosens"]
