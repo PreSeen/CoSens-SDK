@@ -42,3 +42,28 @@ limits or `decision_max_output_tokens`. Reusing a generation key with a differen
 budget is rejected; use resume to adjust a failed candidate, or a new generation key for
 a new version. The Recipe service must be upgraded before using this field; older servers
 reject unknown request fields. Published packages are not updated by a source checkout.
+
+## Local RSI
+
+`from cosens.local import LocalRSI, ChatCompletionsModel, CodexCLIModel`. Requires `cosens-sdk[local]`.
+
+`LocalRSI(*, memory, model, state_path=None)` stores state in SQLite (default `~/.cosens/local-rsi.sqlite3`). `memory` is a `CoSensClient` used only for `/v1/memory/*`, or `None`. Call `await rsi.aclose()` when done; it returns any running generation to the queue.
+
+Same names, parameters and responses as `client.atoms`: `create_task`, `get_task`, `list_tasks`, `supplement_task_context`, `artifact`, `get_artifact`, `start_execution`, `get_execution`, `submit_execution`, `get_revision`, `start_revision`, `record_feedback`, `start_recipe_candidate`, `get_recipe_candidate`, `resume_recipe_candidate`, `list_recipe_candidates`, `wait_workflow_job`, `get_task_recipe`, `get_recipe_versions`.
+
+Differences from `client.atoms`:
+
+- `model` and `max_completion_tokens` are set on the model object, not per call.
+- `create_task(..., recipe=item)` starts a Task's Recipe chain from an item returned by `recall_recipes`.
+- `recall_recipes(query, token_budget=8000)` returns Recipes published to Memory.
+- `publish_recipe(recipe_id)` retries publishing the current version.
+- `wait_workflow_job` runs the generation. A candidate nobody waits on is not generated.
+- A `wait_workflow_job` timeout leaves the generation running in this process; wait on the same ID to continue.
+- Candidates do not report `memory_usable`, `memory_validation` or `max_completion_tokens`, and candidate lists do not report `user_id`.
+- Recipe candidates also report `publish_state`: `pending`, `published`, `failed` or `publish_conflict`.
+
+`ChatCompletionsModel(client, model, *, max_completion_tokens=32000, timeout=300, extra_body=None)` takes your `AsyncOpenAI` client.
+
+`CodexCLIModel(*, model=None, reasoning_effort="medium", timeout=300, executable="codex")` runs your installed Codex CLI and uses its logged-in quota (Linux and macOS). Each call is isolated from your Codex hooks, MCP servers and working directory.
+
+Local RSI does not re-check whether Memory cited by a Recipe has since changed.
