@@ -41,3 +41,11 @@ def test_workflow_native_dispatch_claim_is_atomic_across_store_instances(tmp_pat
     assert first.get("turn-1")["state"] == "native_running"
     first.close()
     second.close()
+
+
+def test_every_documented_error_class_is_importable_from_the_package():
+    import cosens
+
+    for name in ("RSIError", "RSIHTTPError", "RSITransportError", "RSIRecoveryRequired", "RSICandidateFailed"):
+        assert getattr(cosens, name).__name__ == name
+        assert name in cosens.__all__

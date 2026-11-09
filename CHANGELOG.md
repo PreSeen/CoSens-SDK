@@ -7,6 +7,7 @@ Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned
 ### Added
 
 - `cosens.local.LocalRSI` runs the Task, Revision and Recipe workflow in your own process with your own model, through `ChatCompletionsModel` (your `AsyncOpenAI` client) or `CodexCLIModel` (your Codex login). CoSens is used only as Memory: the current Recipe version is published there and `recall_recipes` finds it from another machine. Install `cosens-sdk[local]`. TypeScript does not have this yet.
+- `RSITransportError` is importable from `cosens`, like the other error classes (it was only in `cosens.errors`).
 
 ## Python 0.5.0 / TypeScript 0.6.0
 
