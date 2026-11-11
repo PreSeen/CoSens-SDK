@@ -1,5 +1,9 @@
 # CoSens SDK
 
+[![PyPI](https://img.shields.io/pypi/v/cosens-sdk?label=PyPI)](https://pypi.org/project/cosens-sdk/)
+[![Python](https://img.shields.io/pypi/pyversions/cosens-sdk)](https://pypi.org/project/cosens-sdk/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
 Python and TypeScript clients for the current CoSens Task/Execution/Revision API. All three entry points record execution without generating a Recipe:
 
 | Entry | Python | TypeScript |
@@ -33,6 +37,10 @@ Tests: `PYTHONPATH=python/src pytest python/tests` and `npm --prefix typescript 
 Set `COSENS_API_KEY` to your CoSens API Key. The SDK uses the US CoSens API; `COSENS_REGION` defaults to `us` and accepts only `us`. Your application passes the same key as the model client's `api_key` and sets `COSENS_MODEL_BASE_URL` to `https://llm.cosens.ai/v1`. The SDK itself reads only `COSENS_API_KEY` and `COSENS_REGION`; `RSI_API_KEY*`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, `COSENS_MODE` and `COSENS_INPUT` are not SDK configuration. The application loads any `.env` file.
 
 Pass a public model ID in the model call. Algorithm operations accept only `model`, never a second API Key, base URL, auth type or provider settings. Model credentials are carried in Authorization. The algorithm gateway must forward that header alongside the authenticated user ID. Recipe generation still requires external artifact confirmation.
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
