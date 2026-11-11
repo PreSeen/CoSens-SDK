@@ -37,7 +37,7 @@ def test_contract_validation(case):
 
 def test_contract_rejects_recipe_over_the_text_limit():
     long_title = {"title": "T" * 300, "when": "W" * 600, "when_not": "N" * 600}
-    steps = [{"id": f"s{i}", "instruction": "I" * 600, "evidence_refs": [EVENT_REF]} for i in range(8)]
+    steps = [{"id": f"s{i}", "instruction": "I" * 1200, "evidence_refs": [EVENT_REF]} for i in range(30)]
     assert stages.classify_output("recipe", recipe(**long_title, steps=steps), context()) == "too_long"
 
 
@@ -124,6 +124,19 @@ async def test_parent_uses_the_improvement_role():
     await stages.run_recipe_stages(model, context(), {"recipe": recipe()}, on_phase=lambda _: None)
     assert model.calls[0]["context"]["role"] == "workflow_recipe_improvement"
     assert stages.IMPROVE_INSTRUCTION in model.calls[0]["instruction"]
+
+
+async def test_a_new_version_may_keep_the_previous_versions_evidence():
+    kept = {"revision_id": "old-rev", "event_id": "old-event"}
+    parent = {"recipe": recipe(steps=[{"id": "s1", "instruction": "kept", "evidence_refs": [kept]}])}
+    index = stages.with_parent_evidence(stages.evidence_index(context()), parent)
+    new = recipe(steps=[{"id": "s1", "instruction": "kept", "evidence_refs": [kept]}])
+    assert stages.recipe_rejection(new, index) is None
+    other = recipe(steps=[{"id": "s1", "instruction": "x", "evidence_refs": [{"revision_id": "old-rev", "event_id": "never-cited"}]}])
+    assert stages.recipe_rejection(other, index).kind == "evidence"
+    assert stages.with_parent_evidence(stages.evidence_index(context()), None) == stages.evidence_index(context())
+    imported = {"recipe": {"steps": [{"id": "s1", "instruction": "kept"}], "lessons": []}}  # published without evidence
+    assert stages.with_parent_evidence(stages.evidence_index(context()), imported) == stages.evidence_index(context())
 
 
 async def test_rejected_output_is_retried_with_the_reason():
