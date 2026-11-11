@@ -26,21 +26,21 @@ RECIPE_SCHEMA = {
     "required": ["title", "when", "when_not", "steps", "lessons"],
     "properties": {
         "title": {"type": "string", "minLength": 1, "maxLength": 300},
-        "when": {"type": "string", "minLength": 1, "maxLength": 600},
-        "when_not": {"type": "string", "minLength": 1, "maxLength": 600},
+        "when": {"type": "string", "minLength": 1, "maxLength": 1500},
+        "when_not": {"type": "string", "minLength": 1, "maxLength": 1500},
         "steps": {
-            "type": "array", "minItems": 1, "maxItems": 8,
+            "type": "array", "minItems": 1, "maxItems": 30,
             "items": {
                 "type": "object", "additionalProperties": False, "required": ["id", "instruction", "evidence_refs"],
                 "properties": {
                     "id": {"type": "string", "minLength": 1, "maxLength": 100},
-                    "instruction": {"type": "string", "minLength": 1, "maxLength": 600},
+                    "instruction": {"type": "string", "minLength": 1, "maxLength": 1200},
                     "evidence_refs": _EVIDENCE_REFS,
                 },
             },
         },
         "lessons": {
-            "type": "array", "maxItems": 5,
+            "type": "array", "maxItems": 20,
             "items": {
                 "type": "object", "additionalProperties": False,
                 "required": ["when", "do", "why", "when_not", "evidence_refs"],
@@ -90,7 +90,7 @@ ATTRIBUTION_SCHEMA = {
     },
 }
 
-RECIPE_MAX_TEXT_CHARS = 6000
+RECIPE_MAX_TEXT_CHARS = 32000
 MODEL_OUTPUT_ATTEMPTS = 3
 MAX_HISTORY_REVISIONS = 30
 MAX_CONTEXT_BYTES = 4_000_000
@@ -123,8 +123,18 @@ GENERATION_START = (
     "The host explicitly requested generation after external confirmation; this is not independent validation. "
     "Cite supplied event, artifact, Memory or feedback references for every step and lesson. "
     "An artifact proves content, not that an action occurred. Do not treat feedback or a possible cause as proven fact. "
-    "Keep case-specific names and answers in evidence only. Describe applicability, exclusions and checks. "
-    "Keep the Recipe proportional to the task: a simple task needs at most 3 steps and no lessons. "
+    "Keep one task's own ids, client names and answers in evidence only, but write down exactly every convention that carries across "
+    "tasks: value tables, thresholds, formulas, allowed values, status rules, required output fields, and the format of any name "
+    "the answer must produce, such as titles, folders and channels, written as a pattern with placeholders. A convention seen in "
+    "one confirmed reference is still the default for that kind of task; when_not may set it aside only where the task's own "
+    "requirements state another format. "
+    "Where a reference gives numeric results next to the labels or inputs that produced them, such as scores beside reason "
+    "codes, fit the simplest rule that reproduces every reference row, such as points per label and level cutoffs, check it "
+    "against each row, and write it as the default rule with the check; do not replace it with advice not to infer a rule. "
+    "Write each mapping from a case to an action or route with the record field values that set that case apart from the "
+    "other reference cases, not as a symptom. Do not credit the outcome to one of those values unless the references show "
+    "that value deciding it on its own, and state what the references do when no recorded mapping matches. "
+    "Describe applicability, exclusions and checks. "
     "Every lesson must come from recorded feedback, an observed failure"
 )
 VERIFIED_LESSON_SOURCE = " or the verified new_evidence in the attribution"
@@ -141,7 +151,10 @@ VERIFIED_DISTILL_INSTRUCTION = (
 ACKNOWLEDGED_ONLY_INSTRUCTION = " The feedback only acknowledged the result; do not derive lessons from it."
 IMPROVE_INSTRUCTION = (
     " Update the supplied base_recipe using the new execution, feedback and attribution. "
-    "Preserve unaffected valid steps and lessons; do not re-distill from scratch or require a separately selected cause."
+    "base_recipe may cover kinds of task other than this execution's: keep every step and lesson for them, with their "
+    "evidence_refs unchanged, and add what this execution teaches as steps of its own. Say in each step which kind of task "
+    "it is for, and write title, when and when_not to cover every kind the Recipe now handles. "
+    "Do not re-distill from scratch or require a separately selected cause."
 )
 
 
@@ -188,6 +201,20 @@ def valid_evidence(ref, index):
     if "feedback_id" in ref:
         return ref["feedback_id"] in index.feedback
     return (ref.get("revision_id"), ref.get("event_id")) in index.events
+
+
+def with_parent_evidence(index, parent):
+    """The index a new version is checked against: this context, plus what the previous version already cites."""
+    if not parent:
+        return index
+    items = parent["recipe"]["steps"] + parent["recipe"]["lessons"]
+    refs = [ref for item in items for ref in item.get("evidence_refs", [])]  # an imported publication has none
+    return EvidenceIndex(
+        events=index.events | {(ref.get("revision_id"), ref["event_id"]) for ref in refs if "event_id" in ref},
+        artifacts=index.artifacts | {ref["artifact_id"] for ref in refs if "artifact_id" in ref},
+        memories=index.memories | {ref["memory_item_id"] for ref in refs if "memory_item_id" in ref},
+        feedback=index.feedback | {ref["feedback_id"] for ref in refs if "feedback_id" in ref},
+    )
 
 
 def invalid_refs(items, index):
@@ -312,7 +339,7 @@ async def run_recipe_stages(model, context, parent, *, on_phase, on_attribution=
         model, instruction, RECIPE_SCHEMA,
         {"role": "workflow_recipe_improvement" if parent else "workflow_recipe_distillation",
          "context": context, "base_recipe": parent, "attribution": analysis},
-        lambda value: recipe_rejection(value, index),
+        lambda value: recipe_rejection(value, with_parent_evidence(index, parent)),
     )
     models["generation"] = model.identity
     return StageResult(analysis, models, recipe)
