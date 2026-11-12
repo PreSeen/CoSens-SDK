@@ -129,3 +129,18 @@ async def test_unknown_ids_raise_lookup_error(tmp_path):
     for call in (rsi.get_task("x"), rsi.get_execution("x"), rsi.get_revision("x"), rsi.get_artifact("x")):
         with pytest.raises(LookupError):
             await call
+
+
+async def test_recipe_recall_uses_the_8000_token_budget(tmp_path):
+    rsi = LocalRSI(memory=None, model=FakeModel(), state_path=tmp_path / "s.sqlite3")
+    task = await rsi.create_task(source="new_task", key="k", objective="A")
+    budgets = []
+
+    class Atoms:
+        async def memory_recall(self, *, query, token_budget):
+            budgets.append(token_budget)
+            return {"items": []}
+
+    rsi._atoms = Atoms()
+    await rsi.start_execution(task.task_id, key="e", recall_memory=True)
+    assert budgets == [8000]

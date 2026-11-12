@@ -90,7 +90,7 @@ ATTRIBUTION_SCHEMA = {
     },
 }
 
-RECIPE_MAX_TEXT_CHARS = 32000
+RECIPE_MAX_TEXT_CHARS = 14000
 MODEL_OUTPUT_ATTEMPTS = 3
 MAX_HISTORY_REVISIONS = 30
 MAX_CONTEXT_BYTES = 4_000_000
@@ -99,7 +99,8 @@ UNVERIFIED_NEW_EVIDENCE = "unverified_new_evidence"
 # Sources that can show a result is correct. A person's remark (`human`) is a claim to weigh, not a verification.
 VERIFYING_SOURCES = ("evaluator", "reference", "automated_check", "downstream")
 
-MEMORY_TOKEN_BUDGET = 2000
+# One reference source is 2-3k tokens; the recall route's maximum is 8000.
+MEMORY_TOKEN_BUDGET = 8000
 MEMORY_MIN_SCORE = 0.35
 MEMORY_RELATIVE_SCORE = 0.6
 MEMORY_MAX_ITEMS = 8
