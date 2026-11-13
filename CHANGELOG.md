@@ -8,7 +8,7 @@ Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned
 
 - `cosens.local` writes Recipes that carry more of what a task teaches. Generation keeps every convention that carries across tasks: value tables, thresholds, formulas, allowed values, status rules, required output fields, and name formats as placeholder patterns. Where a reference gives numeric results beside the labels that produced them, it fits and checks the simplest rule that reproduces every row. Each case-to-action mapping lists the field values that set the case apart, and says what the references do when no mapping matches. See [the research notes](python/docs/research/local-recipe-generation.md).
 - A new Recipe version keeps the steps and lessons of the previous one for other kinds of task, with their evidence references, and may cite evidence the previous version already cited.
-- A Recipe may hold up to 30 steps, 20 lessons and 14,000 characters of text (was 8 steps, 5 lessons and 6,000 characters). Step instructions may be 1,200 characters, `when` and `when_not` 1,500.
+- A Recipe may hold up to 30 steps, 20 lessons and 32,000 characters of text (was 8 steps, 5 lessons and 6,000 characters). Step instructions may be 1,200 characters, `when` and `when_not` 1,500.
 - Memory recall for a Recipe uses a token budget of 8,000 (was 2,000), enough for several reference sources of 2-3k tokens each.
 
 ## Python 0.6.1
