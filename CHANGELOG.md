@@ -14,6 +14,7 @@ Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned
 ### Added
 
 - `upload_recipe`, `get_recipe`, `list_recipes` and `search_recipes` on `client.atoms` and `client.sync_atoms`.
+- `RSIHTTPError.current_version` carries the chain's current version from a Recipe version conflict.
 - `contract/local-rsi/recipe-upload.schema.json` pins the uploaded Recipe's schema.
 
 ### Changed

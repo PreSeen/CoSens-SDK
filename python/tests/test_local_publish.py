@@ -164,13 +164,31 @@ async def test_a_failed_upload_keeps_the_local_version_and_retries_idempotently(
 
 
 async def test_another_machine_uploading_first_is_a_conflict(tmp_path):
-    rsi, _, server = setup(tmp_path, recipe_reply("V1"), recipe_reply("V2"))
+    rsi, _, server = setup(tmp_path, recipe_reply("V1"), recipe_reply("V2"), recipe_reply("V3"))
     task, _, done = await first_revision(rsi)
     first = await generate(rsi, task, done.revision_id)
+    server.fail_status = 503
+    await improve(rsi, task, "two")  # our own V2 never reaches the server
+    server.fail_status = None
     server.add(first.recipe_id, PLAIN, version=2)
-    job = await improve(rsi, task, "two")
-    assert job.current and job.version == 2 and job.publish_state == "publish_conflict"
-    assert server.chains[first.recipe_id]["versions"][2]["recipe"] == PLAIN
+    job = await improve(rsi, task, "three")
+    assert job.current and job.version == 3 and job.publish_state == "publish_conflict"
+    assert server.chains[first.recipe_id]["current"] == 2 and server.chains[first.recipe_id]["versions"][2]["recipe"] == PLAIN
+    assert rsi._store.read_one("SELECT remote_version FROM recipe_heads")["remote_version"] == 1
+
+
+async def test_an_upload_whose_response_was_lost_is_recognised_by_the_next_version(tmp_path):
+    rsi, _, server = setup(tmp_path, recipe_reply("V1"), recipe_reply("V2"), recipe_reply("V3"))
+    task, _, done = await first_revision(rsi)
+    first = await generate(rsi, task, done.revision_id)
+    server.lose_response = True
+    assert (await improve(rsi, task, "two")).publish_state == "failed"
+    server.lose_response = False
+    job = await improve(rsi, task, "three")
+    assert (job.version, job.publish_state) == (3, "published")
+    assert sorted(server.chains[first.recipe_id]["versions"]) == [1, 2, 3]
+    assert [(u["version"], u.get("base_version")) for u in server.uploads[-2:]] == [(3, 1), (3, 2)]
+    assert rsi._store.read_one("SELECT remote_version FROM recipe_heads")["remote_version"] == 3
 
 
 async def test_an_upload_lost_to_a_crash_is_recovered_on_the_next_wait(tmp_path):

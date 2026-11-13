@@ -55,7 +55,7 @@ Same names, parameters and responses as `client.atoms`: `create_task`, `get_task
 Differences from `client.atoms`:
 
 - `model` and `max_completion_tokens` are set on the model object, not per call.
-- Each new current version is uploaded to the Recipe store with `upload_recipe`, without evidence references, under the chain's `recipe_id`. `base_version` is the last version the store is known to have, so a version uploaded first from another machine makes the upload a `publish_conflict`. The local version stands either way.
+- Each new current version is uploaded to the Recipe store with `upload_recipe`, without evidence references, under the chain's `recipe_id`. `base_version` is the last version the store is known to have, so a version uploaded first from another machine makes the upload a `publish_conflict`; when the store is ahead with this chain's own earlier version, whose response was lost, the upload is retried on top of it. The local version stands either way.
 - `search_recipes(query, limit=10)`, `list_recipes(limit=20, cursor=None, origin=None)` and `get_recipe(recipe_id, version=None)` read the Recipe store, as on `client.atoms`.
 - `create_task(..., recipe=view)` takes a Recipe returned by `get_recipe`. An `uploaded` Recipe continues under its own `recipe_id`: the next local version is its version plus one and is uploaded on top of it; if the chain is already on this machine, pass its `recipe_id` to `start_execution` instead. A `generated` Recipe starts a new local chain at version 1 without its evidence references. Anything that does not match `contract/local-rsi/recipe-upload.schema.json` is rejected.
 - `publish_recipe(recipe_id)` retries uploading the current version.

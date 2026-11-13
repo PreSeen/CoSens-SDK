@@ -11,7 +11,7 @@ from ..errors import RSICandidateFailed, RSIError, RSIHTTPError
 from ..models import result
 from ..workflow_atoms import _RECIPE_ID, _job_timeout
 from .models import ModelUnavailable
-from .publish import check_upload, upload_form
+from .publish import check_upload, upload_form, without_evidence
 from .recipe_stages import MAX_CONTEXT_BYTES, MAX_HISTORY_REVISIONS, MODEL_OUTPUT_ATTEMPTS, ModelOutputInvalid, run_recipe_stages
 from .store import canonical_json, fingerprint
 
@@ -443,10 +443,17 @@ class LocalRecipeLifecycle:
             row = self._candidate(db, candidate_id)
             lineage = self._lineage(db, candidate_id)
             head = db.execute("SELECT remote_version FROM recipe_heads WHERE recipe_id=?", (lineage["recipe_id"],)).fetchone()
+        recipe_id, recipe, remote = lineage["recipe_id"], upload_form(json.loads(row["recipe_json"])), head["remote_version"]
         try:
             # base_version is the last version the server is known to have, so a version uploaded elsewhere is a conflict.
-            await self._atoms.upload_recipe(lineage["recipe_id"], version=lineage["version"],
-                                            recipe=upload_form(json.loads(row["recipe_json"])), base_version=head["remote_version"])
+            try:
+                await self._atoms.upload_recipe(recipe_id, version=lineage["version"], recipe=recipe, base_version=remote)
+            except RSIHTTPError as exc:
+                ours = await self._own_server_version(recipe_id, exc, remote)
+                if ours is None:
+                    raise
+                remote = ours
+                await self._atoms.upload_recipe(recipe_id, version=lineage["version"], recipe=recipe, base_version=remote)
             state = "published"
         except RSIHTTPError as exc:
             state = "publish_conflict" if exc.status_code == 409 else "failed"
@@ -456,6 +463,20 @@ class LocalRecipeLifecycle:
             _LOG.warning("Uploading Recipe candidate %s failed: %s", candidate_id, type(exc).__name__)
         with self._store.transaction() as db:
             db.execute("UPDATE recipe_candidates SET publish_state=? WHERE id=?", (state, candidate_id))
-            if state == "published":
-                db.execute("UPDATE recipe_heads SET remote_version=? WHERE recipe_id=?", (lineage["version"], lineage["recipe_id"]))
+            db.execute("UPDATE recipe_heads SET remote_version=? WHERE recipe_id=?",
+                       (lineage["version"] if state == "published" else remote, recipe_id))
         return state
+
+    async def _own_server_version(self, recipe_id, exc, remote):
+        """The server's newer current version when it is this chain's own upload whose response was lost, else None."""
+        current = exc.current_version
+        if exc.status_code != 409 or current is None or current <= (remote or 0):
+            return None
+        stored = (await self._atoms.get_recipe(recipe_id, version=current)).get("recipe")
+        with self._store.reading() as db:
+            local = db.execute("SELECT c.recipe_json FROM recipe_versions v JOIN recipe_candidates c ON c.id=v.candidate_id "
+                               "WHERE v.recipe_id=? AND v.version=?", (recipe_id, current)).fetchone()
+        if local is None or not local["recipe_json"] or not isinstance(stored, dict):
+            return None
+        same = fingerprint(without_evidence(stored)) == fingerprint(upload_form(json.loads(local["recipe_json"])))
+        return current if same else None
