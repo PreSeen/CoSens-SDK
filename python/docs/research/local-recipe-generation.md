@@ -47,7 +47,7 @@ acc@3, in percent. Group 5 has 3 test tasks; the others have 5.
 - On the three groups where GDPevo's own method produced a skill, this change averages 57.17, against 54.20 for GDPevo's own and 46.10 for Base.
 - On group 4, GDPevo's own skill writer ran out its 2-hour limit in every try. Local Recipe generation finished and raised the agent from about 20 to 58.
 - The final Recipes are 20,000-26,000 characters, under the 32,000-character limit these runs used.
-- The limit was later set to 14,000 characters, to match the service, and the recall budget raised from 2,000 to 8,000 tokens. Groups 2 to 5 were not re-run at these values, so the scores above are for the 32,000 / 2,000 setting.
+- A 14,000-character limit was tried afterwards, and the limit stays at 32,000. Regenerating the saved contexts of groups 2, 3 and 5 at 14,000 (three attempts each, five versions per attempt) finished only for group 2 (13,318-13,994 characters). In groups 3 and 5 all six attempts failed at version 3 or 4, because the model's output stayed over 14,000 characters (14,236-17,147) after the three retries. The recall budget was raised from 2,000 to 8,000 tokens.
 
 ### Changes that did not help
 
