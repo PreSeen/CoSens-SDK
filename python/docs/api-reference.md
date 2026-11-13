@@ -12,6 +12,7 @@
 | Explicit Recipe generation/update | `start_recipe_candidate(task_id, revision_id=..., key=None, model=..., max_completion_tokens=...)` |
 | Read/list/resume generation | `get_recipe_candidate`, `list_recipe_candidates`, `resume_recipe_candidate` |
 | Associated Recipe/version chain | `get_task_recipe`, `get_recipe_versions` |
+| Recipe store | `upload_recipe(recipe_id, version=..., recipe=..., base_version=None)`, `get_recipe(recipe_id, version=None)`, `list_recipes(limit=20, cursor=None, origin=None)`, `search_recipes(query, limit=10)` |
 | Poll generation | `wait_workflow_job("recipe_candidate", id)` (raises `RSICandidateFailed` on failure) |
 | Sessions | `start_session`, `append_session_events`, `get_session_context`, `end_session` |
 | Memory | `user_get`, `memory_recall`, `memory_get`, `timeline_get`, `memory_write`, `memory_delete`, `document_upload` |
@@ -47,20 +48,21 @@ reject unknown request fields. Published packages are not updated by a source ch
 
 `from cosens.local import LocalRSI, ChatCompletionsModel, CodexCLIModel`. Requires `cosens-sdk[local]`.
 
-`LocalRSI(*, memory, model, state_path=None)` stores state in SQLite (default `~/.cosens/local-rsi.sqlite3`). `memory` is a `CoSensClient` used only for `/v1/memory/*`, or `None`. Call `await rsi.aclose()` when done; it returns any running generation to the queue.
+`LocalRSI(*, client=None, model, state_path=None)` stores state in SQLite (default `~/.cosens/local-rsi.sqlite3`). `client` is a `CoSensClient` used only for Memory recall (`/v1/memory/*`) and the Recipe store (`/v1/recipes`), or `None`. `memory=` is a deprecated name for `client=`. Call `await rsi.aclose()` when done; it returns any running generation to the queue.
 
 Same names, parameters and responses as `client.atoms`: `create_task`, `get_task`, `list_tasks`, `supplement_task_context`, `artifact`, `get_artifact`, `start_execution`, `get_execution`, `submit_execution`, `get_revision`, `start_revision`, `record_feedback`, `start_recipe_candidate`, `get_recipe_candidate`, `resume_recipe_candidate`, `list_recipe_candidates`, `wait_workflow_job`, `get_task_recipe`, `get_recipe_versions`.
 
 Differences from `client.atoms`:
 
 - `model` and `max_completion_tokens` are set on the model object, not per call.
-- `create_task(..., recipe=item)` starts a Task's Recipe chain from an item returned by `recall_recipes`.
-- `recall_recipes(query, token_budget=8000)` returns Recipes published to Memory.
-- `publish_recipe(recipe_id)` retries publishing the current version.
+- Each new current version is uploaded to the Recipe store with `upload_recipe`, without evidence references, under the chain's `recipe_id`. `base_version` is the last version the store is known to have, so a version uploaded first from another machine makes the upload a `publish_conflict`. The local version stands either way.
+- `search_recipes(query, limit=10)`, `list_recipes(limit=20, cursor=None, origin=None)` and `get_recipe(recipe_id, version=None)` read the Recipe store, as on `client.atoms`.
+- `create_task(..., recipe=view)` takes a Recipe returned by `get_recipe`. An `uploaded` Recipe continues under its own `recipe_id`: the next local version is its version plus one and is uploaded on top of it; if the chain is already on this machine, pass its `recipe_id` to `start_execution` instead. A `generated` Recipe starts a new local chain at version 1 without its evidence references. Anything that does not match `contract/local-rsi/recipe-upload.schema.json` is rejected.
+- `publish_recipe(recipe_id)` retries uploading the current version.
 - `wait_workflow_job` runs the generation. A candidate nobody waits on is not generated.
 - A `wait_workflow_job` timeout leaves the generation running in this process; wait on the same ID to continue.
 - Candidates do not report `memory_usable`, `memory_validation` or `max_completion_tokens`, and candidate lists do not report `user_id`.
-- Recipe candidates also report `publish_state`: `pending`, `published`, `failed` or `publish_conflict`.
+- Recipe candidates also report `publish_state`: `pending`, `published`, `failed` or `publish_conflict` (`None` without a client, and for a version started from a generated Recipe).
 
 `ChatCompletionsModel(client, model, *, max_completion_tokens=32000, timeout=300, extra_body=None)` takes your `AsyncOpenAI` client.
 
