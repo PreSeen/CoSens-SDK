@@ -7,7 +7,9 @@ to the caller; in particular a lost artifact receipt must not trigger re-upload.
 import asyncio
 import json
 import math
+import re
 import time
+from urllib.parse import urlencode
 
 from .atoms_helpers import path_part, recipe_request_key, stable_key
 from .errors import RSICandidateFailed, RSIRecoveryRequired
@@ -114,6 +116,55 @@ def _context(expected_context_version, objective, artifacts, self_contained):
     return body
 
 
+_RECIPE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def _positive(value, name):
+    if type(value) is not int or value < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _recipe_upload(recipe_id, version, recipe, base_version):
+    if not isinstance(recipe_id, str) or not _RECIPE_ID.fullmatch(recipe_id):
+        raise ValueError("recipe_id must be 1-128 letters, digits, '_' or '-'")
+    if not isinstance(recipe, dict):
+        raise ValueError("recipe must be an object")
+    body = {"version": _positive(version, "version")}
+    if base_version is not None:
+        body["base_version"] = _positive(base_version, "base_version")
+    body["recipe"] = recipe
+    return body
+
+
+def _recipe_path(recipe_id, version):
+    suffix = "?" + urlencode({"version": _positive(version, "version")}) if version is not None else ""
+    return f"/v1/recipes/{path_part(recipe_id)}" + suffix
+
+
+def _recipes_list_path(limit, cursor, origin):
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("limit must be an integer from 1 to 100")
+    params = {"limit": limit}
+    if cursor is not None:
+        if not isinstance(cursor, str) or not cursor.strip():
+            raise ValueError("cursor must be a nonempty string")
+        params["cursor"] = cursor
+    if origin is not None:
+        if origin not in ("uploaded", "generated"):
+            raise ValueError("origin must be uploaded or generated")
+        params["origin"] = origin
+    return "/v1/recipes?" + urlencode(params)
+
+
+def _recipes_search_path(query, limit):
+    if not isinstance(query, str) or not 1 <= len(query) <= 1000:
+        raise ValueError("query must be 1-1000 characters")
+    if type(limit) is not int or not 1 <= limit <= 50:
+        raise ValueError("limit must be an integer from 1 to 50")
+    return "/v1/recipes?" + urlencode({"q": query, "limit": limit})
+
+
 def _result(request_sha256, outcome, artifacts, events, trace_coverage):
     if not isinstance(request_sha256, str) or not request_sha256.strip():
         raise ValueError("request_sha256 is required")
@@ -195,6 +246,20 @@ class AsyncWorkflowAtoms:
 
     async def get_recipe_versions(self, recipe_id):
         return await self._http.request('GET', f'/v1/recipe-chains/{path_part(recipe_id)}/versions')
+
+    async def upload_recipe(self, recipe_id, *, version, recipe, base_version=None):
+        """Store a Recipe version learned outside the service; ``base_version`` is the version it was built on."""
+        body = _recipe_upload(recipe_id, version, recipe, base_version)
+        return await self._http.request("POST", f"/v1/recipes/{path_part(recipe_id)}", body=body)
+
+    async def get_recipe(self, recipe_id, *, version=None):
+        return await self._http.request("GET", _recipe_path(recipe_id, version))
+
+    async def list_recipes(self, *, limit=20, cursor=None, origin=None):
+        return await self._http.request("GET", _recipes_list_path(limit, cursor, origin))
+
+    async def search_recipes(self, query, *, limit=10):
+        return await self._http.request("GET", _recipes_search_path(query, limit))
 
 
     async def get_execution(self, execution_id):
@@ -306,6 +371,19 @@ class SyncWorkflowAtoms:
 
     def get_recipe_versions(self, recipe_id):
         return self._http.request('GET', f'/v1/recipe-chains/{path_part(recipe_id)}/versions')
+
+    def upload_recipe(self, recipe_id, *, version, recipe, base_version=None):
+        body = _recipe_upload(recipe_id, version, recipe, base_version)
+        return self._http.request("POST", f"/v1/recipes/{path_part(recipe_id)}", body=body)
+
+    def get_recipe(self, recipe_id, *, version=None):
+        return self._http.request("GET", _recipe_path(recipe_id, version))
+
+    def list_recipes(self, *, limit=20, cursor=None, origin=None):
+        return self._http.request("GET", _recipes_list_path(limit, cursor, origin))
+
+    def search_recipes(self, query, *, limit=10):
+        return self._http.request("GET", _recipes_search_path(query, limit))
 
 
     def get_execution(self, execution_id):

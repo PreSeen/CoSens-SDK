@@ -135,7 +135,7 @@ async def test_a_new_version_may_keep_the_previous_versions_evidence():
     other = recipe(steps=[{"id": "s1", "instruction": "x", "evidence_refs": [{"revision_id": "old-rev", "event_id": "never-cited"}]}])
     assert stages.recipe_rejection(other, index).kind == "evidence"
     assert stages.with_parent_evidence(stages.evidence_index(context()), None) == stages.evidence_index(context())
-    imported = {"recipe": {"steps": [{"id": "s1", "instruction": "kept"}], "lessons": []}}  # published without evidence
+    imported = {"recipe": {"steps": [{"id": "s1", "instruction": "kept"}], "lessons": []}}  # imported without evidence
     assert stages.with_parent_evidence(stages.evidence_index(context()), imported) == stages.evidence_index(context())
 
 

@@ -27,8 +27,7 @@ CREATE TABLE IF NOT EXISTS recipe_candidates(
   recipe_sha TEXT, attribution_json TEXT, error TEXT, generation INTEGER NOT NULL DEFAULT 1,
   lease_expires_at REAL, publish_state TEXT);
 CREATE TABLE IF NOT EXISTS recipe_heads(
-  recipe_id TEXT PRIMARY KEY, current_candidate_id TEXT, latest_candidate_id TEXT NOT NULL,
-  memory_source_id TEXT, memory_revision INTEGER NOT NULL DEFAULT 0);
+  recipe_id TEXT PRIMARY KEY, current_candidate_id TEXT, latest_candidate_id TEXT NOT NULL, remote_version INTEGER);
 CREATE TABLE IF NOT EXISTS recipe_versions(
   candidate_id TEXT PRIMARY KEY REFERENCES recipe_candidates(id), recipe_id TEXT NOT NULL REFERENCES recipe_heads(recipe_id),
   version INTEGER NOT NULL, parent_candidate_id TEXT, UNIQUE(recipe_id, version));
@@ -62,6 +61,15 @@ class LocalStore:
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.executescript(SCHEMA)
         self._lock = threading.RLock()
+        self._upgrade()
+
+    def _upgrade(self):
+        """Bring a 0.6 database forward in place; its unused Memory columns stay because older SQLite cannot drop them."""
+        with self.transaction() as db:
+            if "remote_version" not in {row["name"] for row in db.execute("PRAGMA table_info(recipe_heads)")}:
+                db.execute("ALTER TABLE recipe_heads ADD COLUMN remote_version INTEGER")
+                # 0.6 published to Memory, so no version is in the Recipe store yet.
+                db.execute("UPDATE recipe_candidates SET publish_state='pending' WHERE publish_state IS NOT NULL")
 
     @contextmanager
     def transaction(self):
