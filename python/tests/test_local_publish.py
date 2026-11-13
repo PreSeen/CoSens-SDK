@@ -132,7 +132,8 @@ def test_the_upload_form_drops_evidence_and_checks_the_limits():
     with pytest.raises(ValueError, match="unique"):
         upload_form({**PLAIN, "steps": [{"id": "s1", "instruction": "I"}] * 2})
     with pytest.raises(ValueError, match=str(RECIPE_MAX_TEXT_CHARS)):
-        upload_form({**PLAIN, "steps": [{"id": f"s{i}", "instruction": "I" * 1200} for i in range(12)]})
+        upload_form({**PLAIN, "steps": [{"id": f"s{i}", "instruction": "I" * 1200}
+                                         for i in range(RECIPE_MAX_TEXT_CHARS // 1200 + 1)]})
     with pytest.raises(ValueError, match="upload schema"):
         upload_form({**PLAIN, "extra": "x"})
 
