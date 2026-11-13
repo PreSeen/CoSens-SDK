@@ -103,15 +103,15 @@ async def test_list_tasks_paginates_newest_first(tmp_path):
     assert [item.task_id for item in rest["items"]] == [ids[0]] and not rest.has_more
 
 
-async def test_recall_memory_requires_a_memory_client(tmp_path):
+async def test_recall_memory_requires_a_client(tmp_path):
     rsi, _ = make_rsi(tmp_path)
     task = await rsi.create_task(source="new_task", key="k", objective="A")
-    with pytest.raises(ValueError, match="memory client"):
+    with pytest.raises(ValueError, match="requires a client"):
         await rsi.start_execution(task.task_id, key="e", recall_memory=True)
 
 
 async def test_context_changed_during_recall_is_refused(tmp_path):
-    rsi = LocalRSI(memory=None, model=FakeModel(), state_path=tmp_path / "s.sqlite3")
+    rsi = LocalRSI(client=None, model=FakeModel(), state_path=tmp_path / "s.sqlite3")
     task = await rsi.create_task(source="new_task", key="k", objective="Old")
 
     class Atoms:
@@ -125,14 +125,14 @@ async def test_context_changed_during_recall_is_refused(tmp_path):
 
 
 async def test_unknown_ids_raise_lookup_error(tmp_path):
-    rsi = LocalRSI(memory=None, model=FakeModel(), state_path=tmp_path / "s.sqlite3")
+    rsi = LocalRSI(client=None, model=FakeModel(), state_path=tmp_path / "s.sqlite3")
     for call in (rsi.get_task("x"), rsi.get_execution("x"), rsi.get_revision("x"), rsi.get_artifact("x")):
         with pytest.raises(LookupError):
             await call
 
 
 async def test_recipe_recall_uses_the_8000_token_budget(tmp_path):
-    rsi = LocalRSI(memory=None, model=FakeModel(), state_path=tmp_path / "s.sqlite3")
+    rsi = LocalRSI(client=None, model=FakeModel(), state_path=tmp_path / "s.sqlite3")
     task = await rsi.create_task(source="new_task", key="k", objective="A")
     budgets = []
 

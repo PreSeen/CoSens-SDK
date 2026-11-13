@@ -6,14 +6,12 @@ import logging
 import time
 from uuid import uuid4
 
-from jsonschema import Draft202012Validator
-
 from ..atoms_helpers import recipe_request_key, stable_key
 from ..errors import RSICandidateFailed, RSIError, RSIHTTPError
 from ..models import result
-from ..workflow_atoms import _job_timeout
+from ..workflow_atoms import _RECIPE_ID, _job_timeout
 from .models import ModelUnavailable
-from .publish import PUBLICATION_SCHEMA, publication_text, publish_text
+from .publish import check_upload, upload_form
 from .recipe_stages import MAX_CONTEXT_BYTES, MAX_HISTORY_REVISIONS, MODEL_OUTPUT_ATTEMPTS, ModelOutputInvalid, run_recipe_stages
 from .store import canonical_json, fingerprint
 
@@ -115,23 +113,34 @@ class LocalRecipeLifecycle:
         db.execute("INSERT INTO recipe_versions VALUES(?,?,?,?)", (candidate_id, recipe_id, version, parent))
         return {"recipe_id": recipe_id, "version": version, "parent_candidate_id": parent}
 
-    def _import_recipe(self, db, task_id, item):
-        """Start this Task's chain from a Recipe another machine published."""
-        if (not isinstance(item, dict) or not isinstance(item.get("source_id"), str) or type(item.get("revision")) is not int
-                or type(item.get("version")) is not int or item["version"] < 1):
-            raise ValueError("recipe must be an item returned by recall_recipes")
-        Draft202012Validator(PUBLICATION_SCHEMA["properties"]["recipe"]).validate(item.get("recipe"))
-        recipe = json.loads(json.dumps(item["recipe"]))
+    def _import_recipe(self, db, task_id, view):
+        """Start this Task's chain from a Recipe read from the service.
+
+        An uploaded chain continues here under its own ID and version. A generated Recipe starts a new chain without its
+        evidence, which refers to the service's records.
+        """
+        if (not isinstance(view, dict) or view.get("origin") not in ("uploaded", "generated")
+                or not isinstance(view.get("recipe_id"), str) or type(view.get("version")) is not int or view["version"] < 1
+                or not isinstance(view.get("recipe"), dict)
+                or (view["origin"] == "uploaded" and not _RECIPE_ID.fullmatch(view["recipe_id"]))):
+            raise ValueError("recipe must be a Recipe returned by get_recipe")
+        uploaded = view["origin"] == "uploaded"
+        recipe = json.loads(json.dumps(check_upload(view["recipe"]) if uploaded else upload_form(view["recipe"])))
         candidate_id = "recipe_candidate_" + uuid4().hex
+        recipe_id, version = (view["recipe_id"], view["version"]) if uploaded else (candidate_id, 1)
+        if db.execute("SELECT 1 FROM recipe_heads WHERE recipe_id=?", (recipe_id,)).fetchone() is not None:
+            raise ValueError(f"Recipe {recipe_id} is already on this machine; start an execution with its recipe_id")
         context = {"schema": "workflow-recipe-context-v2", "task_id": task_id, "history": [],
-                   "memory": {"status": "not_requested", "items": []}, "initial": True, "imported_from": item["source_id"]}
+                   "memory": {"status": "not_requested", "items": []}, "initial": True,
+                   "imported_from": {k: view[k] for k in ("recipe_id", "origin", "version")}}
         db.execute("INSERT INTO recipe_candidates(id,task_id,revision_id,state,phase,context_json,context_sha,recipe_json,recipe_sha,"
-                   "publish_state) VALUES(?,?,NULL,'candidate','completed',?,?,?,?,'published')",
-                   (candidate_id, task_id, canonical_json(context), fingerprint(context), canonical_json(recipe), fingerprint(recipe)))
-        db.execute("INSERT INTO recipe_heads VALUES(?,?,?,?,?)",
-                   (candidate_id, candidate_id, candidate_id, item["source_id"], item["revision"]))
-        db.execute("INSERT INTO recipe_versions VALUES(?,?,?,NULL)", (candidate_id, candidate_id, item["version"]))
-        db.execute("INSERT INTO task_recipes VALUES(?,?)", (task_id, candidate_id))
+                   "publish_state) VALUES(?,?,NULL,'candidate','completed',?,?,?,?,?)",
+                   (candidate_id, task_id, canonical_json(context), fingerprint(context), canonical_json(recipe), fingerprint(recipe),
+                    "published" if uploaded else None))
+        db.execute("INSERT INTO recipe_heads(recipe_id,current_candidate_id,latest_candidate_id,remote_version) VALUES(?,?,?,?)",
+                   (recipe_id, candidate_id, candidate_id, version if uploaded else None))
+        db.execute("INSERT INTO recipe_versions VALUES(?,?,?,NULL)", (candidate_id, recipe_id, version))
+        db.execute("INSERT INTO task_recipes VALUES(?,?)", (task_id, recipe_id))
 
     def _history(self, db, task_id, revision_id):
         history, current, seen = [], revision_id, set()
@@ -429,26 +438,24 @@ class LocalRecipeLifecycle:
                        "latest_candidate_id": head["latest_candidate_id"], "versions": versions})
 
     async def _publish_candidate(self, candidate_id):
-        """Write this version to Memory. The local version stands whatever happens here."""
+        """Upload this version to the service's Recipe store. The local version stands whatever happens here."""
         with self._store.reading() as db:
             row = self._candidate(db, candidate_id)
             lineage = self._lineage(db, candidate_id)
-            head = db.execute("SELECT * FROM recipe_heads WHERE recipe_id=?", (lineage["recipe_id"],)).fetchone()
-        text = publication_text(lineage["recipe_id"], lineage["version"], json.loads(row["recipe_json"]))
-        receipt = None
+            head = db.execute("SELECT remote_version FROM recipe_heads WHERE recipe_id=?", (lineage["recipe_id"],)).fetchone()
         try:
-            receipt = await publish_text(self._atoms, candidate_id=candidate_id, text=text,
-                                         source_id=head["memory_source_id"], revision=head["memory_revision"])
+            # base_version is the last version the server is known to have, so a version uploaded elsewhere is a conflict.
+            await self._atoms.upload_recipe(lineage["recipe_id"], version=lineage["version"],
+                                            recipe=upload_form(json.loads(row["recipe_json"])), base_version=head["remote_version"])
             state = "published"
         except RSIHTTPError as exc:
             state = "publish_conflict" if exc.status_code == 409 else "failed"
-            _LOG.warning("Publishing Recipe candidate %s to Memory returned HTTP %s", candidate_id, exc.status_code)
+            _LOG.warning("Uploading Recipe candidate %s returned HTTP %s", candidate_id, exc.status_code)
         except RSIError as exc:
             state = "failed"
-            _LOG.warning("Publishing Recipe candidate %s to Memory failed: %s", candidate_id, type(exc).__name__)
+            _LOG.warning("Uploading Recipe candidate %s failed: %s", candidate_id, type(exc).__name__)
         with self._store.transaction() as db:
             db.execute("UPDATE recipe_candidates SET publish_state=? WHERE id=?", (state, candidate_id))
-            if receipt is not None:
-                db.execute("UPDATE recipe_heads SET memory_source_id=?,memory_revision=? WHERE recipe_id=?",
-                           (receipt["source_id"], receipt["revision"], lineage["recipe_id"]))
+            if state == "published":
+                db.execute("UPDATE recipe_heads SET remote_version=? WHERE recipe_id=?", (lineage["version"], lineage["recipe_id"]))
         return state

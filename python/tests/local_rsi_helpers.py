@@ -36,11 +36,11 @@ def attribution_reply(actionable, *, verified_success=False, new_evidence=False)
     return reply
 
 
-def make_rsi(tmp_path, *replies, memory=None, name="state.sqlite3"):
+def make_rsi(tmp_path, *replies, client=None, name="state.sqlite3"):
     from cosens.local import LocalRSI
 
     model = FakeModel(*replies)
-    return LocalRSI(memory=memory, model=model, state_path=tmp_path / name), model
+    return LocalRSI(client=client, model=model, state_path=tmp_path / name), model
 
 
 async def complete_execution(rsi, started, key="out"):

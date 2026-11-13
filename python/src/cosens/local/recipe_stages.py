@@ -209,7 +209,7 @@ def with_parent_evidence(index, parent):
     if not parent:
         return index
     items = parent["recipe"]["steps"] + parent["recipe"]["lessons"]
-    refs = [ref for item in items for ref in item.get("evidence_refs", [])]  # an imported publication has none
+    refs = [ref for item in items for ref in item.get("evidence_refs", [])]  # an imported Recipe has none
     return EvidenceIndex(
         events=index.events | {(ref.get("revision_id"), ref["event_id"]) for ref in refs if "event_id" in ref},
         artifacts=index.artifacts | {ref["artifact_id"] for ref in refs if "artifact_id" in ref},
