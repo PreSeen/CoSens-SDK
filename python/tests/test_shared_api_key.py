@@ -52,8 +52,8 @@ def test_atomic_calls_send_only_model_and_use_transport_key(tmp_path):
     client = CoSensClient(api_key='shared-user-key', state_path=tmp_path/'state.sqlite', _http_transport=httpx.MockTransport(server))
     client.sync_atoms.start_recipe_candidate('task', revision_id='rev', key='confirmed', model='public-model')
     client.sync_atoms.resume_recipe_candidate('candidate', model='public-model')
-    assert json.loads(seen[0].content) == {'data': {'revision_id': 'rev', 'model': 'public-model'}}
-    assert json.loads(seen[1].content) == {'data': {'model': 'public-model'}}
+    assert json.loads(seen[0].content) == {'revision_id': 'rev', 'model': 'public-model'}
+    assert json.loads(seen[1].content) == {'model': 'public-model'}
     assert all(r.headers['Authorization'] == 'Bearer shared-user-key' and b'shared-user-key' not in r.content for r in seen)
     with pytest.raises(TypeError):
         client.sync_atoms.start_recipe_candidate('task', revision_id='rev', key='old', model_api={})

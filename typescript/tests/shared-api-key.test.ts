@@ -9,8 +9,8 @@ test('Model selection sends no second credential or endpoint configuration',asyn
  const client=new CoSensClient({apiKey:'shared-user-key',fetch:async(input,init)=>{seen.push({headers:new Headers(init?.headers),body:JSON.parse(String(init?.body))});return new Response('{}',{headers:{'Content-Type':'application/json'}});}});
  await client.atoms.startRecipeCandidate('task',{revisionId:'rev',key:'confirmed',model:'public-model'});
  await client.atoms.resumeRecipeCandidate('candidate','public-model');
- assert.deepEqual(seen[0].body,{data:{revision_id:'rev',model:'public-model'}});
- assert.deepEqual(seen[1].body,{data:{model:'public-model'}});
+ assert.deepEqual(seen[0].body,{revision_id:'rev',model:'public-model'});
+ assert.deepEqual(seen[1].body,{model:'public-model'});
  assert.ok(seen.every(r=>r.headers.get('Authorization')==='Bearer shared-user-key'&&!JSON.stringify(r.body).includes('shared-user-key')));
  await client.close();
 });

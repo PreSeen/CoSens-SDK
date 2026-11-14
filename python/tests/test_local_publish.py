@@ -29,7 +29,7 @@ def _error(status, code, chain=None):
 
 
 class FakeService:
-    """Memory recall and the /v1/recipes routes, with the Recipe store's version rules."""
+    """Memory recall and the /recipes routes, with the Recipe store's version rules."""
 
     def __init__(self):
         self.requests, self.uploads, self.memory, self.chains = [], [], {}, {}
@@ -83,17 +83,18 @@ class FakeService:
                 {"id": k, "text": v, "revision": 1, "score": 0.9, "kind": "source",
                  "refs": [{"source_id": k, "revision": 1, "content_hash": "h", "start": 0, "end": 1}]}
                 for k, v in self.memory.items()]})
-        if path == "/api/v1/recipes" and "q" in query:
+        if path == "/api/recipes" and "q" in query:
             words = query["q"].lower().split()
             found = [{**self.summary(k), "score": 0.5} for k in self.chains
                      if any(w in self.summary(k)["title"].lower() for w in words)]
             return httpx.Response(200, json={"items": found[:int(query["limit"])]})
-        if path == "/api/v1/recipes":
+        if path == "/api/recipes":
             items = [self.summary(k) for k in reversed(self.chains) if query.get("origin") in (None, self.chains[k]["origin"])]
             return httpx.Response(200, json={"items": items[:int(query["limit"])], "has_more": False, "next_cursor": None})
-        recipe_id = path.removeprefix("/api/v1/recipes/")
-        if request.method == "POST":
-            response = self.upload(recipe_id, body)
+        recipe_id = path.removeprefix("/api/recipes/")
+        if request.method == "PUT":
+            recipe_id, version = recipe_id.split("/versions/")
+            response = self.upload(recipe_id, {**body, "version": int(version)})
             if self.lose_response:
                 return httpx.Response(502, json={"detail": "gateway lost the response"})
             return response
@@ -315,7 +316,7 @@ async def test_only_memory_and_recipe_routes_are_called(tmp_path):
     await rsi.search_recipes("V1")
     await rsi.list_recipes()
     await rsi.get_recipe(job.recipe_id, version=1)
-    assert server.requests and all(path.startswith(("/api/v1/memory/", "/api/v1/recipes")) for path in server.requests)
+    assert server.requests and all(path.startswith(("/api/v1/memory/", "/api/recipes")) for path in server.requests)
 
 
 async def test_recipe_store_methods_need_a_client(tmp_path):

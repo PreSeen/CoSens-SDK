@@ -26,17 +26,17 @@ async def test_recipe_store_requests_sync_and_async():
         client.sync_atoms.search_recipes("sort words")
 
     assert [(r.method, r.url.path, dict(r.url.params)) for r in requests] == [
-        ("POST", "/api/v1/recipes/team_recipe-1", {}),
-        ("POST", "/api/v1/recipes/team_recipe-1", {}),
-        ("GET", "/api/v1/recipes/g1", {"version": "2"}),
-        ("GET", "/api/v1/recipes/r1", {}),
-        ("GET", "/api/v1/recipes", {"limit": "5", "cursor": "c1", "origin": "uploaded"}),
-        ("GET", "/api/v1/recipes", {"limit": "20"}),
-        ("GET", "/api/v1/recipes", {"q": "sort words", "limit": "3"}),
-        ("GET", "/api/v1/recipes", {"q": "sort words", "limit": "10"}),
+        ("PUT", "/api/recipes/team_recipe-1/versions/4", {}),
+        ("PUT", "/api/recipes/team_recipe-1/versions/1", {}),
+        ("GET", "/api/recipes/g1", {"version": "2"}),
+        ("GET", "/api/recipes/r1", {}),
+        ("GET", "/api/recipes", {"limit": "5", "cursor": "c1", "origin": "uploaded"}),
+        ("GET", "/api/recipes", {"limit": "20"}),
+        ("GET", "/api/recipes", {"q": "sort words", "limit": "3"}),
+        ("GET", "/api/recipes", {"q": "sort words", "limit": "10"}),
     ]
-    assert json.loads(requests[0].content) == {"version": 4, "base_version": 3, "recipe": RECIPE}
-    assert json.loads(requests[1].content) == {"version": 1, "recipe": RECIPE}
+    assert json.loads(requests[0].content) == {"base_version": 3, "recipe": RECIPE}
+    assert json.loads(requests[1].content) == {"recipe": RECIPE}
 
 
 @pytest.mark.parametrize("call", [

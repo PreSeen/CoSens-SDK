@@ -41,7 +41,7 @@ def _recipe_list_path(limit, cursor, task_id, status):
         if not isinstance(status, str) or status not in {"queued", "running", "awaiting_runner", "awaiting_parent", "awaiting_material", "candidate", "failed", "interrupted"}:
             raise ValueError("invalid Recipe candidate status")
         params["status"] = status
-    return "/v1/recipe-candidates?" + urlencode(params)
+    return "/recipe-candidates?" + urlencode(params)
 
 
 def _ingest_body(content, request_key, source_kind, durable, source_id, expected_revision):
@@ -92,7 +92,7 @@ class AsyncAtoms(AsyncWorkflowAtoms, AsyncDocumentAtoms):
 
     async def artifact(self, *, name, content):
         validate_artifact(name, content)
-        return await self._http.request("POST", "/v1/artifacts", body={"name": name, "content": content})
+        return await self._http.request("POST", "/artifacts", body={"name": name, "content": content})
 
 
 class SyncAtoms(SyncWorkflowAtoms, SyncDocumentAtoms):
@@ -134,7 +134,7 @@ class SyncAtoms(SyncWorkflowAtoms, SyncDocumentAtoms):
 
     def artifact(self, *, name, content):
         validate_artifact(name, content)
-        return self._http.request("POST", "/v1/artifacts", body={"name": name, "content": content})
+        return self._http.request("POST", "/artifacts", body={"name": name, "content": content})
 
 
 class CoSensClient:

@@ -17,15 +17,15 @@ for(const entry of ['transparent','agent','atomic'])test(`explicit generation: $
   if(path.endsWith('/executions'))assert.equal(body.model,'model');
   if(local){const headers=new Headers(init?.headers);headers.set('X-User-Id',owner);return fetch(local+path+url.search,{...init,headers});}
   let value:any;
-  if(path==='/v1/recipe-candidates')value={items:[],has_more:false};
+  if(path==='/recipe-candidates')value={items:[],has_more:false};
   else if(path==='/v1/memory/recall')value={items:[]};
-  else if(path==='/v1/artifacts')value={artifact_id:'artifact_'+(++count),content_hash:'sha256:test'};
-  else if(path==='/v1/tasks')value={task_id:'task_1',status:'ready'};
+  else if(path==='/artifacts')value={artifact_id:'artifact_'+(++count),content_hash:'sha256:test'};
+  else if(path==='/tasks')value={task_id:'task_1',status:'ready'};
   else if(path.endsWith('/executions')||path.endsWith('/revisions'))value={execution_id:'execution_1',request_sha256:'hash',status:'awaiting_execution',request:{context:{objective:'Produce output'}}};
   else if(path.endsWith('/result'))value={revision_id:'revision_1',status:'completed'};
   else if(path.endsWith('/feedback')){assert.equal(body.source,'human');value={feedback_id:'feedback_1'};}
-  else if(path.endsWith('/recipe-candidates')){assert.equal(body.data.include_memory,undefined);assert.equal(body.data.recall_memory,undefined);value={recipe_candidate_id:'candidate_'+(++generations),recipe_id:'recipe_1',version:generations,status:'queued'};}
-  else if(path.startsWith('/v1/recipe-candidates/candidate_'))value={status:'candidate',version:generations,recipe_id:'recipe_1',recipe_candidate_id:'candidate_'+generations,attribution:{possible_causes:[{reason:'format'}]}};
+  else if(path.endsWith('/recipe-candidates')){assert.equal(body.include_memory,undefined);assert.equal(body.recall_memory,undefined);value={recipe_candidate_id:'candidate_'+(++generations),recipe_id:'recipe_1',version:generations,status:'queued'};}
+  else if(path.startsWith('/recipe-candidates/candidate_'))value={status:'candidate',version:generations,recipe_id:'recipe_1',recipe_candidate_id:'candidate_'+generations,attribution:{possible_causes:[{reason:'format'}]}};
   else throw new Error(path);
   return new Response(JSON.stringify(value),{headers:{'Content-Type':'application/json'}});
  };
@@ -49,7 +49,7 @@ for(const entry of ['transparent','agent','atomic'])test(`explicit generation: $
   const result=await client.atoms.submitExecution(execution.execution_id,{requestSha256:execution.request_sha256,outcome:'completed',artifacts:[{artifact_id:artifact.artifact_id,role:'submitted_output'}]});revisionId=result.revision_id;
  }
  assert.ok(taskId!&&revisionId!);
- assert.ok(!paths.some(p=>p.endsWith('/recipe-candidates')&&p!=='/v1/recipe-candidates'));
+ assert.ok(!paths.some(p=>p.endsWith('/recipe-candidates')&&p!=='/recipe-candidates'));
  const first=entry==='transparent'?await wrapper.cosens.generateRecipe():entry==='agent'?await wrapper.cosens.generateRecipe():await client.atoms.startRecipeCandidate(taskId!,{revisionId:revisionId!,key:'confirmed-v1'});
  const v1=await client.atoms.waitWorkflowJob('recipe_candidate',first.recipe_candidate_id,{timeout:10});assert.equal(v1.status,'candidate');assert.equal(v1.version,1);
  await client.atoms.recordFeedback(revisionId!,{feedback:'Use JSON without code fences',source:'human',key:'feedback'});

@@ -16,11 +16,11 @@ class Backend:
         body=json.loads(r.content) if r.content else None
         path=r.url.path.removeprefix('/api');self.seen.append((r.method,path,body))
         assert '/runs' not in path and '/improvements' not in path and '/attributions' not in path
-        if path=='/v1/recipe-candidates':return httpx.Response(200,json={'items':[],'has_more':False})
+        if path=='/recipe-candidates':return httpx.Response(200,json={'items':[],'has_more':False})
         if path=='/v1/memory/recall':return httpx.Response(200,json={'items':[]})
-        if path=='/v1/artifacts':
+        if path=='/artifacts':
             self.count+=1;return httpx.Response(200,json={'artifact_id':f'artifact_{self.count}','content_hash':'sha256:test'})
-        if path=='/v1/tasks' and r.method=='POST':return httpx.Response(200,json={'task_id':'task_1','status':'ready'})
+        if path=='/tasks' and r.method=='POST':return httpx.Response(200,json={'task_id':'task_1','status':'ready'})
         if path.endswith('/executions') or path.endswith('/revisions') and r.method=='POST':
             return httpx.Response(200,json={'task_id':'task_1','execution_id':'execution_1','request_sha256':'request-hash','status':'awaiting_execution','request':{'context':{'objective':'task'}}})
         if path.endswith('/result'):return httpx.Response(200,json={'status':'completed','revision_id':'revision_1'})
@@ -28,11 +28,11 @@ class Backend:
             assert body['source']=='human'
             return httpx.Response(200,json={'feedback_id':'feedback_1'})
         if path.endswith('/recipe-candidates'):
-            assert 'recall_memory' not in body['data'] and 'include_memory' not in body['data']
+            assert 'recall_memory' not in body and 'include_memory' not in body
             self.generations+=1
             return httpx.Response(200,json={'recipe_candidate_id':'candidate_1','recipe_id':'recipe_1','status':'queued','version':1,'parent_candidate_id':None})
-        if path=='/v1/recipe-candidates/candidate_1':return httpx.Response(200,json={'status':'candidate','recipe_candidate_id':'candidate_1','recipe':{'steps':[]}})
-        if path=='/v1/sessions/start':return httpx.Response(200,json={'session_id':'session_1','cursor':0})
+        if path=='/recipe-candidates/candidate_1':return httpx.Response(200,json={'status':'candidate','recipe_candidate_id':'candidate_1','recipe':{'steps':[]}})
+        if path=='/sessions':return httpx.Response(200,json={'session_id':'session_1','cursor':0})
         if path.endswith('/events'):return httpx.Response(200,json={'cursor':1,'accepted':1})
         raise AssertionError((r.method,path,body))
 

@@ -11,7 +11,7 @@
 | Feedback/correction | `record_feedback`, `start_revision` |
 | Explicit Recipe generation/update | `start_recipe_candidate(task_id, revision_id=..., key=None, model=..., max_completion_tokens=...)` |
 | Read/list/resume generation | `get_recipe_candidate`, `list_recipe_candidates`, `resume_recipe_candidate` |
-| Associated Recipe/version chain | `get_task_recipe`, `get_recipe_versions` |
+| Recipe versions | `get_recipe_versions` (version summaries; a task's Recipe id and current and latest candidate ids are in `get_task`) |
 | Recipe store | `upload_recipe(recipe_id, version=..., recipe=..., base_version=None)`, `get_recipe(recipe_id, version=None)`, `list_recipes(limit=20, cursor=None, origin=None)`, `search_recipes(query, limit=10)` |
 | Poll generation | `wait_workflow_job("recipe_candidate", id)` (raises `RSICandidateFailed` on failure) |
 | Sessions | `start_session`, `append_session_events`, `get_session_context`, `end_session` |
@@ -50,7 +50,7 @@ reject unknown request fields. Published packages are not updated by a source ch
 
 `LocalRSI(*, client=None, model, state_path=None)` stores state in SQLite (default `~/.cosens/local-rsi.sqlite3`). `client` is a `CoSensClient` used only for Memory recall (`/v1/memory/*`) and the Recipe store (`/v1/recipes`), or `None`. `memory=` is a deprecated name for `client=`. Call `await rsi.aclose()` when done; it returns any running generation to the queue.
 
-Same names, parameters and responses as `client.atoms`: `create_task`, `get_task`, `list_tasks`, `supplement_task_context`, `artifact`, `get_artifact`, `start_execution`, `get_execution`, `submit_execution`, `get_revision`, `start_revision`, `record_feedback`, `start_recipe_candidate`, `get_recipe_candidate`, `resume_recipe_candidate`, `list_recipe_candidates`, `wait_workflow_job`, `get_task_recipe`, `get_recipe_versions`.
+Same names, parameters and responses as `client.atoms`: `create_task`, `get_task`, `list_tasks`, `supplement_task_context`, `artifact`, `get_artifact`, `start_execution`, `get_execution`, `submit_execution`, `get_revision`, `start_revision`, `record_feedback`, `start_recipe_candidate`, `get_recipe_candidate`, `resume_recipe_candidate`, `list_recipe_candidates`, `wait_workflow_job`, `get_recipe_versions`. `LocalRSI` also keeps `get_task_recipe`, which the service no longer has.
 
 Differences from `client.atoms`:
 

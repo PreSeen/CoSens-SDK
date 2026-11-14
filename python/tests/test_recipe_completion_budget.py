@@ -28,7 +28,7 @@ def test_sync_auto_budget_is_forwarded_and_cached_without_crossing_keys(tmp_path
         wrapped.responses.create(model='model',input='Produce a report',max_output_tokens=4096)
         wrapped.cosens.generate_recipe(max_completion_tokens=200_000)
         generated = [b for _,p,b in backend.seen if p.endswith('/recipe-candidates') and b]
-        assert generated[-1]['data']['max_completion_tokens'] == 200_000
+        assert generated[-1]['max_completion_tokens'] == 200_000
         wrapped.cosens.generate_recipe()
         assert backend.generations == 1
         with pytest.raises(ValueError, match='request key'):
@@ -47,7 +47,7 @@ async def test_async_auto_and_atoms_forward_completion_budget(tmp_path):
         await wrapped.responses.create(model='model',input='Produce a report')
         await wrapped.cosens.generate_recipe(max_completion_tokens=250_000)
         generated = [b for _,p,b in backend.seen if p.endswith('/recipe-candidates') and b]
-        assert generated[-1]['data']['max_completion_tokens'] == 250_000
+        assert generated[-1]['max_completion_tokens'] == 250_000
     finally: await wrapped.close();await native.close()
 
 
@@ -64,9 +64,9 @@ async def test_atomic_start_resume_wire_and_omission(tmp_path, asynchronous):
         for fn,args,kwargs in [(a.start_recipe_candidate,('task',),{'revision_id':'rev','key':'first','max_completion_tokens':200_000}), (a.resume_recipe_candidate,('candidate',),{'max_completion_tokens':300_000}), (a.start_recipe_candidate,('task',),{'revision_id':'rev','key':'default'})]:
             value=fn(*args,**kwargs)
             if asynchronous:await value
-        assert seen[0]['data']['max_completion_tokens']==200_000
-        assert seen[1]['data']['max_completion_tokens']==300_000
-        assert 'max_completion_tokens' not in seen[2]['data']
+        assert seen[0]['max_completion_tokens']==200_000
+        assert seen[1]['max_completion_tokens']==300_000
+        assert 'max_completion_tokens' not in seen[2]
     finally: await c.aclose()
 
 
@@ -75,12 +75,12 @@ def test_auto_resume_keeps_generation_key_budget_and_forwards_override(tmp_path,
     class FailedBackend(Backend):
         def __call__(self,r):
             path=r.url.path.removeprefix('/api')
-            if path=='/v1/recipe-candidates/candidate_1' and r.method=='GET':
+            if path=='/recipe-candidates/candidate_1' and r.method=='GET':
                 return httpx.Response(200,json={'recipe_candidate_id':'candidate_1','status':'failed','max_completion_tokens':200_000})
             if path.endswith('/resume'):
                 body=json.loads(r.content) if r.content else None
                 self.seen.append((r.method,path,body))
-                limit=(body or {}).get('data',{}).get('max_completion_tokens',200_000)
+                limit=(body or {}).get('max_completion_tokens',200_000)
                 return httpx.Response(200,json={'recipe_candidate_id':'candidate_1','status':'queued','max_completion_tokens':limit})
             return super().__call__(r)
     backend=FailedBackend()
@@ -92,7 +92,7 @@ def test_auto_resume_keeps_generation_key_budget_and_forwards_override(tmp_path,
         value=wrapped.cosens.resume_learning(max_completion_tokens=override)
         assert value['max_completion_tokens']==(override or 200_000)
         requests=[b for _,p,b in backend.seen if p.endswith('/resume')]
-        assert requests[-1]==({'data':{'max_completion_tokens':override}} if override else None)
+        assert requests[-1]==({'max_completion_tokens':override} if override else None)
         wrapped.cosens.generate_recipe(max_completion_tokens=200_000)
         assert backend.generations==1
     finally:wrapped.close();native.close()
@@ -113,6 +113,6 @@ def test_agent_wrapper_forwards_completion_budget(tmp_path):
             await wrapped.run(agent,'Produce output')
             await wrapped.cosens.generate_recipe(max_completion_tokens=200_000)
             generated=[b for _,p,b in backend.seen if p.endswith('/recipe-candidates') and b]
-            assert generated[-1]['data']['max_completion_tokens']==200_000
+            assert generated[-1]['max_completion_tokens']==200_000
         finally:await wrapped.aclose()
     asyncio.run(run())
