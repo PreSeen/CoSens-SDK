@@ -203,10 +203,14 @@ class LocalRecipeLifecycle:
                     raise ValueError("historical artifact unavailable or changed")
                 return {**ref, "content": item["content"]}
 
-            history.append({"task_id": task_id, "revision_id": current, "origin": row["kind"], "context": execution["context"],
+            # The learning context names executions, as the service's does; a revision execution is a correction.
+            feedback = [{**{k: v for k, v in item.items() if k != "revision_id"}, "execution_id": row["execution_id"]}
+                        for item in self._revision_feedback(db, current)]
+            history.append({"task_id": task_id, "execution_id": row["execution_id"],
+                            "origin": "correction" if row["kind"] == "revision" else row["kind"], "context": execution["context"],
                             "materials": [material(ref) for ref in execution["context"]["artifacts"]],
                             "outputs": [material(ref) for ref in outcome["artifacts"]], "events": outcome["events"],
-                            "trace_coverage": outcome["trace_coverage"], "feedback": self._revision_feedback(db, current)})
+                            "trace_coverage": outcome["trace_coverage"], "feedback": feedback})
             current = execution.get("base_revision_id")
         return list(reversed(history))
 
@@ -245,9 +249,9 @@ class LocalRecipeLifecycle:
             found = self._existing_candidate(db, task_id, revision_id, key, request_hash)
             if found is not None:
                 return result(found)
-            context = {"schema": "workflow-recipe-context-v2", "task_id": task_id, "source_revision_id": revision_id,
-                       "history": self._history(db, task_id, revision_id), "memory": memory,
-                       "confirmation_source": "explicit_generation_request"}
+            history = self._history(db, task_id, revision_id)
+            context = {"schema": "workflow-recipe-context-v2", "task_id": task_id, "source_execution_id": history[-1]["execution_id"],
+                       "history": history, "memory": memory, "confirmation_source": "explicit_generation_request"}
             if len(canonical_json(context).encode()) > MAX_CONTEXT_BYTES:
                 raise ValueError("recipe history exceeds 4 MB; narrow the context")
             candidate_id = "recipe_candidate_" + uuid4().hex

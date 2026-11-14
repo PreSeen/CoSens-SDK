@@ -47,6 +47,74 @@ def fingerprint(value):
     return hashlib.sha256(canonical_json(value).encode()).hexdigest()
 
 
+# PRAGMA user_version of a store whose evidence references and learning history name executions.
+STORE_VERSION = 1
+
+
+def _execution_refs(value, execution_of):
+    """`value` with every {revision_id, event_id} evidence reference turned into {execution_id, event_id}."""
+    if isinstance(value, list):
+        return [_execution_refs(item, execution_of) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if "revision_id" in value and "event_id" in value:
+        value = {("execution_id" if key == "revision_id" else key): (execution_of(item) if key == "revision_id" else item)
+                 for key, item in value.items()}
+    return {key: _execution_refs(item, execution_of) for key, item in value.items()}
+
+
+def _execution_context(context, execution_of):
+    """A frozen learning context naming executions: its source, each history entry, and that entry's feedback."""
+    context = dict(context)
+    if "source_revision_id" in context:
+        context["source_execution_id"] = execution_of(context.pop("source_revision_id"))
+    history = []
+    for entry in context.get("history", []):
+        entry = dict(entry)
+        if "revision_id" in entry:
+            entry["execution_id"] = execution_of(entry.pop("revision_id"))
+        if entry.get("origin") == "revision":
+            entry["origin"] = "correction"
+        if "feedback" in entry:
+            entry["feedback"] = [{**{k: v for k, v in item.items() if k != "revision_id"}, "execution_id": execution_of(item["revision_id"])}
+                                 if "revision_id" in item else item for item in entry["feedback"]]
+        history.append(entry)
+    if "history" in context:
+        context["history"] = history
+    return context
+
+
+def _name_executions(db):
+    """Rewrite stored learning rows written with revision keys; a row whose hash does not match its text stops the upgrade."""
+    def execution_of(revision_id):
+        row = db.execute("SELECT execution_id FROM revisions WHERE id=?", (revision_id,)).fetchone()
+        if row is None:
+            raise LookupError(f"stored Recipe data names revision {revision_id}, which is not in this store")
+        return row["execution_id"]
+
+    for row in db.execute("SELECT id,context_json,context_sha,recipe_json,recipe_sha,attribution_json FROM recipe_candidates").fetchall():
+        updates = {}
+        # LocalStore writes these columns as canonical_json(value) with sha = fingerprint(value).
+        for column, sha_column, rewrite in (("context_json", "context_sha", _execution_context), ("recipe_json", "recipe_sha", _execution_refs)):
+            if row[column] is None:
+                continue
+            value = json.loads(row[column])
+            renamed = rewrite(value, execution_of)
+            if renamed == value:
+                continue
+            if fingerprint(value) != row[sha_column]:
+                raise ValueError(f"Recipe candidate {row['id']}: stored {column} does not match its hash; the store was not upgraded")
+            updates[column], updates[sha_column] = canonical_json(renamed), fingerprint(renamed)
+        if row["attribution_json"] is not None:
+            attribution = json.loads(row["attribution_json"])
+            renamed = _execution_refs(attribution, execution_of)
+            if renamed != attribution:
+                updates["attribution_json"] = canonical_json(renamed)
+        if updates:
+            db.execute(f"UPDATE recipe_candidates SET {','.join(name + '=?' for name in updates)} WHERE id=?",
+                       (*updates.values(), row["id"]))
+
+
 def default_store_path():
     return Path.home() / ".cosens" / "local-rsi.sqlite3"
 
@@ -64,12 +132,16 @@ class LocalStore:
         self._upgrade()
 
     def _upgrade(self):
-        """Bring a 0.6 database forward in place; its unused Memory columns stay because older SQLite cannot drop them."""
+        """Bring an older database forward in place; 0.6's unused Memory columns stay because older SQLite cannot drop them."""
         with self.transaction() as db:
             if "remote_version" not in {row["name"] for row in db.execute("PRAGMA table_info(recipe_heads)")}:
                 db.execute("ALTER TABLE recipe_heads ADD COLUMN remote_version INTEGER")
                 # 0.6 published to Memory, so no version is in the Recipe store yet.
                 db.execute("UPDATE recipe_candidates SET publish_state='pending' WHERE publish_state IS NOT NULL")
+            # Once, in this transaction: earlier stores named revisions in evidence references and learning history.
+            if db.execute("PRAGMA user_version").fetchone()[0] < STORE_VERSION:
+                _name_executions(db)
+                db.execute(f"PRAGMA user_version={STORE_VERSION}")
 
     @contextmanager
     def transaction(self):

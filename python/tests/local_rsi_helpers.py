@@ -20,7 +20,7 @@ class FakeModel:
 def recipe_reply(title="Recipe"):
     def reply(payload):
         latest = payload["context"]["history"][-1]
-        ref = {"revision_id": latest["revision_id"], "event_id": latest["events"][0]["id"]}
+        ref = {"execution_id": latest["execution_id"], "event_id": latest["events"][0]["id"]}
         return {"title": title, "when": "always", "when_not": "never",
                 "steps": [{"id": "s1", "instruction": "do it", "evidence_refs": [ref]}], "lessons": []}
     return reply

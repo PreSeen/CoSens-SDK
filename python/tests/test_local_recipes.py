@@ -434,9 +434,14 @@ async def test_history_follows_the_revision_chain_with_feedback(tmp_path):
     started = await rsi.start_revision(done.revision_id, key="r")
     again = await complete_execution(rsi, started, key="r-out")
     await generate(rsi, task, again)
-    history = model.calls[0]["context"]["context"]["history"]
-    assert [h["revision_id"] for h in history] == [done.revision_id, again.revision_id]
+    context = model.calls[0]["context"]["context"]
+    history = context["history"]
+    assert [h["execution_id"] for h in history] == [done.execution_id, again.execution_id]
+    assert [h["origin"] for h in history] == ["original", "correction"]
+    assert context["source_execution_id"] == again.execution_id and "source_revision_id" not in context
     assert history[0]["feedback"][0]["message"] == "wrong"
+    assert history[0]["feedback"][0]["execution_id"] == done.execution_id and "revision_id" not in history[0]["feedback"][0]
+    assert all("revision_id" not in entry for entry in history)
 
 
 async def test_list_recipe_candidates_filters_and_omits_full_recipe(tmp_path):
