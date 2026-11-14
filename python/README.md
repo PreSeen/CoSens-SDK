@@ -123,7 +123,7 @@ rsi = LocalRSI(client=CoSensClient(), model=ChatCompletionsModel(AsyncOpenAI(bas
 
 `LocalRSI` keeps its earlier in-process workflow names and does not yet follow the execution API; see
 [Local RSI](docs/local-rsi.md). Its evidence references now use `execution_id`, and a store written by an earlier SDK
-is upgraded once when first opened. Generation runs while you wait on a candidate, so always wait for it. Each new
+is upgraded once when first opened (stop older LocalRSI processes first; downgrading a store is not supported). Generation runs while you wait on a candidate, so always wait for it. Each new
 version is uploaded without its evidence references. To continue a Recipe on another machine, find it with
 `search_recipes` or `list_recipes`, read it with `get_recipe` and pass it as `create_task(..., recipe=...)`. See
 `examples/04_local_rsi.py`.

@@ -7,6 +7,8 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 
+from ..errors import RSIError
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS artifacts(
   id TEXT PRIMARY KEY, name TEXT NOT NULL, content TEXT NOT NULL, content_hash TEXT NOT NULL);
@@ -51,6 +53,29 @@ def fingerprint(value):
 STORE_VERSION = 1
 
 
+class LocalStoreUpgradeError(RSIError):
+    """Opening the store would need an upgrade this release cannot make; the store is left as it was."""
+
+    def __init__(self, message, *, path, candidate_id=None, column=None):
+        super().__init__(message)
+        self.path = path
+        self.candidate_id = candidate_id
+        self.column = column
+
+
+class _RowNotUpgraded(Exception):
+    def __init__(self, candidate_id, column, reason):
+        super().__init__(reason)
+        self.candidate_id, self.column, self.reason = candidate_id, column, reason
+
+
+def _rename(item, old, new, convert):
+    """A copy of `item` whose key `old` becomes `new`, with its value passed through `convert`."""
+    item = dict(item)
+    item[new] = convert(item.pop(old))
+    return item
+
+
 def _execution_refs(value, execution_of):
     """`value` with every {revision_id, event_id} evidence reference turned into {execution_id, event_id}."""
     if isinstance(value, list):
@@ -58,56 +83,79 @@ def _execution_refs(value, execution_of):
     if not isinstance(value, dict):
         return value
     if "revision_id" in value and "event_id" in value:
-        value = {("execution_id" if key == "revision_id" else key): (execution_of(item) if key == "revision_id" else item)
-                 for key, item in value.items()}
+        value = _rename(value, "revision_id", "execution_id", execution_of)
     return {key: _execution_refs(item, execution_of) for key, item in value.items()}
+
+
+def _execution_feedback(item, execution_of):
+    if "revision_id" not in item:
+        return item
+    return _rename(item, "revision_id", "execution_id", execution_of)
 
 
 def _execution_context(context, execution_of):
     """A frozen learning context naming executions: its source, each history entry, and that entry's feedback."""
-    context = dict(context)
     if "source_revision_id" in context:
-        context["source_execution_id"] = execution_of(context.pop("source_revision_id"))
+        context = _rename(context, "source_revision_id", "source_execution_id", execution_of)
+    if "history" not in context:
+        return context
     history = []
-    for entry in context.get("history", []):
-        entry = dict(entry)
+    for entry in context["history"]:
         if "revision_id" in entry:
-            entry["execution_id"] = execution_of(entry.pop("revision_id"))
+            entry = _rename(entry, "revision_id", "execution_id", execution_of)
         if entry.get("origin") == "revision":
-            entry["origin"] = "correction"
+            entry = {**entry, "origin": "correction"}
         if "feedback" in entry:
-            entry["feedback"] = [{**{k: v for k, v in item.items() if k != "revision_id"}, "execution_id": execution_of(item["revision_id"])}
-                                 if "revision_id" in item else item for item in entry["feedback"]]
+            feedback = []
+            for item in entry["feedback"]:
+                feedback.append(_execution_feedback(item, execution_of))
+            entry = {**entry, "feedback": feedback}
         history.append(entry)
-    if "history" in context:
-        context["history"] = history
-    return context
+    return {**context, "history": history}
 
 
-def _name_executions(db):
-    """Rewrite stored learning rows written with revision keys; a row whose hash does not match its text stops the upgrade."""
-    def execution_of(revision_id):
-        row = db.execute("SELECT execution_id FROM revisions WHERE id=?", (revision_id,)).fetchone()
-        if row is None:
-            raise LookupError(f"stored Recipe data names revision {revision_id}, which is not in this store")
-        return row["execution_id"]
+def _rewritten(row, column, sha_column, rewrite, execution_of):
+    """New (text, sha) for a hashed column that names revisions, None when nothing changes; refuses a changed row."""
+    if row[column] is None:
+        return None
+    value = json.loads(row[column])
+    try:
+        renamed = rewrite(value, execution_of)
+    except LookupError as error:
+        raise _RowNotUpgraded(row["id"], column, str(error)) from error
+    if renamed == value:
+        return None
+    # LocalStore writes these columns as canonical_json(value) with sha = fingerprint(value).
+    if fingerprint(value) != row[sha_column]:
+        raise _RowNotUpgraded(row["id"], column, f"stored {column} does not match its hash")
+    return canonical_json(renamed), fingerprint(renamed)
+
+
+def _upgrade_evidence_to_executions(db):
+    """Rewrite stored learning rows written with revision keys; any row it cannot rewrite stops the whole upgrade."""
+    def resolver(candidate_id):
+        def execution_of(revision_id):
+            found = db.execute("SELECT execution_id FROM revisions WHERE id=?", (revision_id,)).fetchone()
+            if found is None:
+                raise LookupError(f"Recipe candidate {candidate_id} names revision {revision_id}, which is not in this store")
+            return found["execution_id"]
+        return execution_of
 
     for row in db.execute("SELECT id,context_json,context_sha,recipe_json,recipe_sha,attribution_json FROM recipe_candidates").fetchall():
+        execution_of = resolver(row["id"])
         updates = {}
-        # LocalStore writes these columns as canonical_json(value) with sha = fingerprint(value).
-        for column, sha_column, rewrite in (("context_json", "context_sha", _execution_context), ("recipe_json", "recipe_sha", _execution_refs)):
-            if row[column] is None:
-                continue
-            value = json.loads(row[column])
-            renamed = rewrite(value, execution_of)
-            if renamed == value:
-                continue
-            if fingerprint(value) != row[sha_column]:
-                raise ValueError(f"Recipe candidate {row['id']}: stored {column} does not match its hash; the store was not upgraded")
-            updates[column], updates[sha_column] = canonical_json(renamed), fingerprint(renamed)
+        context = _rewritten(row, "context_json", "context_sha", _execution_context, execution_of)
+        if context is not None:
+            updates["context_json"], updates["context_sha"] = context
+        recipe = _rewritten(row, "recipe_json", "recipe_sha", _execution_refs, execution_of)
+        if recipe is not None:
+            updates["recipe_json"], updates["recipe_sha"] = recipe
         if row["attribution_json"] is not None:
             attribution = json.loads(row["attribution_json"])
-            renamed = _execution_refs(attribution, execution_of)
+            try:
+                renamed = _execution_refs(attribution, execution_of)
+            except LookupError as error:
+                raise _RowNotUpgraded(row["id"], "attribution_json", str(error)) from error
             if renamed != attribution:
                 updates["attribution_json"] = canonical_json(renamed)
         if updates:
@@ -129,7 +177,12 @@ class LocalStore:
         self._db.execute("PRAGMA foreign_keys=ON")
         self._db.executescript(SCHEMA)
         self._lock = threading.RLock()
-        self._upgrade()
+        self._path = path
+        try:
+            self._upgrade()
+        except BaseException:
+            self._db.close()
+            raise
 
     def _upgrade(self):
         """Bring an older database forward in place; 0.6's unused Memory columns stay because older SQLite cannot drop them."""
@@ -138,9 +191,21 @@ class LocalStore:
                 db.execute("ALTER TABLE recipe_heads ADD COLUMN remote_version INTEGER")
                 # 0.6 published to Memory, so no version is in the Recipe store yet.
                 db.execute("UPDATE recipe_candidates SET publish_state='pending' WHERE publish_state IS NOT NULL")
+            version = db.execute("PRAGMA user_version").fetchone()[0]
+            if version > STORE_VERSION:
+                raise LocalStoreUpgradeError(
+                    f"LocalRSI store {self._path} is at version {version}, but this release reads version {STORE_VERSION}: "
+                    "this store was written by a newer cosens-sdk. Upgrade cosens-sdk to open it.", path=self._path)
             # Once, in this transaction: earlier stores named revisions in evidence references and learning history.
-            if db.execute("PRAGMA user_version").fetchone()[0] < STORE_VERSION:
-                _name_executions(db)
+            if version < STORE_VERSION:
+                try:
+                    _upgrade_evidence_to_executions(db)
+                except _RowNotUpgraded as stop:
+                    raise LocalStoreUpgradeError(
+                        f"Could not upgrade LocalRSI store {self._path}: Recipe candidate {stop.candidate_id}, "
+                        f"{stop.column}: {stop.reason}; nothing was changed. To go on, open the store with the previous "
+                        "cosens-sdk release, or move the file aside and start a new store.",
+                        path=self._path, candidate_id=stop.candidate_id, column=stop.column) from stop.__cause__
                 db.execute(f"PRAGMA user_version={STORE_VERSION}")
 
     @contextmanager

@@ -5,7 +5,8 @@ import sqlite3
 
 import pytest
 
-from cosens.local.store import LocalStore, canonical_json, fingerprint
+from cosens.local import LocalStoreUpgradeError
+from cosens.local.store import STORE_VERSION, LocalStore, canonical_json, fingerprint
 from local_rsi_helpers import complete_execution, first_revision, make_rsi, recipe_reply
 
 COLUMNS = "id,context_json,context_sha,recipe_json,recipe_sha,attribution_json"
@@ -32,7 +33,21 @@ async def learned_store(tmp_path):
     learned = await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
     assert learned.status == "candidate"
     await rsi.aclose()
-    return tmp_path / "state.sqlite3", learned.recipe_candidate_id
+    path = tmp_path / "state.sqlite3"
+    add_imported_candidate(path, task.task_id)
+    return path, learned.recipe_candidate_id
+
+
+def add_imported_candidate(path, task_id):
+    """A version imported from the Recipe store: empty history, no source execution, no evidence references."""
+    context = {"schema": "workflow-recipe-context-v2", "task_id": task_id, "history": [], "initial": True,
+               "memory": {"status": "not_requested", "items": []},
+               "imported_from": {"recipe_id": "team_recipe", "origin": "uploaded", "version": 3}}
+    recipe = {"title": "T", "when": "W", "when_not": "N", "steps": [{"id": "s1", "instruction": "I"}], "lessons": []}
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO recipe_candidates(id,task_id,revision_id,state,phase,context_json,context_sha,recipe_json,recipe_sha) "
+                   "VALUES('recipe_candidate_imported',?,NULL,'candidate','completed',?,?,?,?)",
+                   (task_id, canonical_json(context), fingerprint(context), canonical_json(recipe), fingerprint(recipe)))
 
 
 def rows(path):
@@ -111,7 +126,8 @@ async def test_an_old_store_upgrades_to_execution_ids_once(tmp_path):
     current = rows(path)
     to_revisions(path)
     old = rows(path)
-    assert len(current) == 2 and old != current
+    assert len(current) == 3 and old != current
+    assert old[2] == current[2]  # the imported version has nothing to rename
     assert '"revision_id"' in old[1][1] and '"origin":"revision"' in old[1][1] and '"source_revision_id"' in old[1][1]
 
     LocalStore(path).close()
@@ -135,8 +151,13 @@ async def test_an_upgrade_stops_on_a_changed_hash_and_changes_nothing(tmp_path):
     to_revisions(path, break_hash_of=candidate_id)  # the second row: the first is rewritten before the upgrade stops
     old = rows(path)
     assert candidate_id == old[1][0]
-    with pytest.raises(ValueError, match="hash"):
+    with pytest.raises(LocalStoreUpgradeError) as caught:
         LocalStore(path)
+    message = str(caught.value)
+    for part in (str(path), candidate_id, "recipe_json", "does not match its hash", "nothing was changed",
+                 "previous cosens-sdk release", "move the file aside"):
+        assert part in message
+    assert (caught.value.path, caught.value.candidate_id, caught.value.column) == (str(path), candidate_id, "recipe_json")
     assert rows(path) == old and user_version(path) == 0
 
 
@@ -144,6 +165,35 @@ async def test_an_upgrade_stops_on_a_revision_it_cannot_resolve(tmp_path):
     path, _ = await learned_store(tmp_path)
     to_revisions(path, unknown_execution=True)
     old = rows(path)
-    with pytest.raises(LookupError, match="revision_missing"):
+    with pytest.raises(LocalStoreUpgradeError) as caught:
         LocalStore(path)
+    message = str(caught.value)
+    for part in ("revision_missing", old[0][0], "context_json", "nothing was changed", "move the file aside"):
+        assert part in message
+    assert isinstance(caught.value.__cause__, LookupError) and old[0][0] in str(caught.value.__cause__)
     assert rows(path) == old and user_version(path) == 0
+
+
+async def test_a_store_from_a_newer_sdk_is_refused(tmp_path):
+    path = tmp_path / "s.sqlite3"
+    LocalStore(path).close()
+    with sqlite3.connect(path) as db:
+        db.execute(f"PRAGMA user_version={STORE_VERSION + 1}")
+    with pytest.raises(LocalStoreUpgradeError, match="this store was written by a newer cosens-sdk") as caught:
+        LocalStore(path)
+    assert str(path) in str(caught.value)
+    assert user_version(path) == STORE_VERSION + 1
+
+
+async def test_a_0_6_store_gets_both_upgrades_in_one_open(tmp_path):
+    path, _ = await learned_store(tmp_path)
+    current = rows(path)
+    to_revisions(path)
+    with sqlite3.connect(path) as db:  # 0.6 had no remote_version and published to Memory
+        db.execute("ALTER TABLE recipe_heads DROP COLUMN remote_version")
+        db.execute("UPDATE recipe_candidates SET publish_state='published'")
+    LocalStore(path).close()
+    assert rows(path) == current and user_version(path) == STORE_VERSION
+    with sqlite3.connect(path) as db:
+        assert "remote_version" in {row[1] for row in db.execute("PRAGMA table_info(recipe_heads)")}
+        assert {row[0] for row in db.execute("SELECT publish_state FROM recipe_candidates")} == {"pending"}

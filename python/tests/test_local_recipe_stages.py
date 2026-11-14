@@ -173,8 +173,6 @@ def test_memory_snapshot_freezes_the_recalled_sources_up_to_the_item_limit():
         stages.memory_snapshot([{"text": "no id"}])
 
 
-
-
 def test_an_evidence_reference_names_an_execution_not_a_revision():
     index = stages.evidence_index(context())
     assert stages.valid_evidence({"execution_id": "exec1", "event_id": "e1"}, index)
