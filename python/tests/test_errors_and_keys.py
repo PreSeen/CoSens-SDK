@@ -42,7 +42,7 @@ def test_missing_request_id_header_is_none():
      {'code': 'insufficient_credits', 'retryable': False, 'phase': 'analyzing', 'upstream_status': 402,
       'upstream_code': 'gateway_credit_insufficient'}),
     ({'error': 'ValueError', 'error_detail': None, 'phase': 'generating'},
-     {'code': 'ValueError', 'retryable': False, 'phase': 'generating', 'upstream_status': None, 'upstream_code': None}),
+     {'code': 'ValueError', 'retryable': None, 'phase': 'generating', 'upstream_status': None, 'upstream_code': None}),
 ])
 @pytest.mark.parametrize('asynchronous', [False, True])
 async def test_wait_raises_typed_failure(payload, expected, asynchronous):

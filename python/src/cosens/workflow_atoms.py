@@ -258,6 +258,11 @@ class AsyncWorkflowAtoms:
                                         body=_recipe_data(model, max_completion_tokens) or {})
 
     async def resume_learning(self, execution_id, *, model=None, max_completion_tokens=None):
+        """Retry a ``failed``, ``interrupted`` or ``awaiting_runner`` learning, optionally with a new budget.
+
+        A learning that is active or ``completed`` comes back unchanged; asking it for a
+        different ``max_completion_tokens`` then gets a 422.
+        """
         return await self._http.request("POST", f"/executions/{path_part(execution_id)}/resume",
                                         body=_recipe_data(model, max_completion_tokens) or None)
 

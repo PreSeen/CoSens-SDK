@@ -52,10 +52,12 @@ async def _run(asynchronous, server, name, *args, **kwargs):
 
 @pytest.fixture(autouse=True)
 def no_sleep(monkeypatch):
-    async def asleep(_):
-        return None
-    monkeypatch.setattr('cosens.workflow_atoms.time.sleep', lambda _: None)
+    sleeps = []
+    async def asleep(seconds):
+        sleeps.append(seconds)
+    monkeypatch.setattr('cosens.workflow_atoms.time.sleep', sleeps.append)
     monkeypatch.setattr('cosens.workflow_atoms.asyncio.sleep', asleep)
+    return sleeps
 
 
 @pytest.mark.parametrize('asynchronous', MODES)
@@ -113,11 +115,32 @@ async def test_invalid_learning_budget_is_rejected_before_sending(asynchronous, 
 
 
 @pytest.mark.parametrize('asynchronous', MODES)
-async def test_wait_learning_returns_the_completed_learning(asynchronous):
+async def test_wait_learning_returns_the_completed_learning(asynchronous, no_sleep):
     server = Server([_learning('queued'), _learning('running'), _learning('completed', current=True)])
     learning = await _run(asynchronous, server, 'wait_learning', 'e1', timeout=60)
     assert learning['status'] == 'completed' and learning['current'] is True
     assert [entry[:2] for entry in server.seen] == [('GET', '/api/executions/e1')] * 3
+    assert no_sleep == [2.0, 4.0]
+
+
+@pytest.mark.parametrize('asynchronous', MODES)
+async def test_wait_learning_never_sleeps_past_the_deadline(asynchronous, no_sleep):
+    server = Server([_learning('queued'), _learning('completed')])
+    await _run(asynchronous, server, 'wait_learning', 'e1', timeout=0.5)
+    assert len(no_sleep) == 1 and 0 < no_sleep[0] <= 0.5
+
+
+@pytest.mark.parametrize('asynchronous', MODES)
+async def test_wait_learning_rejects_an_unknown_status(asynchronous):
+    with pytest.raises(cosens.RSIRecoveryRequired, match='paused'):
+        await _run(asynchronous, Server([_learning('paused')]), 'wait_learning', 'e1', timeout=1)
+
+
+@pytest.mark.parametrize('asynchronous', MODES)
+async def test_wait_learning_stopped_carries_the_request_id(asynchronous):
+    with pytest.raises(RSILearningStopped) as caught:
+        await _run(asynchronous, Server([_learning('interrupted')]), 'wait_learning', 'e1', timeout=1)
+    assert caught.value.request_id == 'req-9'
 
 
 @pytest.mark.parametrize('asynchronous', MODES)
@@ -132,11 +155,25 @@ async def test_wait_learning_raises_typed_failure_from_error_detail(asynchronous
     assert not isinstance(error, RSILearningStopped)
 
 
-def test_failure_without_error_detail_uses_error_and_is_not_retryable():
-    error = RSILearningFailed.from_learning(_learning('failed', error='context_changed', phase='generating'))
+def test_failure_without_error_detail_uses_error_and_leaves_retryable_unknown():
+    error = RSILearningFailed.from_learning(_learning('failed', error='previous_version_failed', phase='generating'))
     assert (error.execution_id, error.code, error.retryable, error.phase, error.upstream_status, error.upstream_code) == \
-        ('e1', 'context_changed', False, 'generating', None, None)
-    assert error.message == 'context_changed'
+        ('e1', 'previous_version_failed', None, 'generating', None, None)
+    assert error.message == 'previous_version_failed'
+
+
+def test_failure_with_error_detail_missing_entirely():
+    assert RSILearningFailed.from_learning({'execution_id': 'e1', 'status': 'failed', 'error': 'x'}).retryable is None
+
+
+def test_failure_ignores_an_error_detail_that_is_not_an_object():
+    assert RSILearningFailed.from_learning(_learning('failed', error='x', error_detail='bare')).code == 'x'
+
+
+def test_stopped_without_a_material_gap_leaves_out_the_parenthesis():
+    assert '()' not in str(RSILearningStopped(_learning('awaiting_material')))
+    assert '(no_actionable_feedback)' in str(RSILearningStopped(_learning('awaiting_material', material_gap='no_actionable_feedback')))
+    assert RSILearningStopped(_learning('paused')).status == 'paused'
 
 
 @pytest.mark.parametrize('asynchronous', MODES)

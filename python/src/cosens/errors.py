@@ -47,11 +47,12 @@ class RSILearningFailed(RSIError):
     """An execution's learning ended ``failed``.
 
     ``code`` is the server's stable failure code. ``retryable`` is True when
-    ``resume_learning`` may succeed and False otherwise, including when the
-    learning carries no ``error_detail``.
+    ``resume_learning`` may succeed, False when it will not, and None when the
+    learning does not say (a bare code such as ``previous_version_failed`` has
+    no ``error_detail`` and can still be resumed).
     """
 
-    def __init__(self, execution_id, code, message, retryable=False, phase=None, upstream_status=None,
+    def __init__(self, execution_id, code, message, retryable=None, phase=None, upstream_status=None,
                  upstream_code=None, *, request_id=None):
         super().__init__(f"Learning failed for execution {execution_id}: {code}")
         self.execution_id = execution_id
@@ -66,10 +67,11 @@ class RSILearningFailed(RSIError):
     @classmethod
     def from_learning(cls, learning, *, request_id=None):
         """Build the error from a failed learning view as returned by the service."""
-        detail = learning.get("error_detail") or {}
+        detail = learning.get("error_detail")
+        detail = detail if isinstance(detail, dict) else {}
         code = detail.get("code") or learning.get("error") or "failed"
         return cls(learning.get("execution_id"), code, detail.get("message") or code,
-                   retryable=detail.get("retryable") is True, phase=detail.get("phase", learning.get("phase")),
+                   retryable=detail.get("retryable"), phase=detail.get("phase", learning.get("phase")),
                    upstream_status=detail.get("upstream_status"), upstream_code=detail.get("upstream_code"),
                    request_id=request_id)
 
@@ -77,7 +79,7 @@ class RSILearningFailed(RSIError):
 _STOPPED = {
     "interrupted": "was interrupted; call resume_learning to continue it",
     "awaiting_runner": "is waiting for a model; call resume_learning with a model",
-    "awaiting_material": "kept the current Recipe version ({gap}); learning more needs feedback or evidence "
+    "awaiting_material": "kept the current Recipe version{gap}; learning more needs feedback or evidence "
                          "in a new execution with previous_execution_id",
 }
 
@@ -95,5 +97,6 @@ class RSILearningStopped(RSIError):
         self.execution_id = learning.get("execution_id")
         self.status = learning.get("status")
         self.request_id = request_id
-        action = _STOPPED[self.status].format(gap=learning.get("material_gap"))
+        gap = learning.get("material_gap")
+        action = _STOPPED.get(self.status, "stopped").format(gap=f" ({gap})" if gap else "")
         super().__init__(f"Learning for execution {self.execution_id} {action}")
