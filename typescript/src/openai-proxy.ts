@@ -284,10 +284,15 @@ export class OpenAIWrapper {
         if(!turn.inputArtifact){turn.inputPending=true;this.save(turn);const ref=await this.client.atoms.artifact({name:'input.json',content:JSON.stringify({request:params})});turn.inputArtifact=ref.artifact_id;turn.inputPending=false;this.save(turn);}
         const task=await this.client.atoms.createTask({source:'new_task',objective:turn.objective,artifacts:[turn.inputArtifact!],key:'task:'+turn.turnId});turn.taskId=task.task_id;this.save(turn);
       }
-      const selected=turn.frozenContext.recipe;
-      const execution=await this.client.atoms.startExecution(turn.taskId!,{key:'execution:'+turn.turnId,model:params.model,...(selected.status==='matched'?{recipeId:selected.recipe_id}:{})});
+      const selected = turn.frozenContext.recipe;
+      const matched = selected.status === 'matched';
+      const execution = await this.client.atoms.startExecution(turn.taskId!, { key: 'execution:' + turn.turnId, model: params.model, ...(matched ? { recipeId: selected.recipe_id } : {}) });
       // Verify the service bound the same immutable method we will inject.
-      if(selected.status==='matched'&&(execution.request?.method?.recipe_id!==selected.recipe_id||execution.request?.method?.version!==selected.version))throw new RSIRecoveryRequired('Selected Recipe changed before execution');turn.executionId=execution.execution_id;turn.requestSha256=execution.request_sha256;this.save(turn);
+      const method = execution.request?.method;
+      if (matched && (method?.recipe_id !== selected.recipe_id || method?.version !== selected.version)) {
+        throw new RSIRecoveryRequired('Selected Recipe changed before execution');
+      }
+      turn.executionId = execution.execution_id; turn.requestSha256 = execution.request_sha256; this.save(turn);
     }
     turn.visibleInput=userText(path,params);
     if(turn.executionId)turn.executionEvents=[...(turn.executionEvents??[]),...this.toolOutputEvents(turn,params)];

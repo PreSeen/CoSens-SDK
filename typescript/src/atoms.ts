@@ -1,6 +1,6 @@
 import { RSILearningFailedError, RSILearningStoppedError, RSIRecoveryRequired } from './errors.js';
 import { pathPart, stableKey, Transport, type TransportOptions } from './http.js';
-import { performance } from 'node:perf_hooks';
+import { clock } from './clock.js';
 import { startWorkflow, type WorkflowSnapshot, type WorkflowStartOptions } from './workflow-start.js';
 import { documentBytes, documentMetadata, documentStatusBody, uploadTarget, type DocumentUploadGrant, type DocumentUploadMetadata } from './document-upload.js';
 
@@ -22,6 +22,10 @@ function boundedInteger(value: number, name: string, maximum: number, minimum = 
   return value;
 }
 
+/** A new execution may follow a Recipe or recall Memory; a correction (`previousExecutionId`) takes neither. */
+export type StartExecutionOptions = { key: string; model?: string } & (
+  | { previousExecutionId?: undefined; recipeId?: string; recallMemory?: boolean }
+  | { previousExecutionId: string; recipeId?: undefined; recallMemory?: false });
 export type WorkflowArtifactRef = string | { artifact_id: string; role: 'original_input' | 'submitted_output' | 'acceptance' | 'external_trace' };
 export type WorkflowOutputRef = { artifact_id: string; role: 'submitted_output' };
 export type WorkflowEvent = { id: string; kind: string; payload: Record<string, unknown> };
@@ -40,8 +44,6 @@ const RECIPE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 /** Learning states the service moves on by itself, and states only the caller can change. */
 const LEARNING_IN_FLIGHT = new Set(['queued', 'running', 'awaiting_previous_version']);
 const LEARNING_STOPPED = new Set(['interrupted', 'awaiting_runner', 'awaiting_material']);
-/** Time source for waitLearning; tests replace it. */
-export const clock = { now: () => performance.now(), sleep: (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)) };
 
 /** The learning when waiting is over, undefined while it is in flight; throws on failure, a stop or an unknown state. */
 function waitedLearning(execution: any, executionId: string): any {
@@ -117,7 +119,7 @@ export class Atoms {
     return this.http.request('POST', `/tasks/${pathPart(taskId)}/context`, { expected_context_version: expectedContextVersion, ...(objective === undefined ? {} : { objective }), ...(artifacts === undefined ? {} : { artifacts }), ...(selfContained === undefined ? {} : { self_contained: selfContained }) });
   }
   /** Start an execution; with `previousExecutionId` it is a correction of that execution and takes only `model`. */
-  startExecution(taskId: string, { key, model, recipeId, recallMemory = false, previousExecutionId }: { key: string; model?: string; recipeId?: string; recallMemory?: boolean; previousExecutionId?: string }) {
+  startExecution(taskId: string, { key, model, recipeId, recallMemory = false, previousExecutionId }: StartExecutionOptions) {
     if (typeof recallMemory !== 'boolean') throw new TypeError('recallMemory must be boolean');
     if (previousExecutionId !== undefined) {
       if (recipeId !== undefined || recallMemory) throw new TypeError('a correction takes only previousExecutionId and model');

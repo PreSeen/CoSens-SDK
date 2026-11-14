@@ -1,4 +1,5 @@
-import { CoSensClient, cosens } from '../src/index.js';
+import { Runner } from '@openai/agents';
+import { CoSensClient, TaskWorkflowRunner, cosens } from '../src/index.js';
 const client=new CoSensClient({apiKey:'service-key'});
 const model='public-model';
 client.atoms.createTask({source:'new_task',objective:'Produce a report',selfContained:true,key:'task'});
@@ -32,4 +33,19 @@ client.atoms.prepare({objective:'task',key:'old'});
 client.atoms.startAttribution('revision',{key:'old'});
 // @ts-expect-error Credentials are taken from Authorization, not model configuration.
 client.atoms.learn('execution',{modelApi:{model:'model',apiKey:'key'}});
-void cosens;
+// @ts-expect-error A correction takes no Recipe.
+client.atoms.startExecution('task',{key:'correction-recipe',previousExecutionId:'execution',recipeId:'recipe'});
+// @ts-expect-error A correction does not recall Memory.
+client.atoms.startExecution('task',{key:'correction-memory',previousExecutionId:'execution',recallMemory:true});
+client.atoms.startExecution('task',{key:'correction-model',previousExecutionId:'execution',model,recallMemory:false});
+// @ts-expect-error A snapshot names the execution, not a revision.
+client.start({task_id:'task',revision_id:'revision'},{phase:'correct',requestKey:'correction'});
+
+const wrapped=cosens({responses:{create:async(_params:unknown)=>({})}});
+wrapped.cosens.generateRecipe({turnId:'turn',maxCompletionTokens:200_000});
+// @ts-expect-error Learning is idempotent per execution and takes no key.
+wrapped.cosens.generateRecipe({turnId:'turn',requestKey:'confirmed'});
+const runner=new TaskWorkflowRunner(Runner,{mode:'auto'});
+runner.cosens.generateRecipe('turn',{model,maxCompletionTokens:200_000});
+// @ts-expect-error Learning is idempotent per execution and takes no key.
+runner.cosens.generateRecipe('turn',{requestKey:'confirmed'});

@@ -1,6 +1,6 @@
 /** Explicit host-coordinated start for a task-workflow phase. No Agent runs here. */
 import { createHash } from 'node:crypto';
-import type { Atoms, WorkflowArtifactRef } from './atoms.js';
+import type { Atoms, StartExecutionOptions, WorkflowArtifactRef } from './atoms.js';
 import { RSIApprovalUnavailable, RSIRecoveryRequired } from './errors.js';
 import { stableKey } from './http.js';
 
@@ -52,8 +52,11 @@ export async function startWorkflow(atoms: Atoms, snapshot: WorkflowSnapshot | s
       execution_id: execution?.execution_id, request_sha256: execution?.request_sha256,
       execution_request: execution?.request, execution };
   }
-  // A correction forwards recipeId and recallMemory so the atom rejects them before sending.
-  if (phase === 'correct') return atoms.startExecution(snapshot.task_id!, { key: stableKey(key!), previousExecutionId: snapshot.execution_id!, recipeId, model, recallMemory });
+  if (phase === 'correct') {
+    // Forward recipeId and recallMemory as given, typed or not, so the atom rejects them before sending.
+    const options = { key: stableKey(key!), previousExecutionId: snapshot.execution_id!, recipeId, model, recallMemory } as StartExecutionOptions;
+    return atoms.startExecution(snapshot.task_id!, options);
+  }
   if (phase === 'learn') return atoms.learn(snapshot.execution_id!, { model });
   throw new TypeError('phase must be prepare, correct or learn');
 }

@@ -3,7 +3,7 @@ import { afterEach, beforeEach, test } from 'node:test';
 import * as sdk from '../src/index.ts';
 import { CoSensClient, RSIError, RSILearningFailedError, RSILearningStoppedError, RSIRecoveryRequired } from '../src/index.ts';
 import * as http from '../src/http.ts';
-import { clock } from '../src/atoms.ts';
+import { clock } from '../src/clock.ts';
 
 const REMOVED = ['getRevision', 'startRevision', 'startRecipeCandidate', 'getRecipeCandidate', 'resumeRecipeCandidate',
   'listRecipeCandidates', 'waitWorkflowJob', 'recallContext', 'startSession', 'appendSessionEvents', 'getSessionContext', 'endSession'];
@@ -16,21 +16,23 @@ function learning(status: string, fields: Record<string, unknown> = {}) {
     memory_context: 'captured', initial: true, material_gap: null, max_completion_tokens: 200_000, ...fields };
 }
 
-/** Records [method, path, body, idempotency key]; serves the execution view from `views` in order. */
+/** Records [method, path, body, idempotency key] and each query; serves the execution view from `views` in order. */
 function server(views: any[] = []) {
   const seen: Array<[string, string, any, string | null]> = [];
+  const queries: Array<Record<string, string>> = [];
   const queue = [...views];
   const fetcher: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     const body = init?.body === undefined ? undefined : JSON.parse(String(init.body));
     seen.push([init?.method ?? 'GET', url.pathname, body, new Headers(init?.headers).get('idempotency-key')]);
+    queries.push(Object.fromEntries(url.searchParams));
     if ((init?.method ?? 'GET') === 'GET' && url.pathname === '/api/executions/e1') {
       const view = queue.length > 1 ? queue.shift() : queue[0];
       return new Response(JSON.stringify({ execution_id: 'e1', task_id: 't1', learning: view }), { headers: { 'x-request-id': 'req-9' } });
     }
     return new Response(JSON.stringify({ execution_id: 'e1', status: 'queued' }));
   };
-  return { seen, client: new CoSensClient({ apiKey: 'test-key', fetch: fetcher }) };
+  return { seen, queries, client: new CoSensClient({ apiKey: 'test-key', fetch: fetcher }) };
 }
 
 let sleeps: number[] = [];
@@ -146,8 +148,8 @@ test('waitLearning rejects an unknown status or a missing learning', async () =>
   await assert.rejects(server([null]).client.atoms.waitLearning('e1', { timeout: 1 }), (error: any) => error instanceof RSIRecoveryRequired && /learn/.test(error.message));
 });
 
-test('uploadRecipe sends previous_version', async () => {
-  const { seen, client } = server();
+test('the Recipe store atoms send previous_version and the exact query', async () => {
+  const { seen, queries, client } = server();
   const recipe = { title: 'T', when: 'W', when_not: 'N', steps: [{ id: 's1', instruction: 'I' }], lessons: [] };
   await client.atoms.uploadRecipe('team_recipe-1', { version: 4, recipe, previousVersion: 3 });
   await client.atoms.uploadRecipe('team_recipe-1', { version: 1, recipe });
@@ -163,6 +165,10 @@ test('uploadRecipe sends previous_version', async () => {
     ['GET', '/api/recipes', undefined],
     ['GET', '/api/recipes', undefined],
   ]);
+  assert.deepEqual(queries, [{}, {}, { version: '2' }, { limit: '5', cursor: 'c1', origin: 'generated' }, { limit: '20' }, { q: 'sort words', limit: '3' }]);
+  await client.atoms.searchRecipes('sort words');
+  await client.atoms.getRecipe('g1');
+  assert.deepEqual(queries.slice(-2), [{ q: 'sort words', limit: '10' }, {}]);
   for (const call of [() => client.atoms.uploadRecipe('a/b', { version: 1, recipe }), () => client.atoms.uploadRecipe('r', { version: 0, recipe }),
     () => client.atoms.uploadRecipe('r', { version: 2, recipe, previousVersion: 0 }), () => client.atoms.listRecipes({ origin: 'copied' as any }),
     () => client.atoms.listRecipes({ limit: 101 }), () => client.atoms.searchRecipes(''), () => client.atoms.searchRecipes('x', { limit: 51 })]) {

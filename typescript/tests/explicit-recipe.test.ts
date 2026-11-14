@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Agent } from '@openai/agents';
 import { CoSensClient, CoSensAgentRunner, cosens, RSIHTTPError, RSILearningStoppedError } from '../src/index.ts';
-import { ServiceFake } from './service-fake.ts';
+import { DEFAULT_BUDGET, ServiceFake } from './service-fake.ts';
 
 const statePath = () => join(mkdtempSync(join(tmpdir(), 'explicit-ts-')), 'state.sqlite');
 const nativeClient = () => ({
@@ -148,6 +148,7 @@ test('a stopped learning surfaces to the caller and stays resumable', async () =
   const client = new CoSensClient({ apiKey: 'test-key', fetch: service.fetch });
   await wrapper.responses.create({ model: 'model', input: 'Produce output' });
   const learning = await wrapper.cosens.generateRecipe();
+  assert.equal(learning.max_completion_tokens, DEFAULT_BUDGET); assert.deepEqual(service.requests.at(-1)!.body, {});
   assert.equal(wrapper.cosens.getTurn(wrapper.cosens.lastTurnId)?.learning?.execution_id, learning.execution_id);
   service.learnings.set(learning.execution_id, { ...service.learnings.get(learning.execution_id)!, status: 'interrupted' });
   const error: any = await client.atoms.waitLearning(learning.execution_id, { timeout: 1 }).then(() => undefined, value => value);
@@ -155,4 +156,42 @@ test('a stopped learning surfaces to the caller and stays resumable', async () =
   assert.equal((await client.atoms.resumeLearning(learning.execution_id)).status, 'queued');
   assert.equal((await client.atoms.waitLearning(learning.execution_id, { timeout: 1 })).status, 'completed');
   await wrapper.close();
+});
+
+test('the fake follows the service: keys, feedback, request hashes, a frozen model and Recipe lookups', async () => {
+  const service = new ServiceFake();
+  service.head = { recipe_id: 'recipe_1', version: 3, recipe_sha256: 'f'.repeat(64), recipe: { title: 'Head', steps: [] } };
+  const recipe = (version: number, origin = 'generated') => ({ recipe_id: 'recipe_1', origin, version, recipe: { title: `Report v${version}` } });
+  service.recipes = [recipe(1), recipe(2), { ...recipe(1, 'uploaded'), recipe_id: 'team' }];
+  const a = new CoSensClient({ apiKey: 'test-key', fetch: service.fetch }).atoms;
+  const status = (error: any) => error.statusCode;
+  const first = await a.startExecution('task_1', { key: 'same', model: 'm1' });
+  assert.equal(first.request.method.version, 3);
+  assert.equal((await a.startExecution('task_1', { key: 'same' })).execution_id, first.execution_id);
+  await assert.rejects(a.startExecution('task_1', { key: 'same', recallMemory: true }), (e: any) => status(e) === 422 && /different context/.test(e.message));
+  await assert.rejects(a.startExecution('task_1', { key: 'other-model', model: 'm2' }), (e: any) => status(e) === 422 && /frozen/.test(e.message));
+  await assert.rejects(a.submitExecution(first.execution_id, { requestSha256: 'stale', outcome: 'completed', artifacts: [{ artifact_id: 'a1', role: 'submitted_output' }] }), /request hash mismatch/);
+  await assert.rejects(a.startExecution('task_1', { key: 'early', previousExecutionId: first.execution_id }), (e: any) => status(e) === 422 && /no completed output/.test(e.message));
+  await a.submitExecution(first.execution_id, { requestSha256: first.request_sha256, outcome: 'completed', artifacts: [{ artifact_id: 'a1', role: 'submitted_output' }] });
+  const second = await a.startExecution('task_1', { key: 'other' });
+  await a.submitExecution(second.execution_id, { requestSha256: second.request_sha256, outcome: 'completed', artifacts: [{ artifact_id: 'a2', role: 'submitted_output' }] });
+  const fixFirst = await a.startExecution('task_1', { key: 'fix', previousExecutionId: first.execution_id });
+  const fixSecond = await a.startExecution('task_1', { key: 'fix', previousExecutionId: second.execution_id });
+  assert.equal(new Set([first, second, fixFirst, fixSecond].map(x => x.execution_id)).size, 4);
+  assert.equal(fixFirst.request.method.version, 3);
+  for (const [taskId, previous] of [['task_1', 'execution_99'], ['task_2', first.execution_id]] as const) {
+    await assert.rejects(a.startExecution(taskId, { key: 'fix', previousExecutionId: previous }), (e: any) => status(e) === 404);
+  }
+  await a.recordFeedback(first.execution_id, { feedback: 'Too long', source: 'human', key: 'fb' });
+  assert.equal((await a.recordFeedback(first.execution_id, { feedback: 'Too long', source: 'human', key: 'fb' })).message, 'Too long');
+  await assert.rejects(a.recordFeedback(first.execution_id, { feedback: 'Too short', source: 'human', key: 'fb' }), (e: any) => status(e) === 422 && /different feedback/.test(e.message));
+  await assert.rejects(a.learn(first.execution_id, { model: 'm2' }), /frozen/);
+  assert.equal((await a.learn(first.execution_id, { model: 'm1' })).max_completion_tokens, DEFAULT_BUDGET);
+  assert.equal((await a.getRecipe('recipe_1')).version, 2);
+  assert.equal((await a.getRecipe('recipe_1', { version: 1 })).version, 1);
+  await assert.rejects(a.getRecipe('recipe_1', { version: 9 }), (e: any) => status(e) === 404);
+  await assert.rejects(a.getRecipe('missing'), (e: any) => status(e) === 404);
+  assert.deepEqual((await a.listRecipes({ limit: 100, origin: 'generated' })).items.map((x: any) => [x.recipe_id, x.version]), [['recipe_1', 2]]);
+  assert.deepEqual((await a.searchRecipes('report v2')).items.map((x: any) => x.recipe_id), ['recipe_1']);
+  assert.deepEqual((await a.searchRecipes('nothing')).items, []);
 });
