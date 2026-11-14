@@ -1,13 +1,14 @@
 """Recipe candidates and version chains: creation, generation, failure and publication."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
 from uuid import uuid4
 
-from ..atoms_helpers import recipe_request_key, stable_key
-from ..errors import RSICandidateFailed, RSIError, RSIHTTPError
+from ..atoms_helpers import stable_key
+from ..errors import RSIError, RSIHTTPError
 from ..models import result
 from ..workflow_atoms import _RECIPE_ID, _job_timeout
 from .models import ModelUnavailable
@@ -23,6 +24,47 @@ PARENT_FAILED = {"code": "parent_failed", "message": "The Recipe this candidate 
                  "retryable": True, "phase": None, "upstream_status": None, "upstream_code": None}
 INTERRUPTED = {"code": "interrupted", "message": "The process generating this candidate stopped; resume to retry.",
                "retryable": True, "phase": None, "upstream_status": None, "upstream_code": None}
+
+
+def recipe_request_key(task_id, revision_id, max_completion_tokens=None):
+    """Deterministic generation key: one candidate per revision and completion budget."""
+    budget = "" if max_completion_tokens is None else str(max_completion_tokens)
+    digest = hashlib.sha256(f"recipe:{task_id}:{revision_id}:{budget}".encode("utf-8")).hexdigest()
+    return "recipe-" + digest
+
+
+class RSICandidateFailed(RSIError):
+    """A local Recipe candidate ended in ``failed``.
+
+    ``code`` is the stable failure code; ``retryable`` is True when
+    ``resume_recipe_candidate`` may succeed and False when it will not.
+    """
+
+    def __init__(self, message, *, code, candidate_id=None, phase=None, retryable=None,
+                 upstream_status=None, upstream_code=None, request_id=None):
+        super().__init__(message)
+        self.code = code
+        self.candidate_id = candidate_id
+        self.phase = phase
+        self.retryable = retryable
+        self.upstream_status = upstream_status
+        self.upstream_code = upstream_code
+        self.request_id = request_id
+
+    @classmethod
+    def from_candidate(cls, candidate):
+        candidate_id = candidate.get("recipe_candidate_id")
+        detail = candidate.get("error_detail")
+        if isinstance(detail, dict):
+            code = detail.get("code") or candidate.get("error") or "failed"
+            message = detail.get("message") or code
+            return cls(f"Recipe candidate {candidate_id} failed: {message}", code=code, candidate_id=candidate_id,
+                       phase=detail.get("phase", candidate.get("phase")), retryable=detail.get("retryable"),
+                       upstream_status=detail.get("upstream_status"), upstream_code=detail.get("upstream_code"),
+                       request_id=getattr(candidate, "request_id", None))
+        code = candidate.get("error") or "failed"
+        return cls(f"Recipe candidate {candidate_id} failed: {code}", code=code, candidate_id=candidate_id,
+                   phase=candidate.get("phase"), request_id=getattr(candidate, "request_id", None))
 
 
 class ParentChanged(ValueError):
@@ -445,15 +487,15 @@ class LocalRecipeLifecycle:
             head = db.execute("SELECT remote_version FROM recipe_heads WHERE recipe_id=?", (lineage["recipe_id"],)).fetchone()
         recipe_id, recipe, remote = lineage["recipe_id"], upload_form(json.loads(row["recipe_json"])), head["remote_version"]
         try:
-            # base_version is the last version the server is known to have, so a version uploaded elsewhere is a conflict.
+            # previous_version is the last version the server is known to have, so a version uploaded elsewhere is a conflict.
             try:
-                await self._atoms.upload_recipe(recipe_id, version=lineage["version"], recipe=recipe, base_version=remote)
+                await self._atoms.upload_recipe(recipe_id, version=lineage["version"], recipe=recipe, previous_version=remote)
             except RSIHTTPError as exc:
                 ours = await self._own_server_version(recipe_id, exc, remote)
                 if ours is None:
                     raise
                 remote = ours
-                await self._atoms.upload_recipe(recipe_id, version=lineage["version"], recipe=recipe, base_version=remote)
+                await self._atoms.upload_recipe(recipe_id, version=lineage["version"], recipe=recipe, previous_version=remote)
             state = "published"
         except RSIHTTPError as exc:
             state = "publish_conflict" if exc.status_code == 409 else "failed"

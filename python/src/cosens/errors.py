@@ -43,38 +43,57 @@ class SessionHistoryChanged(RSIError):
     """A previously acknowledged Session prefix was rewritten."""
 
 
-class RSICandidateFailed(RSIError):
-    """A Recipe candidate ended in ``failed``.
+class RSILearningFailed(RSIError):
+    """An execution's learning ended ``failed``.
 
     ``code`` is the server's stable failure code. ``retryable`` is True when
-    ``resume_recipe_candidate`` may succeed, False when it will not, and None
-    when the server did not say (servers without ``error_detail``).
+    ``resume_learning`` may succeed and False otherwise, including when the
+    learning carries no ``error_detail``.
     """
 
-    def __init__(self, message, *, code, candidate_id=None, phase=None, retryable=None,
-                 upstream_status=None, upstream_code=None, request_id=None):
-        super().__init__(message)
+    def __init__(self, execution_id, code, message, retryable=False, phase=None, upstream_status=None,
+                 upstream_code=None, *, request_id=None):
+        super().__init__(f"Learning failed for execution {execution_id}: {code}")
+        self.execution_id = execution_id
         self.code = code
-        self.candidate_id = candidate_id
-        self.phase = phase
+        self.message = message
         self.retryable = retryable
+        self.phase = phase
         self.upstream_status = upstream_status
         self.upstream_code = upstream_code
         self.request_id = request_id
 
     @classmethod
-    def from_candidate(cls, candidate):
-        """Build the error from a failed candidate as returned by the service."""
-        candidate_id = candidate.get("recipe_candidate_id")
-        detail = candidate.get("error_detail")
-        if isinstance(detail, dict):
-            code = detail.get("code") or candidate.get("error") or "failed"
-            message = detail.get("message") or code
-            return cls(f"Recipe candidate {candidate_id} failed: {message}", code=code, candidate_id=candidate_id,
-                       phase=detail.get("phase", candidate.get("phase")), retryable=detail.get("retryable"),
-                       upstream_status=detail.get("upstream_status"), upstream_code=detail.get("upstream_code"),
-                       request_id=getattr(candidate, "request_id", None))
-        # Servers before error_detail report only a bare code in ``error``.
-        code = candidate.get("error") or "failed"
-        return cls(f"Recipe candidate {candidate_id} failed: {code}", code=code, candidate_id=candidate_id,
-                   phase=candidate.get("phase"), request_id=getattr(candidate, "request_id", None))
+    def from_learning(cls, learning, *, request_id=None):
+        """Build the error from a failed learning view as returned by the service."""
+        detail = learning.get("error_detail") or {}
+        code = detail.get("code") or learning.get("error") or "failed"
+        return cls(learning.get("execution_id"), code, detail.get("message") or code,
+                   retryable=detail.get("retryable") is True, phase=detail.get("phase", learning.get("phase")),
+                   upstream_status=detail.get("upstream_status"), upstream_code=detail.get("upstream_code"),
+                   request_id=request_id)
+
+
+_STOPPED = {
+    "interrupted": "was interrupted; call resume_learning to continue it",
+    "awaiting_runner": "is waiting for a model; call resume_learning with a model",
+    "awaiting_material": "kept the current Recipe version ({gap}); learning more needs feedback or evidence "
+                         "in a new execution with previous_execution_id",
+}
+
+
+class RSILearningStopped(RSIError):
+    """An execution's learning stopped in a state that only the caller can change.
+
+    ``status`` is ``interrupted``, ``awaiting_runner`` or ``awaiting_material``;
+    ``learning`` is the learning view. This is not a failure: ``RSILearningFailed``
+    is raised for ``failed``.
+    """
+
+    def __init__(self, learning, *, request_id=None):
+        self.learning = learning
+        self.execution_id = learning.get("execution_id")
+        self.status = learning.get("status")
+        self.request_id = request_id
+        action = _STOPPED[self.status].format(gap=learning.get("material_gap"))
+        super().__init__(f"Learning for execution {self.execution_id} {action}")

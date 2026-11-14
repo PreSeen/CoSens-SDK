@@ -56,11 +56,11 @@ async def test_r02_oversized_key_is_rejected_before_sending():
             assert not seen
 
 
-async def test_r03_empty_generation_key_is_rejected_before_sending():
+async def test_r03_empty_feedback_key_is_rejected_before_sending():
     for mode in MODES:
         async with sdk(mode) as (call, seen):
             with pytest.raises(ValueError, match='key'):
-                await call('start_recipe_candidate','task-1',revision_id='revision-1',key='')
+                await call('record_feedback','execution-1',feedback='f',source='human',key='')
             assert not seen
 
 
@@ -87,7 +87,7 @@ async def test_r06_key_does_not_leak_into_following_read_request():
         async with sdk(mode) as (call, seen):
             await call("start_execution", "task-1", key="execution-key")
             await call("get_task", "task-1")
-            await call("get_revision", "revision-1")
+            await call("get_execution", "execution-1")
             assert len(seen) == 3
             assert seen[0].headers["idempotency-key"] == "execution-key"
             assert all("idempotency-key" not in r.headers for r in seen[1:])

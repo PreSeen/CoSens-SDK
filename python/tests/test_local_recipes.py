@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cosens.errors import RSICandidateFailed
+from cosens.local.recipes import RSICandidateFailed
 from cosens.local import LocalRSI, ModelUnavailable
 from local_rsi_helpers import FakeModel, attribution_reply, complete_execution, first_revision, make_rsi, recipe_reply
 

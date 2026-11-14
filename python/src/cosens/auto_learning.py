@@ -6,7 +6,7 @@ import time
 import math
 
 from .atoms import CoSensClient
-from .errors import RSICandidateFailed, RSIRecoveryRequired
+from .errors import RSILearningFailed, RSIRecoveryRequired
 from .state import TurnStore
 from .workflow_atoms import _completion_tokens
 
@@ -121,7 +121,7 @@ class LearningCoordinator:
             value=self._refresh(turn_id)
             if value['state']=='failed':
                 # The failed state is stored first, so resume_learning can retry it.
-                raise RSICandidateFailed.from_candidate(value['recipe'])
+                raise RSILearningFailed.from_learning(value['recipe'])
             if value['state'] in {'awaiting_confirmation','completed','interrupted','awaiting_runner'}:
                 return value
             if time.monotonic()>=deadline:

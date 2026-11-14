@@ -22,7 +22,7 @@ async def test_gateway_retains_service_paths_queries_and_headers_for_both_transp
         sync.request("GET", "/tasks/r1?include_context=true")
         await async_transport.request("POST", "/tasks", body={"objective": "task"}, key="turn-key")
         async with CoSensClient(api_key="test-gateway", _http_transport=httpx.MockTransport(server)) as client:
-            await client.atoms.get_recipe_candidate("candidate1")
+            await client.atoms.get_execution("execution1")
     finally:
         sync.close()
         await async_transport.aclose()
@@ -30,7 +30,7 @@ async def test_gateway_retains_service_paths_queries_and_headers_for_both_transp
     assert [str(r.url) for r in requests] == [
         "https://rsi.cosens.ai/api/tasks/r1?include_context=true",
         "https://rsi.cosens.ai/api/tasks",
-        "https://rsi.cosens.ai/api/recipe-candidates/candidate1",
+        "https://rsi.cosens.ai/api/executions/execution1",
     ]
     assert [r.headers["authorization"] for r in requests] == ["Bearer test-gateway"] * 3
     assert [r.headers["x-auth-type"] for r in requests] == ["api_key"] * 3

@@ -37,13 +37,13 @@ class FakeService:
 
     def add(self, recipe_id, recipe, *, version=1, origin="uploaded"):
         chain = self.chains.setdefault(recipe_id, {"origin": origin, "versions": {}, "current": None})
-        chain["versions"][version] = {"recipe": recipe, "sha": fingerprint(recipe), "base_version": chain["current"]}
+        chain["versions"][version] = {"recipe": recipe, "sha": fingerprint(recipe), "previous_version": chain["current"]}
         chain["current"] = version
 
     def view(self, recipe_id, version):
         chain = self.chains[recipe_id]
         stored = chain["versions"][version]
-        return {"recipe_id": recipe_id, "origin": chain["origin"], "version": version, "base_version": stored["base_version"],
+        return {"recipe_id": recipe_id, "origin": chain["origin"], "version": version, "previous_version": stored["previous_version"],
                 "current_version": chain["current"], "recipe": stored["recipe"], "recipe_sha256": stored["sha"],
                 "task_id": "task_server" if chain["origin"] == "generated" else None, "created_at": "2026-11-13T00:00:00Z"}
 
@@ -54,7 +54,7 @@ class FakeService:
 
     def upload(self, recipe_id, body):
         self.uploads.append({"recipe_id": recipe_id, **body})
-        version, base, sha = body["version"], body.get("base_version"), fingerprint(body["recipe"])
+        version, base, sha = body["version"], body.get("previous_version"), fingerprint(body["recipe"])
         chain = self.chains.get(recipe_id)
         if chain is None:
             if base is not None:
@@ -145,7 +145,7 @@ async def test_each_version_is_uploaded_without_evidence(tmp_path):
     first = await generate(rsi, task, done.revision_id)
     second = await improve(rsi, task, "two")
     assert first.publish_state == second.publish_state == "published"
-    assert [(u["recipe_id"], u["version"], u.get("base_version")) for u in server.uploads] == [
+    assert [(u["recipe_id"], u["version"], u.get("previous_version")) for u in server.uploads] == [
         (first.recipe_id, 1, None), (first.recipe_id, 2, 1)]
     assert "evidence_refs" not in json.dumps(server.uploads)
     assert server.chains[first.recipe_id]["versions"][2]["recipe"]["title"] == "V2"
@@ -162,7 +162,7 @@ async def test_a_failed_upload_keeps_the_local_version_and_retries_idempotently(
     assert (await rsi.publish_recipe(job.recipe_id)).publish_state == "published"
     assert len(server.uploads) == 2 and server.chains[job.recipe_id]["current"] == 1
     assert (await improve(rsi, task, "two")).publish_state == "published"
-    assert server.uploads[-1]["base_version"] == 1
+    assert server.uploads[-1]["previous_version"] == 1
 
 
 async def test_another_machine_uploading_first_is_a_conflict(tmp_path):
@@ -189,7 +189,7 @@ async def test_an_upload_whose_response_was_lost_is_recognised_by_the_next_versi
     job = await improve(rsi, task, "three")
     assert (job.version, job.publish_state) == (3, "published")
     assert sorted(server.chains[first.recipe_id]["versions"]) == [1, 2, 3]
-    assert [(u["version"], u.get("base_version")) for u in server.uploads[-2:]] == [(3, 1), (3, 2)]
+    assert [(u["version"], u.get("previous_version")) for u in server.uploads[-2:]] == [(3, 1), (3, 2)]
     assert rsi._store.read_one("SELECT remote_version FROM recipe_heads")["remote_version"] == 3
 
 
@@ -224,7 +224,7 @@ async def test_search_get_and_continue_an_uploaded_recipe_on_another_machine(tmp
     job = await generate(second, imported, done.revision_id)
     assert (job.recipe_id, job.version, job.publish_state) == (shared.recipe_id, 2, "published")
     assert model.calls[0]["context"]["base_recipe"]["recipe"]["title"] == "Shared"
-    assert service.uploads[-1]["base_version"] == 1 and service.chains[shared.recipe_id]["current"] == 2
+    assert service.uploads[-1]["previous_version"] == 1 and service.chains[shared.recipe_id]["current"] == 2
 
 
 async def test_an_imported_version_continues_from_the_server_version(tmp_path):
@@ -237,7 +237,7 @@ async def test_an_imported_version_continues_from_the_server_version(tmp_path):
     done = await complete_execution(rsi, started, key="o")
     job = await generate(rsi, task, done.revision_id)
     assert (job.recipe_id, job.version, job.publish_state) == ("team-recipe", 4, "published")
-    assert (server.uploads[-1]["version"], server.uploads[-1]["base_version"]) == (4, 3)
+    assert (server.uploads[-1]["version"], server.uploads[-1]["previous_version"]) == (4, 3)
     assert [v.version for v in (await rsi.get_recipe_versions("team-recipe"))["versions"]] == [3, 4]
 
 

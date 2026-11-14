@@ -1,47 +1,18 @@
 """Public atomic RSI resources. No atom runs an Agent or model."""
 
-import asyncio
 from urllib.parse import urlencode
 
 from .http import AsyncTransport, SyncTransport
 from ._config import resolve_api_key, resolve_service
-from .errors import RSIRecoveryRequired
-from .models import result
-from .workflow import _bounded_timeout
 from .atoms_helpers import path_part as _part, stable_key as _key
 from .workflow_atoms import AsyncWorkflowAtoms, SyncWorkflowAtoms, validate_artifact
 from .document_atoms import AsyncDocumentAtoms, SyncDocumentAtoms
-
-
-def _recall_context(recipe, memory, query, task_family):
-    if not isinstance(recipe, dict) or recipe.get("status") not in {"matched", "not_found"}:
-        raise RSIRecoveryRequired("Standalone Recipe lookup returned an invalid status")
-    if recipe["status"] == "matched" and (not recipe.get("recipe_id") or not isinstance(recipe.get("bundle"), dict)):
-        raise RSIRecoveryRequired("Standalone Recipe bundle is missing")
-    if not isinstance(memory, dict) or not isinstance(memory.get("items"), list) or not all(isinstance(item, dict) for item in memory["items"]):
-        raise RSIRecoveryRequired("Standalone Memory recall items are missing or invalid")
-    return result({"recipe": recipe, "context": {"query": query, "task_family": task_family, "source": "public_recipe_and_memory"},
-                   "snapshot": {"evidence": memory["items"], "memory_recall": memory}})
 
 
 def _bounded_integer(value, *, name, minimum, maximum):
     if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
         raise ValueError(f"{name} must be an integer from {minimum} to {maximum}")
     return value
-
-
-def _recipe_list_path(limit, cursor, task_id, status):
-    params = {"limit": _bounded_integer(limit, name="limit", minimum=1, maximum=100)}
-    for name, value in (("cursor", cursor), ("task_id", task_id)):
-        if value is not None:
-            if not isinstance(value, str) or not value.strip() or len(value) > 128:
-                raise ValueError(f"{name} must be a nonempty string of at most 128 characters")
-            params[name] = value
-    if status is not None:
-        if not isinstance(status, str) or status not in {"queued", "running", "awaiting_runner", "awaiting_parent", "awaiting_material", "candidate", "failed", "interrupted"}:
-            raise ValueError("invalid Recipe candidate status")
-        params["status"] = status
-    return "/recipe-candidates?" + urlencode(params)
 
 
 def _ingest_body(content, request_key, source_kind, durable, source_id, expected_revision):
@@ -58,17 +29,6 @@ def _ingest_body(content, request_key, source_kind, durable, source_id, expected
 class AsyncAtoms(AsyncWorkflowAtoms, AsyncDocumentAtoms):
     def __init__(self, transport):
         self._http = transport
-
-    async def list_recipe_candidates(self, *, limit=20, cursor=None, task_id=None, status=None):
-        return await self._http.request("GET", _recipe_list_path(limit, cursor, task_id, status))
-
-    async def recall_context(self, *, query, task_family="general", token_budget=1000):
-        """Read Recipe and Memory without creating a Run; freeze per turn upstream."""
-        page = await self.list_recipe_candidates(status='candidate', limit=100)
-        recipe = {'status': 'not_found', 'candidates': page['items']}
-        memory = await self.memory_recall(query=query, token_budget=token_budget)
-        return _recall_context(recipe, memory, query, task_family)
-
 
     async def memory_recall(self, *, query, token_budget=1000):
         return await self._http.request("POST", "/v1/memory/recall", body={"query": query, "token_budget": _bounded_integer(token_budget, name="token_budget", minimum=1, maximum=8000)})
@@ -100,17 +60,6 @@ class SyncAtoms(SyncWorkflowAtoms, SyncDocumentAtoms):
 
     def __init__(self, transport):
         self._http = transport
-
-    def list_recipe_candidates(self, *, limit=20, cursor=None, task_id=None, status=None):
-        return self._http.request("GET", _recipe_list_path(limit, cursor, task_id, status))
-
-    def recall_context(self, *, query, task_family="general", token_budget=1000):
-        """Read Recipe and Memory without creating a Run; freeze per turn upstream."""
-        page = self.list_recipe_candidates(status='candidate', limit=100)
-        recipe = {'status': 'not_found', 'candidates': page['items']}
-        memory = self.memory_recall(query=query, token_budget=token_budget)
-        return _recall_context(recipe, memory, query, task_family)
-
 
     def memory_recall(self, *, query, token_budget=1000):
         return self._http.request("POST", "/v1/memory/recall", body={"query": query, "token_budget": _bounded_integer(token_budget, name="token_budget", minimum=1, maximum=8000)})

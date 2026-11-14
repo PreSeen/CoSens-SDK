@@ -16,7 +16,7 @@ async def test_recipe_store_requests_sync_and_async():
         return httpx.Response(200, json={"items": []})
 
     async with CoSensClient(api_key="test-key", _http_transport=httpx.MockTransport(server)) as client:
-        await client.atoms.upload_recipe("team_recipe-1", version=4, recipe=RECIPE, base_version=3)
+        await client.atoms.upload_recipe("team_recipe-1", version=4, recipe=RECIPE, previous_version=3)
         client.sync_atoms.upload_recipe("team_recipe-1", version=1, recipe=RECIPE)
         await client.atoms.get_recipe("g1", version=2)
         client.sync_atoms.get_recipe("r1")
@@ -35,7 +35,7 @@ async def test_recipe_store_requests_sync_and_async():
         ("GET", "/api/recipes", {"q": "sort words", "limit": "3"}),
         ("GET", "/api/recipes", {"q": "sort words", "limit": "10"}),
     ]
-    assert json.loads(requests[0].content) == {"base_version": 3, "recipe": RECIPE}
+    assert json.loads(requests[0].content) == {"previous_version": 3, "recipe": RECIPE}
     assert json.loads(requests[1].content) == {"recipe": RECIPE}
 
 
@@ -44,7 +44,7 @@ async def test_recipe_store_requests_sync_and_async():
     lambda a: a.upload_recipe("x" * 129, version=1, recipe=RECIPE),
     lambda a: a.upload_recipe("r", version=0, recipe=RECIPE),
     lambda a: a.upload_recipe("r", version=True, recipe=RECIPE),
-    lambda a: a.upload_recipe("r", version=2, recipe=RECIPE, base_version=0),
+    lambda a: a.upload_recipe("r", version=2, recipe=RECIPE, previous_version=0),
     lambda a: a.upload_recipe("r", version=1, recipe=[]),
     lambda a: a.get_recipe("r", version=0),
     lambda a: a.list_recipes(limit=0),

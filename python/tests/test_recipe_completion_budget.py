@@ -13,7 +13,7 @@ def test_invalid_budget_is_rejected_before_http(value, tmp_path):
     backend = Backend()
     client = CoSensClient(api_key='test-key', state_path=tmp_path/'state', _http_transport=httpx.MockTransport(backend))
     try:
-        for fn, args, kwargs in [(client.sync_atoms.start_recipe_candidate, ('task',), {'revision_id':'rev','key':'key'}), (client.sync_atoms.resume_recipe_candidate, ('candidate',), {})]:
+        for fn, args, kwargs in [(client.sync_atoms.learn, ('execution',), {}), (client.sync_atoms.resume_learning, ('execution',), {})]:
             with pytest.raises(ValueError, match='max_completion_tokens'):
                 fn(*args, **kwargs, max_completion_tokens=value)
         assert backend.seen == []
@@ -53,15 +53,15 @@ async def test_async_auto_and_atoms_forward_completion_budget(tmp_path):
 
 @pytest.mark.parametrize('asynchronous',[False,True])
 @pytest.mark.asyncio
-async def test_atomic_start_resume_wire_and_omission(tmp_path, asynchronous):
+async def test_atomic_learn_resume_wire_and_omission(tmp_path, asynchronous):
     seen=[]
     def response(r):
         seen.append(json.loads(r.content))
-        return httpx.Response(200,json={'recipe_candidate_id':'candidate','status':'queued'})
+        return httpx.Response(200,json={'execution_id':'execution','status':'queued'})
     c=CoSensClient(api_key='test-key',state_path=tmp_path/'state',_http_transport=httpx.MockTransport(response))
     try:
         a=c.atoms if asynchronous else c.sync_atoms
-        for fn,args,kwargs in [(a.start_recipe_candidate,('task',),{'revision_id':'rev','key':'first','max_completion_tokens':200_000}), (a.resume_recipe_candidate,('candidate',),{'max_completion_tokens':300_000}), (a.start_recipe_candidate,('task',),{'revision_id':'rev','key':'default'})]:
+        for fn,args,kwargs in [(a.learn,('execution',),{'max_completion_tokens':200_000}), (a.resume_learning,('execution',),{'max_completion_tokens':300_000}), (a.learn,('execution',),{})]:
             value=fn(*args,**kwargs)
             if asynchronous:await value
         assert seen[0]['max_completion_tokens']==200_000
