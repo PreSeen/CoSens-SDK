@@ -27,14 +27,15 @@ def test_sync_auto_budget_is_forwarded_and_cached_without_crossing_keys(tmp_path
     try:
         wrapped.responses.create(model='model',input='Produce a report',max_output_tokens=4096)
         wrapped.cosens.generate_recipe(max_completion_tokens=200_000)
-        generated = [b for _,p,b in backend.seen if p.endswith('/recipe-candidates') and b]
-        assert generated[-1]['max_completion_tokens'] == 200_000
-        wrapped.cosens.generate_recipe()
-        assert backend.generations == 1
-        with pytest.raises(ValueError, match='request key'):
+        generated = [b for _,p,b in backend.seen if p.endswith('/learn')]
+        assert generated == [{'max_completion_tokens': 200_000}]
+        assert wrapped.cosens.generate_recipe()['max_completion_tokens'] == 200_000
+        assert [p for _,p,_ in backend.seen].count('/executions/execution_1/learn') == 1
+        with pytest.raises(ValueError, match='completion budget'):
             wrapped.cosens.generate_recipe(max_completion_tokens=300_000)
-        wrapped.cosens.generate_recipe(request_key='new-generation',max_completion_tokens=300_000)
-        assert backend.generations == 2
+        with pytest.raises(TypeError):
+            wrapped.cosens.generate_recipe(request_key='new-generation')
+        assert backend.generations == 1
     finally: wrapped.close();native.close()
 
 
@@ -46,7 +47,7 @@ async def test_async_auto_and_atoms_forward_completion_budget(tmp_path):
     try:
         await wrapped.responses.create(model='model',input='Produce a report')
         await wrapped.cosens.generate_recipe(max_completion_tokens=250_000)
-        generated = [b for _,p,b in backend.seen if p.endswith('/recipe-candidates') and b]
+        generated = [b for _,p,b in backend.seen if p.endswith('/learn')]
         assert generated[-1]['max_completion_tokens'] == 250_000
     finally: await wrapped.close();await native.close()
 
@@ -71,17 +72,12 @@ async def test_atomic_learn_resume_wire_and_omission(tmp_path, asynchronous):
 
 
 @pytest.mark.parametrize('override',[None,300_000])
-def test_auto_resume_keeps_generation_key_budget_and_forwards_override(tmp_path,override):
+def test_auto_resume_keeps_the_budget_and_forwards_override(tmp_path,override):
     class FailedBackend(Backend):
         def __call__(self,r):
             path=r.url.path.removeprefix('/api')
-            if path=='/recipe-candidates/candidate_1' and r.method=='GET':
-                return httpx.Response(200,json={'recipe_candidate_id':'candidate_1','status':'failed','max_completion_tokens':200_000})
-            if path.endswith('/resume'):
-                body=json.loads(r.content) if r.content else None
-                self.seen.append((r.method,path,body))
-                limit=(body or {}).get('max_completion_tokens',200_000)
-                return httpx.Response(200,json={'recipe_candidate_id':'candidate_1','status':'queued','max_completion_tokens':limit})
+            if path=='/executions/execution_1' and r.method=='GET' and not any(p.endswith('/resume') for _,p,_ in self.seen):
+                self.learnings['execution_1'].update(status='failed')
             return super().__call__(r)
     backend=FailedBackend()
     native=OpenAI(api_key='native-key',http_client=httpx.Client(transport=httpx.MockTransport(native_response)))
@@ -93,7 +89,7 @@ def test_auto_resume_keeps_generation_key_budget_and_forwards_override(tmp_path,
         assert value['max_completion_tokens']==(override or 200_000)
         requests=[b for _,p,b in backend.seen if p.endswith('/resume')]
         assert requests[-1]==({'max_completion_tokens':override} if override else None)
-        wrapped.cosens.generate_recipe(max_completion_tokens=200_000)
+        assert wrapped.cosens.generate_recipe()['max_completion_tokens']==(override or 200_000)
         assert backend.generations==1
     finally:wrapped.close();native.close()
 
@@ -112,7 +108,7 @@ def test_agent_wrapper_forwards_completion_budget(tmp_path):
         try:
             await wrapped.run(agent,'Produce output')
             await wrapped.cosens.generate_recipe(max_completion_tokens=200_000)
-            generated=[b for _,p,b in backend.seen if p.endswith('/recipe-candidates') and b]
+            generated=[b for _,p,b in backend.seen if p.endswith('/learn')]
             assert generated[-1]['max_completion_tokens']==200_000
         finally:await wrapped.aclose()
     asyncio.run(run())

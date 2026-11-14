@@ -63,11 +63,7 @@ class CoSensAgentRunner:
 
     async def run(self, agent, user_input, *, session=None, input_artifacts=None, turn_id=None, authorize=None, **options):
         rsi,session=await self._prepare_inputs(agent,user_input,session=session,input_artifacts=input_artifacts,turn_id=turn_id,authorize=authorize)
-        result=await self._workflow.run(agent,user_input,rsi=rsi,session=session,**options)
-        state=self.cosens.get_turn(rsi['turn_id'])
-        if session is not None and state and state.get('state')=='completed':
-            await self._session_events(session,state)
-        return result
+        return await self._workflow.run(agent,user_input,rsi=rsi,session=session,**options)
 
     async def run_streamed(self, agent, user_input, *, session=None, input_artifacts=None, turn_id=None, authorize=None, **options):
         rsi,session=await self._prepare_inputs(agent,user_input,session=session,input_artifacts=input_artifacts,turn_id=turn_id,authorize=authorize)
@@ -82,34 +78,8 @@ class CoSensAgentRunner:
     async def resume(self, agent, turn_id, native_state, *, session=None, **options):
         return await self._workflow.resume(agent,turn_id,native_state,session=session or self._session,**options)
 
-    async def _session_events(self,session,state):
-        """Persist ACK only after the server accepted the exact event batch."""
-        if not callable(getattr(session,'get_items',None)):return
-        items=session.get_items()
-        if inspect.isawaitable(items):items=await items
-        identity=str(getattr(session,'session_id',None) or getattr(session,'id',None))
-        incarnation=str(getattr(session,'session_incarnation','0'))
-        key='agent-session:'+hashlib.sha256((identity+':'+incarnation).encode()).hexdigest()
-        saved=self._workflow._store.get(key)
-        if not saved:
-            opened=await self._client.atoms.start_session()
-            saved={'session_id':opened['session_id'],'acked':0,'prefix':hashlib.sha256(b'[]').hexdigest()}
-            self._workflow._store.put(key,saved)
-        encode=lambda value:json.dumps(value,sort_keys=True,default=str).encode()
-        if saved['acked']>len(items) or hashlib.sha256(encode(items[:saved['acked']])).hexdigest()!=saved['prefix']:
-            raise RSIRecoveryRequired('Session history changed after acknowledgement')
-        for offset in range(saved['acked'],len(items),200):
-            batch=items[offset:offset+200]
-            events=[{'event_id':'message:'+hashlib.sha256(encode([offset+i,item])).hexdigest(),
-                     'kind':'session_message','payload':item if isinstance(item,dict) else {'content':str(item)}} for i,item in enumerate(batch)]
-            await self._client.atoms.append_session_events(saved['session_id'],events)
-            saved.update(acked=offset+len(batch),prefix=hashlib.sha256(encode(items[:offset+len(batch)])).hexdigest())
-            self._workflow._store.put(key,saved)
-
     async def reconcile(self,turn_id,*,session=None):
-        state=await self._workflow.reconcile(turn_id,session=session or self._session)
-        if session or self._session:await self._session_events(session or self._session,state)
-        return state
+        return await self._workflow.reconcile(turn_id,session=session or self._session)
 
     async def aclose(self):
         await self._workflow.aclose()

@@ -41,7 +41,7 @@ def test_auto_decision_timeout_configuration(monkeypatch, tmp_path, configured_t
 
     monkeypatch.setattr(proxy, 'decide_sync', decision)
     def algorithm(request):
-        if request.url.path.endswith('/recipe-candidates'):
+        if request.url.path.endswith('/recipes'):
             return httpx.Response(200, json={'items': [], 'has_more': False})
         if request.url.path.endswith('/memory/recall'):
             return httpx.Response(200, json={'items': []})
@@ -61,7 +61,7 @@ def test_auto_decision_timeout_configuration(monkeypatch, tmp_path, configured_t
 
 def test_auto_recipe_match_timeout_still_captures_without_a_recipe(tmp_path):
     """Reusing a Recipe is optional: a match timeout must not discard the capture."""
-    from test_auto_latency import Algorithm, _candidate
+    from test_auto_latency import Algorithm, _recipe
 
     def gateway(request):
         if request.url.path.endswith('/chat/completions'):
@@ -76,7 +76,7 @@ def test_auto_recipe_match_timeout_still_captures_without_a_recipe(tmp_path):
                 'message': {'role': 'assistant', 'content': content}, 'finish_reason': 'stop'}]})
         return native_response(request)
 
-    algorithm = Algorithm([_candidate()])
+    algorithm = Algorithm([_recipe()])
     native = OpenAI(base_url='https://llm.cosens.ai/v1', api_key='test-only-gateway-key',
         http_client=httpx.Client(transport=httpx.MockTransport(gateway)))
     wrapped = cosens(native, mode='auto', api_key='test-only-gateway-key',
@@ -86,7 +86,7 @@ def test_auto_recipe_match_timeout_still_captures_without_a_recipe(tmp_path):
         assert response.output_text == 'final artifact'
         assert wrapped.cosens.rsi_capture == 'active'
         turn = wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
-        assert turn['state'] == 'completed' and turn['revision_id'] == 'revision_1'
+        assert turn['state'] == 'completed' and turn['execution_id'] == 'execution_1'
         assert not turn.get('used_recipe_id')
         assert turn['recipe_match_error']['type'] == 'APITimeoutError'
         assert wrapped.cosens.get_auto()['recipe_match_error_type'] == 'APITimeoutError'

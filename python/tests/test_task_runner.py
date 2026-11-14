@@ -47,7 +47,7 @@ async def test_real_agents_tool_approval_resumes_the_same_task_execution(tmp_pat
         if path == "/api/tasks": return httpx.Response(200, json={"task_id": "t1", "status": "ready"})
         if path.endswith("/executions"): return httpx.Response(200, json={"execution_id": "e1", "status": "awaiting_execution", "request_sha256": "h1", "request": {"kind": "original"}})
         if path == "/api/artifacts": return httpx.Response(200, json={"artifact_id": "a1", "content_hash": "server-hash"})
-        if path.endswith("/result"): return httpx.Response(200, json={"status": "completed", "revision_id": "r1"})
+        if path.endswith("/result"): return httpx.Response(200, json={"status": "completed", "trace_origin": "original"})
         raise AssertionError(path)
 
     wrapper = TaskWorkflowRunner(Runner, mode="auto", api_key="key", state_path=tmp_path / "native-approval.sqlite3",
@@ -139,7 +139,7 @@ async def test_task_runner_submits_once_and_reconciles_lost_result_receipt(tmp_p
             submissions += 1
             if submissions == 1:
                 return httpx.Response(503, json={"error": {"code": "transient", "message": "receipt lost"}})
-            return httpx.Response(200, json={"status": "completed", "revision_id": "r1"})
+            return httpx.Response(200, json={"status": "completed", "trace_origin": "original"})
         raise AssertionError(path)
 
     wrapper = TaskWorkflowRunner(native, mode="auto", api_key="key", state_path=tmp_path / "workflow.sqlite3",
@@ -151,7 +151,7 @@ async def test_task_runner_submits_once_and_reconciles_lost_result_receipt(tmp_p
     with pytest.raises(RSIRecoveryRequired):
         await wrapper.run(FakeAgent(), "work", rsi={"turn_id": "turn-1", "task": {"source": "new_task", "objective": "work"}})
     recovered = await wrapper.reconcile("turn-1")
-    assert recovered["state"] == "completed" and recovered["revision_id"] == "r1"
+    assert recovered["state"] == "completed" and "revision_id" not in recovered
     assert len(native.calls) == 1
     assert [path for path, _ in seen].count("/api/artifacts") == 1
     bodies = [body for path, body in seen if path.endswith("/result")]
@@ -186,7 +186,7 @@ async def test_task_runner_waits_for_context_then_reuses_task_and_reports_observ
         if request.url.path == "/api/executions/e1/result":
             assert json.loads(request.content)["events"] == [{"id": "event-1", "kind": "tool_result", "payload": {"name": "tool"}}]
             assert json.loads(request.content)["trace_coverage"] == "partial"
-            return httpx.Response(200, json={"status": "completed", "revision_id": "r1"})
+            return httpx.Response(200, json={"status": "completed", "trace_origin": "original"})
         raise AssertionError(request.url.path)
 
     wrapper = TaskWorkflowRunner(native, mode="auto", api_key="key", state_path=tmp_path / "context.sqlite3",
@@ -200,7 +200,7 @@ async def test_task_runner_waits_for_context_then_reuses_task_and_reports_observ
     await wrapper.cosens.atoms.supplement_task_context("t1", expected_context_version=1, objective="work", self_contained=True)
     result = await wrapper.run(FakeAgent(), "work", rsi=rsi)
     assert result.final_output == "native answer"
-    assert wrapper.cosens.get_turn("turn-1")["revision_id"] == "r1"
+    assert wrapper.cosens.get_turn("turn-1")["state"] == "completed"
     assert seen.count("/api/tasks") == 1
     assert len(native.calls) == 1
     await wrapper.aclose()
@@ -233,7 +233,7 @@ async def test_task_runner_stream_submits_after_native_stream_finishes(tmp_path)
         if request.url.path == "/api/artifacts":
             return httpx.Response(200, json={"artifact_id": "a1", "content_hash": "server-hash"})
         if request.url.path.endswith("/result"):
-            return httpx.Response(200, json={"status": "completed", "revision_id": "r1"})
+            return httpx.Response(200, json={"status": "completed", "trace_origin": "original"})
         raise AssertionError(request.url.path)
 
     wrapper = TaskWorkflowRunner(Native(), mode="auto", api_key="key", state_path=tmp_path / "stream.sqlite3",
@@ -384,7 +384,7 @@ def test_task_runner_run_sync_uses_native_sync_runner_and_sync_gateway(tmp_path)
             result_submissions += 1
             if result_submissions == 1:
                 return httpx.Response(503, json={"error": {"message": "receipt lost"}})
-            return httpx.Response(200, json={"status": "completed", "revision_id": "r1"})
+            return httpx.Response(200, json={"status": "completed", "trace_origin": "original"})
         raise AssertionError(request.url.path)
 
     wrapper = TaskWorkflowRunner(Native(), mode="auto", api_key="key", state_path=tmp_path / "sync.sqlite3",
@@ -394,7 +394,7 @@ def test_task_runner_run_sync_uses_native_sync_runner_and_sync_gateway(tmp_path)
     assert len(native_calls) == 1
     assert wrapper.cosens.get_turn("sync-1")["state"] == "completion_pending"
     recovered = wrapper.reconcile_sync("sync-1")
-    assert recovered["state"] == "completed" and recovered["revision_id"] == "r1"
+    assert recovered["state"] == "completed" and "revision_id" not in recovered
     assert len(native_calls) == 1
     assert [body for path, body in seen if path.endswith("/result")][0] == [body for path, body in seen if path.endswith("/result")][1]
     wrapper.close()

@@ -42,7 +42,7 @@ def assert_noop(wrapped, body, requests, algorithm_calls):
     turn = wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
     assert turn['decision']['activate'] is False
     assert turn['capture'] == 'skipped' and turn['state'] == 'completed'
-    for field in ('used_recipe_id', 'execution_id', 'revision_id', 'frozen_context'):
+    for field in ('used_recipe_id', 'execution_id', 'frozen_context'):
         assert not turn.get(field)
 
 
@@ -114,14 +114,13 @@ def test_noop_tool_continuation_keeps_original_turn_and_native_request(tmp_path,
         if legacy_context:
             runtime = wrapped.cosens._runtime
             old = runtime.turns.get(turn_id)
-            old.update(used_recipe_id='legacy-recipe', used_recipe_version=1,
-                       used_recipe_candidate_id='legacy-candidate', frozen_context={'recipe': {'status': 'matched'}})
+            old.update(used_recipe_id='legacy-recipe', used_recipe_version=1, frozen_context={'recipe': {'status': 'matched'}})
             runtime._save(old)
         wrapped.responses.create(**second)
         assert requests == [first, second] and calls == []
         assert len(decisions) == 1 and wrapped.cosens.last_turn_id == turn_id
         turn = wrapped.cosens.get_turn(turn_id)
-        assert turn['state'] == 'completed' and not turn.get('revision_id')
+        assert turn['state'] == 'completed' and not turn.get('execution_id')
         assert not turn.get('used_recipe_id') and not turn.get('frozen_context')
     finally:
         wrapped.close()

@@ -19,21 +19,22 @@ DECLINE = {'activate': False, 'reason': 'routine'}
 
 
 class Algorithm:
-    """Minimal service: optional Recipe candidates, Memory, task and execution."""
+    """Minimal service: optional Recipes, Memory, task and execution."""
 
-    def __init__(self, candidates=()):
+    def __init__(self, recipes=()):
         self.paths = []
-        self.candidates = {c['recipe_candidate_id']: c for c in candidates}
+        self.recipes = {r['recipe_id']: r for r in recipes}
 
     def __call__(self, request):
         path = request.url.path.removeprefix('/api')
         self.paths.append(path)
-        if path == '/recipe-candidates':
-            items = [{'recipe_candidate_id': key, 'status': 'candidate', 'current': True, 'title': c['recipe']['title']}
-                     for key, c in self.candidates.items()]
-            return httpx.Response(200, json={'items': items, 'has_more': False})
-        if path.startswith('/recipe-candidates/'):
-            return httpx.Response(200, json=self.candidates[path.rsplit('/', 1)[1]])
+        if path == '/recipes':
+            assert dict(request.url.params) == {'limit': '100'}
+            items = [{'recipe_id': key, 'origin': r['origin'], 'version': r['version'], 'title': r['recipe']['title'],
+                      'task_id': 'task_0', 'updated_at': 't'} for key, r in self.recipes.items()]
+            return httpx.Response(200, json={'items': items, 'has_more': False, 'next_cursor': None})
+        if path.startswith('/recipes/'):
+            return httpx.Response(200, json=self.recipes[path.rsplit('/', 1)[1]])
         if path == '/v1/memory/recall':
             return httpx.Response(200, json={'items': [{'id': 'm1', 'kind': 'source', 'text': 'Reports use the Q3 template.',
                                                         'refs': [{'source_id': 's1'}], 'score': 0.9}]})
@@ -45,19 +46,21 @@ class Algorithm:
             body = json.loads(request.content)
             method = None
             if body.get('recipe_id'):
-                chosen = next(c for c in self.candidates.values() if c['recipe_id'] == body['recipe_id'])
-                method = {'recipe_id': chosen['recipe_id'], 'recipe_candidate_id': chosen['recipe_candidate_id'],
-                          'version': chosen['version']}
+                chosen = self.recipes[body['recipe_id']]
+                method = {'recipe_id': chosen['recipe_id'], 'version': chosen['version'], 'recipe_sha256': 'f' * 64,
+                          'recipe': chosen['recipe']}
             return httpx.Response(200, json={'execution_id': 'execution_1', 'status': 'awaiting_execution',
                                              'request_sha256': 'sha', 'request': {'method': method}})
         if path.endswith('/result'):
-            return httpx.Response(200, json={'status': 'completed', 'revision_id': 'revision_1'})
+            return httpx.Response(200, json={'task_id': 'task_1', 'execution_id': 'execution_1', 'status': 'completed',
+                                             'trace_origin': 'original'})
         raise AssertionError(path)
 
 
-def _candidate(candidate_id='candidate_1', steps=3):
-    return {'recipe_candidate_id': candidate_id, 'recipe_id': 'recipe_1', 'status': 'candidate', 'current': True,
-            'version': 1, 'recipe': {'title': 'Quarterly report', 'when': 'Writing a report', 'when_not': 'Chat',
+def _recipe(recipe_id='recipe_1', steps=3, origin='generated'):
+    return {'recipe_id': recipe_id, 'origin': origin, 'version': 1, 'previous_version': None, 'current_version': 1,
+            'recipe_sha256': 'f' * 64, 'task_id': 'task_0', 'execution_id': 'execution_0', 'created_at': 't',
+            'recipe': {'title': 'Quarterly report', 'when': 'Writing a report', 'when_not': 'Chat',
             'steps': [{'id': f's{n}', 'instruction': f'Do step {n}', 'evidence_refs': [{'event_id': f'e{n}'}]}
                       for n in range(1, steps + 1)],
             'lessons': [{'when': 'Always', 'do': 'Cite the source', 'why': 'Trust', 'when_not': 'Never',
@@ -98,10 +101,10 @@ def test_decision_client_and_extra_body_cover_decision_and_match(tmp_path):
         body = json.loads(request.content)
         decision_bodies.append(body)
         if body['response_format']['json_schema']['name'] == 'cosens_recipe_match':
-            return _chat({'candidate_id': 'candidate_1'})
+            return _chat({'recipe_id': 'recipe_1'})
         return _chat(ACTIVATE)
 
-    algorithm = Algorithm([_candidate()])
+    algorithm = Algorithm([_recipe()])
     native = OpenAI(api_key='model-key', http_client=httpx.Client(transport=httpx.MockTransport(model)))
     decision_client = OpenAI(api_key='decision-key', http_client=httpx.Client(transport=httpx.MockTransport(decider)))
     wrapped = cosens(native, mode='auto', api_key='service-key', state_path=tmp_path / 's.sqlite',
@@ -145,7 +148,7 @@ def test_empty_recipe_list_skips_match_and_is_cached(tmp_path):
         wrapped.responses.create(model='model', input='Produce a report')
         wrapped.responses.create(model='model', input='Produce another report')
         assert decision_names == ['cosens_decision', 'cosens_decision']
-        assert algorithm.paths.count('/recipe-candidates') == 1
+        assert algorithm.paths.count('/recipes') == 1
         assert algorithm.paths.count('/v1/memory/recall') == 2
     finally:
         wrapped.close(); native.close()
@@ -158,11 +161,11 @@ def test_injected_context_is_compact_and_bounded(tmp_path):
         body = json.loads(request.content)
         if request.url.path.endswith('/chat/completions'):
             name = body['response_format']['json_schema']['name']
-            return _chat({'candidate_id': 'candidate_1'} if name == 'cosens_recipe_match' else ACTIVATE)
+            return _chat({'recipe_id': 'recipe_1'} if name == 'cosens_recipe_match' else ACTIVATE)
         sent.append(body)
         return native_response(request)
 
-    algorithm = Algorithm([_candidate(steps=30)])
+    algorithm = Algorithm([_recipe(steps=30)])
     native = OpenAI(api_key='model-key', http_client=httpx.Client(transport=httpx.MockTransport(model)))
     wrapped = cosens(native, mode='auto', api_key='service-key', state_path=tmp_path / 's.sqlite',
                      max_context_chars=400, _http_transport=httpx.MockTransport(algorithm))
@@ -185,7 +188,7 @@ def test_declined_turn_makes_no_lookup(tmp_path):
             return _chat(DECLINE)
         return native_response(request)
 
-    algorithm = Algorithm([_candidate()])
+    algorithm = Algorithm([_recipe()])
     native = OpenAI(api_key='model-key', http_client=httpx.Client(transport=httpx.MockTransport(model)))
     wrapped = cosens(native, mode='auto', api_key='service-key', state_path=tmp_path / 's.sqlite',
                      _http_transport=httpx.MockTransport(algorithm))
@@ -269,5 +272,27 @@ def test_request_without_user_text_makes_no_decision_call(tmp_path):
         wrapped.responses.create(model='m', input=[{'role': 'user', 'content': [{'type': 'input_image', 'image_url': 'data:,'}]}])
         assert calls == ['/v1/responses']
         assert wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)['capture'] == 'no_user_text'
+    finally:
+        wrapped.close(); native.close()
+
+
+def test_uploaded_recipes_are_not_offered_to_the_matcher(tmp_path):
+    decision_names = []
+
+    def model(request):
+        if request.url.path.endswith('/chat/completions'):
+            decision_names.append(json.loads(request.content)['response_format']['json_schema']['name'])
+            return _chat(ACTIVATE)
+        return native_response(request)
+
+    algorithm = Algorithm([_recipe('team_recipe', origin='uploaded')])
+    native = OpenAI(api_key='model-key', http_client=httpx.Client(transport=httpx.MockTransport(model)))
+    wrapped = cosens(native, mode='auto', api_key='service-key', state_path=tmp_path / 's.sqlite',
+                     _http_transport=httpx.MockTransport(algorithm))
+    try:
+        wrapped.responses.create(model='model', input='Produce a report')
+        assert decision_names == ['cosens_decision']
+        assert not [path for path in algorithm.paths if path.startswith('/recipes/')]
+        assert not wrapped.cosens.get_turn(wrapped.cosens.last_turn_id).get('used_recipe_id')
     finally:
         wrapped.close(); native.close()

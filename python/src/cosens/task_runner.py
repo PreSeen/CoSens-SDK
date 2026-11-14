@@ -72,26 +72,27 @@ class _WorkflowStatus:
     def get_turn(self, turn_id):
         return self._owner._store.get(turn_id)
 
-    async def feedback(self, message, *, source, turn_id=None, request_key=None):
-        turn_id = turn_id or self.last_turn_id
-        state = self.get_turn(turn_id)
-        if not state or not state.get('revision_id'):
-            raise RSIRecoveryRequired('Turn has no recorded revision')
-        key = request_key or 'feedback:'+hashlib.sha256((turn_id+'\0'+message).encode()).hexdigest()
-        return await self._owner._client.atoms.record_feedback(state['revision_id'], feedback=message, source=source, key=key)
+    def _completed_turn(self, turn_id):
+        state = self.get_turn(turn_id or self.last_turn_id)
+        if not state or state.get('state') != 'completed' or not state.get('execution_id'):
+            raise RSIRecoveryRequired('Turn has no completed execution')
+        return state
 
-    async def generate_recipe(self, turn_id=None, *, request_key=None, model=None, max_completion_tokens=None):
-        turn_id = turn_id or self.last_turn_id
-        state = self.get_turn(turn_id)
-        if not state or not state.get('revision_id'):
-            raise RSIRecoveryRequired('Turn has no recorded revision')
+    async def feedback(self, message, *, source, turn_id=None, request_key=None):
+        state = self._completed_turn(turn_id)
+        key = request_key or 'feedback:'+hashlib.sha256((state['turn_id']+'\0'+message).encode()).hexdigest()
+        return await self._owner._client.atoms.record_feedback(state['execution_id'], feedback=message, source=source, key=key)
+
+    async def generate_recipe(self, turn_id=None, *, model=None, max_completion_tokens=None):
+        """Learn a Recipe version from the turn's confirmed execution; repeat calls return the same learning."""
+        state = self._completed_turn(turn_id)
         options = {'model': model} if model is not None else {}
         if max_completion_tokens is not None:
             options['max_completion_tokens'] = max_completion_tokens
-        receipt = await self._owner._client.atoms.start_recipe_candidate(state['task_id'], revision_id=state['revision_id'], key=request_key or 'explicit-generation:'+turn_id, **options)
-        state['recipe_candidate_id'] = receipt['recipe_candidate_id']
+        learning = await self._owner._client.atoms.learn(state['execution_id'], **options)
+        state['learning'] = dict(learning)
         self._owner._save(state)
-        return receipt
+        return learning
 
     async def reconcile(self, turn_id, *, session=None):
         return await self._owner.reconcile(turn_id, session=session)
@@ -350,9 +351,8 @@ class TaskWorkflowRunner:
                                     "events": state.get("events", []), "trace_coverage": state.get("trace_coverage", "unknown")}
             self._save(state)
         receipt = await self._client.atoms.submit_execution(state["execution_id"], **state["result_body"])
-        if receipt.get("status") in {"failed", "cancelled"} or not isinstance(receipt.get("revision_id"), str) or not receipt["revision_id"]:
+        if receipt.get("status") != "completed":
             raise RSIRecoveryRequired("Workflow result was not confirmed as completed")
-        state["revision_id"] = receipt.get("revision_id")
         state["state"] = "completed"
         state.pop("last_error", None)
         self._save(state)
@@ -398,9 +398,8 @@ class TaskWorkflowRunner:
                                     "events": state.get("events", []), "trace_coverage": state.get("trace_coverage", "unknown")}
             self._save(state)
         receipt = self._client.sync_atoms.submit_execution(state["execution_id"], **state["result_body"])
-        if receipt.get("status") in {"failed", "cancelled"} or not isinstance(receipt.get("revision_id"), str) or not receipt["revision_id"]:
+        if receipt.get("status") != "completed":
             raise RSIRecoveryRequired("Workflow result was not confirmed as completed")
-        state["revision_id"] = receipt["revision_id"]
         state["state"] = "completed"
         state.pop("last_error", None)
         self._save(state)

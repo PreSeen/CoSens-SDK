@@ -81,9 +81,9 @@ class _Status:
         learning = self._runtime.learning().get(target)
         if learning:
             return {**{key: learning.get(key) for key in (
-                'action', 'reason', 'used_recipe_id', 'used_recipe_version', 'recipe_candidate_id', 'error_type')},
+                'action', 'reason', 'used_recipe_id', 'used_recipe_version', 'execution_id', 'error_type')},
                 'turn_id': target, 'request_turn_id': request_turn, 'status': learning['state'],
-                'job_id': learning.get('recipe_candidate_id'), **outcome}
+                'job_id': learning['execution_id'] if learning.get('learning') else None, **outcome}
         return {'action': 'noop', 'reason': turn.get('state'), 'turn_id': request_turn,
                 'used_recipe_id': turn.get('used_recipe_id'), 'used_recipe_version': turn.get('used_recipe_version'),
                 'status': 'blocked' if turn.get('state') == 'completion_pending' else 'pending',
@@ -108,13 +108,14 @@ class _Status:
     def feedback(self, message, *, source, turn_id=None):
         return self._learning_call('feedback', self._learning_turn(turn_id), message, source)
 
-    def generate_recipe(self, turn_id=None, *, request_key=None, max_completion_tokens=None):
-        return self._learning_call('generate', self._learning_turn(turn_id), request_key, max_completion_tokens)
+    def generate_recipe(self, turn_id=None, *, max_completion_tokens=None):
+        return self._learning_call('generate', self._learning_turn(turn_id), max_completion_tokens)
 
     def resume_learning(self, turn_id=None, *, max_completion_tokens=None):
         return self._learning_call('resume', self._learning_turn(turn_id), max_completion_tokens)
 
     def wait_learning(self, turn_id=None, *, timeout=1800):
+        """Wait for the turn's learning; raises RSILearningFailed or RSILearningStopped with the turn kept resumable."""
         return self._learning_call('wait', self._learning_turn(turn_id), timeout)
 
     def reconcile(self, turn_id):
@@ -644,7 +645,7 @@ class _Runtime(AutoExecution):
                 if user.get('role') == 'user' and assistant.get('role') == 'assistant':
                     alias = self.turns.get(self._feedback_chat_key(user.get('content'), assistant.get('content')))
         value = self.turns.get(alias['turn_ref']) if alias and alias.get('turn_ref') else None
-        if value and value.get('mode') == 'auto' and value.get('state') == 'completed' and value.get('revision_id'):
+        if value and value.get('mode') == 'auto' and value.get('state') == 'completed' and value.get('execution_id'):
             self._require_session(value)
             return value
         return None
@@ -748,7 +749,7 @@ class _Runtime(AutoExecution):
 
     def _save(self, state):
         entries = []
-        if state.get('state') == 'completed' and state.get('revision_id'):
+        if state.get('state') == 'completed' and state.get('execution_id'):
             entries.append((self._feedback_chat_key(state.get('visible_input'), state.get('result', {}).get('summary')), {'turn_ref': state['turn_id']}))
             if state.get('native_response_id'):
                 entries.append(('response:' + state['native_response_id'], {'turn_ref': state['turn_id']}))

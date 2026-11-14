@@ -6,9 +6,12 @@ import time
 import math
 
 from .atoms import CoSensClient
-from .errors import RSILearningFailed, RSIRecoveryRequired
+from .errors import RSILearningFailed, RSILearningStopped, RSIRecoveryRequired
 from .state import TurnStore
-from .workflow_atoms import _completion_tokens
+from .workflow_atoms import _LEARNING_STOPPED as _STOPPED, _completion_tokens
+
+# Learning states resume_learning can continue.
+_RESUMABLE = {'failed', 'interrupted', 'awaiting_runner'}
 
 
 @dataclass(frozen=True)
@@ -39,7 +42,7 @@ class LearningCoordinator:
         return self.store.get(self._key(turn_id))
 
     def attach(self, turn):
-        value = {'turn_id':turn['turn_id'], 'task_id':turn.get('task_id'), 'revision_id':turn.get('revision_id'),
+        value = {'turn_id':turn['turn_id'], 'task_id':turn.get('task_id'), 'execution_id':turn.get('execution_id'),
                  'used_recipe_id':turn.get('used_recipe_id'), 'used_recipe_version':turn.get('used_recipe_version'),
                  'state':'awaiting_confirmation', 'action':'noop', 'reason':'external_confirmation_required'}
         self.store.insert_if_absent(self._key(turn['turn_id']), value)
@@ -47,72 +50,74 @@ class LearningCoordinator:
 
     def _record(self, turn_id):
         value=self.get(turn_id)
-        if not value or not value.get('task_id') or not value.get('revision_id'):
-            raise RSIRecoveryRequired('Turn has no submitted Task/Revision')
+        if not value or not value.get('execution_id'):
+            raise RSIRecoveryRequired('Turn has no completed execution')
+        return value
+
+    def _save(self, turn_id, value):
+        self.store.put(self._key(turn_id), value)
+        return value
+
+    def _learned(self, value, learning):
+        """Store a learning view on the record; the record's state is the learning status."""
+        value.update(learning=deepcopy(dict(learning)), state=learning['status'], recipe_id=learning.get('recipe_id'),
+                     version=learning.get('version'), action='revise' if learning.get('previous_version') else 'create')
+        if learning.get('max_completion_tokens') is not None:
+            value['max_completion_tokens'] = learning['max_completion_tokens']
         return value
 
     def feedback(self, turn_id, message, source):
         value=self._record(turn_id)
         key='feedback:'+hashlib.sha256((turn_id+'\0'+message).encode()).hexdigest()
-        receipt=self.atoms.record_feedback(value['revision_id'], feedback=message, source=source, key=key)
-        value['feedback']=receipt
-        self.store.put(self._key(turn_id),value)
-        return value
+        value['feedback']=self.atoms.record_feedback(value['execution_id'], feedback=message, source=source, key=key)
+        return self._save(turn_id, value)
 
-    def generate(self, turn_id, request_key=None, max_completion_tokens=None):
-        """Calling this is the host's explicit confirmation signal."""
+    def generate(self, turn_id, max_completion_tokens=None):
+        """Calling this is the host's explicit confirmation signal; an execution learns once."""
         _completion_tokens(max_completion_tokens)
         value=self._record(turn_id)
-        key=request_key or value.get('request_key') or 'explicit-generation:'+turn_id
-        budget = max_completion_tokens
-        if key == value.get('request_key'):
-            previous_budget = value.get('request_max_completion_tokens', value.get('max_completion_tokens'))
-            if budget is None:
-                budget = previous_budget
-            elif previous_budget != budget:
-                raise ValueError('request key reused with a different max_completion_tokens')
-        if value.get('recipe_candidate_id') and key==value.get('request_key'):
-            return value
-        value.update(request_key=key,state='request_pending',reason='explicit_generation_requested',max_completion_tokens=budget,request_max_completion_tokens=budget)
-        self.store.put(self._key(turn_id),value)
+        if value['state']!='awaiting_confirmation':
+            if max_completion_tokens is not None and max_completion_tokens!=value.get('max_completion_tokens'):
+                raise ValueError('cannot change the completion budget of a requested learning; resume it instead')
+            if value.get('learning'):
+                return value
+        budget = max_completion_tokens if max_completion_tokens is not None else value.get('max_completion_tokens')
+        value.update(state='request_pending',reason='explicit_generation_requested',max_completion_tokens=budget)
+        self._save(turn_id, value)
         options = {'max_completion_tokens': budget} if budget is not None else {}
-        receipt=self.atoms.start_recipe_candidate(value['task_id'],revision_id=value['revision_id'],key=key,**options)
-        value.update(recipe_candidate_id=receipt['recipe_candidate_id'],state=receipt['status'],
-                     max_completion_tokens=receipt.get('max_completion_tokens',budget),
-                     action='revise' if receipt.get('parent_candidate_id') else 'create')
-        self.store.put(self._key(turn_id),value)
-        return value
+        return self._save(turn_id, self._learned(value, self.atoms.learn(value['execution_id'], **options)))
 
     def _refresh(self,turn_id):
         value=self._record(turn_id)
-        if not value.get('recipe_candidate_id'):
+        if not value.get('learning'):
             return value
-        candidate=self.atoms.get_recipe_candidate(value['recipe_candidate_id'])
-        if candidate.get('max_completion_tokens') is not None:
-            value['max_completion_tokens'] = candidate['max_completion_tokens']
-        value.update(recipe=deepcopy(candidate),state='completed' if candidate['status']=='candidate' else candidate['status'])
-        self.store.put(self._key(turn_id),value)
-        return value
+        learning=self.atoms.get_execution(value['execution_id']).get('learning')
+        if not isinstance(learning, dict):
+            raise RSIRecoveryRequired('The execution lost its learning; reconcile with the service')
+        return self._save(turn_id, self._learned(value, learning))
 
     def resume(self,turn_id,max_completion_tokens=None):
         _completion_tokens(max_completion_tokens)
         value=self._record(turn_id)
         if value['state']=='awaiting_confirmation':
             return value
-        if not value.get('recipe_candidate_id'):
-            return self.generate(turn_id,value['request_key'],max_completion_tokens if max_completion_tokens is not None else value.get('request_max_completion_tokens'))
+        if not value.get('learning'):
+            return self.generate(turn_id, max_completion_tokens)
         value=self._refresh(turn_id)
-        if value['state'] in {'failed','interrupted','awaiting_runner'}:
+        if value['state'] in _RESUMABLE:
             options = {'max_completion_tokens': max_completion_tokens} if max_completion_tokens is not None else {}
-            receipt = self.atoms.resume_recipe_candidate(value['recipe_candidate_id'], **options)
-            value['max_completion_tokens'] = receipt.get('max_completion_tokens', max_completion_tokens if max_completion_tokens is not None else value.get('max_completion_tokens'))
-            value['state']='queued'
-            self.store.put(self._key(turn_id),value)
-        elif max_completion_tokens is not None and max_completion_tokens != value.get('max_completion_tokens'):
-            raise ValueError('cannot change the completion budget of an active or completed candidate')
+            return self._save(turn_id, self._learned(value, self.atoms.resume_learning(value['execution_id'], **options)))
+        if max_completion_tokens is not None and max_completion_tokens != value.get('max_completion_tokens'):
+            raise ValueError('cannot change the completion budget of an active or completed learning')
         return value
 
     def wait(self,turn_id,timeout=None):
+        """Return the record once its learning completed, or at once while no learning was requested.
+
+        ``RSILearningFailed`` (``failed``) and ``RSILearningStopped`` (``interrupted``,
+        ``awaiting_runner``, ``awaiting_material``) are raised after the record is
+        stored, so ``resume`` can continue a resumable learning.
+        """
         timeout=self.config.timeout if timeout is None else timeout
         if isinstance(timeout,bool) or not isinstance(timeout,(float,int)) or not math.isfinite(timeout) or timeout<0:
             raise ValueError('timeout must be finite and nonnegative')
@@ -120,12 +125,13 @@ class LearningCoordinator:
         while True:
             value=self._refresh(turn_id)
             if value['state']=='failed':
-                # The failed state is stored first, so resume_learning can retry it.
-                raise RSILearningFailed.from_learning(value['recipe'])
-            if value['state'] in {'awaiting_confirmation','completed','interrupted','awaiting_runner'}:
+                raise RSILearningFailed.from_learning(value['learning'])
+            if value['state'] in _STOPPED:
+                raise RSILearningStopped(value['learning'])
+            if value['state'] in {'awaiting_confirmation','completed'}:
                 return value
             if time.monotonic()>=deadline:
-                raise TimeoutError('Poll or resume the same Recipe candidate; do not rerun the model')
+                raise TimeoutError('Learning is still running; wait again or resume it, do not rerun the model')
             time.sleep(min(self.config.poll_interval,max(0,deadline-time.monotonic())))
 
     def close(self):

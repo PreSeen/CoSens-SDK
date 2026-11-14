@@ -70,10 +70,11 @@ async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto"
                        "request_sha256": execution.get("request_sha256"), "execution_request": execution.get("request"),
                        "execution": execution})
 
-    stable_key(request_key)
-    if phase == 'revise':
-        return await atoms.start_revision(session_context['revision_id'], key=request_key)
-    if phase == 'recipe':
-        options = {'model': model} if model is not None else {}
-        return await atoms.start_recipe_candidate(session_context['task_id'], revision_id=session_context['revision_id'], key=request_key, **options)
-    raise ValueError('phase must be prepare, revise or recipe')
+    if phase == 'correct':
+        # A correction of a completed execution; the service rejects recipe_id and recall_memory here.
+        return await atoms.start_execution(session_context['task_id'], key=stable_key(request_key),
+                                           previous_execution_id=session_context['execution_id'],
+                                           **({'model': model} if model is not None else {}))
+    if phase == 'learn':
+        return await atoms.learn(session_context['execution_id'], **({'model': model} if model is not None else {}))
+    raise ValueError('phase must be prepare, correct or learn')
