@@ -2,6 +2,12 @@
 
 Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned separately.
 
+## Unreleased
+
+### Changed
+
+- `cosens.local` freezes the Memory recall as the service returns it: the original text of the episodes the general Memory recall finds, at most 8 sources within the token budget. The service no longer returns source references, so the snapshot drops the score, duplicate and reference filter (`omitted_unreferenced`, `omitted_low_relevance` and `omitted_duplicate` are gone; `omitted_over_budget` counts sources beyond the limit).
+
 ## Python 0.7.0
 
 ### Breaking
