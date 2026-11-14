@@ -28,11 +28,11 @@ function algorithm(candidates: any[] = []) {
   const fetcher: typeof fetch = async (input, init) => {
     const path = new URL(String(input)).pathname.replace(/^\/api/, '');
     paths.push(path);
-    if (path === '/v1/recipe-candidates') return json({ items: candidates.map(c => ({ recipe_candidate_id: c.recipe_candidate_id, status: 'candidate', current: true, title: c.recipe.title })), has_more: false });
-    if (path.startsWith('/v1/recipe-candidates/')) return json(candidates.find(c => path.endsWith('/' + c.recipe_candidate_id)));
+    if (path === '/recipe-candidates') return json({ items: candidates.map(c => ({ recipe_candidate_id: c.recipe_candidate_id, status: 'candidate', current: true, title: c.recipe.title })), has_more: false });
+    if (path.startsWith('/recipe-candidates/')) return json(candidates.find(c => path.endsWith('/' + c.recipe_candidate_id)));
     if (path === '/v1/memory/recall') return json({ items: [{ id: 'm1', kind: 'source', text: 'Reports use the Q3 template.', refs: [{ source_id: 's1' }], score: 0.9 }] });
-    if (path === '/v1/artifacts') return json({ artifact_id: 'artifact_1', content_hash: 'sha256:x' });
-    if (path === '/v1/tasks') return json({ task_id: 'task_1', status: 'ready' });
+    if (path === '/artifacts') return json({ artifact_id: 'artifact_1', content_hash: 'sha256:x' });
+    if (path === '/tasks') return json({ task_id: 'task_1', status: 'ready' });
     if (path.endsWith('/executions')) {
       const body = JSON.parse(String(init?.body));
       const chosen = candidates.find(c => c.recipe_id === body.recipe_id);
@@ -98,7 +98,7 @@ test('an empty Recipe list skips the match call and is cached', async () => {
     await client.responses.create({ model: 'm', input: 'Produce a report' });
     await client.responses.create({ model: 'm', input: 'Produce another report' });
     assert.deepEqual(decisionNames, ['cosens_decision', 'cosens_decision']);
-    assert.equal(service.paths.filter(path => path === '/v1/recipe-candidates').length, 1);
+    assert.equal(service.paths.filter(path => path === '/recipe-candidates').length, 1);
     assert.equal(service.paths.filter(path => path === '/v1/memory/recall').length, 2);
   } finally { await client.close(); }
 });

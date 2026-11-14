@@ -19,8 +19,8 @@ async def test_us_routes_all_transports_and_freezes_at_client_creation(monkeypat
         await client.atoms.get_task('t1')
         await client.atoms.get_revision('revision1')
     assert [str(r.url) for r in requests]==[
-        'https://rsi.cosens.ai/api/v1/tasks/t1','https://rsi.cosens.ai/api/v1/tasks/t1',
-        'https://rsi.cosens.ai/api/v1/revisions/revision1']
+        'https://rsi.cosens.ai/api/tasks/t1','https://rsi.cosens.ai/api/tasks/t1',
+        'https://rsi.cosens.ai/api/revisions/revision1']
     assert all(r.headers['authorization']=='Bearer regional-key' for r in requests)
     assert all(not any(k.lower().replace('_','-')=='x-user-id' for k in r.headers) for r in requests)
 

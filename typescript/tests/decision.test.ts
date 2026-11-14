@@ -88,13 +88,13 @@ test('auto recipe match timeout still captures the turn without a Recipe', async
   };
   const fetcher: typeof fetch = async input => {
     const path = new URL(String(input)).pathname.replace(/^\/api/, '');
-    const value = path === '/v1/recipe-candidates'
+    const value = path === '/recipe-candidates'
       ? { items: [{ recipe_candidate_id: 'candidate', status: 'candidate', current: true, title: 'Test' }], has_more: false }
-      : path === '/v1/recipe-candidates/candidate'
+      : path === '/recipe-candidates/candidate'
         ? { recipe_candidate_id: 'candidate', recipe_id: 'recipe', version: 1, status: 'candidate', current: true,
             recipe: { title: 'Test', when: 'tests', when_not: 'never', steps: [] } }
-        : path === '/v1/artifacts' ? { artifact_id: 'artifact', content_hash: 'sha256:x' }
-        : path === '/v1/tasks' ? { task_id: 'task', status: 'ready' }
+        : path === '/artifacts' ? { artifact_id: 'artifact', content_hash: 'sha256:x' }
+        : path === '/tasks' ? { task_id: 'task', status: 'ready' }
         : path.endsWith('/executions') ? { execution_id: 'execution', status: 'awaiting_execution', request_sha256: 'sha', request: {} }
         : path.endsWith('/result') ? { status: 'completed', revision_id: 'revision' }
         : { items: [] };

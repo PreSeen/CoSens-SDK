@@ -21,7 +21,7 @@ async def test_recipe_listing_sync_and_async_requests():
         second = client.sync_atoms.list_recipe_candidates(limit=1, cursor=first.next_cursor, task_id="task /1", status="candidate")
 
     assert first.has_more and not second.has_more
-    assert [request.url.path for request in requests] == ["/api/v1/recipe-candidates"] * 2
+    assert [request.url.path for request in requests] == ["/api/recipe-candidates"] * 2
     assert dict(requests[0].url.params) == {"limit": "1", "task_id": "task /1", "status": "candidate"}
     assert dict(requests[1].url.params) == {"limit": "1", "cursor": "r1", "task_id": "task /1", "status": "candidate"}
     assert all(request.headers["authorization"] == "Bearer test-key" and request.headers["x-auth-type"] == "api_key" for request in requests)

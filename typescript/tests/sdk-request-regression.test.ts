@@ -168,7 +168,7 @@ test('R14 reserved characters in resource ID remain one encoded segment', async 
   const { a, seen } = sdk(t);
   await a.getTask('a/b?c#d%2F');
   assert.equal(seen.length, 1);
-  assert.equal(new URL(seen[0]!.url).pathname, '/api/v1/tasks/a%2Fb%3Fc%23d%252F');
+  assert.equal(new URL(seen[0]!.url).pathname, '/api/tasks/a%2Fb%3Fc%23d%252F');
   assert.equal(new URL(seen[0]!.url).search, '');
 });
 

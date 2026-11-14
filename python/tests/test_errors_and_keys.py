@@ -100,7 +100,7 @@ def test_wait_learning_raises_and_keeps_the_failed_turn_resumable(tmp_path):
 
     class FailedBackend(Backend):
         def __call__(self, request):
-            if request.url.path.endswith('/v1/recipe-candidates/candidate_1'):
+            if request.url.path.endswith('/recipe-candidates/candidate_1'):
                 return httpx.Response(200, json={'recipe_candidate_id': 'candidate_1', 'status': 'failed',
                                                  'error': 'upstream_unavailable',
                                                  'error_detail': dict(DETAIL, code='upstream_unavailable', retryable=True)})

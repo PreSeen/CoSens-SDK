@@ -19,9 +19,9 @@ for (const streamed of [false, true]) test(`real Agents approval resumes the sam
   const seen: string[] = [];
   const wrapped = new TaskWorkflowRunner(new Runner({ tracingDisabled: true }), { mode: 'auto', apiKey: 'key', statePath: ':memory:', fetch: async input => {
     const path = new URL(String(input)).pathname; seen.push(path);
-    if (path === '/api/v1/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'ready' }));
+    if (path === '/api/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'ready' }));
     if (path.endsWith('/executions')) return new Response(JSON.stringify({ execution_id: 'e1', status: 'awaiting_execution', request_sha256: 'h1', request: { kind: 'original' } }));
-    if (path === '/api/v1/artifacts') return new Response(JSON.stringify({ artifact_id: 'a1', content_hash: 'server-hash' }));
+    if (path === '/api/artifacts') return new Response(JSON.stringify({ artifact_id: 'a1', content_hash: 'server-hash' }));
     if (path.endsWith('/result')) return new Response(JSON.stringify({ status: 'completed', revision_id: 'r1' }));
     throw new Error(path);
   } });
@@ -41,7 +41,7 @@ for (const streamed of [false, true]) test(`real Agents approval resumes the sam
     assert.equal(wrapped.cosens.getTurn('approved-turn')?.state, 'completed');
     assert.deepEqual(toolCalls, ['fact']);
     assert.equal(model.calls.length, 2);
-    for (const path of ['/api/v1/tasks', '/api/v1/tasks/t1/executions', '/api/v1/executions/e1/result']) assert.equal(seen.filter(x => x === path).length, 1);
+    for (const path of ['/api/tasks', '/api/tasks/t1/executions', '/api/executions/e1/result']) assert.equal(seen.filter(x => x === path).length, 1);
     assert.equal(model.calls[0]!.request.systemInstructions, model.calls[1]!.request.systemInstructions);
     assert.equal(agent.instructions, 'Original instruction');
   } finally { await wrapped.close(); }
@@ -77,10 +77,10 @@ test('task Runner returns native result and reconciles identical result body wit
   const wrapped = new TaskWorkflowRunner(native, { mode: 'auto', apiKey: 'key', statePath: ':memory:', fetch: async (input, init) => {
     const path = new URL(String(input)).pathname;
     seen.push({ path, body: init?.body ? JSON.parse(String(init.body)) : undefined });
-    if (path === '/api/v1/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'ready' }));
-    if (path === '/api/v1/tasks/t1/executions') return new Response(JSON.stringify({ execution_id: 'e1', status: 'awaiting_execution', request_sha256: 'frozen-hash', request: { kind: 'original' } }));
-    if (path === '/api/v1/artifacts') return new Response(JSON.stringify({ artifact_id: 'a1', content_hash: 'server-hash' }));
-    if (path === '/api/v1/executions/e1/result') {
+    if (path === '/api/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'ready' }));
+    if (path === '/api/tasks/t1/executions') return new Response(JSON.stringify({ execution_id: 'e1', status: 'awaiting_execution', request_sha256: 'frozen-hash', request: { kind: 'original' } }));
+    if (path === '/api/artifacts') return new Response(JSON.stringify({ artifact_id: 'a1', content_hash: 'server-hash' }));
+    if (path === '/api/executions/e1/result') {
       submissions++;
       return submissions === 1 ? new Response(JSON.stringify({ error: { code: 'transient', message: 'receipt lost' } }), { status: 503 }) :
         new Response(JSON.stringify({ status: 'completed', revision_id: 'r1' }));
@@ -95,7 +95,7 @@ test('task Runner returns native result and reconciles identical result body wit
   const recovered = await wrapped.reconcile('turn-1');
   assert.equal(recovered.revisionId, 'r1');
   assert.equal(nativeCalls, 1);
-  assert.equal(seen.filter(x => x.path === '/api/v1/artifacts').length, 1);
+  assert.equal(seen.filter(x => x.path === '/api/artifacts').length, 1);
   const bodies = seen.filter(x => x.path.endsWith('/result')).map(x => x.body);
   assert.deepEqual(bodies[0], bodies[1]);
   assert.deepEqual(bodies[0], { request_sha256: 'frozen-hash', outcome: 'completed', artifacts: [{ artifact_id: 'a1', role: 'submitted_output' }],
@@ -112,12 +112,12 @@ test('task Runner resumes a context gap on the same task and submits host-observ
     traceAdapter: () => ({ events: [{ id: 'event-1', kind: 'tool_result', payload: { name: 'tool' } }], traceCoverage: 'partial' }),
     fetch: async (input, init) => {
       const path = new URL(String(input)).pathname; seen.push(path);
-      if (path === '/api/v1/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'needs_context' }));
-      if (path === '/api/v1/tasks/t1/context') { ready = true; return new Response(JSON.stringify({ task_id: 't1', status: 'ready' })); }
-      if (path === '/api/v1/tasks/t1') return new Response(JSON.stringify({ task_id: 't1', status: ready ? 'ready' : 'needs_context' }));
-      if (path === '/api/v1/tasks/t1/executions') return new Response(JSON.stringify({ execution_id: 'e1', request_sha256: 'h1', request: { kind: 'reconstructed' }, status: 'awaiting_execution' }));
-      if (path === '/api/v1/artifacts') return new Response(JSON.stringify({ artifact_id: 'new-a1', content_hash: 'server-hash' }));
-      if (path === '/api/v1/executions/e1/result') {
+      if (path === '/api/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'needs_context' }));
+      if (path === '/api/tasks/t1/context') { ready = true; return new Response(JSON.stringify({ task_id: 't1', status: 'ready' })); }
+      if (path === '/api/tasks/t1') return new Response(JSON.stringify({ task_id: 't1', status: ready ? 'ready' : 'needs_context' }));
+      if (path === '/api/tasks/t1/executions') return new Response(JSON.stringify({ execution_id: 'e1', request_sha256: 'h1', request: { kind: 'reconstructed' }, status: 'awaiting_execution' }));
+      if (path === '/api/artifacts') return new Response(JSON.stringify({ artifact_id: 'new-a1', content_hash: 'server-hash' }));
+      if (path === '/api/executions/e1/result') {
         const body = JSON.parse(String(init?.body));
         assert.deepEqual(body.events, [{ id: 'event-1', kind: 'tool_result', payload: { name: 'tool' } }]);
         assert.equal(body.trace_coverage, 'partial');
@@ -132,7 +132,7 @@ test('task Runner resumes a context gap on the same task and submits host-observ
   await wrapped.cosens.atoms!.supplementTaskContext('t1', { expectedContextVersion: 1, objective: 'work', selfContained: true });
   await wrapped.run(new FakeAgent(), 'work', { rsi });
   assert.equal(wrapped.cosens.getTurn('turn-1')?.revisionId, 'r1');
-  assert.equal(seen.filter(path => path === '/api/v1/tasks').length, 1);
+  assert.equal(seen.filter(path => path === '/api/tasks').length, 1);
   assert.equal(nativeCalls, 1);
   await wrapped.close();
 });
@@ -146,18 +146,18 @@ test('task Runner stream preserves events and submits only at native completion'
   const native = { async run() { return nativeStream; } } as unknown as Runner;
   const wrapped = new TaskWorkflowRunner(native, { mode: 'auto', apiKey: 'key', statePath: ':memory:', fetch: async (input) => {
     const path = new URL(String(input)).pathname; seen.push(path);
-    if (path === '/api/v1/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'ready' }));
+    if (path === '/api/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'ready' }));
     if (path.endsWith('/executions')) return new Response(JSON.stringify({ execution_id: 'e1', status: 'awaiting_execution', request_sha256: 'h1', request: { kind: 'original' } }));
-    if (path === '/api/v1/artifacts') return new Response(JSON.stringify({ artifact_id: 'a1', content_hash: 'server-hash' }));
+    if (path === '/api/artifacts') return new Response(JSON.stringify({ artifact_id: 'a1', content_hash: 'server-hash' }));
     if (path.endsWith('/result')) return new Response(JSON.stringify({ status: 'completed', revision_id: 'r1' }));
     throw new Error(path);
   } });
   const stream = await wrapped.runStreamed(new FakeAgent(), 'work', { rsi: { turnId: 'stream-1', task: { source: 'new_task', objective: 'work' } } });
-  assert.equal(seen.includes('/api/v1/artifacts'), false);
+  assert.equal(seen.includes('/api/artifacts'), false);
   const events = [];
   for await (const event of stream) events.push(event);
   assert.deepEqual(events, [{ type: 'raw_response_event' }]);
-  assert.deepEqual(seen.slice(-2), ['/api/v1/artifacts', '/api/v1/executions/e1/result']);
+  assert.deepEqual(seen.slice(-2), ['/api/artifacts', '/api/executions/e1/result']);
   assert.equal(wrapped.cosens.getTurn('stream-1')?.state, 'completed');
   await wrapped.close();
 });
@@ -169,7 +169,7 @@ test('task Runner aborted stream cannot submit a completed result', async () => 
   const native = { async run() { return nativeStream; } } as unknown as Runner;
   const wrapped = new TaskWorkflowRunner(native, { mode: 'auto', apiKey: 'key', statePath: ':memory:', fetch: async input => {
     const path = new URL(String(input)).pathname; seen.push(path);
-    if (path === '/api/v1/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'ready' }));
+    if (path === '/api/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'ready' }));
     if (path.endsWith('/executions')) return new Response(JSON.stringify({ execution_id: 'e1', status: 'awaiting_execution', request_sha256: 'h1', request: { kind: 'original' } }));
     throw new Error(path);
   } });
@@ -177,7 +177,7 @@ test('task Runner aborted stream cannot submit a completed result', async () => 
   assert.equal(stream.abort(), 'aborted');
   await stream.completed;
   assert.equal(wrapped.cosens.getTurn('cancel-1')?.state, 'incomplete');
-  assert.deepEqual(seen, ['/api/v1/tasks', '/api/v1/tasks/t1/executions']);
+  assert.deepEqual(seen, ['/api/tasks', '/api/tasks/t1/executions']);
   await wrapped.close();
 });
 
@@ -192,7 +192,7 @@ test('awaiting a failed native stream records incomplete state and preserves the
   const native = { async run() { return nativeStream; } } as unknown as Runner;
   const wrapped = new TaskWorkflowRunner(native, { mode: 'auto', apiKey: 'key', statePath: ':memory:', fetch: async input => {
     const path = new URL(String(input)).pathname; seen.push(path);
-    if (path === '/api/v1/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'ready' }));
+    if (path === '/api/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'ready' }));
     if (path.endsWith('/executions')) return new Response(JSON.stringify({ execution_id: 'e1', status: 'awaiting_execution', request_sha256: 'h1', request: { kind: 'original' } }));
     throw new Error(path);
   } });
@@ -202,7 +202,7 @@ test('awaiting a failed native stream records incomplete state and preserves the
     await assert.rejects(stream.completed, error => error === nativeError);
     assert.equal(wrapped.cosens.getTurn('stream-error')?.state, 'incomplete');
     await assert.rejects(wrapped.runStreamed(new FakeAgent(), 'work', options), /may have executed/);
-    assert.deepEqual(seen, ['/api/v1/tasks', '/api/v1/tasks/t1/executions']);
+    assert.deepEqual(seen, ['/api/tasks', '/api/tasks/t1/executions']);
   } finally { await wrapped.close(); }
 });
 
@@ -211,7 +211,7 @@ test('task Runner never replays a native execution with unknown side effects', a
   const native = { async run() { nativeCalls++; throw new Error('native side effect unknown'); } } as unknown as Runner;
   const wrapped = new TaskWorkflowRunner(native, { mode: 'auto', apiKey: 'key', statePath: ':memory:', fetch: async input => {
     const path = new URL(String(input)).pathname;
-    if (path === '/api/v1/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'ready' }));
+    if (path === '/api/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'ready' }));
     if (path.endsWith('/executions')) return new Response(JSON.stringify({ execution_id: 'e1', status: 'awaiting_execution', request_sha256: 'h1', request: { kind: 'original' } }));
     throw new Error(path);
   } });
@@ -228,14 +228,14 @@ test('task Runner never uploads a fabricated artifact for missing native output'
   const native = { async run() { return { finalOutput: null, interruptions: [] }; } } as unknown as Runner;
   const wrapped = new TaskWorkflowRunner(native, { mode: 'auto', apiKey: 'key', statePath: ':memory:', fetch: async input => {
     const path = new URL(String(input)).pathname; seen.push(path);
-    if (path === '/api/v1/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'ready' }));
+    if (path === '/api/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'ready' }));
     if (path.endsWith('/executions')) return new Response(JSON.stringify({ execution_id: 'e1', status: 'awaiting_execution', request_sha256: 'h1', request: { kind: 'original' } }));
     throw new Error(path);
   } });
   const result = await wrapped.run(new FakeAgent(), 'work', { rsi: { turnId: 'no-output', task: { source: 'new_task', objective: 'work' } } });
   assert.equal(result.finalOutput, null);
   assert.equal(wrapped.cosens.getTurn('no-output')?.state, 'completion_pending');
-  assert.deepEqual(seen, ['/api/v1/tasks', '/api/v1/tasks/t1/executions']);
+  assert.deepEqual(seen, ['/api/tasks', '/api/tasks/t1/executions']);
   await wrapped.close();
 });
 
@@ -252,6 +252,6 @@ test('task Runner recovery binds original input and Session incarnation', async 
   await assert.rejects(wrapped.run(new FakeAgent(), 'work', { rsi, session: session1 }), /needs_context/);
   await assert.rejects(wrapped.run(new FakeAgent(), 'different input', { rsi, session: session1 }), /input or Session/);
   await assert.rejects(wrapped.run(new FakeAgent(), 'work', { rsi, session: session2 }), /input or Session/);
-  assert.deepEqual(seen, ['/api/v1/tasks']);
+  assert.deepEqual(seen, ['/api/tasks']);
   await wrapped.close();
 });

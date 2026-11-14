@@ -44,7 +44,7 @@ function workflowSelection(candidateSha256?: string, candidateId?: string, custo
 }
 export class Atoms {
   listRecipeCandidates({limit=20,cursor,taskId,status}:{limit?:number;cursor?:string;taskId?:string;status?:string}={}) {
-    boundedInteger(limit,'limit',100);return this.http.request('GET','/v1/recipe-candidates?'+new URLSearchParams({limit:String(limit),...(cursor?{cursor}:{}),...(taskId?{task_id:taskId}:{}),...(status?{status}:{})}));
+    boundedInteger(limit,'limit',100);return this.http.request('GET','/recipe-candidates?'+new URLSearchParams({limit:String(limit),...(cursor?{cursor}:{}),...(taskId?{task_id:taskId}:{}),...(status?{status}:{})}));
   }
   constructor(private readonly http: Transport) {}
   createDocumentUploadGrant(metadata: DocumentUploadMetadata) {
@@ -84,9 +84,9 @@ export class Atoms {
   artifact({ name, content }: { name: string; content: string }) {
     if (typeof name !== 'string' || !name.trim()) throw new TypeError('artifact name is required');
     if (typeof content !== 'string' || !content || Buffer.byteLength(content, 'utf8') > 1_000_000) throw new TypeError('artifact content must be nonempty UTF-8 text of at most 1,000,000 bytes');
-    return this.http.request('POST', '/v1/artifacts', { name, content });
+    return this.http.request('POST', '/artifacts', { name, content });
   }
-  getArtifact(id: string) { return this.http.request('GET', `/v1/artifacts/${pathPart(id)}`); }
+  getArtifact(id: string) { return this.http.request('GET', `/artifacts/${pathPart(id)}`); }
 
   // Task workflow atoms; each call maps to one HTTP request and never runs an Agent.
   createTask({ source, key, objective, artifacts = [], selfContained }: { source: 'new_task' | 'external_artifact'; key: string; objective?: string; artifacts?: WorkflowArtifactRef[]; selfContained?: boolean }) {
@@ -105,12 +105,12 @@ export class Atoms {
     });
     if ([...rolesById.values()].some(itemRoles => itemRoles.has('original_input') && itemRoles.has('submitted_output'))) throw new TypeError('one artifact cannot be both original_input and submitted_output');
     if (selfContained !== undefined && typeof selfContained !== 'boolean') throw new TypeError('selfContained must be a boolean');
-    return this.http.request('POST', '/v1/tasks', { source, artifacts, ...(objective === undefined ? {} : { objective }), ...(selfContained === undefined ? {} : { self_contained: selfContained }) }, requestKey(key));
+    return this.http.request('POST', '/tasks', { source, artifacts, ...(objective === undefined ? {} : { objective }), ...(selfContained === undefined ? {} : { self_contained: selfContained }) }, requestKey(key));
   }
-  getTask(taskId: string) { return this.http.request('GET', `/v1/tasks/${pathPart(taskId)}`); }
+  getTask(taskId: string) { return this.http.request('GET', `/tasks/${pathPart(taskId)}`); }
   supplementTaskContext(taskId: string, { expectedContextVersion, objective, artifacts, selfContained }: { expectedContextVersion: number; objective?: string; artifacts?: WorkflowArtifactRef[]; selfContained?: boolean }) {
     if (!Number.isInteger(expectedContextVersion) || expectedContextVersion < 1) throw new TypeError('expectedContextVersion must be a positive integer');
-    return this.http.request('POST', `/v1/tasks/${pathPart(taskId)}/context`, { expected_context_version: expectedContextVersion, ...(objective === undefined ? {} : { objective }), ...(artifacts === undefined ? {} : { artifacts }), ...(selfContained === undefined ? {} : { self_contained: selfContained }) });
+    return this.http.request('POST', `/tasks/${pathPart(taskId)}/context`, { expected_context_version: expectedContextVersion, ...(objective === undefined ? {} : { objective }), ...(artifacts === undefined ? {} : { artifacts }), ...(selfContained === undefined ? {} : { self_contained: selfContained }) });
   }
   startExecution(taskId: string, { key, model, recipeId, recallMemory = false }: { key: string; model?: string; recipeId?: string; recallMemory?: boolean }) {
     if (typeof recallMemory !== 'boolean') throw new TypeError('recallMemory must be boolean');
@@ -118,12 +118,11 @@ export class Atoms {
     const connection = modelData(model);
     const body = { ...connection,
       ...(recipeId === undefined ? {} : { recipe_id: recipeId }), ...(recallMemory ? { recall_memory: true } : {}) };
-    return this.http.request('POST', `/v1/tasks/${pathPart(taskId)}/executions`,
+    return this.http.request('POST', `/tasks/${pathPart(taskId)}/executions`,
       Object.keys(body).length ? body : undefined, requestKey(key), undefined);
   }
-  getTaskRecipe(taskId: string) { return this.http.request('GET', `/v1/tasks/${pathPart(taskId)}/recipe`); }
-  getRecipeVersions(recipeId: string) { return this.http.request('GET', `/v1/recipe-chains/${pathPart(recipeId)}/versions`); }
-  getExecution(executionId: string) { return this.http.request('GET', `/v1/executions/${pathPart(executionId)}`); }
+  getRecipeVersions(recipeId: string) { return this.http.request('GET', `/recipes/${pathPart(recipeId)}/versions`); }
+  getExecution(executionId: string) { return this.http.request('GET', `/executions/${pathPart(executionId)}`); }
   submitExecution(executionId: string, { requestSha256, outcome, artifacts, events = [], traceCoverage = 'unknown' }: { requestSha256: string; outcome: 'completed' | 'failed' | 'cancelled'; artifacts: WorkflowOutputRef[]; events?: WorkflowEvent[]; traceCoverage?: 'full' | 'partial' | 'unknown' }) {
     if (!requestSha256?.trim()) throw new TypeError('requestSha256 is required');
     if (!['completed', 'failed', 'cancelled'].includes(outcome)) throw new TypeError('invalid execution outcome');
@@ -135,23 +134,23 @@ export class Atoms {
     if (outcome === 'completed' && !artifacts?.some(a => a.role === 'submitted_output')) throw new TypeError('completed execution requires a submitted_output artifact');
     const body = { request_sha256: requestSha256, outcome, artifacts, events, trace_coverage: traceCoverage };
     if (Buffer.byteLength(JSON.stringify(body), 'utf8') > 1_000_000) throw new TypeError('execution result JSON must be at most 1,000,000 bytes');
-    return this.http.request('POST', `/v1/executions/${pathPart(executionId)}/result`, body);
+    return this.http.request('POST', `/executions/${pathPart(executionId)}/result`, body);
   }
-  getRevision(revisionId: string) { return this.http.request('GET', `/v1/revisions/${pathPart(revisionId)}`); }
-  startRevision(revisionId:string,{key}:{key:string}) {return this.http.request('POST',`/v1/revisions/${pathPart(revisionId)}/revisions`,{data:{}},requestKey(key));}
+  getRevision(revisionId: string) { return this.http.request('GET', `/revisions/${pathPart(revisionId)}`); }
+  startRevision(revisionId:string,{key}:{key:string}) {return this.http.request('POST','/revisions',{parent_revision_id:revisionId},requestKey(key));}
   /** Create or update the Recipe from a confirmed revision. Without `key`, repeated calls for the same revision and budget return the same candidate. */
   startRecipeCandidate(taskId:string,{revisionId,key,model,maxCompletionTokens}:{revisionId:string;key?:string;model?:string;maxCompletionTokens?:number}) {
-    return this.http.request('POST',`/v1/tasks/${pathPart(taskId)}/recipe-candidates`,{data:{revision_id:revisionId,...modelData(model),...(maxCompletionTokens===undefined?{}:{max_completion_tokens:boundedInteger(maxCompletionTokens,'maxCompletionTokens',1_000_000)})}},requestKey(key??recipeRequestKey(taskId,revisionId,maxCompletionTokens)));
+    return this.http.request('POST',`/tasks/${pathPart(taskId)}/recipe-candidates`,{revision_id:revisionId,...modelData(model),...(maxCompletionTokens===undefined?{}:{max_completion_tokens:boundedInteger(maxCompletionTokens,'maxCompletionTokens',1_000_000)})},requestKey(key??recipeRequestKey(taskId,revisionId,maxCompletionTokens)));
   }
-  getRecipeCandidate(recipeId:string){return this.http.request('GET',`/v1/recipe-candidates/${pathPart(recipeId)}`);}
-  resumeRecipeCandidate(recipeId:string,options?:string|{model?:string;maxCompletionTokens?:number}){const {model,maxCompletionTokens}=typeof options==='string'?{model:options}:options??{};const data={...modelData(model),...(maxCompletionTokens===undefined?{}:{max_completion_tokens:boundedInteger(maxCompletionTokens,'maxCompletionTokens',1_000_000)})};return this.http.request('POST',`/v1/recipe-candidates/${pathPart(recipeId)}/resume`,Object.keys(data).length?{data}:undefined);}
+  getRecipeCandidate(recipeId:string){return this.http.request('GET',`/recipe-candidates/${pathPart(recipeId)}`);}
+  resumeRecipeCandidate(recipeId:string,options?:string|{model?:string;maxCompletionTokens?:number}){const {model,maxCompletionTokens}=typeof options==='string'?{model:options}:options??{};const data={...modelData(model),...(maxCompletionTokens===undefined?{}:{max_completion_tokens:boundedInteger(maxCompletionTokens,'maxCompletionTokens',1_000_000)})};return this.http.request('POST',`/recipe-candidates/${pathPart(recipeId)}/resume`,Object.keys(data).length?data:undefined);}
 
-  listTasks({limit=20,cursor}:{limit?:number;cursor?:string}={}) {return this.http.request('GET','/v1/tasks?'+new URLSearchParams({limit:String(limit),...(cursor?{cursor}:{})}));}
-  recordFeedback(revisionId:string,{feedback,source,key}:{feedback:string;source:FeedbackSource;key:string}) {return this.http.request('POST',`/v1/revisions/${pathPart(revisionId)}/feedback`,{feedback,source:feedbackSource(source)},requestKey(key));}
-  startSession(sessionId?:string) {return this.http.request('POST','/v1/sessions/start',sessionId?{session_id:sessionId}:{});}
-  appendSessionEvents(sessionId:string,events:Array<{event_id:string;kind:string;payload:Record<string,unknown>;task_id?:string;revision_id?:string}>) {return this.http.request('POST',`/v1/sessions/${pathPart(sessionId)}/events`,{events});}
-  getSessionContext(sessionId:string,after=0) {return this.http.request('GET',`/v1/sessions/${pathPart(sessionId)}/context?after=${after}`);}
-  endSession(sessionId:string) {return this.http.request('POST',`/v1/sessions/${pathPart(sessionId)}/end`);}
+  listTasks({limit=20,cursor}:{limit?:number;cursor?:string}={}) {return this.http.request('GET','/tasks?'+new URLSearchParams({limit:String(limit),...(cursor?{cursor}:{})}));}
+  recordFeedback(revisionId:string,{feedback,source,key}:{feedback:string;source:FeedbackSource;key:string}) {return this.http.request('POST',`/revisions/${pathPart(revisionId)}/feedback`,{feedback,source:feedbackSource(source)},requestKey(key));}
+  startSession(sessionId?:string) {return this.http.request('POST','/sessions',sessionId?{session_id:sessionId}:{});}
+  appendSessionEvents(sessionId:string,events:Array<{event_id:string;kind:string;payload:Record<string,unknown>;task_id?:string;revision_id?:string}>) {return this.http.request('POST',`/sessions/${pathPart(sessionId)}/events`,{events});}
+  getSessionContext(sessionId:string,after=0) {return this.http.request('GET',`/sessions/${pathPart(sessionId)}/context?after=${after}`);}
+  endSession(sessionId:string) {return this.http.request('POST',`/sessions/${pathPart(sessionId)}/end`);}
   /** Poll an existing candidate until it leaves queued/running/awaiting_parent; throws RSICandidateFailedError when it failed. */
   async waitWorkflowJob(kind:'recipe_candidate',id:string,{timeout=300}:{timeout?:number}={}) {
     if(kind!=='recipe_candidate')throw new TypeError('job kind must be recipe_candidate');

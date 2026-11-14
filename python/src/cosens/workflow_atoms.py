@@ -130,7 +130,8 @@ def _recipe_upload(recipe_id, version, recipe, base_version):
         raise ValueError("recipe_id must be 1-128 letters, digits, '_' or '-'")
     if not isinstance(recipe, dict):
         raise ValueError("recipe must be an object")
-    body = {"version": _positive(version, "version")}
+    _positive(version, "version")
+    body = {}
     if base_version is not None:
         body["base_version"] = _positive(base_version, "base_version")
     body["recipe"] = recipe
@@ -139,7 +140,7 @@ def _recipe_upload(recipe_id, version, recipe, base_version):
 
 def _recipe_path(recipe_id, version):
     suffix = "?" + urlencode({"version": _positive(version, "version")}) if version is not None else ""
-    return f"/v1/recipes/{path_part(recipe_id)}" + suffix
+    return f"/recipes/{path_part(recipe_id)}" + suffix
 
 
 def _recipes_list_path(limit, cursor, origin):
@@ -154,7 +155,7 @@ def _recipes_list_path(limit, cursor, origin):
         if origin not in ("uploaded", "generated"):
             raise ValueError("origin must be uploaded or generated")
         params["origin"] = origin
-    return "/v1/recipes?" + urlencode(params)
+    return "/recipes?" + urlencode(params)
 
 
 def _recipes_search_path(query, limit):
@@ -162,7 +163,7 @@ def _recipes_search_path(query, limit):
         raise ValueError("query must be 1-1000 characters")
     if type(limit) is not int or not 1 <= limit <= 50:
         raise ValueError("limit must be an integer from 1 to 50")
-    return "/v1/recipes?" + urlencode({"q": query, "limit": limit})
+    return "/recipes?" + urlencode({"q": query, "limit": limit})
 
 
 def _result(request_sha256, outcome, artifacts, events, trace_coverage):
@@ -216,16 +217,16 @@ class AsyncWorkflowAtoms:
             delay = min(delay * 2, 30.0)
 
     async def get_artifact(self, artifact_id):
-        return await self._http.request("GET", f"/v1/artifacts/{path_part(artifact_id)}")
+        return await self._http.request("GET", f"/artifacts/{path_part(artifact_id)}")
 
     async def create_task(self, *, source, key, objective=None, artifacts=None, self_contained=None):
-        return await self._http.request("POST", "/v1/tasks", body=_task(source, objective, artifacts, self_contained), key=stable_key(key))
+        return await self._http.request("POST", "/tasks", body=_task(source, objective, artifacts, self_contained), key=stable_key(key))
 
     async def get_task(self, task_id):
-        return await self._http.request("GET", f"/v1/tasks/{path_part(task_id)}")
+        return await self._http.request("GET", f"/tasks/{path_part(task_id)}")
 
     async def supplement_task_context(self, task_id, *, expected_context_version, objective=None, artifacts=None, self_contained=None):
-        return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/context",
+        return await self._http.request("POST", f"/tasks/{path_part(task_id)}/context",
                                         body=_context(expected_context_version, objective, artifacts, self_contained))
 
 
@@ -239,18 +240,15 @@ class AsyncWorkflowAtoms:
             path_part(recipe_id)
             data['recipe_id'] = recipe_id
         options = {'body': data} if data else {}
-        return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/executions", key=stable_key(key), **options)
-
-    async def get_task_recipe(self, task_id):
-        return await self._http.request('GET', f'/v1/tasks/{path_part(task_id)}/recipe')
+        return await self._http.request("POST", f"/tasks/{path_part(task_id)}/executions", key=stable_key(key), **options)
 
     async def get_recipe_versions(self, recipe_id):
-        return await self._http.request('GET', f'/v1/recipe-chains/{path_part(recipe_id)}/versions')
+        return await self._http.request('GET', f'/recipes/{path_part(recipe_id)}/versions')
 
     async def upload_recipe(self, recipe_id, *, version, recipe, base_version=None):
         """Store a Recipe version learned outside the service; ``base_version`` is the version it was built on."""
         body = _recipe_upload(recipe_id, version, recipe, base_version)
-        return await self._http.request("POST", f"/v1/recipes/{path_part(recipe_id)}", body=body)
+        return await self._http.request("PUT", f"/recipes/{path_part(recipe_id)}/versions/{version}", body=body)
 
     async def get_recipe(self, recipe_id, *, version=None):
         return await self._http.request("GET", _recipe_path(recipe_id, version))
@@ -263,19 +261,19 @@ class AsyncWorkflowAtoms:
 
 
     async def get_execution(self, execution_id):
-        return await self._http.request("GET", f"/v1/executions/{path_part(execution_id)}")
+        return await self._http.request("GET", f"/executions/{path_part(execution_id)}")
 
     async def submit_execution(self, execution_id, *, request_sha256, outcome, artifacts, events=None, trace_coverage="unknown"):
-        return await self._http.request("POST", f"/v1/executions/{path_part(execution_id)}/result",
+        return await self._http.request("POST", f"/executions/{path_part(execution_id)}/result",
                                         body=_result(request_sha256, outcome, artifacts, events if events is not None else [], trace_coverage))
 
     async def get_revision(self, revision_id):
-        return await self._http.request("GET", f"/v1/revisions/{path_part(revision_id)}")
+        return await self._http.request("GET", f"/revisions/{path_part(revision_id)}")
 
 
     async def start_revision(self, revision_id, *, key):
-        return await self._http.request("POST", f"/v1/revisions/{path_part(revision_id)}/revisions",
-                                        body={"data": {}}, key=stable_key(key))
+        return await self._http.request("POST", "/revisions",
+                                        body={"parent_revision_id": revision_id}, key=stable_key(key))
 
 
     async def start_recipe_candidate(self, task_id, *, revision_id, key=None, model=None, max_completion_tokens=None):
@@ -287,35 +285,35 @@ class AsyncWorkflowAtoms:
         data = _recipe_data(model, max_completion_tokens)
         data.update(revision_id=revision_id)
         key = recipe_request_key(task_id, revision_id, max_completion_tokens) if key is None else key
-        return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/recipe-candidates",
-                                        body={"data": data}, key=stable_key(key))
+        return await self._http.request("POST", f"/tasks/{path_part(task_id)}/recipe-candidates",
+                                        body=data, key=stable_key(key))
 
     async def get_recipe_candidate(self, recipe_id):
-        return await self._http.request("GET", f"/v1/recipe-candidates/{path_part(recipe_id)}")
+        return await self._http.request("GET", f"/recipe-candidates/{path_part(recipe_id)}")
 
     async def resume_recipe_candidate(self, recipe_id, *, model=None, max_completion_tokens=None):
         data = _recipe_data(model, max_completion_tokens)
-        return await self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/resume", body={"data": data} if data else None)
+        return await self._http.request("POST", f"/recipe-candidates/{path_part(recipe_id)}/resume", body=data or None)
 
     async def list_tasks(self, *, limit=20, cursor=None):
         from urllib.parse import urlencode
-        return await self._http.request('GET', '/v1/tasks?'+urlencode({'limit':limit, **({'cursor':cursor} if cursor else {})}))
+        return await self._http.request('GET', '/tasks?'+urlencode({'limit':limit, **({'cursor':cursor} if cursor else {})}))
 
     async def record_feedback(self, revision_id, *, feedback, source, key):
-        return await self._http.request('POST', f'/v1/revisions/{path_part(revision_id)}/feedback',
+        return await self._http.request('POST', f'/revisions/{path_part(revision_id)}/feedback',
                                         body={'feedback':feedback, 'source':feedback_source(source)}, key=stable_key(key))
 
     async def start_session(self, *, session_id=None):
-        return await self._http.request('POST', '/v1/sessions/start', body={'session_id':session_id} if session_id else {})
+        return await self._http.request('POST', '/sessions', body={'session_id':session_id} if session_id else {})
 
     async def append_session_events(self, session_id, events):
-        return await self._http.request('POST', f'/v1/sessions/{path_part(session_id)}/events', body={'events':events})
+        return await self._http.request('POST', f'/sessions/{path_part(session_id)}/events', body={'events':events})
 
     async def get_session_context(self, session_id, *, after=0):
-        return await self._http.request('GET', f'/v1/sessions/{path_part(session_id)}/context?after={after}')
+        return await self._http.request('GET', f'/sessions/{path_part(session_id)}/context?after={after}')
 
     async def end_session(self, session_id):
-        return await self._http.request('POST', f'/v1/sessions/{path_part(session_id)}/end')
+        return await self._http.request('POST', f'/sessions/{path_part(session_id)}/end')
 
 
 class SyncWorkflowAtoms:
@@ -341,16 +339,16 @@ class SyncWorkflowAtoms:
             delay = min(delay * 2, 30.0)
 
     def get_artifact(self, artifact_id):
-        return self._http.request("GET", f"/v1/artifacts/{path_part(artifact_id)}")
+        return self._http.request("GET", f"/artifacts/{path_part(artifact_id)}")
 
     def create_task(self, *, source, key, objective=None, artifacts=None, self_contained=None):
-        return self._http.request("POST", "/v1/tasks", body=_task(source, objective, artifacts, self_contained), key=stable_key(key))
+        return self._http.request("POST", "/tasks", body=_task(source, objective, artifacts, self_contained), key=stable_key(key))
 
     def get_task(self, task_id):
-        return self._http.request("GET", f"/v1/tasks/{path_part(task_id)}")
+        return self._http.request("GET", f"/tasks/{path_part(task_id)}")
 
     def supplement_task_context(self, task_id, *, expected_context_version, objective=None, artifacts=None, self_contained=None):
-        return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/context",
+        return self._http.request("POST", f"/tasks/{path_part(task_id)}/context",
                                   body=_context(expected_context_version, objective, artifacts, self_contained))
 
 
@@ -364,17 +362,14 @@ class SyncWorkflowAtoms:
             path_part(recipe_id)
             data['recipe_id'] = recipe_id
         options = {'body': data} if data else {}
-        return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/executions", key=stable_key(key), **options)
-
-    def get_task_recipe(self, task_id):
-        return self._http.request('GET', f'/v1/tasks/{path_part(task_id)}/recipe')
+        return self._http.request("POST", f"/tasks/{path_part(task_id)}/executions", key=stable_key(key), **options)
 
     def get_recipe_versions(self, recipe_id):
-        return self._http.request('GET', f'/v1/recipe-chains/{path_part(recipe_id)}/versions')
+        return self._http.request('GET', f'/recipes/{path_part(recipe_id)}/versions')
 
     def upload_recipe(self, recipe_id, *, version, recipe, base_version=None):
         body = _recipe_upload(recipe_id, version, recipe, base_version)
-        return self._http.request("POST", f"/v1/recipes/{path_part(recipe_id)}", body=body)
+        return self._http.request("PUT", f"/recipes/{path_part(recipe_id)}/versions/{version}", body=body)
 
     def get_recipe(self, recipe_id, *, version=None):
         return self._http.request("GET", _recipe_path(recipe_id, version))
@@ -387,51 +382,51 @@ class SyncWorkflowAtoms:
 
 
     def get_execution(self, execution_id):
-        return self._http.request("GET", f"/v1/executions/{path_part(execution_id)}")
+        return self._http.request("GET", f"/executions/{path_part(execution_id)}")
 
     def submit_execution(self, execution_id, *, request_sha256, outcome, artifacts, events=None, trace_coverage="unknown"):
-        return self._http.request("POST", f"/v1/executions/{path_part(execution_id)}/result",
+        return self._http.request("POST", f"/executions/{path_part(execution_id)}/result",
                                   body=_result(request_sha256, outcome, artifacts, events if events is not None else [], trace_coverage))
 
     def get_revision(self, revision_id):
-        return self._http.request("GET", f"/v1/revisions/{path_part(revision_id)}")
+        return self._http.request("GET", f"/revisions/{path_part(revision_id)}")
 
 
     def start_revision(self, revision_id, *, key):
-        return self._http.request("POST", f"/v1/revisions/{path_part(revision_id)}/revisions",
-                                  body={"data": {}}, key=stable_key(key))
+        return self._http.request("POST", "/revisions",
+                                  body={"parent_revision_id": revision_id}, key=stable_key(key))
 
 
     def start_recipe_candidate(self, task_id, *, revision_id, key=None, model=None, max_completion_tokens=None):
         data = _recipe_data(model, max_completion_tokens)
         data.update(revision_id=revision_id)
         key = recipe_request_key(task_id, revision_id, max_completion_tokens) if key is None else key
-        return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/recipe-candidates",
-                                  body={"data": data}, key=stable_key(key))
+        return self._http.request("POST", f"/tasks/{path_part(task_id)}/recipe-candidates",
+                                  body=data, key=stable_key(key))
 
     def get_recipe_candidate(self, recipe_id):
-        return self._http.request("GET", f"/v1/recipe-candidates/{path_part(recipe_id)}")
+        return self._http.request("GET", f"/recipe-candidates/{path_part(recipe_id)}")
 
     def resume_recipe_candidate(self, recipe_id, *, model=None, max_completion_tokens=None):
         data = _recipe_data(model, max_completion_tokens)
-        return self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/resume", body={"data": data} if data else None)
+        return self._http.request("POST", f"/recipe-candidates/{path_part(recipe_id)}/resume", body=data or None)
 
     def list_tasks(self, *, limit=20, cursor=None):
         from urllib.parse import urlencode
-        return self._http.request('GET', '/v1/tasks?'+urlencode({'limit':limit, **({'cursor':cursor} if cursor else {})}))
+        return self._http.request('GET', '/tasks?'+urlencode({'limit':limit, **({'cursor':cursor} if cursor else {})}))
 
     def record_feedback(self, revision_id, *, feedback, source, key):
-        return self._http.request('POST', f'/v1/revisions/{path_part(revision_id)}/feedback',
+        return self._http.request('POST', f'/revisions/{path_part(revision_id)}/feedback',
                                   body={'feedback':feedback, 'source':feedback_source(source)}, key=stable_key(key))
 
     def start_session(self, *, session_id=None):
-        return self._http.request('POST', '/v1/sessions/start', body={'session_id':session_id} if session_id else {})
+        return self._http.request('POST', '/sessions', body={'session_id':session_id} if session_id else {})
 
     def append_session_events(self, session_id, events):
-        return self._http.request('POST', f'/v1/sessions/{path_part(session_id)}/events', body={'events':events})
+        return self._http.request('POST', f'/sessions/{path_part(session_id)}/events', body={'events':events})
 
     def get_session_context(self, session_id, *, after=0):
-        return self._http.request('GET', f'/v1/sessions/{path_part(session_id)}/context?after={after}')
+        return self._http.request('GET', f'/sessions/{path_part(session_id)}/context?after={after}')
 
     def end_session(self, session_id):
-        return self._http.request('POST', f'/v1/sessions/{path_part(session_id)}/end')
+        return self._http.request('POST', f'/sessions/{path_part(session_id)}/end')

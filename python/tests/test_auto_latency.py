@@ -28,18 +28,18 @@ class Algorithm:
     def __call__(self, request):
         path = request.url.path.removeprefix('/api')
         self.paths.append(path)
-        if path == '/v1/recipe-candidates':
+        if path == '/recipe-candidates':
             items = [{'recipe_candidate_id': key, 'status': 'candidate', 'current': True, 'title': c['recipe']['title']}
                      for key, c in self.candidates.items()]
             return httpx.Response(200, json={'items': items, 'has_more': False})
-        if path.startswith('/v1/recipe-candidates/'):
+        if path.startswith('/recipe-candidates/'):
             return httpx.Response(200, json=self.candidates[path.rsplit('/', 1)[1]])
         if path == '/v1/memory/recall':
             return httpx.Response(200, json={'items': [{'id': 'm1', 'kind': 'source', 'text': 'Reports use the Q3 template.',
                                                         'refs': [{'source_id': 's1'}], 'score': 0.9}]})
-        if path == '/v1/artifacts':
+        if path == '/artifacts':
             return httpx.Response(200, json={'artifact_id': 'artifact_1', 'content_hash': 'sha256:x'})
-        if path == '/v1/tasks':
+        if path == '/tasks':
             return httpx.Response(200, json={'task_id': 'task_1', 'status': 'ready'})
         if path.endswith('/executions'):
             body = json.loads(request.content)
@@ -145,7 +145,7 @@ def test_empty_recipe_list_skips_match_and_is_cached(tmp_path):
         wrapped.responses.create(model='model', input='Produce a report')
         wrapped.responses.create(model='model', input='Produce another report')
         assert decision_names == ['cosens_decision', 'cosens_decision']
-        assert algorithm.paths.count('/v1/recipe-candidates') == 1
+        assert algorithm.paths.count('/recipe-candidates') == 1
         assert algorithm.paths.count('/v1/memory/recall') == 2
     finally:
         wrapped.close(); native.close()

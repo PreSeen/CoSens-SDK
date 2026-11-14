@@ -12,10 +12,10 @@ function fixture() {
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     requests.push({path,body});
     let value:any;
-    if(path==='/v1/recipe-candidates') value={items:[],has_more:false};
+    if(path==='/recipe-candidates') value={items:[],has_more:false};
     else if(path==='/v1/memory/recall') value={items:[]};
-    else if(path==='/v1/artifacts') value={artifact_id:'artifact',content_hash:'sha256:test'};
-    else if(path==='/v1/tasks') value={task_id:'task',status:'ready'};
+    else if(path==='/artifacts') value={artifact_id:'artifact',content_hash:'sha256:test'};
+    else if(path==='/tasks') value={task_id:'task',status:'ready'};
     else if(path.endsWith('/executions')) value={execution_id:'execution',request_sha256:'hash',request:{context:{objective:'Produce output'}},status:'awaiting_execution'};
     else if(path.endsWith('/result')) value={revision_id:'revision',status:'completed'};
     else value={recipe_candidate_id:'candidate',status:'queued'};
@@ -31,10 +31,10 @@ test('atomic start and resume preserve budgets and the legacy positional model',
     await c.atoms.resumeRecipeCandidate('candidate',{model:'model',maxCompletionTokens:300_000});
     await c.atoms.resumeRecipeCandidate('candidate','legacy-model');
     await c.atoms.startRecipeCandidate('task',{revisionId:'revision',key:'default'});
-    assert.equal(f.requests[0].body.data.max_completion_tokens,200_000);
-    assert.deepEqual(f.requests[1].body.data,{model:'model',max_completion_tokens:300_000});
-    assert.deepEqual(f.requests[2].body.data,{model:'legacy-model'});
-    assert.equal(f.requests[3].body.data.max_completion_tokens,undefined);
+    assert.equal(f.requests[0].body.max_completion_tokens,200_000);
+    assert.deepEqual(f.requests[1].body,{model:'model',max_completion_tokens:300_000});
+    assert.deepEqual(f.requests[2].body,{model:'legacy-model'});
+    assert.equal(f.requests[3].body.max_completion_tokens,undefined);
   } finally {await c.close();}
 });
 
@@ -60,7 +60,7 @@ test('auto generateRecipe forwards its budget separately from business output to
     await wrapped.responses.create({model:'model',input:'Produce output',max_output_tokens:4096});
     await wrapped.cosens.generateRecipe({maxCompletionTokens:200_000});
     const generated=f.requests.find(r=>r.path.endsWith('/recipe-candidates')&&r.body);
-    assert.equal(generated?.body.data.max_completion_tokens,200_000);
+    assert.equal(generated?.body.max_completion_tokens,200_000);
     assert.equal(business[0].max_output_tokens,4096);
   } finally {await wrapped.close();}
 });

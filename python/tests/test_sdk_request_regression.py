@@ -187,7 +187,7 @@ async def test_r14_reserved_characters_in_resource_id_remain_one_encoded_segment
         async with sdk(mode) as (call, seen):
             await call("get_task", "a/b?c#d%2F")
             assert len(seen) == 1
-            assert seen[0].url.raw_path == b"/api/v1/tasks/a%2Fb%3Fc%23d%252F"
+            assert seen[0].url.raw_path == b"/api/tasks/a%2Fb%3Fc%23d%252F"
 
 
 async def test_r15_upload_port_zero_is_not_treated_as_default_https_port():

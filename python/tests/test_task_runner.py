@@ -44,9 +44,9 @@ async def test_real_agents_tool_approval_resumes_the_same_task_execution(tmp_pat
     seen = []
     def server(request):
         path = request.url.path; seen.append(path)
-        if path == "/api/v1/tasks": return httpx.Response(200, json={"task_id": "t1", "status": "ready"})
+        if path == "/api/tasks": return httpx.Response(200, json={"task_id": "t1", "status": "ready"})
         if path.endswith("/executions"): return httpx.Response(200, json={"execution_id": "e1", "status": "awaiting_execution", "request_sha256": "h1", "request": {"kind": "original"}})
-        if path == "/api/v1/artifacts": return httpx.Response(200, json={"artifact_id": "a1", "content_hash": "server-hash"})
+        if path == "/api/artifacts": return httpx.Response(200, json={"artifact_id": "a1", "content_hash": "server-hash"})
         if path.endswith("/result"): return httpx.Response(200, json={"status": "completed", "revision_id": "r1"})
         raise AssertionError(path)
 
@@ -72,7 +72,7 @@ async def test_real_agents_tool_approval_resumes_the_same_task_execution(tmp_pat
         assert isinstance(resumed, RunResult) and resumed.final_output == "approved answer"
         assert tool_calls == ["fact"] and len(model.calls) == 2
         assert wrapper.cosens.get_turn("approved-turn")["state"] == "completed"
-        assert seen.count("/api/v1/tasks") == seen.count("/api/v1/tasks/t1/executions") == seen.count("/api/v1/executions/e1/result") == 1
+        assert seen.count("/api/tasks") == seen.count("/api/tasks/t1/executions") == seen.count("/api/executions/e1/result") == 1
         assert model.calls[0]["system_instructions"] == model.calls[1]["system_instructions"]
         assert agent.instructions == "Original instruction"
     finally:
@@ -129,13 +129,13 @@ async def test_task_runner_submits_once_and_reconciles_lost_result_receipt(tmp_p
         nonlocal submissions
         seen.append((request.url.path, json.loads(request.content) if request.content else None))
         path = request.url.path
-        if path == "/api/v1/tasks":
+        if path == "/api/tasks":
             return httpx.Response(200, json={"task_id": "t1", "status": "ready"})
-        if path == "/api/v1/tasks/t1/executions":
+        if path == "/api/tasks/t1/executions":
             return httpx.Response(200, json={"execution_id": "e1", "status": "awaiting_execution", "request_sha256": "frozen-hash", "request": {"kind": "original"}})
-        if path == "/api/v1/artifacts":
+        if path == "/api/artifacts":
             return httpx.Response(200, json={"artifact_id": "a1", "content_hash": "server-hash"})
-        if path == "/api/v1/executions/e1/result":
+        if path == "/api/executions/e1/result":
             submissions += 1
             if submissions == 1:
                 return httpx.Response(503, json={"error": {"code": "transient", "message": "receipt lost"}})
@@ -153,7 +153,7 @@ async def test_task_runner_submits_once_and_reconciles_lost_result_receipt(tmp_p
     recovered = await wrapper.reconcile("turn-1")
     assert recovered["state"] == "completed" and recovered["revision_id"] == "r1"
     assert len(native.calls) == 1
-    assert [path for path, _ in seen].count("/api/v1/artifacts") == 1
+    assert [path for path, _ in seen].count("/api/artifacts") == 1
     bodies = [body for path, body in seen if path.endswith("/result")]
     assert bodies[0] == bodies[1]
     assert bodies[0]["request_sha256"] == "frozen-hash"
@@ -172,18 +172,18 @@ async def test_task_runner_waits_for_context_then_reuses_task_and_reports_observ
     def server(request):
         nonlocal ready
         seen.append(request.url.path)
-        if request.url.path == "/api/v1/tasks":
+        if request.url.path == "/api/tasks":
             return httpx.Response(200, json={"task_id": "t1", "status": "needs_context"})
-        if request.url.path == "/api/v1/tasks/t1/context":
+        if request.url.path == "/api/tasks/t1/context":
             ready = True
             return httpx.Response(200, json={"task_id": "t1", "status": "ready"})
-        if request.url.path == "/api/v1/tasks/t1":
+        if request.url.path == "/api/tasks/t1":
             return httpx.Response(200, json={"task_id": "t1", "status": "ready" if ready else "needs_context"})
-        if request.url.path == "/api/v1/tasks/t1/executions":
+        if request.url.path == "/api/tasks/t1/executions":
             return httpx.Response(200, json={"execution_id": "e1", "request_sha256": "h1", "request": {"kind": "reconstructed"}, "status": "awaiting_execution"})
-        if request.url.path == "/api/v1/artifacts":
+        if request.url.path == "/api/artifacts":
             return httpx.Response(200, json={"artifact_id": "new-a1", "content_hash": "server-hash"})
-        if request.url.path == "/api/v1/executions/e1/result":
+        if request.url.path == "/api/executions/e1/result":
             assert json.loads(request.content)["events"] == [{"id": "event-1", "kind": "tool_result", "payload": {"name": "tool"}}]
             assert json.loads(request.content)["trace_coverage"] == "partial"
             return httpx.Response(200, json={"status": "completed", "revision_id": "r1"})
@@ -201,7 +201,7 @@ async def test_task_runner_waits_for_context_then_reuses_task_and_reports_observ
     result = await wrapper.run(FakeAgent(), "work", rsi=rsi)
     assert result.final_output == "native answer"
     assert wrapper.cosens.get_turn("turn-1")["revision_id"] == "r1"
-    assert seen.count("/api/v1/tasks") == 1
+    assert seen.count("/api/tasks") == 1
     assert len(native.calls) == 1
     await wrapper.aclose()
 
@@ -226,11 +226,11 @@ async def test_task_runner_stream_submits_after_native_stream_finishes(tmp_path)
 
     def server(request):
         seen.append(request.url.path)
-        if request.url.path == "/api/v1/tasks":
+        if request.url.path == "/api/tasks":
             return httpx.Response(200, json={"task_id": "t1", "status": "ready"})
         if request.url.path.endswith("/executions"):
             return httpx.Response(200, json={"execution_id": "e1", "status": "awaiting_execution", "request_sha256": "h1", "request": {"kind": "original"}})
-        if request.url.path == "/api/v1/artifacts":
+        if request.url.path == "/api/artifacts":
             return httpx.Response(200, json={"artifact_id": "a1", "content_hash": "server-hash"})
         if request.url.path.endswith("/result"):
             return httpx.Response(200, json={"status": "completed", "revision_id": "r1"})
@@ -239,10 +239,10 @@ async def test_task_runner_stream_submits_after_native_stream_finishes(tmp_path)
     wrapper = TaskWorkflowRunner(Native(), mode="auto", api_key="key", state_path=tmp_path / "stream.sqlite3",
                                  _http_transport=httpx.MockTransport(server))
     stream = wrapper.run_streamed(FakeAgent(), "work", rsi={"turn_id": "stream-1", "task": {"source": "new_task", "objective": "work"}})
-    assert "/api/v1/artifacts" not in seen
+    assert "/api/artifacts" not in seen
     events = [event async for event in stream.stream_events()]
     assert events == [{"type": "raw_response_event"}]
-    assert seen[-2:] == ["/api/v1/artifacts", "/api/v1/executions/e1/result"]
+    assert seen[-2:] == ["/api/artifacts", "/api/executions/e1/result"]
     assert wrapper.cosens.get_turn("stream-1")["state"] == "completed"
     await wrapper.aclose()
 
@@ -265,7 +265,7 @@ async def test_task_runner_cancelled_stream_never_submits(tmp_path, cancel_optio
 
     def server(request):
         seen.append(request.url.path)
-        if request.url.path == "/api/v1/tasks":
+        if request.url.path == "/api/tasks":
             return httpx.Response(200, json={"task_id": "t1", "status": "ready"})
         if request.url.path.endswith("/executions"):
             return httpx.Response(200, json={"execution_id": "e1", "status": "awaiting_execution", "request_sha256": "h1", "request": {"kind": "original"}})
@@ -277,7 +277,7 @@ async def test_task_runner_cancelled_stream_never_submits(tmp_path, cancel_optio
     assert stream.cancel(**cancel_options) == "cancelled"
     assert cancelled == [cancel_options.get("mode", "immediate")]
     assert wrapper.cosens.get_turn("cancel-1")["state"] == "incomplete"
-    assert seen == ["/api/v1/tasks", "/api/v1/tasks/t1/executions"]
+    assert seen == ["/api/tasks", "/api/tasks/t1/executions"]
     await wrapper.aclose()
 
 
@@ -292,7 +292,7 @@ async def test_task_runner_does_not_replay_failed_native_execution(tmp_path):
             raise RuntimeError("native side effect unknown")
 
     def server(request):
-        if request.url.path == "/api/v1/tasks":
+        if request.url.path == "/api/tasks":
             return httpx.Response(200, json={"task_id": "t1", "status": "ready"})
         if request.url.path.endswith("/executions"):
             return httpx.Response(200, json={"execution_id": "e1", "status": "awaiting_execution", "request_sha256": "h1", "request": {"kind": "original"}})
@@ -320,7 +320,7 @@ async def test_task_runner_does_not_fabricate_an_artifact_for_missing_native_out
 
     def server(request):
         seen.append(request.url.path)
-        if request.url.path == "/api/v1/tasks":
+        if request.url.path == "/api/tasks":
             return httpx.Response(200, json={"task_id": "t1", "status": "ready"})
         if request.url.path.endswith("/executions"):
             return httpx.Response(200, json={"execution_id": "e1", "status": "awaiting_execution", "request_sha256": "h1", "request": {"kind": "original"}})
@@ -331,7 +331,7 @@ async def test_task_runner_does_not_fabricate_an_artifact_for_missing_native_out
     result = await wrapper.run(FakeAgent(), "work", rsi={"turn_id": "no-output", "task": {"source": "new_task", "objective": "work"}})
     assert result.final_output is None
     assert wrapper.cosens.get_turn("no-output")["state"] == "completion_pending"
-    assert seen == ["/api/v1/tasks", "/api/v1/tasks/t1/executions"]
+    assert seen == ["/api/tasks", "/api/tasks/t1/executions"]
     await wrapper.aclose()
 
 
@@ -354,7 +354,7 @@ async def test_task_runner_pre_execution_recovery_binds_input_and_session(tmp_pa
         await wrapper.run(FakeAgent(), "different input", rsi=rsi, session=session_1)
     with pytest.raises(RSIRecoveryRequired, match="input or Session"):
         await wrapper.run(FakeAgent(), "work", rsi=rsi, session=session_2)
-    assert seen == ["/api/v1/tasks"]
+    assert seen == ["/api/tasks"]
     await wrapper.aclose()
 
 
@@ -374,11 +374,11 @@ def test_task_runner_run_sync_uses_native_sync_runner_and_sync_gateway(tmp_path)
     def server(request):
         nonlocal result_submissions
         seen.append((request.url.path, json.loads(request.content) if request.content else None))
-        if request.url.path == "/api/v1/tasks":
+        if request.url.path == "/api/tasks":
             return httpx.Response(200, json={"task_id": "t1", "status": "ready"})
         if request.url.path.endswith("/executions"):
             return httpx.Response(200, json={"execution_id": "e1", "status": "awaiting_execution", "request_sha256": "h1", "request": {"kind": "original"}})
-        if request.url.path == "/api/v1/artifacts":
+        if request.url.path == "/api/artifacts":
             return httpx.Response(200, json={"artifact_id": "a1", "content_hash": "server-hash"})
         if request.url.path.endswith("/result"):
             result_submissions += 1

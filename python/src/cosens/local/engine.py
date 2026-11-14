@@ -15,7 +15,7 @@ class LocalRSI(LocalTaskWorkflow, LocalRecipeLifecycle):
     """The workflow methods of ``client.atoms``, backed by local storage and ``model``.
 
     ``client`` is a ``CoSensClient`` used only for Memory recall (``/v1/memory/*``) and the Recipe store
-    (``/v1/recipes``); with ``None`` nothing is recalled or uploaded. ``memory`` is its deprecated name.
+    (``/recipes``); with ``None`` nothing is recalled or uploaded. ``memory`` is its deprecated name.
     Generation runs inside ``wait_workflow_job``.
     """
 
