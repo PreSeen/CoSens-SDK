@@ -127,6 +127,7 @@ Pass `LocalRSI(..., web_search=<a WebSearch>)` (`cosens.local.WebSearch`: `async
 nothing is searched. `start_recipe_candidate(..., web_search=False)` opts out, `web_search_blocked_domains=["example.com"]`
 adds hosts whose pages are dropped, and `web_search=True` with no `WebSearch` fails the candidate with `web_search_unavailable`.
 
+- `LocalRSI(web_search_blocked_domains=[...])` blocks hosts for every candidate, as the service's own blocklist does.
 - The model writes at most 3 general queries from the task objective and the attribution, never from execution outputs,
   reference answers or web text. **Queries leave this machine to whatever provider your `WebSearch` calls**, so keep
   names, ids and secrets out of the task objective.

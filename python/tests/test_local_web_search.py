@@ -140,3 +140,14 @@ def test_remote_request_fields_and_key():
     assert recipe_request_key("t", "r", web_search=False) != plain
     assert recipe_request_key("t", "r", web_search_blocked_domains=["a.com"]) != recipe_request_key("t", "r", web_search_blocked_domains=["b.com"])
     assert recipe_request_key("t", "r") == plain
+
+
+async def test_the_instance_blocklist_applies_to_every_candidate(tmp_path):
+    search = FakeSearch([{"url": "https://github.com/x/answers", "text": "leak"}, *PAGE])
+    model = FakeModel(queries_reply("q"), with_web_ref(recipe_reply()))
+    rsi = LocalRSI(model=model, state_path=tmp_path / "s.sqlite3", web_search=search, web_search_blocked_domains=["github.com"])
+    task, _, done = await first_revision(rsi)
+    _, job = await run(rsi, task, done, web_search_blocked_domains=["example.net"])
+    assert search.calls == [("q", ["github.com", "example.net"])]
+    assert job.web_search["dropped"] == [{"url": "https://github.com/x/answers", "reason": "blocked_host"}]
+    assert [s["url"] for s in job.web_search["sources"]] == ["https://example.org/rule"]

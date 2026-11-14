@@ -197,7 +197,7 @@ class LocalRecipeLifecycle:
     async def start_recipe_candidate(self, task_id, *, revision_id, key=None, web_search=None, web_search_blocked_domains=()):
         """``web_search`` None searches when the ``LocalRSI`` has a ``web_search``; False never searches; True without
         one fails the candidate with ``web_search_unavailable``."""
-        blocked = validate_blocked_domains(web_search_blocked_domains)
+        blocked = list(dict.fromkeys(self._web_blocked + validate_blocked_domains(web_search_blocked_domains)))
         if blocked and web_search is False:
             raise ValueError("web_search_blocked_domains needs web search")
         key = stable_key(recipe_request_key(task_id, revision_id, web_search=web_search, web_search_blocked_domains=blocked)
