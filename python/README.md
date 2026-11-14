@@ -69,17 +69,23 @@ When a usable Recipe matches, the SDK adds it as plain text: its title, when/whe
 
 ## Generate a Recipe after confirmation
 
-Check that the turn has a submitted Revision before offering Recipe generation. After your application obtains user confirmation of that artifact, call from its confirmation handler:
+A turn has something to learn from only when it recorded a completed execution. After your application obtains user confirmation of that artifact, call from its confirmation handler:
 
 ```python
 turn = client.cosens.get_turn(turn_id) if turn_id else None
-if turn and turn.get("revision_id"):
-    receipt = client.cosens.generate_recipe(turn_id, request_key="confirmed-report-1")
+if turn and turn.get("state") == "completed" and turn.get("execution_id"):
+    client.cosens.generate_recipe(turn_id)
+    record = client.cosens.wait_learning(turn_id)
 ```
 
-This is the only generation action. It creates the first Recipe version or updates the associated Recipe, always reads relevant Memory, and performs feedback attribution internally. `feedback` records feedback; it does not update a Recipe.
+This is the only learning action. It learns the first Recipe version, or the next one, from the turn's execution, and performs feedback attribution internally. An execution learns once: calling `generate_recipe` again returns the same learning, and it takes no request key. A different `max_completion_tokens` for a turn that already learned is rejected. `feedback(message, source=...)` records feedback on the turn's execution; it does not update a Recipe. When the next message is classified as feedback on this turn, the wrapper records it and runs that message as a correction; learning from the correction turn makes the next version.
 
-`client.cosens.wait_learning(turn_id)` raises `cosens.RSICandidateFailed` when generation fails. The error has `code`, `phase`, `retryable`, `upstream_status`, `upstream_code`, `candidate_id` and `request_id`. When `retryable` is true, `client.cosens.resume_learning(turn_id)` retries the same candidate. Older servers report only `code`; `retryable` is then `None`.
+`client.cosens.wait_learning(turn_id)` raises:
+
+- `cosens.RSILearningFailed` when the learning failed. It has `execution_id`, `code`, `message`, `retryable`, `phase`, `upstream_status`, `upstream_code` and `request_id`. `retryable` is `True` when `client.cosens.resume_learning(turn_id)` may succeed, `False` when it will not, and `None` when the service does not say.
+- `cosens.RSILearningStopped` when the learning is `interrupted`, `awaiting_runner` or `awaiting_material`: nothing changes until you act. It has `learning`, `execution_id` and `status`. Resume an interrupted learning, or one waiting for a model; for `awaiting_material` the current version was kept (`learning["material_gap"]` says why), and learning more needs feedback in a correction.
+
+Both are raised after the turn's learning record is stored, so the turn stays resumable.
 
 ## Run an OpenAI Agents agent
 
@@ -115,18 +121,21 @@ rsi = LocalRSI(client=CoSensClient(), model=ChatCompletionsModel(AsyncOpenAI(bas
 # Or use your Codex login: LocalRSI(client=CoSensClient(), model=CodexCLIModel())
 ```
 
-`LocalRSI` has the workflow methods of `client.atoms`. Generation runs inside `wait_workflow_job`, so always wait for a
-candidate. Each new version is uploaded without its evidence references. To continue a Recipe on another machine, find it
-with `search_recipes` or `list_recipes`, read it with `get_recipe` and pass it as `create_task(..., recipe=...)`. See
+`LocalRSI` keeps its earlier in-process workflow names and does not yet follow the execution API; see
+[Local RSI](docs/local-rsi.md). Its evidence references now use `execution_id`, and a store written by an earlier SDK
+is upgraded once when first opened. Generation runs while you wait on a candidate, so always wait for it. Each new
+version is uploaded without its evidence references. To continue a Recipe on another machine, find it with
+`search_recipes` or `list_recipes`, read it with `get_recipe` and pass it as `create_task(..., recipe=...)`. See
 `examples/04_local_rsi.py`.
 
 ## Atomic operations
 
-`CoSensClient().atoms` (async) and `.sync_atoms` (sync) expose Task, Execution, Revision, feedback, Recipe, Session and Memory operations directly. Keep stable idempotency keys across retries.
+`CoSensClient().atoms` (async) and `.sync_atoms` (sync) expose Task, Execution, feedback, learning, Recipe and Memory operations directly; see [the API reference](docs/api-reference.md). Keep stable idempotency keys across retries.
 
+- `submit_execution` returns `status`; treat the execution as done only when it is `"completed"`.
+- `record_feedback(execution_id, ...)` records feedback; `start_execution(task_id, key=..., previous_execution_id=execution_id)` starts a correction.
+- `learn(execution_id)` learns once per execution and takes no key; `wait_learning(execution_id)` raises `RSILearningFailed` or `RSILearningStopped` as above, and `resume_learning(execution_id)` retries.
 - Returned JSON objects are dicts with a `request_id` attribute holding the response's `x-request-id`, for support requests.
-- `start_recipe_candidate(task_id, revision_id=...)` may omit `key`; the default is derived from the task, revision and `max_completion_tokens`, so repeating the call returns the same candidate.
-- `wait_workflow_job("recipe_candidate", id)` raises `RSICandidateFailed` when the candidate failed.
 
 ## More
 

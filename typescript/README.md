@@ -67,16 +67,26 @@ When a usable Recipe matches, the SDK adds it as plain text: its title, when/whe
 
 ## Generate a Recipe after confirmation
 
-From your application's artifact-confirmation handler:
+A turn has something to learn from only when it recorded a completed execution. From your application's artifact-confirmation handler:
 
 ```ts
+import { CoSensClient } from 'cosens-sdk';
+
+const atoms = new CoSensClient().atoms;
 const turn = client.cosens.getTurn(turnId);
-if (turn?.revisionId) {
-  const receipt = await client.cosens.generateRecipe({ turnId, requestKey: 'confirmed-report-1' });
+if (turn?.state === 'completed' && turn.executionId) {
+  await client.cosens.generateRecipe({ turnId });
+  const learning = await atoms.waitLearning(turn.executionId);
 }
 ```
 
-Submission and feedback only record evidence. Explicit generation creates or updates the associated Recipe, recalls related Memory only when the execution behind the revision was started with `recallMemory: true`, and analyzes feedback internally. There is no generation Memory option. `recordFeedback` requires `source`: `human`, `evaluator`, `reference`, `automated_check` or `downstream`.
+`generateRecipe` learns the first Recipe version, or the next one, from the turn's execution, and analyzes feedback internally. An execution learns once: calling it again returns the same learning, and it takes no key. A different `maxCompletionTokens` for an execution that already learned is rejected by the service with HTTP 422. Learning recalls related Memory only when the execution was started with `recallMemory: true`; there is no learning Memory option. `cosens.feedback(message, { source })` records feedback on the turn's execution; `source` is `human`, `evaluator`, `reference`, `automated_check` or `downstream`.
+
+### Differences from the Python SDK
+
+- **No automatic feedback-to-correction.** The TypeScript wrappers do not classify a follow-up message as feedback on the previous turn. Record feedback with `cosens.feedback(...)` or `atoms.recordFeedback(executionId, ...)`, then start the correction yourself with `client.start({ task_id, execution_id }, { phase: 'correct', requestKey })` or `atoms.startExecution(taskId, { key, previousExecutionId })`.
+- **No `waitLearning` / `resumeLearning` on the wrappers.** Use `client.atoms.waitLearning(executionId)` and `client.atoms.resumeLearning(executionId)`; the turn's `executionId` and its stored `learning` are on `getTurn(turnId)`.
+- **The feedback key option is the other way round.** The transparent wrapper's `cosens.feedback(message, { source, turnId, requestKey })` accepts a `requestKey` and the agent runner's `cosens.feedback(message, source, turnId)` does not; in Python the agent runner's `feedback` takes `request_key` and the transparent wrapper's does not.
 
 ## Run an OpenAI Agents agent
 
@@ -93,36 +103,43 @@ const result = await runner.run(agent, 'Produce a report');
 
 ## Atomic operations
 
-Use `CoSensClient.atoms` for Task, Execution, Revision, feedback, Recipe, Session and Memory operations. Keep the same request key when retrying an uncertain response.
-
-Recipe token budgets can be supplied as `maxCompletionTokens`:
+Use `CoSensClient.atoms` for Task, Execution, feedback, learning, Recipe and Memory operations. Each call sends one request. Keep the same key when retrying an uncertain response.
 
 ```ts
-await client.atoms.startRecipeCandidate(taskId, {
-  revisionId, key: 'confirmed-v1', maxCompletionTokens: 200000,
-});
-await wrapped.cosens.generateRecipe({ turnId, maxCompletionTokens: 200000 });
-await client.atoms.resumeRecipeCandidate(candidateId, { maxCompletionTokens: 300000 });
+const execution = await client.atoms.startExecution(taskId, { key: 'run-1', model: '<public-model-id>' });
+const result = await client.atoms.submitExecution(execution.execution_id, { requestSha256: execution.request_sha256, outcome: 'completed', artifacts });
+if (result.status !== 'completed') throw new Error('The execution result was not confirmed');
+await client.atoms.recordFeedback(result.execution_id, { feedback: 'Use the Q3 numbers', source: 'human', key: 'feedback-1' });
+const correction = await client.atoms.startExecution(taskId, { key: 'correction-1', previousExecutionId: result.execution_id });
 ```
 
-The value must be an integer from 1 to 1,000,000. New candidates default to 200,000, and the setting is stored per candidate for attribution and Recipe generation. Resume preserves it unless explicitly overridden. Upstream model limits still apply. The positional form `resumeRecipeCandidate(id, model)` remains supported.
+A correction (`previousExecutionId`) takes only `model` besides; `recipeId` or `recallMemory: true` with it fails to compile and throws before sending. Treat an execution as done only when the result's `status` is `'completed'`.
 
-`key` is optional on `startRecipeCandidate`; the default is derived from the task, revision and `maxCompletionTokens`, so repeating the call returns the same candidate. Returned objects have a non-enumerable `requestId` holding the response's `x-request-id`.
-
-`waitWorkflowJob('recipe_candidate', id)` throws `RSICandidateFailedError` when the candidate failed:
+Learning is explicit and once per execution:
 
 ```ts
-import { RSICandidateFailedError } from 'cosens-sdk';
+import { RSILearningFailedError, RSILearningStoppedError } from 'cosens-sdk';
 
+await client.atoms.learn(executionId, { maxCompletionTokens: 200000 });
 try {
-  await client.atoms.waitWorkflowJob('recipe_candidate', candidateId);
+  const learning = await client.atoms.waitLearning(executionId);
 } catch (error) {
-  if (error instanceof RSICandidateFailedError && error.retryable) await client.atoms.resumeRecipeCandidate(candidateId);
+  if (error instanceof RSILearningFailedError && error.retryable) await client.atoms.resumeLearning(executionId);
+  else if (error instanceof RSILearningStoppedError && error.status === 'interrupted') await client.atoms.resumeLearning(executionId);
   else throw error;
 }
 ```
 
-The error has `code`, `phase`, `retryable`, `upstreamStatus`, `upstreamCode`, `candidateId` and `requestId`. Older servers report only `code`; `retryable` is then undefined.
+- `learn` sends no key; repeating it returns the same learning. `maxCompletionTokens` is an integer from 1 to 1,000,000; the service defaults to 32,000, and a different value for an execution that already learned gets HTTP 422.
+- `resumeLearning` retries a `failed`, `interrupted` or `awaiting_runner` learning, optionally with a new budget. It returns an active or completed learning unchanged (a different budget then gets 422) and answers 422 before any learning and for `awaiting_material`.
+- `waitLearning(executionId, { timeout = 300 })` (seconds) polls every 2 s, doubling to 30 s. It returns a `completed` learning and throws:
+  - `RSILearningFailedError` on `failed`, with `executionId`, `code`, `detailMessage`, `retryable`, `phase`, `upstreamStatus`, `upstreamCode` and `requestId`. `retryable` is `true`, `false`, or `undefined` when the service does not say (a bare code such as `previous_version_failed` can still be resumed).
+  - `RSILearningStoppedError` on `interrupted`, `awaiting_runner` or `awaiting_material`, with `learning`, `executionId`, `status` and `requestId`. These are not failures; nothing changes until you resume (or, for `awaiting_material`, give feedback in a correction).
+  - an `Error` named `TimeoutError` while the learning is still in flight, and `RSIRecoveryRequired` when the execution has no learning or an unknown status.
+
+The Recipe store: `uploadRecipe(recipeId, { version, recipe, previousVersion })`, `getRecipe(recipeId, { version })`, `listRecipes({ limit, cursor, origin })` and `searchRecipes(query, { limit })`. Only `generated` Recipes can be applied to an execution with `recipeId`, so the transparent wrapper's lookup offers only those.
+
+`client.start(snapshot, { phase })` takes `prepare` (a task execution; needs `requestKey`), `correct` (a correction of `snapshot.execution_id`; needs `requestKey`) or `learn` (learns from `snapshot.execution_id`; no key). Returned objects have a non-enumerable `requestId` holding the response's `x-request-id`.
 
 ## More
 
