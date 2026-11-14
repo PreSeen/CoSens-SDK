@@ -39,6 +39,9 @@ class Backend:
         self.feedback_keys={}
         # The task's current Recipe method; the service binds it to every new execution.
         self.head=None
+        # Recipe version views {recipe_id, origin, version, recipe, ...} served by GET /recipes and /recipes/{id}.
+        self.recipes=[]
+        self.task_models={}
 
     def learning(self,execution_id):
         return self.learnings[execution_id]
@@ -56,16 +59,16 @@ class Backend:
                 return invalid('execution has no completed output')
             if before['task_id']!=task_id:
                 return not_found('previous execution not found in this task')
-            scope=('correction',previous,key)
-            if scope in self.keys:
-                return self.keys[scope][1]
+            scope,intent=('correction',previous,key),None
         else:
-            scope=('original',task_id,key)
-            intent=(body.get('recipe_id'),bool(body.get('recall_memory')))
-            if scope in self.keys:
-                if self.keys[scope][0]!=intent:
-                    return invalid('idempotency key reused with different context')
-                return self.keys[scope][1]
+            scope,intent=('original',task_id,key),(body.get('recipe_id'),bool(body.get('recall_memory')))
+        frozen=self._freeze_model(task_id,body.get('model'))
+        if frozen is not None:
+            return frozen
+        if scope in self.keys:
+            if self.keys[scope][0]!=intent:
+                return invalid('idempotency key reused with different context')
+            return self.keys[scope][1]
         execution_id=f'execution_{len(self.executions)+1}'
         kind='correction' if previous else 'original'
         self.executions[execution_id]={'task_id':task_id,'kind':kind,'status':'awaiting_execution','previous_execution_id':previous,
@@ -74,6 +77,39 @@ class Backend:
                  'status':'awaiting_execution','request':{'context':{'objective':'task'},'method':self.method(body)}}
         self.keys[scope]=(None if previous else intent,receipt)
         return receipt
+
+    def _freeze_model(self,task_id,model):
+        """The task's model is frozen once set; a different one is rejected."""
+        if model is None:
+            return None
+        if self.task_models.setdefault(task_id,model)!=model:
+            return invalid('task model is frozen; only its credential and auth type may rotate')
+        return None
+
+    def _current_recipes(self):
+        latest={}
+        for recipe in self.recipes:
+            if recipe['version']>latest.get(recipe['recipe_id'],{}).get('version',0):
+                latest[recipe['recipe_id']]=recipe
+        return list(latest.values())
+
+    def _recipe_lookup(self,path,params):
+        summary=lambda r:{'recipe_id':r['recipe_id'],'origin':r['origin'],'version':r['version'],'title':r['recipe'].get('title'),'task_id':'task_0','updated_at':'t'}
+        if path=='/recipes':
+            if 'q' in params:
+                if 'cursor' in params or 'origin' in params:
+                    return invalid('search takes no cursor or origin')
+                found=[r for r in self._current_recipes() if params['q'].lower() in str(r['recipe'].get('title','')).lower()]
+                return httpx.Response(200,json={'items':[summary(r) for r in found[:int(params.get('limit',10))]]})
+            items=[r for r in self._current_recipes() if not params.get('origin') or r['origin']==params['origin']]
+            limit=int(params.get('limit',20))
+            return httpx.Response(200,json={'items':[summary(r) for r in items[:limit]],'has_more':len(items)>limit,'next_cursor':None})
+        recipe_id=path.split('/')[2]
+        if 'version' in params:
+            found=[r for r in self.recipes if r['recipe_id']==recipe_id and r['version']==int(params['version'])]
+        else:
+            found=[r for r in self._current_recipes() if r['recipe_id']==recipe_id]
+        return httpx.Response(200,json=found[0]) if found else not_found('Recipe not found')
 
     def method(self,body):
         """The Recipe the service binds to a new execution: the task's head, when the task has one."""
@@ -125,7 +161,8 @@ class Backend:
         path=r.url.path.removeprefix('/api');self.seen.append((r.method,path,body));self.headers.append(dict(r.headers))
         assert '/runs' not in path and '/improvements' not in path and '/attributions' not in path
         assert '/sessions' not in path and '/revisions' not in path and '/recipe-candidates' not in path
-        if path=='/recipes':return httpx.Response(200,json={'items':[],'has_more':False,'next_cursor':None})
+        if path=='/recipes' or (path.startswith('/recipes/') and r.method=='GET'):
+            return self._recipe_lookup(path,dict(r.url.params))
         if path=='/v1/memory/recall':return httpx.Response(200,json={'items':[]})
         if path=='/artifacts':
             self.count+=1;return httpx.Response(200,json={'artifact_id':f'artifact_{self.count}','content_hash':'sha256:test'})
@@ -147,6 +184,9 @@ class Backend:
             return answer if isinstance(answer,httpx.Response) else httpx.Response(200,json=answer)
         if path.endswith('/learn') or path.endswith('/resume'):
             assert 'recall_memory' not in (body or {}) and 'include_memory' not in (body or {})
+            frozen=self._freeze_model(execution['task_id'],(body or {}).get('model'))
+            if frozen is not None:
+                return frozen
             answer=(self._learn if path.endswith('/learn') else self._resume)(execution_id,body)
             return answer if isinstance(answer,httpx.Response) else httpx.Response(200,json=answer)
         if r.method=='GET':
@@ -377,20 +417,9 @@ def test_a_correction_uses_the_recipe_the_service_binds_from_the_task(tmp_path):
     """The task already has a Recipe: the feedback turn makes no lookup and injects the correction's method."""
     stale={'title':'Old report','when':'Writing a report','when_not':'Chat','steps':[{'id':'s1','instruction':'Old step'}],'lessons':[]}
     head={'title':'Quarterly report','when':'Writing a report','when_not':'Chat','steps':[{'id':'s1','instruction':'Use the Q3 numbers'}],'lessons':[]}
-    class RecipeBackend(Backend):
-        def __init__(self):
-            super().__init__()
-            self.head={'recipe_id':'recipe_1','version':2,'recipe_sha256':'f'*64,'recipe':head}
-        def __call__(self,r):
-            path=r.url.path.removeprefix('/api')
-            if path=='/recipes':
-                self.seen.append((r.method,path,None));self.headers.append(dict(r.headers))
-                return httpx.Response(200,json={'items':[{'recipe_id':'recipe_1','origin':'generated','version':1,'title':'Old report'}],'has_more':False})
-            if path=='/recipes/recipe_1':
-                self.seen.append((r.method,path,None));self.headers.append(dict(r.headers))
-                return httpx.Response(200,json={'recipe_id':'recipe_1','origin':'generated','version':1,'recipe':stale})
-            return super().__call__(r)
-    backend=RecipeBackend();responses=[]
+    backend=Backend();responses=[]
+    backend.head={'recipe_id':'recipe_1','version':2,'recipe_sha256':'f'*64,'recipe':head}
+    backend.recipes=[{'recipe_id':'recipe_1','origin':'generated','version':1,'recipe':stale}]
     def native(r):
         data=json.loads(r.content)
         if r.url.path.endswith('/chat/completions'):
@@ -449,3 +478,32 @@ async def test_execution_keys_feedback_keys_and_request_hashes_follow_the_servic
         with pytest.raises(RSIHTTPError, match='different feedback') as caught:
             await a.record_feedback(first['execution_id'],feedback='Too short',source='human',key='fb')
         assert caught.value.status_code==422
+
+
+@pytest.mark.asyncio
+async def test_the_fake_freezes_the_task_model_and_looks_recipes_up_like_the_service(tmp_path):
+    from cosens.errors import RSIHTTPError
+    backend=Backend()
+    view=lambda version,origin='generated',recipe_id='recipe_1':{'recipe_id':recipe_id,'origin':origin,'version':version,'recipe':{'title':f'Report v{version}'}}
+    backend.recipes=[view(1),view(2),view(1,'uploaded','team')]
+    async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(backend)) as sdk:
+        a=sdk.atoms
+        first=await a.start_execution('task_1',key='e1',model='m1')
+        with pytest.raises(RSIHTTPError, match='frozen') as caught:
+            await a.start_execution('task_1',key='e2',model='m2')
+        assert caught.value.status_code==422
+        await a.submit_execution(first['execution_id'],request_sha256=first['request_sha256'],outcome='completed',artifacts=[{'artifact_id':'a1','role':'submitted_output'}])
+        with pytest.raises(RSIHTTPError, match='frozen'):
+            await a.learn(first['execution_id'],model='m2')
+        await a.learn(first['execution_id'],model='m1')
+        with pytest.raises(RSIHTTPError, match='frozen'):
+            await a.resume_learning(first['execution_id'],model='m2')
+        assert (await a.get_recipe('recipe_1'))['version']==2
+        assert (await a.get_recipe('recipe_1',version=1))['version']==1
+        for call in (a.get_recipe('recipe_1',version=9),a.get_recipe('missing')):
+            with pytest.raises(RSIHTTPError) as caught:
+                await call
+            assert caught.value.status_code==404
+        assert [(r['recipe_id'],r['version']) for r in (await a.list_recipes(limit=100,origin='generated'))['items']]==[('recipe_1',2)]
+        assert [r['recipe_id'] for r in (await a.search_recipes('report v2'))['items']]==['recipe_1']
+        assert (await a.search_recipes('nothing'))['items']==[]
