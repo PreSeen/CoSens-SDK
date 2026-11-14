@@ -135,7 +135,7 @@ async def test_a_new_version_may_keep_the_previous_versions_evidence():
     other = recipe(steps=[{"id": "s1", "instruction": "x", "evidence_refs": [{"revision_id": "old-rev", "event_id": "never-cited"}]}])
     assert stages.recipe_rejection(other, index).kind == "evidence"
     assert stages.with_parent_evidence(stages.evidence_index(context()), None) == stages.evidence_index(context())
-    imported = {"recipe": {"steps": [{"id": "s1", "instruction": "kept"}], "lessons": []}}  # published without evidence
+    imported = {"recipe": {"steps": [{"id": "s1", "instruction": "kept"}], "lessons": []}}  # imported without evidence
     assert stages.with_parent_evidence(stages.evidence_index(context()), imported) == stages.evidence_index(context())
 
 
@@ -162,16 +162,14 @@ async def test_invalid_json_counts_as_a_rejection():
     assert outcome.recipe is not None
 
 
-def memory_item(item_id, score, text):
-    return {"id": item_id, "score": score, "text": text,
-            "refs": [{"source_id": item_id, "revision": 1, "content_hash": "h", "start": 0, "end": 1}]}
-
-
-def test_memory_snapshot_filters_weak_duplicate_and_unreferenced_items():
-    items = [memory_item("a", 0.9, "alpha beta gamma"), memory_item("b", 0.1, "weak"),
-             memory_item("c", 0.8, "alpha beta gamma"), {"id": "d", "score": 0.9, "text": "no refs"}]
+def test_memory_snapshot_freezes_the_recalled_sources_up_to_the_item_limit():
+    items = [{"id": f"m{i}", "kind": "episode", "text": f"source {i}", "score": 0.5} for i in range(stages.MEMORY_MAX_ITEMS + 2)]
     snapshot = stages.memory_snapshot(items)
-    assert [item["id"] for item in snapshot["items"]] == ["a"]
-    assert (snapshot["omitted_low_relevance"], snapshot["omitted_duplicate"], snapshot["omitted_unreferenced"]) == (1, 1, 1)
+    assert [item["id"] for item in snapshot["items"]] == [f"m{i}" for i in range(stages.MEMORY_MAX_ITEMS)]
+    assert snapshot["status"] == "captured" and snapshot["omitted_over_budget"] == 2
+    with pytest.raises(ValueError, match="duplicate"):
+        stages.memory_snapshot([items[0], items[0]])
+    with pytest.raises(ValueError, match="ID"):
+        stages.memory_snapshot([{"text": "no id"}])
 
 

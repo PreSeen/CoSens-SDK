@@ -221,7 +221,7 @@ async def test_commit_refuses_when_the_parent_is_no_longer_current(tmp_path):
             return await super().call(**kwargs)
 
     model = ChangesHead(recipe_reply("V1"))
-    rsi = LocalRSI(memory=None, model=model, state_path=tmp_path / "s.sqlite3")
+    rsi = LocalRSI(client=None, model=model, state_path=tmp_path / "s.sqlite3")
     task, _, done = await first_revision(rsi)
     candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
     with pytest.raises(RSICandidateFailed) as caught:
@@ -236,7 +236,7 @@ async def test_wait_timeout_leaves_generation_running(tmp_path):
             return await super().call(**kwargs)
 
     model = Slow(recipe_reply("V1"))
-    rsi = LocalRSI(memory=None, model=model, state_path=tmp_path / "s.sqlite3")
+    rsi = LocalRSI(client=None, model=model, state_path=tmp_path / "s.sqlite3")
     task, _, done = await first_revision(rsi)
     candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
     with pytest.raises(TimeoutError):
@@ -256,13 +256,13 @@ async def test_aclose_returns_a_running_generation_to_the_queue(tmp_path):
             await asyncio.sleep(30)
 
     path = tmp_path / "s.sqlite3"
-    rsi = LocalRSI(memory=None, model=Slow(), state_path=path)
+    rsi = LocalRSI(client=None, model=Slow(), state_path=path)
     task, _, done = await first_revision(rsi)
     candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
     with pytest.raises(TimeoutError):
         await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id, timeout=0.1)
     await rsi.aclose()
-    reopened = LocalRSI(memory=None, model=FakeModel(), state_path=path)
+    reopened = LocalRSI(client=None, model=FakeModel(), state_path=path)
     assert (await reopened.get_recipe_candidate(candidate.recipe_candidate_id)).status == "queued"
 
 
@@ -288,7 +288,7 @@ async def test_one_bad_row_does_not_break_the_list(tmp_path):
     assert (await rsi.list_recipe_candidates())["items"][0]["title"] == "changed"
 
 
-async def test_a_process_without_memory_leaves_a_pending_publish_alone(tmp_path):
+async def test_a_process_without_a_client_leaves_a_pending_upload_alone(tmp_path):
     rsi, _ = make_rsi(tmp_path, recipe_reply("V1"))
     task, _, done = await first_revision(rsi)
     job = await generate(rsi, task, done)
@@ -302,7 +302,7 @@ async def test_cancelled_generation_goes_back_to_the_queue(tmp_path):
         async def call(self, **kwargs):
             await asyncio.sleep(30)
 
-    rsi = LocalRSI(memory=None, model=Slow(), state_path=tmp_path / "s.sqlite3")
+    rsi = LocalRSI(client=None, model=Slow(), state_path=tmp_path / "s.sqlite3")
     task, _, done = await first_revision(rsi)
     candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
     with pytest.raises(TimeoutError):
@@ -334,7 +334,7 @@ async def test_stale_generation_cannot_commit_after_resume(tmp_path):
             return await super().call(**kwargs)
 
     model = ResumedMeanwhile(recipe_reply("V1"))
-    rsi = LocalRSI(memory=None, model=model, state_path=tmp_path / "s.sqlite3")
+    rsi = LocalRSI(client=None, model=model, state_path=tmp_path / "s.sqlite3")
     task, _, done = await first_revision(rsi)
     candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
     stale = asyncio.create_task(rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id, timeout=1))
@@ -368,8 +368,8 @@ async def test_two_connections_generate_once(tmp_path):
             return await super().call(**kwargs)
 
     model = Slow(recipe_reply("V1"))
-    first = LocalRSI(memory=None, model=model, state_path=tmp_path / "s.sqlite3")
-    second = LocalRSI(memory=None, model=model, state_path=tmp_path / "s.sqlite3")
+    first = LocalRSI(client=None, model=model, state_path=tmp_path / "s.sqlite3")
+    second = LocalRSI(client=None, model=model, state_path=tmp_path / "s.sqlite3")
     task, _, done = await first_revision(first)
     candidate = await first.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
     jobs = await asyncio.gather(*(rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id) for rsi in (first, second)))
@@ -394,7 +394,7 @@ async def test_two_processes_generate_once(tmp_path):
                 return await super().call(**kwargs)
 
         async def main():
-            rsi = LocalRSI(memory=None, model=Counted(recipe_reply("V1")), state_path={str(tmp_path / "shared.sqlite3")!r})
+            rsi = LocalRSI(client=None, model=Counted(recipe_reply("V1")), state_path={str(tmp_path / "shared.sqlite3")!r})
             job = await rsi.wait_workflow_job("recipe_candidate", {candidate.recipe_candidate_id!r}, timeout=30)
             print(job.status)
 

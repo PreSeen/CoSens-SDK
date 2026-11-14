@@ -6,11 +6,13 @@ class RSIError(Exception):
 
 
 class RSIHTTPError(RSIError):
-    def __init__(self, status_code: int, message: str, *, code: str | None = None, request_id: str | None = None):
+    def __init__(self, status_code: int, message: str, *, code: str | None = None, request_id: str | None = None,
+                 current_version: int | None = None):
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.request_id = request_id
+        self.current_version = current_version  # a Recipe version conflict reports the chain's current version
 
 
 class RSITransportError(RSIError):

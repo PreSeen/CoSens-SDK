@@ -99,11 +99,10 @@ UNVERIFIED_NEW_EVIDENCE = "unverified_new_evidence"
 # Sources that can show a result is correct. A person's remark (`human`) is a claim to weigh, not a verification.
 VERIFYING_SOURCES = ("evaluator", "reference", "automated_check", "downstream")
 
-MEMORY_TOKEN_BUDGET = 2000
-MEMORY_MIN_SCORE = 0.35
-MEMORY_RELATIVE_SCORE = 0.6
+# The recall route returns the original text of the episodes its recall finds. One reference source is 2-3k tokens;
+# the route's maximum is 8000.
+MEMORY_TOKEN_BUDGET = 8000
 MEMORY_MAX_ITEMS = 8
-MEMORY_DUPLICATE_SIMILARITY = 0.85
 
 ATTRIBUTION_INSTRUCTION = (
     "Analyze recorded feedback against inputs, actual events and before/after artifacts. Return possible causes with "
@@ -208,7 +207,7 @@ def with_parent_evidence(index, parent):
     if not parent:
         return index
     items = parent["recipe"]["steps"] + parent["recipe"]["lessons"]
-    refs = [ref for item in items for ref in item.get("evidence_refs", [])]  # an imported publication has none
+    refs = [ref for item in items for ref in item.get("evidence_refs", [])]  # an imported Recipe has none
     return EvidenceIndex(
         events=index.events | {(ref.get("revision_id"), ref["event_id"]) for ref in refs if "event_id" in ref},
         artifacts=index.artifacts | {ref["artifact_id"] for ref in refs if "artifact_id" in ref},
@@ -345,43 +344,13 @@ async def run_recipe_stages(model, context, parent, *, on_phase, on_attribution=
     return StageResult(analysis, models, recipe)
 
 
-def _has_source_refs(value):
-    if isinstance(value, dict):
-        return {"source_id", "revision", "content_hash", "start", "end"} <= value.keys() or any(
-            _has_source_refs(v) for v in value.values())
-    if isinstance(value, list):
-        return any(_has_source_refs(v) for v in value)
-    return False
-
-
-def _near_duplicate(a, b):
-    union = a | b
-    return bool(union) and len(a & b) / len(union) >= MEMORY_DUPLICATE_SIMILARITY
-
-
 def memory_snapshot(items):
-    """Freeze strong, distinct, source-backed recall hits; items without a score cannot be ranked and stay."""
+    """Freeze the recalled sources. The recall already ranked them and read each original text within the budget."""
     if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
         raise ValueError("invalid Memory recall response")
-    grounded = [item for item in items if isinstance(item.get("id"), str) and item["id"] and _has_source_refs(item)]
-    if len({item["id"] for item in grounded}) != len(grounded):
+    if any(not isinstance(item.get("id"), str) or not item["id"] for item in items):
+        raise ValueError("invalid Memory item ID")
+    if len({item["id"] for item in items}) != len(items):
         raise ValueError("duplicate Memory item IDs")
-    scores = [item["score"] for item in grounded if isinstance(item.get("score"), (int, float))]
-    floor = max(MEMORY_MIN_SCORE, max(scores, default=0) * MEMORY_RELATIVE_SCORE)
-    kept, seen, low, duplicate = [], [], 0, 0
-    for item in grounded:
-        score = item.get("score")
-        if isinstance(score, (int, float)) and score < floor:
-            low += 1
-            continue
-        words = set(str(item.get("text", "")).lower().split())
-        if any(_near_duplicate(words, other) for other in seen):
-            duplicate += 1
-            continue
-        if len(kept) == MEMORY_MAX_ITEMS:
-            low += 1
-            continue
-        kept.append(item)
-        seen.append(words)
-    return {"status": "captured", "items": kept, "omitted_unreferenced": len(items) - len(grounded),
-            "omitted_low_relevance": low, "omitted_duplicate": duplicate}
+    return {"status": "captured", "items": items[:MEMORY_MAX_ITEMS],
+            "omitted_over_budget": max(0, len(items) - MEMORY_MAX_ITEMS)}

@@ -6,12 +6,20 @@ from uuid import uuid4
 from ..atoms_helpers import stable_key
 from ..models import result
 from ..workflow_atoms import _context, _result, _task, feedback_source, validate_artifact
-from .publish import parse_publication
 from .recipe_stages import MEMORY_TOKEN_BUDGET, memory_snapshot
 from .store import canonical_json, fingerprint
 
 _ARTIFACT_ROLES = {"original_input", "submitted_output", "acceptance", "external_trace"}
 _INPUT_OUTPUT = {"original_input", "submitted_output"}
+
+
+def _published_recipe(text):
+    """True for a Recipe that SDK 0.6 published to Memory, which may still be there."""
+    try:
+        value = json.loads(text)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(value, dict) and value.get("schema") == "cosens-recipe/v1"
 
 
 def _missing(context, mode):
@@ -146,8 +154,8 @@ class LocalTaskWorkflow:
     async def _recall_snapshot(self, objective):
         recalled = await self._atoms.memory_recall(query=objective, token_budget=MEMORY_TOKEN_BUDGET)
         items = json.loads(json.dumps(recalled.get("items", [])))
-        # A Recipe this SDK published is a method, not evidence about the task.
-        return memory_snapshot([item for item in items if parse_publication(item.get("text")) is None])
+        # A published Recipe is a method, not evidence about the task.
+        return memory_snapshot([item for item in items if not _published_recipe(item.get("text"))])
 
     def _execution_intent(self, db, task_id, key, recipe_id, recall_memory):
         """Return the replayed or needs-context response, or the frozen request to create."""
@@ -174,7 +182,7 @@ class LocalTaskWorkflow:
         if type(recall_memory) is not bool:
             raise ValueError("recall_memory must be boolean")
         if recall_memory and self._atoms is None:
-            raise ValueError("recall_memory requires a memory client")
+            raise ValueError("recall_memory requires a client")
         with self._store.transaction() as db:
             first = self._execution_intent(db, task_id, key, recipe_id, recall_memory)
         if "response" in first:
