@@ -71,10 +71,10 @@ async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto"
                        "execution": execution})
 
     if phase == 'correct':
-        # A correction of a completed execution; the service rejects recipe_id and recall_memory here.
+        # A correction of a completed execution; the atom rejects recipe_id and recall_memory before sending.
         return await atoms.start_execution(session_context['task_id'], key=stable_key(request_key),
                                            previous_execution_id=session_context['execution_id'],
-                                           **({'model': model} if model is not None else {}))
+                                           recipe_id=recipe_id, model=model, recall_memory=recall_memory)
     if phase == 'learn':
         return await atoms.learn(session_context['execution_id'], **({'model': model} if model is not None else {}))
     raise ValueError('phase must be prepare, correct or learn')

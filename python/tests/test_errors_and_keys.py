@@ -4,7 +4,7 @@ import json
 import httpx
 import pytest
 
-from cosens import CoSensClient, RSILearningFailed, RSILearningStopped
+from cosens import CoSensClient, RSILearningFailed, RSILearningStopped, RSIRecoveryRequired
 
 DETAIL = {'code': 'insufficient_credits', 'message': 'The model gateway reported insufficient credits.',
           'retryable': False, 'phase': 'analyzing', 'upstream_status': 402, 'upstream_code': 'gateway_credit_insufficient'}
@@ -138,5 +138,29 @@ def test_wait_learning_surfaces_a_kept_version_without_resuming(tmp_path):
         assert caught.value.status == 'awaiting_material'
         assert wrapped.cosens.get_learning()['state'] == 'awaiting_material'
         assert wrapped.cosens.resume_learning()['state'] == 'awaiting_material' and backend.resumed == 0
+    finally:
+        wrapped.close(); native.close()
+
+
+def test_wait_learning_rejects_an_unknown_status(tmp_path):
+    wrapped, native, backend = _wrapped_with_learning(tmp_path, {'status': 'paused'})
+    try:
+        with pytest.raises(RSIRecoveryRequired, match='paused'):
+            wrapped.cosens.wait_learning(timeout=1)
+    finally:
+        wrapped.close(); native.close()
+
+
+def test_wait_learning_on_a_request_without_a_learning_needs_recovery(tmp_path):
+    wrapped, native, backend = _wrapped_with_learning(tmp_path, {})
+    try:
+        coordinator = wrapped.cosens._runtime.learning()
+        turn_id = wrapped.cosens.last_turn_id
+        record = coordinator.get(turn_id)
+        record.pop('learning'); record['state'] = 'request_pending'
+        coordinator.store.put(coordinator._key(turn_id), record)
+        with pytest.raises(RSIRecoveryRequired, match='not confirmed'):
+            wrapped.cosens.wait_learning(timeout=1)
+        assert wrapped.cosens.resume_learning()['learning']['execution_id'] == 'execution_1'
     finally:
         wrapped.close(); native.close()

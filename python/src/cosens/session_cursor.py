@@ -1,4 +1,4 @@
-"""Durable per-Session cursor for incremental, ACK-driven event reporting."""
+"""Snapshots of a host Session's items for the transparent wrappers."""
 
 import copy
 import hashlib
@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ._config import resolve_service
-from .errors import RSIRecoveryRequired, SessionHistoryChanged
+from .errors import SessionHistoryChanged
 
 
 def default_state_path():
@@ -40,12 +40,6 @@ class SessionSnapshot:
     key: str
     session_id: str
     items: tuple[dict, ...]
-
-
-@dataclass(frozen=True)
-class PendingBatch:
-    session_id: str
-    events: list[dict]
 
 
 class CursorStore:
@@ -106,135 +100,6 @@ class CursorStore:
                 "source_revision": item.get("source_revision"),
             },
         }
-
-    def _validate_batch(self, snapshot, events, start_index):
-        for offset, event in enumerate(events):
-            position = start_index + offset
-            if position >= len(snapshot.items) or event != self._event(snapshot, position):
-                raise SessionHistoryChanged("Pending Session event differs from current history")
-
-    def _row(self, key):
-        row = self._db.execute(
-            "SELECT acked_index, prefix_hash, session_id, pending_events FROM workflow_session_cursors WHERE key=?", (key,)
-        ).fetchone()
-        return row or (-1, None, None, None)
-
-    def _validate(self, snapshot, index, prefix_hash):
-        if index >= len(snapshot.items) or (index >= 0 and _hash(snapshot.items[: index + 1]) != prefix_hash):
-            raise SessionHistoryChanged("Previously ACKed Session history changed; use a new session incarnation or reconcile")
-
-    def pending(self, snapshot, *, max_events=200, max_bytes=1_000_000):
-        with self._lock:
-            index, prefix_hash, _, _ = self._row(snapshot.key)
-            self._validate(snapshot, index, prefix_hash)
-            events = []
-            size = 0
-            for position in range(index + 1, len(snapshot.items)):
-                event = self._event(snapshot, position)
-                encoded_size = len(_json(event).encode("utf-8"))
-                if encoded_size > max_bytes:
-                    raise ValueError("One Session event exceeds the server batch size")
-                if events and (len(events) >= max_events or size + encoded_size > max_bytes):
-                    break
-                events.append(event)
-                size += encoded_size
-            return events
-
-    def begin_batch(self, session_id, snapshot, events):
-        if not events:
-            return
-        with self._lock:
-            self._db.execute("BEGIN IMMEDIATE")
-            try:
-                acked_index, prefix_hash, old_session_id, pending_json = self._row(snapshot.key)
-                self._validate(snapshot, acked_index, prefix_hash)
-                if pending_json:
-                    if old_session_id != session_id:
-                        raise RSIRecoveryRequired(f"Pending Session events belong to Session {old_session_id}")
-                    if events != json.loads(pending_json):
-                        raise RSIRecoveryRequired("Pending Session batch changed during recovery")
-                else:
-                    try:
-                        self._validate_batch(snapshot, events, acked_index + 1)
-                    except SessionHistoryChanged as exc:
-                        raise RSIRecoveryRequired("Session batch was built from a stale cursor or changed history") from exc
-                self._db.execute(
-                    "INSERT INTO workflow_session_cursors(key,acked_index,prefix_hash,session_id,pending_events) VALUES(?,?,?,?,?) "
-                    "ON CONFLICT(key) DO UPDATE SET session_id=excluded.session_id,pending_events=excluded.pending_events",
-                    (snapshot.key, acked_index, prefix_hash, session_id, _json(events)),
-                )
-                self._db.commit()
-            except BaseException:
-                self._db.rollback()
-                raise
-
-    def recover_batch(self, snapshot):
-        with self._lock:
-            acked_index, prefix_hash, session_id, pending_json = self._row(snapshot.key)
-            self._validate(snapshot, acked_index, prefix_hash)
-            if not pending_json:
-                return None
-            events = json.loads(pending_json)
-            self._validate_batch(snapshot, events, acked_index + 1)
-            return PendingBatch(session_id, events)
-
-    def ack(self, snapshot, receipt):
-        acknowledged = receipt.get("durable_ack")
-        if isinstance(acknowledged, dict):
-            acknowledged = acknowledged.get("event_ids", acknowledged.get("ids", []))
-        if not isinstance(acknowledged, list):
-            raise RSIRecoveryRequired("Session event receipt has no durable_ack event IDs")
-        with self._lock, self._db:
-            old_index, old_hash, session_id, pending_json = self._row(snapshot.key)
-            self._validate(snapshot, old_index, old_hash)
-            if not pending_json:
-                raise RSIRecoveryRequired("No pending Session event batch to acknowledge")
-            pending = json.loads(pending_json)
-            self._validate_batch(snapshot, pending, old_index + 1)
-            pending_ids = {event["id"] for event in pending}
-            ack_set = set()
-            for event_id in acknowledged:
-                if not isinstance(event_id, str) or event_id not in pending_ids or event_id in ack_set:
-                    raise RSIRecoveryRequired("Session event ACK contains an unsent or duplicate event ID")
-                ack_set.add(event_id)
-            advanced = 0
-            for event in pending:
-                if event["id"] not in ack_set:
-                    break
-                advanced += 1
-            new_index = old_index + advanced
-            remaining = pending[advanced:]
-            item = snapshot.items[new_index] if new_index >= 0 else {}
-            updated = self._db.execute(
-                "UPDATE workflow_session_cursors SET acked_index=?,prefix_hash=?,pending_events=?,"
-                "acked_message_id=?,acked_item_hash=?,source_revision=? "
-                "WHERE key=? AND acked_index=? AND session_id=? AND pending_events=?",
-                (
-                    new_index,
-                    _hash(snapshot.items[: new_index + 1]) if new_index >= 0 else None,
-                    _json(remaining) if remaining else None,
-                    str(item.get("id") or _hash([snapshot.key, new_index, item])) if new_index >= 0 else None,
-                    _hash(item) if new_index >= 0 else None,
-                    item.get("source_revision"),
-                    snapshot.key,
-                    old_index,
-                    session_id,
-                    pending_json,
-                ),
-            )
-            if updated.rowcount != 1:
-                raise RSIRecoveryRequired("Session cursor changed concurrently; reread before ACK")
-            return advanced
-
-    def last_ack(self, snapshot):
-        with self._lock:
-            row = self._db.execute(
-                "SELECT acked_index,acked_message_id,acked_item_hash,source_revision,session_id "
-                "FROM workflow_session_cursors WHERE key=?", (snapshot.key,),
-            ).fetchone()
-            if row is None:
-                return None
-            return dict(zip(("index", "message_id", "item_hash", "source_revision", "session_id"), row))
 
     def close(self):
         self._db.close()

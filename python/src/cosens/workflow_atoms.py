@@ -50,6 +50,8 @@ _ROLES = {"original_input", "submitted_output", "acceptance", "external_trace"}
 # Learning states the service moves on by itself, and states only the caller can change.
 _LEARNING_IN_FLIGHT = {"queued", "running", "awaiting_previous_version"}
 _LEARNING_STOPPED = {"interrupted", "awaiting_runner", "awaiting_material"}
+# States resume_learning continues.
+_LEARNING_RESUMABLE = {"failed", "interrupted", "awaiting_runner"}
 
 
 def _job_timeout(timeout):
@@ -261,7 +263,8 @@ class AsyncWorkflowAtoms:
         """Retry a ``failed``, ``interrupted`` or ``awaiting_runner`` learning, optionally with a new budget.
 
         A learning that is active or ``completed`` comes back unchanged; asking it for a
-        different ``max_completion_tokens`` then gets a 422.
+        different ``max_completion_tokens`` then gets a 422. An execution that has not
+        learned yet, or whose learning is ``awaiting_material``, also gets a 422.
         """
         return await self._http.request("POST", f"/executions/{path_part(execution_id)}/resume",
                                         body=_recipe_data(model, max_completion_tokens) or None)
@@ -340,10 +343,12 @@ class SyncWorkflowAtoms:
                                   body={'feedback':feedback, 'source':feedback_source(source)}, key=stable_key(key))
 
     def learn(self, execution_id, *, model=None, max_completion_tokens=None):
+        """Learn a Recipe version from a confirmed execution; repeat calls return the same learning."""
         return self._http.request("POST", f"/executions/{path_part(execution_id)}/learn",
                                   body=_recipe_data(model, max_completion_tokens) or {})
 
     def resume_learning(self, execution_id, *, model=None, max_completion_tokens=None):
+        """Retry a failed, interrupted or awaiting_runner learning; see the async form for the 422 cases."""
         return self._http.request("POST", f"/executions/{path_part(execution_id)}/resume",
                                   body=_recipe_data(model, max_completion_tokens) or None)
 

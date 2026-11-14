@@ -3,7 +3,6 @@ import asyncio
 import hashlib
 import inspect
 import json
-from uuid import uuid4
 
 from .task_runner import TaskWorkflowRunner
 from .errors import RSIRecoveryRequired

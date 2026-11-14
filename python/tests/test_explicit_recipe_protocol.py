@@ -18,14 +18,77 @@ def learning_view(execution_id, status='queued', **fields):
             'max_completion_tokens': 200_000, **fields}
 
 
+def invalid(message):
+    return httpx.Response(422,json={'error':{'code':'invalid_request','message':message}})
+
+
 class Backend:
-    """The execution API: one learning per execution, created by the first learn call."""
-    def __init__(self):self.seen=[];self.count=0;self.generations=0;self.learnings={};self.executions=0
+    """The execution API as cosens-rsi serves it: fresh execution IDs per key, one learning per execution.
+
+    ``seen`` holds (method, path, body); ``headers`` holds each request's headers in the same order.
+    """
+    ACTIVE={'queued','running','awaiting_previous_version','completed'}
+    RESUMABLE={'failed','interrupted','awaiting_runner'}
+
+    def __init__(self):
+        self.seen=[];self.headers=[];self.count=0;self.generations=0;self.learnings={};self.executions={};self.keys={}
+
     def learning(self,execution_id):
         return self.learnings[execution_id]
+
+    def _start(self,body,key):
+        if key in self.keys:
+            return self.keys[key]
+        previous=(body or {}).get('previous_execution_id')
+        if previous is not None:
+            if (body.get('recipe_id') is not None or body.get('recall_memory')):
+                return invalid('a correction takes only previous_execution_id and model')
+            if self.executions.get(previous,{}).get('status')!='completed':
+                return invalid('previous execution has not completed')
+        execution_id=f'execution_{len(self.executions)+1}'
+        kind='correction' if previous else 'original'
+        self.executions[execution_id]={'kind':kind,'status':'awaiting_execution','previous_execution_id':previous}
+        receipt={'task_id':'task_1','execution_id':execution_id,'kind':kind,'request_sha256':'request-hash',
+                 'status':'awaiting_execution','request':{'context':{'objective':'task'},'method':self.method(kind)}}
+        self.keys[key]=receipt
+        return receipt
+
+    def method(self,kind):
+        """The Recipe the service binds to an execution; none unless a subclass serves one."""
+        return None
+
+    def _learn(self,execution_id,body):
+        budget=(body or {}).get('max_completion_tokens')
+        if execution_id in self.learnings:
+            current=self.learnings[execution_id]
+            if budget is not None and budget!=current['max_completion_tokens']:
+                return invalid('this execution already learned with a different completion budget')
+            return current
+        if self.executions.get(execution_id,{}).get('status')!='completed':
+            return invalid('execution has not completed')
+        self.generations+=1
+        self.learnings[execution_id]=learning_view(execution_id,max_completion_tokens=budget or 200_000)
+        return self.learnings[execution_id]
+
+    def _resume(self,execution_id,body):
+        budget=(body or {}).get('max_completion_tokens')
+        current=self.learnings.get(execution_id)
+        if current is None:
+            return invalid('this execution has not learned yet')
+        if current['status'] in self.ACTIVE:
+            if budget is not None and budget!=current['max_completion_tokens']:
+                return invalid('cannot change the completion budget of an active or completed learning')
+            return current
+        if current['status'] not in self.RESUMABLE:
+            return invalid(f"a learning in {current['status']} cannot be resumed")
+        current=dict(current,status='queued',error=None,error_detail=None)
+        if budget is not None:current['max_completion_tokens']=budget
+        self.learnings[execution_id]=current
+        return current
+
     def __call__(self,r):
         body=json.loads(r.content) if r.content else None
-        path=r.url.path.removeprefix('/api');self.seen.append((r.method,path,body))
+        path=r.url.path.removeprefix('/api');self.seen.append((r.method,path,body));self.headers.append(dict(r.headers))
         assert '/runs' not in path and '/improvements' not in path and '/attributions' not in path
         assert '/sessions' not in path and '/revisions' not in path and '/recipe-candidates' not in path
         if path=='/recipes':return httpx.Response(200,json={'items':[],'has_more':False,'next_cursor':None})
@@ -34,32 +97,29 @@ class Backend:
             self.count+=1;return httpx.Response(200,json={'artifact_id':f'artifact_{self.count}','content_hash':'sha256:test'})
         if path=='/tasks' and r.method=='POST':return httpx.Response(200,json={'task_id':'task_1','status':'ready'})
         if path.endswith('/executions') and r.method=='POST':
-            self.executions+=1
-            execution_id='execution_1' if self.executions==1 else f'execution_{self.executions}'
-            kind='correction' if (body or {}).get('previous_execution_id') else 'original'
-            return httpx.Response(200,json={'task_id':'task_1','execution_id':execution_id,'kind':kind,'request_sha256':'request-hash','status':'awaiting_execution','request':{'context':{'objective':'task'}}})
+            answer=self._start(body,r.headers.get('idempotency-key'))
+            return answer if isinstance(answer,httpx.Response) else httpx.Response(200,json=answer)
         execution_id=path.split('/')[2] if path.startswith('/executions/') else None
+        execution=self.executions.get(execution_id)
+        if execution is None:
+            return httpx.Response(404,json={'error':{'code':'not_found','message':'execution not found'}})
         if path.endswith('/result'):
-            return httpx.Response(200,json={'task_id':'task_1','execution_id':execution_id,'status':'completed','trace_origin':'original'})
+            if execution['status']=='awaiting_execution':execution['status']=body['outcome']
+            return httpx.Response(200,json={'task_id':'task_1','execution_id':execution_id,'status':execution['status'],'trace_origin':execution['kind']})
         if path.endswith('/feedback'):
             assert body['source']=='human'
-            return httpx.Response(200,json={'feedback_id':'feedback_1','execution_id':execution_id})
-        if path.endswith('/learn'):
-            assert 'recall_memory' not in body and 'include_memory' not in body
-            if execution_id not in self.learnings:
-                self.generations+=1
-                self.learnings[execution_id]=learning_view(execution_id,max_completion_tokens=body.get('max_completion_tokens',200_000))
-            return httpx.Response(200,json=self.learnings[execution_id])
-        if path.endswith('/resume'):
-            learning=dict(self.learning(execution_id),status='queued')
-            if body and 'max_completion_tokens' in body:learning['max_completion_tokens']=body['max_completion_tokens']
-            self.learnings[execution_id]=learning
-            return httpx.Response(200,json=learning)
-        if execution_id and r.method=='GET':
+            if execution['status']!='completed':return invalid('feedback needs a completed execution')
+            return httpx.Response(200,json={'feedback_id':'feedback_1','execution_id':execution_id,'task_id':'task_1','message':body['feedback'],'source':body['source']})
+        if path.endswith('/learn') or path.endswith('/resume'):
+            assert 'recall_memory' not in (body or {}) and 'include_memory' not in (body or {})
+            answer=(self._learn if path.endswith('/learn') else self._resume)(execution_id,body)
+            return answer if isinstance(answer,httpx.Response) else httpx.Response(200,json=answer)
+        if r.method=='GET':
             learning=self.learnings.get(execution_id)
             if learning and learning['status'] in {'queued','running'}:
                 learning=self.learnings[execution_id]=dict(learning,status='completed',current=True,recipe={'steps':[]})
-            return httpx.Response(200,json={'execution_id':execution_id,'task_id':'task_1','kind':'original','status':'completed','learning':learning})
+            return httpx.Response(200,json={'execution_id':execution_id,'task_id':'task_1','kind':execution['kind'],'status':execution['status'],
+                                            'previous_execution_id':execution['previous_execution_id'],'learning':learning})
         raise AssertionError((r.method,path,body))
 
 
@@ -142,8 +202,11 @@ async def test_atomic_feedback_correction_and_learning(tmp_path):
         assert result['status']=='completed' and 'revision_id' not in result
         await a.record_feedback(result['execution_id'],feedback='Check the format',source='human',key='feedback')
         correction=await a.start_execution(task['task_id'],key='correction',previous_execution_id=result['execution_id'])
-        assert correction['kind']=='correction'
+        assert correction['kind']=='correction' and correction['execution_id']!=result['execution_id']
         assert backend.seen[-1]==('POST','/tasks/task_1/executions',{'previous_execution_id':'execution_1'})
+        corrected=await a.artifact(name='corrected.txt',content='fixed')
+        done=await a.submit_execution(correction['execution_id'],request_sha256=correction['request_sha256'],outcome='completed',artifacts=[{'artifact_id':corrected['artifact_id'],'role':'submitted_output'}])
+        assert done['trace_origin']=='correction'
         assert backend.generations==0
         learning=await a.learn(correction['execution_id'])
         assert backend.generations==1 and learning['execution_id']==correction['execution_id']
@@ -185,24 +248,133 @@ def test_feedback_on_a_previous_turn_starts_a_correction_of_its_execution(tmp_pa
         first=wrapped.responses.create(model='model',input='Produce a report')
         before=len(backend.seen)
         wrapped.responses.create(model='model',input='The totals are wrong; use the Q3 numbers',previous_response_id=first.id)
-        calls=[(m,p,b) for m,p,b in backend.seen[before:] if p.endswith('/feedback') or p.endswith('/executions')]
-        assert [call[:2] for call in calls]==[('POST','/executions/execution_1/feedback'),('POST','/tasks/task_1/executions')]
-        assert calls[1][2]=={'previous_execution_id':'execution_1'}
+        calls=[(i,m,p,b) for i,(m,p,b) in enumerate(backend.seen) if i>=before and (p.endswith('/feedback') or p.endswith('/executions'))]
+        assert [call[1:3] for call in calls]==[('POST','/executions/execution_1/feedback'),('POST','/tasks/task_1/executions')]
+        assert calls[1][3]=={'previous_execution_id':'execution_1'}
         turn=wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
-        assert turn['execution_id']=='execution_2' and turn['state']=='completed'
+        assert backend.headers[calls[1][0]]['idempotency-key']=='auto-correction:'+turn['turn_id']
+        assert turn['execution_id']=='execution_2' and turn['execution_id']!='execution_1' and turn['state']=='completed'
+        assert backend.executions['execution_2']['kind']=='correction'
+        assert not [p for _,p,_ in backend.seen[before:] if p.startswith('/recipes')]
     finally:
         wrapped.close();client.close()
+
+
+async def _completed_execution(sdk):
+    prepared=await sdk.start('Produce output',request_key='prepare-1')
+    artifact=await sdk.atoms.artifact(name='output.txt',content='final')
+    await sdk.atoms.submit_execution(prepared['execution_id'],request_sha256=prepared['request_sha256'],outcome='completed',
+                                     artifacts=[{'artifact_id':artifact['artifact_id'],'role':'submitted_output'}])
+    return prepared
 
 
 @pytest.mark.asyncio
 async def test_start_phases_correct_and_learn(tmp_path):
     backend=Backend()
     async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(backend)) as sdk:
-        corrected=await sdk.start({'task_id':'task_1','execution_id':'execution_1'},phase='correct',request_key='fix-1')
-        assert corrected['execution_id']=='execution_1' and corrected['kind']=='correction'
-        assert backend.seen[-1]==('POST','/tasks/task_1/executions',{'previous_execution_id':'execution_1'})
-        learning=await sdk.start({'execution_id':'execution_1'},phase='learn',model='public-model')
-        assert learning['execution_id']=='execution_1' and learning['status']=='queued'
-        assert backend.seen[-1]==('POST','/executions/execution_1/learn',{'model':'public-model'})
+        prepared=await _completed_execution(sdk)
+        snapshot={'task_id':prepared['task_id'],'execution_id':prepared['execution_id']}
+        corrected=await sdk.start(snapshot,phase='correct',request_key='fix-1')
+        assert corrected['kind']=='correction' and corrected['execution_id']!=prepared['execution_id']
+        assert backend.seen[-1]==('POST','/tasks/task_1/executions',{'previous_execution_id':prepared['execution_id']})
+        assert backend.headers[-1]['idempotency-key']=='fix-1'
+        learning=await sdk.start(snapshot,phase='learn',model='public-model')
+        assert learning['execution_id']==prepared['execution_id'] and learning['status']=='queued'
+        assert backend.seen[-1]==('POST',f"/executions/{prepared['execution_id']}/learn",{'model':'public-model'})
         with pytest.raises(ValueError, match='prepare, correct or learn'):
-            await sdk.start({'execution_id':'execution_1'},phase='recipe',request_key='k')
+            await sdk.start(snapshot,phase='recipe',request_key='k')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('extra',[{'recipe_id':'recipe_1'},{'recall_memory':True}])
+async def test_start_correct_rejects_recipe_and_memory_before_sending(tmp_path,extra):
+    backend=Backend()
+    async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(backend)) as sdk:
+        with pytest.raises(ValueError, match='previous_execution_id'):
+            await sdk.start({'task_id':'task_1','execution_id':'execution_1'},phase='correct',request_key='fix-1',**extra)
+    assert backend.seen==[]
+
+
+@pytest.mark.asyncio
+async def test_agent_wrapper_surfaces_a_changed_learning_budget(tmp_path):
+    from cosens.errors import RSIHTTPError
+    backend=Backend()
+    class Runner:
+        @staticmethod
+        async def run(agent,user_input,**options):return SimpleNamespace(final_output='agent artifact',new_items=[],interruptions=[])
+    agent=Agent(name='reporter',instructions='Produce output')
+    wrapped=cosens(agent,mode='disable',api_key='service-key',state_path=tmp_path/'agent.sqlite',_http_transport=httpx.MockTransport(backend),_runner=Runner)
+    try:
+        await wrapped.run(agent,'Produce a report')
+        await wrapped.cosens.generate_recipe(max_completion_tokens=200_000)
+        assert (await wrapped.cosens.generate_recipe())['max_completion_tokens']==200_000
+        with pytest.raises(RSIHTTPError) as caught:
+            await wrapped.cosens.generate_recipe(max_completion_tokens=300_000)
+        assert caught.value.status_code==422 and caught.value.code=='invalid_request'
+        assert backend.generations==1
+    finally:
+        await wrapped.aclose()
+
+
+@pytest.mark.asyncio
+async def test_feedback_and_resume_follow_the_service_rules(tmp_path):
+    from cosens.errors import RSIHTTPError
+    backend=Backend()
+    async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(backend)) as sdk:
+        a=sdk.atoms
+        pending=await sdk.start('Produce output',request_key='prepare-1')
+        with pytest.raises(RSIHTTPError) as caught:
+            await a.record_feedback(pending['execution_id'],feedback='f',source='human',key='early')
+        assert caught.value.status_code==422
+        artifact=await a.artifact(name='output.txt',content='final')
+        await a.submit_execution(pending['execution_id'],request_sha256=pending['request_sha256'],outcome='completed',
+                                 artifacts=[{'artifact_id':artifact['artifact_id'],'role':'submitted_output'}])
+        with pytest.raises(RSIHTTPError, match='has not learned yet'):
+            await a.resume_learning(pending['execution_id'])
+        learning=await a.learn(pending['execution_id'],max_completion_tokens=200_000)
+        assert await a.resume_learning(pending['execution_id'])==learning
+        with pytest.raises(RSIHTTPError, match='completion budget'):
+            await a.resume_learning(pending['execution_id'],max_completion_tokens=300_000)
+
+
+def test_a_correction_uses_the_recipe_the_service_binds_from_the_task(tmp_path):
+    """The task already has a Recipe: the feedback turn makes no lookup and injects the correction's method."""
+    stale={'title':'Old report','when':'Writing a report','when_not':'Chat','steps':[{'id':'s1','instruction':'Old step'}],'lessons':[]}
+    head={'title':'Quarterly report','when':'Writing a report','when_not':'Chat','steps':[{'id':'s1','instruction':'Use the Q3 numbers'}],'lessons':[]}
+    class RecipeBackend(Backend):
+        def method(self,kind):
+            return {'recipe_id':'recipe_1','version':2,'recipe_sha256':'f'*64,'recipe':head} if kind=='correction' else None
+        def __call__(self,r):
+            path=r.url.path.removeprefix('/api')
+            if path=='/recipes':
+                self.seen.append((r.method,path,None));self.headers.append(dict(r.headers))
+                return httpx.Response(200,json={'items':[{'recipe_id':'recipe_1','origin':'generated','version':1,'title':'Old report'}],'has_more':False})
+            if path=='/recipes/recipe_1':
+                self.seen.append((r.method,path,None));self.headers.append(dict(r.headers))
+                return httpx.Response(200,json={'recipe_id':'recipe_1','origin':'generated','version':1,'recipe':stale})
+            return super().__call__(r)
+    backend=RecipeBackend();responses=[]
+    def native(r):
+        data=json.loads(r.content)
+        if r.url.path.endswith('/chat/completions'):
+            schema=data['response_format']['json_schema']
+            if schema['name']=='cosens_recipe_match':
+                answer={'recipe_id':''}
+            else:
+                answer={'activate':True,'reason':'task',**({'feedback':True} if 'feedback' in schema['schema']['properties'] else {})}
+            return httpx.Response(200,json={'id':'decision','object':'chat.completion','created':0,'model':'model','choices':[{'index':0,'message':{'role':'assistant','content':json.dumps(answer)},'finish_reason':'stop'}]})
+        responses.append(data)
+        return native_response(r)
+    client=OpenAI(api_key='model-key',http_client=httpx.Client(transport=httpx.MockTransport(native)))
+    wrapped=cosens(client,mode='auto',api_key='service-key',state_path=tmp_path/'s.sqlite',_http_transport=httpx.MockTransport(backend))
+    try:
+        first=wrapped.responses.create(model='model',input='Produce a report')
+        before=len(backend.seen)
+        wrapped.responses.create(model='model',input='The totals are wrong; use the Q3 numbers',previous_response_id=first.id)
+        assert not [p for _,p,_ in backend.seen[before:] if p.startswith('/recipes')]
+        turn=wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
+        assert turn['state']=='completed' and turn['execution_id']=='execution_2'
+        assert (turn['used_recipe_id'],turn['used_recipe_version'])==('recipe_1',2)
+        assert 'Use the Q3 numbers' in responses[-1]['instructions'] and 'Old step' not in responses[-1]['instructions']
+    finally:
+        wrapped.close();client.close()

@@ -18,6 +18,17 @@ _MATCH_FORMAT = {'type': 'json_schema', 'name': 'cosens_recipe_match', 'strict':
                             'properties': {'recipe_id': {'type': 'string'}}, 'required': ['recipe_id']}}
 
 
+def _correction_context(request):
+    """Frozen context for a correction: the Recipe the service bound to it, no new lookup or recall."""
+    method = request.get('method')
+    recipe = {'status': 'not_found'}
+    if isinstance(method, dict) and isinstance(method.get('recipe'), dict):
+        recipe = {'status': 'matched', 'recipe_id': method['recipe_id'], 'version': method['version'],
+                  'bundle': method['recipe'], 'provisional': True}
+    return freeze_recall_context({'recipe': recipe, 'context': {'source': 'correction_method'},
+                                  'snapshot': {'evidence': []}})
+
+
 class AutoExecution:
     def _auto_model(self, turn_id, options):
         binding = self._policy_bindings.get(turn_id)
@@ -44,7 +55,7 @@ class AutoExecution:
         """Current generated Recipes with their content, and whether the listing was complete."""
         if time.monotonic() < self._recipe_lookup_empty_until:
             return [], True
-        page = atoms.list_recipes(limit=100)
+        page = atoms.list_recipes(limit=100, origin='generated')
         items = page.get('items')
         if not isinstance(items, list):
             raise RSIRecoveryRequired('Recipe lookup returned an invalid list')
@@ -137,7 +148,8 @@ class AutoExecution:
             state['state'] = 'native_running'
             self._save(state)
             return state, dict(kwargs)
-        if 'frozen_context' not in state:
+        if 'frozen_context' not in state and not feedback_target:
+            # A correction takes the Recipe the service binds from the task, so it makes no lookup.
             try:
                 context = self._lookup_auto(state, kwargs)
             except Exception as error:
@@ -185,14 +197,20 @@ class AutoExecution:
             execution = correction or atoms.start_execution(state['task_id'], key='auto-execution:' + state['turn_id'], **options)
             if execution.get('status') != 'awaiting_execution' or not execution.get('execution_id') or not execution.get('request_sha256'):
                 raise RSIRecoveryRequired('Auto execution is not ready')
-            # Verify the service bound the same immutable method we will inject.
             method = (execution.get('request') or {}).get('method')
+            if correction is not None and isinstance(method, dict):
+                state.update(used_recipe_id=method.get('recipe_id'), used_recipe_version=method.get('version'))
+            # Verify the service bound the same immutable method we will inject.
             if state.get('used_recipe_id'):
                 if (not isinstance(method, dict) or method.get('recipe_id') != state['used_recipe_id'] or
                         method.get('version') != state.get('used_recipe_version')):
                     raise RSIRecoveryRequired('Service selected a different Recipe; execution was not dispatched')
             state.update(execution_id=execution['execution_id'], request_sha256=execution['request_sha256'])
             state['execution_request'] = execution.get('request') or {}
+            self._save(state)
+        if 'frozen_context' not in state:
+            # Only a correction reaches here: inject the method its request carries.
+            state['frozen_context'] = dict(_correction_context(state['execution_request']))
             self._save(state)
         if user_text(path, kwargs):
             state['visible_input'] = user_text(path, kwargs)

@@ -29,9 +29,10 @@ class Algorithm:
         path = request.url.path.removeprefix('/api')
         self.paths.append(path)
         if path == '/recipes':
-            assert dict(request.url.params) == {'limit': '100'}
+            assert dict(request.url.params) == {'limit': '100', 'origin': 'generated'}
             items = [{'recipe_id': key, 'origin': r['origin'], 'version': r['version'], 'title': r['recipe']['title'],
-                      'task_id': 'task_0', 'updated_at': 't'} for key, r in self.recipes.items()]
+                      'task_id': 'task_0', 'updated_at': 't'} for key, r in self.recipes.items()
+                     if r['origin'] == request.url.params['origin']]
             return httpx.Response(200, json={'items': items, 'has_more': False, 'next_cursor': None})
         if path.startswith('/recipes/'):
             return httpx.Response(200, json=self.recipes[path.rsplit('/', 1)[1]])

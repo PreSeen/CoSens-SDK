@@ -8,10 +8,7 @@ import math
 from .atoms import CoSensClient
 from .errors import RSILearningFailed, RSILearningStopped, RSIRecoveryRequired
 from .state import TurnStore
-from .workflow_atoms import _LEARNING_STOPPED as _STOPPED, _completion_tokens
-
-# Learning states resume_learning can continue.
-_RESUMABLE = {'failed', 'interrupted', 'awaiting_runner'}
+from .workflow_atoms import _LEARNING_IN_FLIGHT, _LEARNING_RESUMABLE, _LEARNING_STOPPED, _completion_tokens
 
 
 @dataclass(frozen=True)
@@ -76,11 +73,10 @@ class LearningCoordinator:
         """Calling this is the host's explicit confirmation signal; an execution learns once."""
         _completion_tokens(max_completion_tokens)
         value=self._record(turn_id)
-        if value['state']!='awaiting_confirmation':
+        if value.get('learning'):
             if max_completion_tokens is not None and max_completion_tokens!=value.get('max_completion_tokens'):
-                raise ValueError('cannot change the completion budget of a requested learning; resume it instead')
-            if value.get('learning'):
-                return value
+                raise ValueError('this execution already learned with a different completion budget')
+            return value
         budget = max_completion_tokens if max_completion_tokens is not None else value.get('max_completion_tokens')
         value.update(state='request_pending',reason='explicit_generation_requested',max_completion_tokens=budget)
         self._save(turn_id, value)
@@ -104,11 +100,11 @@ class LearningCoordinator:
         if not value.get('learning'):
             return self.generate(turn_id, max_completion_tokens)
         value=self._refresh(turn_id)
-        if value['state'] in _RESUMABLE:
+        if value['state'] in _LEARNING_RESUMABLE:
             options = {'max_completion_tokens': max_completion_tokens} if max_completion_tokens is not None else {}
             return self._save(turn_id, self._learned(value, self.atoms.resume_learning(value['execution_id'], **options)))
         if max_completion_tokens is not None and max_completion_tokens != value.get('max_completion_tokens'):
-            raise ValueError('cannot change the completion budget of an active or completed learning')
+            raise ValueError('only a failed, interrupted or awaiting_runner learning takes a new completion budget')
         return value
 
     def wait(self,turn_id,timeout=None):
@@ -126,10 +122,14 @@ class LearningCoordinator:
             value=self._refresh(turn_id)
             if value['state']=='failed':
                 raise RSILearningFailed.from_learning(value['learning'])
-            if value['state'] in _STOPPED:
+            if value['state'] in _LEARNING_STOPPED:
                 raise RSILearningStopped(value['learning'])
             if value['state'] in {'awaiting_confirmation','completed'}:
                 return value
+            if not value.get('learning'):
+                raise RSIRecoveryRequired('Learning was requested but not confirmed; call resume_learning to request it again')
+            if value['state'] not in _LEARNING_IN_FLIGHT:
+                raise RSIRecoveryRequired(f"Unexpected learning status: {value['state']}")
             if time.monotonic()>=deadline:
                 raise TimeoutError('Learning is still running; wait again or resume it, do not rerun the model')
             time.sleep(min(self.config.poll_interval,max(0,deadline-time.monotonic())))
