@@ -35,7 +35,7 @@ The size limits (8 steps, 5 lessons, 6,000 characters) also forced a Recipe that
 
 ## Results
 
-acc@3, in percent. Group 5 has 3 test tasks; the others have 5.
+acc@3, in percent. Groups 5 and 6 have 3 test tasks; the others have 5.
 
 | Task group | Base | GDPevo's own few-shot | `cosens.local` 0.6 | This change |
 |---|---:|---:|---:|---:|
@@ -43,8 +43,10 @@ acc@3, in percent. Group 5 has 3 test tasks; the others have 5.
 | 3 | 44.47 | 60.80 | 38.95 | **61.01** |
 | 4 | about 20.2 | no skill produced | not run | **57.77** |
 | 5 | 51.31 | 54.37 | not run | **55.23** (repeat: 61.11) |
+| 6 (held out, trained from scratch) | 58.33 | 63.12 | not run | **68.21** |
 
-- On the three groups where GDPevo's own method produced a skill, this change averages 57.17, against 54.20 for GDPevo's own and 46.10 for Base.
+- **Group 6 is the cleanest check.** No prompt change looked at it, and the released prompt trained there from scratch, with no offline regeneration. It scored 68.21, against 58.33 for Base and 63.12 for GDPevo's own. It was level with or ahead of GDPevo's own on all three test tasks (75.0 / 42.6 / 87.0 against 70.8 / 42.6 / 75.9).
+- On the four groups where GDPevo's own method produced a skill (2, 3, 5, 6), this change averages 59.93, against 56.43 for GDPevo's own and 49.16 for Base.
 - On group 4, GDPevo's own skill writer ran out its 2-hour limit in every try. Local Recipe generation finished and raised the agent from about 20 to 58.
 - The final Recipes are 20,000-26,000 characters, under the 32,000-character limit these runs used.
 - A 14,000-character limit was tried afterwards, and the limit stays at 32,000. Regenerating the saved contexts of groups 2, 3 and 5 at 14,000 (three attempts each, five versions per attempt) finished only for group 2 (13,318-13,994 characters). In groups 3 and 5 all six attempts failed at version 3 or 4, because the model's output stayed over 14,000 characters (14,236-17,147) after the three retries. The recall budget was raised from 2,000 to 8,000 tokens.
@@ -61,7 +63,7 @@ Each of these was added, measured on at least two groups, and removed:
 ## Limits of these measurements
 
 - **Few samples, large spread.** Each figure is 3 tries per task. Rerunning the same Recipes moved a group score by up to 15 points, so differences of a few points are not established.
-- **Not all held out.** The changes were developed while reading failures on groups 3 and 5, so only group 2 is a held-out check of the final prompt. Group 5 was held out for the previous version of the mapping rule, which fell below Base there. That failure led to the "distinguishing values" rule.
-- **Recipes regenerated offline.** To compare prompts without solving the training tasks again, most Recipes were regenerated from the saved training records. Those records came from runs guided by earlier Recipes, which can differ slightly from a fresh run. Only Base, GDPevo's own method and the first group 5 run trained from scratch.
+- **Not all held out.** The changes were developed while reading failures on groups 3 and 5, so groups 2 and 6 are the held-out checks of the final prompt. Group 5 was held out for the previous version of the mapping rule, which fell below Base there. That failure led to the "distinguishing values" rule.
+- **Recipes regenerated offline.** To compare prompts without solving the training tasks again, most Recipes were regenerated from the saved training records. Those records came from runs guided by earlier Recipes, which can differ slightly from a fresh run. Only Base, GDPevo's own method, the first group 5 run and the group 6 run trained from scratch.
 - **What is left is mostly not in the material.** Most remaining lost points depend on conventions that no training reference or environment record states. Examples are the thresholds behind a risk score's reason codes, and the rule that a locked SIM goes to a human. A generator that learns only from the references cannot recover them.
 - **One agent model.** All results use `qwen3.8-27b` as the solving model.
