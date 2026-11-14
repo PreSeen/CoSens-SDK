@@ -120,6 +120,29 @@ candidate. Each new version is uploaded without its evidence references. To cont
 with `search_recipes` or `list_recipes`, read it with `get_recipe` and pass it as `create_task(..., recipe=...)`. See
 `examples/04_local_rsi.py`.
 
+### Web search in Recipe generation
+
+Pass `LocalRSI(..., web_search=<a WebSearch>)` (`cosens.local.WebSearch`: `async search(query, *, blocked_domains) -> list of
+{url, title, text}`) and each candidate searches the web while it is written; the SDK ships no search client. Without one
+nothing is searched. `start_recipe_candidate(..., web_search=False)` opts out, `web_search_blocked_domains=["example.com"]`
+adds hosts whose pages are dropped, and `web_search=True` with no `WebSearch` fails the candidate with `web_search_unavailable`.
+
+- The model writes at most 3 general queries from the task objective and the attribution, never from execution outputs,
+  reference answers or web text. **Queries leave this machine to whatever provider your `WebSearch` calls**, so keep
+  names, ids and secrets out of the task objective.
+- Results are cut to 5 per query, 1,500 characters each and 24,000 in total, and dropped when the parsed URL host is a
+  blocked host or one of its subdomains. Blocking lowers but does not remove the chance of copied or leaked content, so pass
+  the hosts of any benchmark or private source a Recipe must not read.
+- The candidate's `web_search` lists the queries, the sources used (URL, title, excerpt, `retrieved_at`, `text_sha256`) and
+  the dropped results. Retries and `resume_recipe_candidate` reuse frozen sources; a provider failure raises
+  `WebSearchUnavailable` from your `WebSearch` and fails the candidate as `web_search_unavailable` (retryable).
+- Web text is untrusted data, never instructions. A step or lesson that cites only web sources is rejected, so a page can
+  refine a step that recorded evidence supports but cannot add one. The uploaded Recipe carries no evidence references,
+  so the web provenance stays on the local candidate.
+- Against the service, `atoms.start_recipe_candidate(..., web_search=..., web_search_blocked_domains=[...])` sends the same
+  fields. Omitted means the service default: on when the service has a search provider.
+- `CodexCLIModel` runs `codex exec` with native `web_search` disabled, so only the search you supply is used.
+
 ## Atomic operations
 
 `CoSensClient().atoms` (async) and `.sync_atoms` (sync) expose Task, Execution, Revision, feedback, Recipe, Session and Memory operations directly. Keep stable idempotency keys across retries.

@@ -39,10 +39,19 @@ def _completion_tokens(value):
     return value
 
 
-def _recipe_data(model, max_completion_tokens):
+def _recipe_data(model, max_completion_tokens, web_search=None, web_search_blocked_domains=()):
     data = _model_data(model)
     if _completion_tokens(max_completion_tokens) is not None:
         data['max_completion_tokens'] = max_completion_tokens
+    if web_search is not None:
+        if type(web_search) is not bool:
+            raise ValueError('web_search must be a boolean')
+        data['web_search'] = web_search
+    if web_search_blocked_domains:
+        domains = list(web_search_blocked_domains)
+        if len(domains) > 50 or any(not isinstance(d, str) or not d.strip() for d in domains):
+            raise ValueError('web_search_blocked_domains must be at most 50 hostnames')
+        data['web_search_blocked_domains'] = domains
     return data
 
 
@@ -278,15 +287,19 @@ class AsyncWorkflowAtoms:
                                         body={"data": {}}, key=stable_key(key))
 
 
-    async def start_recipe_candidate(self, task_id, *, revision_id, key=None, model=None, max_completion_tokens=None):
+    async def start_recipe_candidate(self, task_id, *, revision_id, key=None, model=None, max_completion_tokens=None,
+                                     web_search=None, web_search_blocked_domains=()):
         """Create or update the Recipe from a confirmed revision.
 
-        Without ``key`` the request key is derived from task, revision and budget,
-        so repeated calls for the same revision return the same candidate.
+        Without ``key`` the request key is derived from task, revision, budget and web search setting,
+        so repeated calls for the same revision return the same candidate. ``web_search`` omitted takes the
+        service default (on when the service has a search provider); ``False`` opts out.
+        ``web_search_blocked_domains`` adds hostnames whose pages are dropped from the results.
         """
-        data = _recipe_data(model, max_completion_tokens)
+        data = _recipe_data(model, max_completion_tokens, web_search, web_search_blocked_domains)
         data.update(revision_id=revision_id)
-        key = recipe_request_key(task_id, revision_id, max_completion_tokens) if key is None else key
+        key = recipe_request_key(task_id, revision_id, max_completion_tokens, web_search=web_search,
+                                 web_search_blocked_domains=web_search_blocked_domains) if key is None else key
         return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/recipe-candidates",
                                         body={"data": data}, key=stable_key(key))
 
@@ -402,10 +415,12 @@ class SyncWorkflowAtoms:
                                   body={"data": {}}, key=stable_key(key))
 
 
-    def start_recipe_candidate(self, task_id, *, revision_id, key=None, model=None, max_completion_tokens=None):
-        data = _recipe_data(model, max_completion_tokens)
+    def start_recipe_candidate(self, task_id, *, revision_id, key=None, model=None, max_completion_tokens=None,
+                               web_search=None, web_search_blocked_domains=()):
+        data = _recipe_data(model, max_completion_tokens, web_search, web_search_blocked_domains)
         data.update(revision_id=revision_id)
-        key = recipe_request_key(task_id, revision_id, max_completion_tokens) if key is None else key
+        key = recipe_request_key(task_id, revision_id, max_completion_tokens, web_search=web_search,
+                                 web_search_blocked_domains=web_search_blocked_domains) if key is None else key
         return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/recipe-candidates",
                                   body={"data": data}, key=stable_key(key))
 

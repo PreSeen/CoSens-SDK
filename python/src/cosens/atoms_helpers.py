@@ -1,6 +1,7 @@
 """Shared resource and idempotency validation for atomic clients."""
 
 import hashlib
+import json
 from urllib.parse import quote
 
 
@@ -17,11 +18,14 @@ def stable_key(value):
     return value
 
 
-def recipe_request_key(task_id, revision_id, max_completion_tokens=None):
-    """Deterministic generation key: one candidate per revision and completion budget.
+def recipe_request_key(task_id, revision_id, max_completion_tokens=None, *, web_search=None, web_search_blocked_domains=()):
+    """Deterministic generation key: one candidate per revision, completion budget and web search setting.
 
     TypeScript computes the same key, so retries from either SDK reuse one candidate.
     """
     budget = "" if max_completion_tokens is None else str(max_completion_tokens)
-    digest = hashlib.sha256(f"recipe:{task_id}:{revision_id}:{budget}".encode("utf-8")).hexdigest()
+    web = ""
+    if web_search is not None or web_search_blocked_domains:
+        web = ":web=" + json.dumps([web_search, list(web_search_blocked_domains)], separators=(",", ":"))
+    digest = hashlib.sha256(f"recipe:{task_id}:{revision_id}:{budget}{web}".encode("utf-8")).hexdigest()
     return "recipe-" + digest

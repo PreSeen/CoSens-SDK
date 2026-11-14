@@ -16,10 +16,12 @@ class LocalRSI(LocalTaskWorkflow, LocalRecipeLifecycle):
 
     ``client`` is a ``CoSensClient`` used only for Memory recall (``/v1/memory/*``) and the Recipe store
     (``/v1/recipes``); with ``None`` nothing is recalled or uploaded. ``memory`` is its deprecated name.
-    Generation runs inside ``wait_workflow_job``.
+    Generation runs inside ``wait_workflow_job``. ``web_search`` is a ``cosens.local.web_search.WebSearch`` the Recipe
+    stages may use; the SDK ships no search client, and without one nothing is searched. Queries leave this machine to
+    whatever provider it calls, and web text is untrusted data: it cannot add a step without recorded execution evidence.
     """
 
-    def __init__(self, *, client=None, model, state_path=None, memory=_UNSET):
+    def __init__(self, *, client=None, model, state_path=None, memory=_UNSET, web_search=None):
         if memory is not _UNSET:
             if client is not None:
                 raise TypeError("pass client, not both client and memory")
@@ -27,6 +29,7 @@ class LocalRSI(LocalTaskWorkflow, LocalRecipeLifecycle):
             client = memory
         self._atoms = client.atoms if client is not None else None
         self._model = model
+        self._web_search = web_search
         self._store = LocalStore(state_path)
         self._settling = {}
 
