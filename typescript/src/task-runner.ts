@@ -55,7 +55,7 @@ function observedNativeItems(result: any): { events: Array<{ id: string; kind: s
 
 export class TaskWorkflowRunner {
   readonly native: Runner;
-  readonly cosens: { mode: CoSensMode; lastTurnId: string | null; atoms?: CoSensClient['atoms']; generateRecipe:(id?:string,options?:{requestKey?:string;maxCompletionTokens?:number})=>Promise<any>; feedback:(message:string,source:FeedbackSource,id?:string)=>Promise<any>; getTurn: (id: string) => TaskTurn | undefined; reconcile: (id: string, options?: { session?: any }) => Promise<TaskTurn> };
+  readonly cosens: { mode: CoSensMode; lastTurnId: string | null; atoms?: CoSensClient['atoms']; generateRecipe:(id?:string,options?:{requestKey?:string;maxCompletionTokens?:number;webSearch?:boolean;webSearchBlockedDomains?:string[]})=>Promise<any>; feedback:(message:string,source:FeedbackSource,id?:string)=>Promise<any>; getTurn: (id: string) => TaskTurn | undefined; reconcile: (id: string, options?: { session?: any }) => Promise<TaskTurn> };
   private readonly client?: CoSensClient;
   private readonly turns?: TurnStore;
   constructor(nativeRunner: Runner | typeof Runner, private readonly options: TaskRunnerOptions = {}) {
@@ -66,7 +66,7 @@ export class TaskWorkflowRunner {
       this.turns = new TurnStore(options.statePath, this.client.transport.apiKey, this.client.transport.service.identity);
     }
     this.cosens = { mode: options.mode ?? 'disable', lastTurnId: null, atoms: this.client?.atoms,
-      generateRecipe:async(id,opts={})=>{const turn=this.turns?.get<TaskTurn>(id??this.cosens.lastTurnId!);if(!turn?.revisionId)throw new RSIRecoveryRequired('No recorded revision');return this.client!.atoms.startRecipeCandidate(turn.taskId!,{revisionId:turn.revisionId,key:opts.requestKey??'generation:'+turn.turnId,maxCompletionTokens:opts.maxCompletionTokens});},
+      generateRecipe:async(id,opts={})=>{const turn=this.turns?.get<TaskTurn>(id??this.cosens.lastTurnId!);if(!turn?.revisionId)throw new RSIRecoveryRequired('No recorded revision');return this.client!.atoms.startRecipeCandidate(turn.taskId!,{revisionId:turn.revisionId,key:opts.requestKey??'generation:'+turn.turnId,maxCompletionTokens:opts.maxCompletionTokens,webSearch:opts.webSearch,webSearchBlockedDomains:opts.webSearchBlockedDomains});},
       feedback:async(message,source,id)=>{const turn=this.turns?.get<TaskTurn>(id??this.cosens.lastTurnId!);if(!turn?.revisionId)throw new RSIRecoveryRequired('No recorded revision');return this.client!.atoms.recordFeedback(turn.revisionId,{feedback:message,source,key:'feedback:'+hash([turn.turnId,message])});},
       getTurn: id => this.turns?.get<TaskTurn>(id), reconcile: (id, opts) => this.reconcile(id, opts) };
   }

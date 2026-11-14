@@ -44,6 +44,7 @@ async def test_runs_isolated_and_returns_the_output_file(tmp_path):
     assert args[args.index("-s") + 1] == "read-only"
     assert args[args.index("--disable") + 1] == "hooks"
     assert "mcp_servers={}" in args
+    assert 'web_search="disabled"' in args
     assert 'model_reasoning_effort="high"' in args
     assert args[args.index("-m") + 1] == "m1"
     assert seen["cwd_files"] == [] and seen["cwd"] == args[args.index("-C") + 1]
