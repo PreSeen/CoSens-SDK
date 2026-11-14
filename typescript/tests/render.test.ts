@@ -36,13 +36,13 @@ test('inject skips empty context and uses only a matched bundle', () => {
 });
 
 test('execution request rendering matches the Python SDK', () => {
-  const request = { task_id: 'task_1', kind: 'revision', context_version: 3, trace_origin: 'revision',
+  const request = { task_id: 'task_1', kind: 'correction', context_version: 3, trace_origin: 'correction',
     context: { objective: 'Write the Q3 report', artifacts: [{ artifact_id: 'a1', role: 'original_input', content_hash: 'sha256:abc' }] },
     feedback: [{ feedback: 'Use euros' }],
-    method: { recipe_id: 'r1', recipe_candidate_id: 'c1', version: 2, recipe_sha256: 'f'.repeat(64), recipe: RECIPE },
+    method: { recipe_id: 'r1', version: 2, recipe_sha256: 'f'.repeat(64), recipe: RECIPE },
     memory: { status: 'captured', scope: 'u', items: MEMORY } };
   assert.deepEqual(renderExecutionRequest(request).split('\n'), [
-    '[CoSens frozen task execution request]', 'Task: task_1 (revision)', 'Objective: Write the Q3 report',
+    '[CoSens frozen task execution request]', 'Task: task_1 (correction)', 'Objective: Write the Q3 report',
     'Input artifacts: a1 (original_input)', 'Feedback on the previous result:', '- Use euros',
     'Recipe (provisional): Quarterly report', 'Use when: Writing a report', 'Do not use when: Casual chat',
     'Steps:', '1. Collect figures', '2. Fill the template', 'Related Memory:', '- Use the Q3 template.',

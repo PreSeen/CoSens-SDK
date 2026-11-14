@@ -1,4 +1,4 @@
-/** 16 request-boundary regressions. Only the external HTTP peer is replaced. */
+/** 15 request-boundary regressions. Only the external HTTP peer is replaced. */
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import { CoSensClient, RSIHTTPError, RSITransportError } from '../src/index.ts';
@@ -32,9 +32,9 @@ test('R02 oversized key is rejected before sending', async t => {
   assert.equal(seen.length, 0);
 });
 
-test('R03 empty generation keys are rejected before sending',async t=>{
+test('R03 empty feedback keys are rejected before sending',async t=>{
  const {a,seen}=sdk(t);
- await assert.rejects(async()=>a.startRecipeCandidate('task',{revisionId:'revision',key:''}),/key/);
+ await assert.rejects(async()=>a.recordFeedback('execution-1',{feedback:'f',source:'human',key:''}),/key/);
  assert.equal(seen.length,0);
 });
 
@@ -58,7 +58,7 @@ test('R06 key does not leak into following read request', async t => {
   const { a, seen } = sdk(t);
   await a.startExecution('task-1', { key: 'execution-key' });
   await a.getTask('task-1');
-  await a.getRevision('revision-1');
+  await a.getExecution('execution-1');
   assert.equal(seen.length, 3);
   assert.equal(seen[0]!.headers.get('idempotency-key'), 'execution-key');
   assert.ok(seen.slice(1).every(r => r.headers.get('idempotency-key') === null));
@@ -175,16 +175,5 @@ test('R14 reserved characters in resource ID remain one encoded segment', async 
 test('R15 upload port zero is not treated as default HTTPS port', async t => {
   const { a, seen } = sdk(t);
   await assert.rejects(a.uploadDocumentToGrant({ ...GRANT, upload_url: 'https://rsi.cosens.ai:0/api/v1/document/uploads/regression_token' }, Buffer.from('x')), /upload target/);
-  assert.equal(seen.length, 0);
-});
-
-test('R16 unsupported workflow job kinds are rejected before sending', async t => {
-  const { a, seen } = sdk(t);
-  for (const kind of ['analysis', 'recipe', '', null, undefined, 1, {}]) {
-    // JavaScript callers and untyped input can bypass the literal TypeScript type.
-    await assert.rejects(a.waitWorkflowJob(kind as 'recipe_candidate', 'job-1'), {
-      name: 'TypeError', message: 'job kind must be recipe_candidate',
-    });
-  }
   assert.equal(seen.length, 0);
 });

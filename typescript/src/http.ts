@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { resolveApiKey, resolveService, type Service } from './config.js';
 import { RSIHTTPError, RSITransportError } from './errors.js';
 
@@ -76,16 +75,8 @@ export function pathPart(id: string): string {
   if (typeof id !== 'string' || !id || id === '.' || id === '..') throw new TypeError('resource ID must be a nonempty safe path segment');
   return encodeURIComponent(id);
 }
-export function requestKey(key: string): string {
+export function stableKey(key: string): string {
   if (typeof key !== 'string' || !key.trim() || key.length > 256 || /[\x00-\x1f\x7f]/.test(key)) throw new TypeError('key must be 1–256 characters without control characters');
   return key;
 }
 
-/**
- * Deterministic generation key: one candidate per revision and completion budget.
- * The Python SDK computes the same key.
- */
-export function recipeRequestKey(taskId: string, revisionId: string, maxCompletionTokens?: number): string {
-  const budget = maxCompletionTokens === undefined ? '' : String(maxCompletionTokens);
-  return 'recipe-' + createHash('sha256').update(`recipe:${taskId}:${revisionId}:${budget}`, 'utf8').digest('hex');
-}

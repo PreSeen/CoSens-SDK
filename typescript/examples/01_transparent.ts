@@ -7,4 +7,4 @@ export async function runTask(task:string,model:string){
  return {client,response,turnId:client.cosens.lastTurnId};
 }
 // Invoke from the application's external artifact-confirmation handler.
-export function onArtifactConfirmed(client:ReturnType<typeof cosens>,turnId:string,requestKey:string){return client.cosens.generateRecipe({turnId,requestKey});}
+export function onArtifactConfirmed(client:ReturnType<typeof cosens>,turnId:string){return client.cosens.generateRecipe({turnId});}

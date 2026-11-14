@@ -22,7 +22,7 @@ for (const streamed of [false, true]) test(`real Agents approval resumes the sam
     if (path === '/api/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'ready' }));
     if (path.endsWith('/executions')) return new Response(JSON.stringify({ execution_id: 'e1', status: 'awaiting_execution', request_sha256: 'h1', request: { kind: 'original' } }));
     if (path === '/api/artifacts') return new Response(JSON.stringify({ artifact_id: 'a1', content_hash: 'server-hash' }));
-    if (path.endsWith('/result')) return new Response(JSON.stringify({ status: 'completed', revision_id: 'r1' }));
+    if (path.endsWith('/result')) return new Response(JSON.stringify({ status: 'completed', trace_origin: 'original' }));
     throw new Error(path);
   } });
   try {
@@ -83,7 +83,7 @@ test('task Runner returns native result and reconciles identical result body wit
     if (path === '/api/executions/e1/result') {
       submissions++;
       return submissions === 1 ? new Response(JSON.stringify({ error: { code: 'transient', message: 'receipt lost' } }), { status: 503 }) :
-        new Response(JSON.stringify({ status: 'completed', revision_id: 'r1' }));
+        new Response(JSON.stringify({ status: 'completed', trace_origin: 'original' }));
     }
     throw new Error(path);
   } });
@@ -93,7 +93,7 @@ test('task Runner returns native result and reconciles identical result body wit
   assert.equal(wrapped.cosens.getTurn('turn-1')?.state, 'completion_pending');
   await assert.rejects(wrapped.run(new FakeAgent(), 'work', { rsi }), /may have executed/);
   const recovered = await wrapped.reconcile('turn-1');
-  assert.equal(recovered.revisionId, 'r1');
+  assert.equal(recovered.state, 'completed'); assert.equal('revisionId' in recovered, false);
   assert.equal(nativeCalls, 1);
   assert.equal(seen.filter(x => x.path === '/api/artifacts').length, 1);
   const bodies = seen.filter(x => x.path.endsWith('/result')).map(x => x.body);
@@ -121,7 +121,7 @@ test('task Runner resumes a context gap on the same task and submits host-observ
         const body = JSON.parse(String(init?.body));
         assert.deepEqual(body.events, [{ id: 'event-1', kind: 'tool_result', payload: { name: 'tool' } }]);
         assert.equal(body.trace_coverage, 'partial');
-        return new Response(JSON.stringify({ status: 'completed', revision_id: 'r1' }));
+        return new Response(JSON.stringify({ status: 'completed', trace_origin: 'original' }));
       }
       throw new Error(path);
     } });
@@ -131,7 +131,7 @@ test('task Runner resumes a context gap on the same task and submits host-observ
   assert.equal(nativeCalls, 0);
   await wrapped.cosens.atoms!.supplementTaskContext('t1', { expectedContextVersion: 1, objective: 'work', selfContained: true });
   await wrapped.run(new FakeAgent(), 'work', { rsi });
-  assert.equal(wrapped.cosens.getTurn('turn-1')?.revisionId, 'r1');
+  assert.equal(wrapped.cosens.getTurn('turn-1')?.state, 'completed');
   assert.equal(seen.filter(path => path === '/api/tasks').length, 1);
   assert.equal(nativeCalls, 1);
   await wrapped.close();
@@ -149,7 +149,7 @@ test('task Runner stream preserves events and submits only at native completion'
     if (path === '/api/tasks') return new Response(JSON.stringify({ task_id: 't1', status: 'ready' }));
     if (path.endsWith('/executions')) return new Response(JSON.stringify({ execution_id: 'e1', status: 'awaiting_execution', request_sha256: 'h1', request: { kind: 'original' } }));
     if (path === '/api/artifacts') return new Response(JSON.stringify({ artifact_id: 'a1', content_hash: 'server-hash' }));
-    if (path.endsWith('/result')) return new Response(JSON.stringify({ status: 'completed', revision_id: 'r1' }));
+    if (path.endsWith('/result')) return new Response(JSON.stringify({ status: 'completed', trace_origin: 'original' }));
     throw new Error(path);
   } });
   const stream = await wrapped.runStreamed(new FakeAgent(), 'work', { rsi: { turnId: 'stream-1', task: { source: 'new_task', objective: 'work' } } });

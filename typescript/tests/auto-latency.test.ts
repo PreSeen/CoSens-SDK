@@ -15,31 +15,36 @@ const RESPONSE = { id: 'resp-1', object: 'response', created_at: 1, model: 'm', 
   output: [{ id: 'msg-1', type: 'message', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'done', annotations: [] }] }] };
 const ACTIVATE = { activate: true, reason: 'task' };
 
-function candidate(steps = 3) {
-  return { recipe_candidate_id: 'candidate_1', recipe_id: 'recipe_1', status: 'candidate', current: true, version: 1,
+function recipe(steps = 3, origin = 'generated', recipeId = 'recipe_1') {
+  return { recipe_id: recipeId, origin, version: 1, previous_version: null, current_version: 1, recipe_sha256: 'f'.repeat(64),
+    task_id: 'task_0', execution_id: 'execution_0', created_at: 't',
     recipe: { title: 'Quarterly report', when: 'Writing a report', when_not: 'Chat',
       steps: Array.from({ length: steps }, (_, n) => ({ id: `s${n + 1}`, instruction: `Do step ${n + 1}`, evidence_refs: [{ event_id: `e${n + 1}` }] })),
       lessons: [{ when: 'Always', do: 'Cite the source', why: 'Trust', when_not: 'Never', evidence_refs: [{ event_id: 'e1' }] }] } };
 }
 
-/** Minimal service: optional Recipe candidates, Memory, task and execution. */
-function algorithm(candidates: any[] = []) {
+/** Minimal service: optional Recipes, Memory, task and execution. */
+function algorithm(recipes: any[] = []) {
   const paths: string[] = [];
   const fetcher: typeof fetch = async (input, init) => {
-    const path = new URL(String(input)).pathname.replace(/^\/api/, '');
+    const url = new URL(String(input));
+    const path = url.pathname.replace(/^\/api/, '');
     paths.push(path);
-    if (path === '/recipe-candidates') return json({ items: candidates.map(c => ({ recipe_candidate_id: c.recipe_candidate_id, status: 'candidate', current: true, title: c.recipe.title })), has_more: false });
-    if (path.startsWith('/recipe-candidates/')) return json(candidates.find(c => path.endsWith('/' + c.recipe_candidate_id)));
+    if (path === '/recipes') {
+      assert.deepEqual(Object.fromEntries(url.searchParams), { limit: '100', origin: 'generated' });
+      return json({ items: recipes.filter(r => r.origin === url.searchParams.get('origin')).map(r => ({ recipe_id: r.recipe_id, origin: r.origin, version: r.version, title: r.recipe.title })), has_more: false });
+    }
+    if (path.startsWith('/recipes/')) return json(recipes.find(r => path === '/recipes/' + r.recipe_id));
     if (path === '/v1/memory/recall') return json({ items: [{ id: 'm1', kind: 'source', text: 'Reports use the Q3 template.', refs: [{ source_id: 's1' }], score: 0.9 }] });
     if (path === '/artifacts') return json({ artifact_id: 'artifact_1', content_hash: 'sha256:x' });
     if (path === '/tasks') return json({ task_id: 'task_1', status: 'ready' });
     if (path.endsWith('/executions')) {
       const body = JSON.parse(String(init?.body));
-      const chosen = candidates.find(c => c.recipe_id === body.recipe_id);
+      const chosen = recipes.find(r => r.recipe_id === body.recipe_id);
       return json({ execution_id: 'execution_1', status: 'awaiting_execution', request_sha256: 'sha',
-        request: { method: chosen ? { recipe_id: chosen.recipe_id, recipe_candidate_id: chosen.recipe_candidate_id, version: chosen.version } : null } });
+        request: { method: chosen ? { recipe_id: chosen.recipe_id, version: chosen.version, recipe_sha256: chosen.recipe_sha256, recipe: chosen.recipe } : null } });
     }
-    if (path.endsWith('/result')) return json({ status: 'completed', revision_id: 'revision_1' });
+    if (path.endsWith('/result')) return json({ task_id: 'task_1', execution_id: 'execution_1', status: 'completed', trace_origin: 'original' });
     throw new Error(path);
   };
   return { paths, fetcher };
@@ -70,9 +75,9 @@ test('decisionClient and decisionExtraBody cover the decision and Recipe match',
   const decisionClient = new OpenAI({ apiKey: 'decision-key', baseURL: 'https://decider.example/v1', fetch: async (_input, init) => {
     const body = JSON.parse(String(init?.body));
     decisionBodies.push(body);
-    return chat(body.response_format.json_schema.name === 'cosens_recipe_match' ? { candidate_id: 'candidate_1' } : ACTIVATE);
+    return chat(body.response_format.json_schema.name === 'cosens_recipe_match' ? { recipe_id: 'recipe_1' } : ACTIVATE);
   } });
-  const service = algorithm([candidate()]);
+  const service = algorithm([recipe()]);
   const client = cosens(native, { apiKey: 'service-key', mode: 'auto', fetch: service.fetcher, statePath: statePath(),
     decisionClient, decisionExtraBody: { enable_thinking: false } });
   try {
@@ -98,7 +103,7 @@ test('an empty Recipe list skips the match call and is cached', async () => {
     await client.responses.create({ model: 'm', input: 'Produce a report' });
     await client.responses.create({ model: 'm', input: 'Produce another report' });
     assert.deepEqual(decisionNames, ['cosens_decision', 'cosens_decision']);
-    assert.equal(service.paths.filter(path => path === '/recipe-candidates').length, 1);
+    assert.equal(service.paths.filter(path => path === '/recipes').length, 1);
     assert.equal(service.paths.filter(path => path === '/v1/memory/recall').length, 2);
   } finally { await client.close(); }
 });
@@ -107,11 +112,11 @@ test('injected context is compact and bounded by maxContextChars', async () => {
   const sent: any[] = [];
   const native = new OpenAI({ apiKey: 'model-key', baseURL: 'https://model.example/v1', fetch: async (input, init) => {
     const body = JSON.parse(String(init?.body));
-    if (String(input).endsWith('/chat/completions')) return chat(body.response_format.json_schema.name === 'cosens_recipe_match' ? { candidate_id: 'candidate_1' } : ACTIVATE);
+    if (String(input).endsWith('/chat/completions')) return chat(body.response_format.json_schema.name === 'cosens_recipe_match' ? { recipe_id: 'recipe_1' } : ACTIVATE);
     sent.push(body);
     return json(RESPONSE);
   } });
-  const service = algorithm([candidate(30)]);
+  const service = algorithm([recipe(30)]);
   const client = cosens(native, { apiKey: 'service-key', mode: 'auto', fetch: service.fetcher, statePath: statePath(), maxContextChars: 400 });
   try {
     await client.responses.create({ model: 'm', input: 'Produce a report', instructions: 'Be brief.' });
@@ -133,7 +138,7 @@ test('a declined turn makes no Recipe or Memory lookup and sends the request unc
     sent.push(body);
     return json(RESPONSE);
   } });
-  const service = algorithm([candidate()]);
+  const service = algorithm([recipe()]);
   const client = cosens(native, { apiKey: 'service-key', mode: 'auto', fetch: service.fetcher, statePath: statePath() });
   try {
     const request = { model: 'm', input: 'Say hi', instructions: 'Preserve this instruction' };
@@ -191,5 +196,21 @@ test('a request without user text makes no decision call', async () => {
     await client.responses.create({ model: 'm', input: [{ role: 'user', content: [{ type: 'input_image', image_url: 'data:,' }] }] as any });
     assert.deepEqual(paths, ['/v1/responses']);
     assert.equal(client.cosens.getTurn(client.cosens.lastTurnId)?.decision.capture, 'no_user_text');
+  } finally { await client.close(); }
+});
+
+test('uploaded Recipes are not offered to the matcher', async () => {
+  const decisionNames: string[] = [];
+  const native = new OpenAI({ apiKey: 'model-key', baseURL: 'https://model.example/v1', fetch: async (input, init) => {
+    if (String(input).endsWith('/chat/completions')) { decisionNames.push(JSON.parse(String(init?.body)).response_format.json_schema.name); return chat(ACTIVATE); }
+    return json(RESPONSE);
+  } });
+  const service = algorithm([recipe(3, 'uploaded', 'team_recipe')]);
+  const client = cosens(native, { apiKey: 'service-key', mode: 'auto', fetch: service.fetcher, statePath: statePath() });
+  try {
+    await client.responses.create({ model: 'm', input: 'Produce a report' });
+    assert.deepEqual(decisionNames, ['cosens_decision']);
+    assert.ok(!service.paths.some(path => path.startsWith('/recipes/')));
+    assert.equal(client.cosens.getTurn(client.cosens.lastTurnId)?.frozenContext.recipe.status, 'not_found');
   } finally { await client.close(); }
 });

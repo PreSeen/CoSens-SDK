@@ -2,12 +2,13 @@
 import { createHash } from 'node:crypto';
 import type { Atoms, WorkflowArtifactRef } from './atoms.js';
 import { RSIApprovalUnavailable, RSIRecoveryRequired } from './errors.js';
-import { requestKey } from './http.js';
+import { stableKey } from './http.js';
 
-export type WorkflowPhase = 'prepare' | 'revise' | 'recipe';
+/** `prepare` a task execution, `correct` a completed execution, or `learn` from one. */
+export type WorkflowPhase = 'prepare' | 'correct' | 'learn';
 export interface WorkflowSnapshot {
   task?: { source: 'new_task' | 'external_artifact'; objective?: string; artifacts?: WorkflowArtifactRef[]; self_contained?: boolean };
-  task_id?: string; revision_id?: string; recipe_candidate_id?: string;
+  task_id?: string; execution_id?: string;
   feedback?: string;
 }
 export interface WorkflowStartOptions {
@@ -17,7 +18,7 @@ export interface WorkflowStartOptions {
 }
 
 function derivedKey(key: string, operation: string) {
-  return createHash('sha256').update(`workflow-start:${operation}:${requestKey(key)}`).digest('hex');
+  return createHash('sha256').update(`workflow-start:${operation}:${stableKey(key)}`).digest('hex');
 }
 
 export async function startWorkflow(atoms: Atoms, snapshot: WorkflowSnapshot | string, { phase = 'prepare', mode = 'auto', requestKey: key, authorize, recipeId, model, recallMemory = false }: WorkflowStartOptions = {}): Promise<any> {
@@ -33,8 +34,8 @@ export async function startWorkflow(atoms: Atoms, snapshot: WorkflowSnapshot | s
     if (!authorize) throw new RSIApprovalUnavailable('approval mode requires a host authorization callback');
     if (await authorize(phase, snapshot) !== true) throw new RSIApprovalUnavailable('host authorization was not granted');
   }
-  const stable = requestKey(key!);
   if (phase === 'prepare') {
+    const stable = stableKey(key!);
     let task: any;
     let taskId = snapshot.task_id;
     if (taskId) task = await atoms.getTask(taskId);
@@ -51,7 +52,8 @@ export async function startWorkflow(atoms: Atoms, snapshot: WorkflowSnapshot | s
       execution_id: execution?.execution_id, request_sha256: execution?.request_sha256,
       execution_request: execution?.request, execution };
   }
-  if(phase==='revise')return atoms.startRevision(snapshot.revision_id!,{key:stable});
-  if(phase==='recipe')return atoms.startRecipeCandidate(snapshot.task_id!,{revisionId:snapshot.revision_id!,key:stable,model});
-  throw new RSIRecoveryRequired('phase must be prepare, revise or recipe');
+  // A correction forwards recipeId and recallMemory so the atom rejects them before sending.
+  if (phase === 'correct') return atoms.startExecution(snapshot.task_id!, { key: stableKey(key!), previousExecutionId: snapshot.execution_id!, recipeId, model, recallMemory });
+  if (phase === 'learn') return atoms.learn(snapshot.execution_id!, { model });
+  throw new TypeError('phase must be prepare, correct or learn');
 }

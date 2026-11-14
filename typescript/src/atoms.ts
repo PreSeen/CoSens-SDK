@@ -1,5 +1,5 @@
-import { RSICandidateFailedError, RSIRecoveryRequired } from './errors.js';
-import { pathPart, recipeRequestKey, requestKey, Transport, type TransportOptions } from './http.js';
+import { RSILearningFailedError, RSILearningStoppedError, RSIRecoveryRequired } from './errors.js';
+import { pathPart, stableKey, Transport, type TransportOptions } from './http.js';
 import { performance } from 'node:perf_hooks';
 import { startWorkflow, type WorkflowSnapshot, type WorkflowStartOptions } from './workflow-start.js';
 import { documentBytes, documentMetadata, documentStatusBody, uploadTarget, type DocumentUploadGrant, type DocumentUploadMetadata } from './document-upload.js';
@@ -22,7 +22,6 @@ function boundedInteger(value: number, name: string, maximum: number, minimum = 
   return value;
 }
 
-export interface RecallContext { recipe: any; context: { query: string; task_family: string; source: string }; snapshot: { evidence: any[]; memory_recall: any }; run_id?: never }
 export type WorkflowArtifactRef = string | { artifact_id: string; role: 'original_input' | 'submitted_output' | 'acceptance' | 'external_trace' };
 export type WorkflowOutputRef = { artifact_id: string; role: 'submitted_output' };
 export type WorkflowEvent = { id: string; kind: string; payload: Record<string, unknown> };
@@ -34,18 +33,29 @@ function feedbackSource(source: FeedbackSource) {
   return source;
 }
 
-function workflowSelection(candidateSha256?: string, candidateId?: string, customReason?: string) {
-  if (Boolean(candidateId) === Boolean(customReason)) throw new TypeError('provide exactly one candidateId or customReason');
-  if (candidateId !== undefined && (typeof candidateSha256 !== 'string' || !candidateSha256.trim())) throw new TypeError('candidateSha256 is required');
-  if (candidateId !== undefined && (typeof candidateId !== 'string' || !candidateId.trim())) throw new TypeError('candidateId must be nonempty');
-  if (customReason !== undefined && (!customReason.trim() || customReason.length > 4_000)) throw new TypeError('customReason must be 1–4,000 characters');
-  return { data: { ...(candidateSha256 === undefined ? {} : { candidate_sha256: candidateSha256 }),
-    ...(candidateId ? { candidate_id: candidateId } : { custom_reason: customReason }) } };
+function learningData(model?: string, maxCompletionTokens?: number): Record<string, unknown> {
+  return { ...modelData(model), ...(maxCompletionTokens === undefined ? {} : { max_completion_tokens: boundedInteger(maxCompletionTokens, 'maxCompletionTokens', 1_000_000) }) };
 }
+const RECIPE_ID = /^[A-Za-z0-9_-]{1,128}$/;
+/** Learning states the service moves on by itself, and states only the caller can change. */
+const LEARNING_IN_FLIGHT = new Set(['queued', 'running', 'awaiting_previous_version']);
+const LEARNING_STOPPED = new Set(['interrupted', 'awaiting_runner', 'awaiting_material']);
+/** Time source for waitLearning; tests replace it. */
+export const clock = { now: () => performance.now(), sleep: (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)) };
+
+/** The learning when waiting is over, undefined while it is in flight; throws on failure, a stop or an unknown state. */
+function waitedLearning(execution: any, executionId: string): any {
+  const learning = execution?.learning;
+  if (!learning || typeof learning !== 'object') throw new RSIRecoveryRequired(`Execution ${executionId} has no learning; call learn first`);
+  const status = learning.status;
+  if (status === 'completed') return learning;
+  if (status === 'failed') throw RSILearningFailedError.fromLearning(learning, execution.requestId);
+  if (LEARNING_STOPPED.has(status)) throw new RSILearningStoppedError(learning, execution.requestId);
+  if (!LEARNING_IN_FLIGHT.has(status)) throw new RSIRecoveryRequired(`Unexpected learning status: ${status}`);
+  return undefined;
+}
+
 export class Atoms {
-  listRecipeCandidates({limit=20,cursor,taskId,status}:{limit?:number;cursor?:string;taskId?:string;status?:string}={}) {
-    boundedInteger(limit,'limit',100);return this.http.request('GET','/recipe-candidates?'+new URLSearchParams({limit:String(limit),...(cursor?{cursor}:{}),...(taskId?{task_id:taskId}:{}),...(status?{status}:{})}));
-  }
   constructor(private readonly http: Transport) {}
   createDocumentUploadGrant(metadata: DocumentUploadMetadata) {
     return this.http.request('POST', '/v1/document/upload-grants', documentMetadata(metadata));
@@ -63,17 +73,11 @@ export class Atoms {
   getDocumentStatus(documentIds: string[]) {
     return this.http.request('POST', '/v1/document/status', documentStatusBody(documentIds));
   }
-  async recallContext({query,taskFamily='general',tokenBudget=1000}:{query:string;taskFamily?:string;tokenBudget?:number}):Promise<RecallContext>{
-    const page=await this.listRecipeCandidates({status:'candidate',limit:100});
-    const candidates=[];for(const item of page.items.filter((x:any)=>x.current).slice(0,20)){candidates.push(await this.getRecipeCandidate(item.recipe_candidate_id));}
-    const memory=await this.memoryRecall({query,tokenBudget});
-    return {recipe:{status:'not_found',candidates},context:{query,task_family:taskFamily,source:'workflow_recipes'},snapshot:{evidence:memory.items,memory_recall:memory}};
-  }
   async memoryRecall({ query, tokenBudget = 1000 }: { query: string; tokenBudget?: number }) { return this.http.request('POST', '/v1/memory/recall', { query, token_budget: boundedInteger(tokenBudget, 'tokenBudget', 8000) }); }
   memoryIngest({ content, requestKey: key, sourceKind = 'decision', durable = true, sourceId, expectedRevision }:
     { content: string; requestKey: string; sourceKind?: string; durable?: boolean; sourceId?: string; expectedRevision?: number }) {
     if (sourceId !== undefined && (!sourceId || !sourceId.trim())) throw new TypeError('sourceId must be a nonempty string');
-    return this.http.request('POST', '/v1/memory/ingest', { content, request_key: requestKey(key), source_kind: sourceKind, durable,
+    return this.http.request('POST', '/v1/memory/ingest', { content, request_key: stableKey(key), source_kind: sourceKind, durable,
       ...(sourceId === undefined ? {} : { source_id: sourceId }),
       ...(expectedRevision === undefined ? {} : { expected_revision: boundedInteger(expectedRevision, 'expectedRevision', Number.MAX_SAFE_INTEGER, 0) }) });
   }
@@ -105,21 +109,25 @@ export class Atoms {
     });
     if ([...rolesById.values()].some(itemRoles => itemRoles.has('original_input') && itemRoles.has('submitted_output'))) throw new TypeError('one artifact cannot be both original_input and submitted_output');
     if (selfContained !== undefined && typeof selfContained !== 'boolean') throw new TypeError('selfContained must be a boolean');
-    return this.http.request('POST', '/tasks', { source, artifacts, ...(objective === undefined ? {} : { objective }), ...(selfContained === undefined ? {} : { self_contained: selfContained }) }, requestKey(key));
+    return this.http.request('POST', '/tasks', { source, artifacts, ...(objective === undefined ? {} : { objective }), ...(selfContained === undefined ? {} : { self_contained: selfContained }) }, stableKey(key));
   }
   getTask(taskId: string) { return this.http.request('GET', `/tasks/${pathPart(taskId)}`); }
   supplementTaskContext(taskId: string, { expectedContextVersion, objective, artifacts, selfContained }: { expectedContextVersion: number; objective?: string; artifacts?: WorkflowArtifactRef[]; selfContained?: boolean }) {
     if (!Number.isInteger(expectedContextVersion) || expectedContextVersion < 1) throw new TypeError('expectedContextVersion must be a positive integer');
     return this.http.request('POST', `/tasks/${pathPart(taskId)}/context`, { expected_context_version: expectedContextVersion, ...(objective === undefined ? {} : { objective }), ...(artifacts === undefined ? {} : { artifacts }), ...(selfContained === undefined ? {} : { self_contained: selfContained }) });
   }
-  startExecution(taskId: string, { key, model, recipeId, recallMemory = false }: { key: string; model?: string; recipeId?: string; recallMemory?: boolean }) {
+  /** Start an execution; with `previousExecutionId` it is a correction of that execution and takes only `model`. */
+  startExecution(taskId: string, { key, model, recipeId, recallMemory = false, previousExecutionId }: { key: string; model?: string; recipeId?: string; recallMemory?: boolean; previousExecutionId?: string }) {
     if (typeof recallMemory !== 'boolean') throw new TypeError('recallMemory must be boolean');
+    if (previousExecutionId !== undefined) {
+      if (recipeId !== undefined || recallMemory) throw new TypeError('a correction takes only previousExecutionId and model');
+      pathPart(previousExecutionId);
+    }
     if (recipeId !== undefined) pathPart(recipeId);
-    const connection = modelData(model);
-    const body = { ...connection,
+    const body = { ...modelData(model), ...(previousExecutionId === undefined ? {} : { previous_execution_id: previousExecutionId }),
       ...(recipeId === undefined ? {} : { recipe_id: recipeId }), ...(recallMemory ? { recall_memory: true } : {}) };
     return this.http.request('POST', `/tasks/${pathPart(taskId)}/executions`,
-      Object.keys(body).length ? body : undefined, requestKey(key), undefined);
+      Object.keys(body).length ? body : undefined, stableKey(key), undefined);
   }
   getRecipeVersions(recipeId: string) { return this.http.request('GET', `/recipes/${pathPart(recipeId)}/versions`); }
   getExecution(executionId: string) { return this.http.request('GET', `/executions/${pathPart(executionId)}`); }
@@ -136,27 +144,66 @@ export class Atoms {
     if (Buffer.byteLength(JSON.stringify(body), 'utf8') > 1_000_000) throw new TypeError('execution result JSON must be at most 1,000,000 bytes');
     return this.http.request('POST', `/executions/${pathPart(executionId)}/result`, body);
   }
-  getRevision(revisionId: string) { return this.http.request('GET', `/revisions/${pathPart(revisionId)}`); }
-  startRevision(revisionId:string,{key}:{key:string}) {return this.http.request('POST','/revisions',{parent_revision_id:revisionId},requestKey(key));}
-  /** Create or update the Recipe from a confirmed revision. Without `key`, repeated calls for the same revision and budget return the same candidate. */
-  startRecipeCandidate(taskId:string,{revisionId,key,model,maxCompletionTokens}:{revisionId:string;key?:string;model?:string;maxCompletionTokens?:number}) {
-    return this.http.request('POST',`/tasks/${pathPart(taskId)}/recipe-candidates`,{revision_id:revisionId,...modelData(model),...(maxCompletionTokens===undefined?{}:{max_completion_tokens:boundedInteger(maxCompletionTokens,'maxCompletionTokens',1_000_000)})},requestKey(key??recipeRequestKey(taskId,revisionId,maxCompletionTokens)));
+  recordFeedback(executionId: string, { feedback, source, key }: { feedback: string; source: FeedbackSource; key: string }) {
+    return this.http.request('POST', `/executions/${pathPart(executionId)}/feedback`, { feedback, source: feedbackSource(source) }, stableKey(key));
   }
-  getRecipeCandidate(recipeId:string){return this.http.request('GET',`/recipe-candidates/${pathPart(recipeId)}`);}
-  resumeRecipeCandidate(recipeId:string,options?:string|{model?:string;maxCompletionTokens?:number}){const {model,maxCompletionTokens}=typeof options==='string'?{model:options}:options??{};const data={...modelData(model),...(maxCompletionTokens===undefined?{}:{max_completion_tokens:boundedInteger(maxCompletionTokens,'maxCompletionTokens',1_000_000)})};return this.http.request('POST',`/recipe-candidates/${pathPart(recipeId)}/resume`,Object.keys(data).length?data:undefined);}
-
+  /** Learn a Recipe version from a confirmed execution; repeat calls return the same learning. */
+  learn(executionId: string, { model, maxCompletionTokens }: { model?: string; maxCompletionTokens?: number } = {}) {
+    return this.http.request('POST', `/executions/${pathPart(executionId)}/learn`, learningData(model, maxCompletionTokens));
+  }
+  /**
+   * Retry a `failed`, `interrupted` or `awaiting_runner` learning, optionally with a new budget.
+   * A learning that is active or `completed` comes back unchanged; a different `maxCompletionTokens`
+   * then gets a 422. An execution that has not learned yet, or whose learning is `awaiting_material`, also gets a 422.
+   */
+  resumeLearning(executionId: string, { model, maxCompletionTokens }: { model?: string; maxCompletionTokens?: number } = {}) {
+    const data = learningData(model, maxCompletionTokens);
+    return this.http.request('POST', `/executions/${pathPart(executionId)}/resume`, Object.keys(data).length ? data : undefined);
+  }
+  /**
+   * Poll the execution (2 s, doubling to 30 s) until its learning is `completed` and return the learning.
+   * Throws `RSILearningFailedError` on `failed`, `RSILearningStoppedError` on `interrupted`, `awaiting_runner`
+   * or `awaiting_material`, and a `TimeoutError` while it is still in flight. `timeout` is in seconds.
+   */
+  async waitLearning(executionId: string, { timeout = 300 }: { timeout?: number } = {}) {
+    const deadline = clock.now() + boundedTimeout(timeout * 1000);
+    let delay = 2000;
+    while (true) {
+      const execution = await this.getExecution(executionId);
+      const learning = waitedLearning(execution, executionId);
+      if (learning !== undefined) return learning;
+      const remaining = deadline - clock.now();
+      if (remaining <= 0) {
+        throw Object.assign(new Error(`Learning for execution ${executionId} is still ${execution.learning.status}; call waitLearning again`), { name: 'TimeoutError' });
+      }
+      await clock.sleep(Math.min(delay, remaining));
+      delay = Math.min(delay * 2, 30_000);
+    }
+  }
   listTasks({limit=20,cursor}:{limit?:number;cursor?:string}={}) {return this.http.request('GET','/tasks?'+new URLSearchParams({limit:String(limit),...(cursor?{cursor}:{})}));}
-  recordFeedback(revisionId:string,{feedback,source,key}:{feedback:string;source:FeedbackSource;key:string}) {return this.http.request('POST',`/revisions/${pathPart(revisionId)}/feedback`,{feedback,source:feedbackSource(source)},requestKey(key));}
-  startSession(sessionId?:string) {return this.http.request('POST','/sessions',sessionId?{session_id:sessionId}:{});}
-  appendSessionEvents(sessionId:string,events:Array<{event_id:string;kind:string;payload:Record<string,unknown>;task_id?:string;revision_id?:string}>) {return this.http.request('POST',`/sessions/${pathPart(sessionId)}/events`,{events});}
-  getSessionContext(sessionId:string,after=0) {return this.http.request('GET',`/sessions/${pathPart(sessionId)}/context?after=${after}`);}
-  endSession(sessionId:string) {return this.http.request('POST',`/sessions/${pathPart(sessionId)}/end`);}
-  /** Poll an existing candidate until it leaves queued/running/awaiting_parent; throws RSICandidateFailedError when it failed. */
-  async waitWorkflowJob(kind:'recipe_candidate',id:string,{timeout=300}:{timeout?:number}={}) {
-    if(kind!=='recipe_candidate')throw new TypeError('job kind must be recipe_candidate');
-    const deadline=performance.now()+boundedTimeout(timeout*1000);
-    while(true){const value=await this.getRecipeCandidate(id);if(value.status==='failed')throw RSICandidateFailedError.fromCandidate(value);if(!['queued','running','awaiting_parent'].includes(value.status))return value;
-    if(performance.now()>=deadline)throw new Error('Poll or resume the same candidate');await new Promise(r=>setTimeout(r,100));}
+
+  /** Store a Recipe version learned outside the service; `previousVersion` is the version it was built on. */
+  uploadRecipe(recipeId: string, { version, recipe, previousVersion }: { version: number; recipe: Record<string, unknown>; previousVersion?: number }) {
+    if (typeof recipeId !== 'string' || !RECIPE_ID.test(recipeId)) throw new TypeError("recipeId must be 1-128 letters, digits, '_' or '-'");
+    if (!recipe || typeof recipe !== 'object' || Array.isArray(recipe)) throw new TypeError('recipe must be an object');
+    boundedInteger(version, 'version', Number.MAX_SAFE_INTEGER);
+    const body = { ...(previousVersion === undefined ? {} : { previous_version: boundedInteger(previousVersion, 'previousVersion', Number.MAX_SAFE_INTEGER) }), recipe };
+    return this.http.request('PUT', `/recipes/${pathPart(recipeId)}/versions/${version}`, body);
+  }
+  getRecipe(recipeId: string, { version }: { version?: number } = {}) {
+    const query = version === undefined ? '' : '?' + new URLSearchParams({ version: String(boundedInteger(version, 'version', Number.MAX_SAFE_INTEGER)) });
+    return this.http.request('GET', `/recipes/${pathPart(recipeId)}${query}`);
+  }
+  listRecipes({ limit = 20, cursor, origin }: { limit?: number; cursor?: string; origin?: 'uploaded' | 'generated' } = {}) {
+    boundedInteger(limit, 'limit', 100);
+    if (cursor !== undefined && (typeof cursor !== 'string' || !cursor.trim())) throw new TypeError('cursor must be a nonempty string');
+    if (origin !== undefined && !['uploaded', 'generated'].includes(origin)) throw new TypeError('origin must be uploaded or generated');
+    return this.http.request('GET', '/recipes?' + new URLSearchParams({ limit: String(limit), ...(cursor === undefined ? {} : { cursor }), ...(origin === undefined ? {} : { origin }) }));
+  }
+  searchRecipes(query: string, { limit = 10 }: { limit?: number } = {}) {
+    if (typeof query !== 'string' || query.length < 1 || query.length > 1000) throw new TypeError('query must be 1-1000 characters');
+    boundedInteger(limit, 'limit', 50);
+    return this.http.request('GET', '/recipes?' + new URLSearchParams({ q: query, limit: String(limit) }));
   }
 }
 export class CoSensClient {

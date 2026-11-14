@@ -14,7 +14,7 @@ interface TaskTurn {
   materials?: Array<{ name: string; content: string }>; outputRefs?: Array<{ artifact_id: string; content_hash: string }>;
   uploadInflight?: number | null; resultBody?: { requestSha256: string; outcome: 'completed'; artifacts: WorkflowOutputRef[]; events: Array<{ id: string; kind: string; payload: Record<string, unknown> }>; traceCoverage: 'full' | 'partial' | 'unknown' };
   events?: Array<{ id: string; kind: string; payload: Record<string, unknown> }>; traceCoverage?: 'full' | 'partial' | 'unknown';
-  revisionId?: string; nativeState?: string; lastError?: string;
+  learning?: any; nativeState?: string; lastError?: string;
 }
 export interface TaskRunnerOptions {
   mode?: CoSensMode; apiKey?: string; statePath?: string; region?: string; fetch?: typeof fetch;
@@ -55,7 +55,7 @@ function observedNativeItems(result: any): { events: Array<{ id: string; kind: s
 
 export class TaskWorkflowRunner {
   readonly native: Runner;
-  readonly cosens: { mode: CoSensMode; lastTurnId: string | null; atoms?: CoSensClient['atoms']; generateRecipe:(id?:string,options?:{requestKey?:string;maxCompletionTokens?:number})=>Promise<any>; feedback:(message:string,source:FeedbackSource,id?:string)=>Promise<any>; getTurn: (id: string) => TaskTurn | undefined; reconcile: (id: string, options?: { session?: any }) => Promise<TaskTurn> };
+  readonly cosens: { mode: CoSensMode; lastTurnId: string | null; atoms?: CoSensClient['atoms']; generateRecipe:(id?:string,options?:{model?:string;maxCompletionTokens?:number})=>Promise<any>; feedback:(message:string,source:FeedbackSource,id?:string)=>Promise<any>; getTurn: (id: string) => TaskTurn | undefined; reconcile: (id: string, options?: { session?: any }) => Promise<TaskTurn> };
   private readonly client?: CoSensClient;
   private readonly turns?: TurnStore;
   constructor(nativeRunner: Runner | typeof Runner, private readonly options: TaskRunnerOptions = {}) {
@@ -66,11 +66,25 @@ export class TaskWorkflowRunner {
       this.turns = new TurnStore(options.statePath, this.client.transport.apiKey, this.client.transport.service.identity);
     }
     this.cosens = { mode: options.mode ?? 'disable', lastTurnId: null, atoms: this.client?.atoms,
-      generateRecipe:async(id,opts={})=>{const turn=this.turns?.get<TaskTurn>(id??this.cosens.lastTurnId!);if(!turn?.revisionId)throw new RSIRecoveryRequired('No recorded revision');return this.client!.atoms.startRecipeCandidate(turn.taskId!,{revisionId:turn.revisionId,key:opts.requestKey??'generation:'+turn.turnId,maxCompletionTokens:opts.maxCompletionTokens});},
-      feedback:async(message,source,id)=>{const turn=this.turns?.get<TaskTurn>(id??this.cosens.lastTurnId!);if(!turn?.revisionId)throw new RSIRecoveryRequired('No recorded revision');return this.client!.atoms.recordFeedback(turn.revisionId,{feedback:message,source,key:'feedback:'+hash([turn.turnId,message])});},
+      // Learn from the turn's confirmed execution; repeat calls return the same learning.
+      generateRecipe: async (id, opts = {}) => {
+        const turn = this.completedTurn(id);
+        const learning = await this.client!.atoms.learn(turn.executionId!, { model: opts.model, maxCompletionTokens: opts.maxCompletionTokens });
+        turn.learning = { ...learning }; this.save(turn);
+        return learning;
+      },
+      feedback: async (message, source, id) => {
+        const turn = this.completedTurn(id);
+        return this.client!.atoms.recordFeedback(turn.executionId!, { feedback: message, source, key: 'feedback:' + hash([turn.turnId, message]) });
+      },
       getTurn: id => this.turns?.get<TaskTurn>(id), reconcile: (id, opts) => this.reconcile(id, opts) };
   }
   private save(state: TaskTurn) { this.turns!.put(state.turnId, state); }
+  private completedTurn(id?: string): TaskTurn {
+    const turn = this.turns?.get<TaskTurn>(id ?? this.cosens.lastTurnId!);
+    if (turn?.state !== 'completed' || !turn.executionId) throw new RSIRecoveryRequired('Turn has no completed execution');
+    return turn;
+  }
   private claimNative(state: TaskTurn, expected: string) {
     state.state = 'native_running';
     if (!this.turns!.claimState(state.turnId, expected, state)) throw new RSIRecoveryRequired('Workflow turn was claimed by another runner; reconcile before retrying');
@@ -166,8 +180,8 @@ export class TaskWorkflowRunner {
       this.save(state);
     }
     const receipt = await this.client!.atoms.submitExecution(state.executionId!, state.resultBody);
-    if (['failed', 'cancelled'].includes(receipt?.status) || typeof receipt?.revision_id !== 'string' || !receipt.revision_id) throw new RSIRecoveryRequired('Workflow result was not confirmed as completed');
-    state.revisionId = receipt.revision_id; state.state = 'completed'; delete state.lastError; this.save(state);
+    if (receipt?.status !== 'completed') throw new RSIRecoveryRequired('Workflow result was not confirmed as completed');
+    state.state = 'completed'; delete state.lastError; this.save(state);
     await this.emit('completed', state);
   }
   private async complete(state: TaskTurn, nativeResult: any) {
