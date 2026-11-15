@@ -5,12 +5,18 @@ from uuid import uuid4
 
 from ..atoms_helpers import stable_key
 from ..models import result
-from ..workflow_atoms import _context, _result, _task, feedback_source, validate_artifact
+from ..workflow_atoms import _INPUT_ROLES, _context, _input, _result, _task, feedback_source, validate_artifact
 from .recipe_stages import MEMORY_TOKEN_BUDGET, memory_snapshot
 from .store import canonical_json, fingerprint
 
-_ARTIFACT_ROLES = {"original_input", "submitted_output", "acceptance", "external_trace"}
+# A task's own artifacts are reference material; an execution's input takes the four input roles.
+_TASK_ROLES = {"reference"}
 _INPUT_OUTPUT = {"original_input", "submitted_output"}
+# Learning states in the service's words: a finished candidate is a completed learning, and one waiting for the version
+# it builds on awaits the previous version.
+_LEARNING_STATUS = {"candidate": "completed", "awaiting_parent": "awaiting_previous_version"}
+# How the host produces an execution: from the input, or by reconstructing an output that already exists.
+_SOURCES = {"new_task": "original", "external_artifact": "reconstructed"}
 
 
 def _published_recipe(text):
@@ -22,23 +28,25 @@ def _published_recipe(text):
     return isinstance(value, dict) and value.get("schema") == "cosens-recipe/v1"
 
 
-def _missing(context, mode):
-    missing = []
-    if not context.get("objective"):
-        missing.append("objective")
-    if (mode == "reconstruct" and not any(a["role"] == "original_input" for a in context["artifacts"])
-            and not context.get("self_contained")):
-        missing.append("original_input_or_self_contained_task")
+def _input_missing(value, kind):
+    """What a new execution's input lacks; a reconstruction also needs what it started from and what it produced."""
+    missing = [] if value["objective"] else ["objective"]
+    if kind == "reconstructed":
+        roles = {a["role"] for a in value["artifacts"]}
+        if "original_input" not in roles and not value["self_contained"]:
+            missing.append("original_input_or_self_contained_task")
+        if "submitted_output" not in roles:
+            missing.append("submitted_output")
     return missing
 
 
 class LocalTaskWorkflow:
-    def _artifact_refs(self, db, values, *, default_role=None):
+    def _artifact_refs(self, db, values, *, roles, default_role=None):
         refs, seen = [], set()
         for item in values:
             if isinstance(item, str) and default_role:
                 item = {"artifact_id": item, "role": default_role}
-            if not isinstance(item, dict) or set(item) != {"artifact_id", "role"} or item["role"] not in _ARTIFACT_ROLES:
+            if not isinstance(item, dict) or set(item) != {"artifact_id", "role"} or item["role"] not in roles:
                 raise ValueError("invalid artifact reference or role")
             artifact_id, role = item["artifact_id"], item["role"]
             if (artifact_id, role) in seen:
@@ -69,58 +77,74 @@ class LocalTaskWorkflow:
         return result({"artifact_id": artifact_id, "name": row["name"], "content": row["content"],
                        "content_hash": row["content_hash"]})
 
-    async def create_task(self, *, source, key, objective=None, artifacts=None, self_contained=None, recipe=None):
-        key, body = stable_key(key), _task(source, objective, artifacts, self_contained)
+    async def create_task(self, *, key, objective, artifacts=None, recipe=None):
+        key, body = stable_key(key), _task(objective, artifacts)
         request_hash = fingerprint({**body, **({"recipe": recipe} if recipe is not None else {})})
-        mode = {"new_task": "execute", "external_artifact": "reconstruct"}[source]
         with self._store.transaction() as db:
             saved = self._store.replay(db, "create_task", key, request_hash)
             if saved is not None:
                 return result(saved)
-            refs = self._artifact_refs(db, body["artifacts"],
-                                       default_role="original_input" if mode == "execute" else "submitted_output")
-            context = {"objective": objective, "self_contained": body.get("self_contained", False), "artifacts": refs}
+            context = {"objective": objective,
+                       "artifacts": self._artifact_refs(db, body["artifacts"], roles=_TASK_ROLES, default_role="reference")}
             task_id = "task_" + uuid4().hex
-            db.execute("INSERT INTO tasks VALUES(?,?,?,1)", (task_id, mode, canonical_json(context)))
+            db.execute("INSERT INTO tasks VALUES(?,?,1)", (task_id, canonical_json(context)))
             if recipe is not None:
                 self._import_recipe(db, task_id, recipe)
-            missing = _missing(context, mode)
-            response = {"task_id": task_id, "source": source, "status": "needs_context" if missing else "ready",
-                        "missing": missing, "context_version": 1}
+            response = {"task_id": task_id, **context, "context_version": 1}
             self._store.remember(db, "create_task", key, request_hash, response)
         return result(response)
 
-    def _task_view(self, row):
+    @staticmethod
+    def _task_view(db, row):
         context = json.loads(row["context_json"])
-        executions = [dict(r) for r in self._store.read(
-            "SELECT id,kind,status,request_sha FROM executions WHERE task_id=? ORDER BY rowid", (row["id"],))]
-        missing = _missing(context, row["mode"])
-        return {"task_id": row["id"], "source": "new_task" if row["mode"] == "execute" else "external_artifact",
-                "mode": row["mode"], "context": context, "context_version": row["context_version"],
-                "status": "needs_context" if missing else "ready", "missing": missing, "executions": executions}
+        executions = [dict(r) for r in db.execute(
+            "SELECT id AS execution_id,instance_id,kind,status,request_sha AS request_sha256 FROM executions "
+            "WHERE task_id=? ORDER BY rowid", (row["id"],))]
+        # The head's latest version is the newest learning on the Recipe, in flight or finished; a version that was
+        # not learned from an execution (imported) has no learning.
+        recipes = [{"recipe_id": r["recipe_id"], "current_version": r["current_version"],
+                    "latest_version": r["latest_version"],
+                    "learning": {"execution_id": r["execution_id"], "version": r["latest_version"],
+                                 "status": _LEARNING_STATUS.get(r["state"], r["state"]), "phase": r["phase"],
+                                 "error": json.loads(r["error"])["code"] if r["error"] else None}
+                    if r["execution_id"] else None}
+                   for r in db.execute(
+                       "SELECT t.recipe_id,cv.version AS current_version,lv.version AS latest_version,"
+                       "r.execution_id,c.state,c.phase,c.error FROM task_recipes t "
+                       "JOIN recipe_heads h ON h.recipe_id=t.recipe_id "
+                       "JOIN recipe_versions lv ON lv.candidate_id=h.latest_candidate_id "
+                       "JOIN recipe_candidates c ON c.id=h.latest_candidate_id "
+                       "LEFT JOIN recipe_versions cv ON cv.candidate_id=h.current_candidate_id "
+                       "LEFT JOIN revisions r ON r.id=c.revision_id "
+                       "WHERE t.task_id=? ORDER BY t.recipe_id", (row["id"],))]
+        return {"task_id": row["id"], "objective": context["objective"], "artifacts": context["artifacts"],
+                "context_version": row["context_version"], "executions": executions, "recipes": recipes}
 
     async def get_task(self, task_id):
-        row = self._store.read_one("SELECT * FROM tasks WHERE id=?", (task_id,))
-        if row is None:
-            raise LookupError("task not found")
-        return result(self._task_view(row))
+        with self._store.reading() as db:
+            row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None:
+                raise LookupError("task not found")
+            return result(self._task_view(db, row))
 
     async def list_tasks(self, *, limit=20, cursor=None):
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("limit must be between 1 and 100")
         condition, parameters = "", []
-        if cursor:
-            row = self._store.read_one("SELECT rowid AS position FROM tasks WHERE id=?", (cursor,))
-            if row is None:
-                raise ValueError("invalid task cursor")
-            condition, parameters = "WHERE rowid<?", [row["position"]]
-        rows = self._store.read(f"SELECT * FROM tasks {condition} ORDER BY rowid DESC LIMIT ?", (*parameters, limit + 1))
-        return result({"items": [self._task_view(row) for row in rows[:limit]], "has_more": len(rows) > limit,
+        with self._store.reading() as db:
+            if cursor:
+                row = db.execute("SELECT rowid AS position FROM tasks WHERE id=?", (cursor,)).fetchone()
+                if row is None:
+                    raise ValueError("invalid task cursor")
+                condition, parameters = "WHERE rowid<?", [row["position"]]
+            rows = db.execute(f"SELECT * FROM tasks {condition} ORDER BY rowid DESC LIMIT ?",
+                              (*parameters, limit + 1)).fetchall()
+            items = [self._task_view(db, row) for row in rows[:limit]]
+        return result({"items": items, "has_more": len(rows) > limit,
                        "next_cursor": rows[limit - 1]["id"] if len(rows) > limit else None})
 
-    async def supplement_task_context(self, task_id, *, expected_context_version, objective=None, artifacts=None,
-                                      self_contained=None):
-        body = _context(expected_context_version, objective, artifacts, self_contained)
+    async def supplement_task_context(self, task_id, *, expected_context_version, objective=None, artifacts=None):
+        body = _context(expected_context_version, objective, artifacts)
         with self._store.transaction() as db:
             row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if row is None:
@@ -129,21 +153,12 @@ class LocalTaskWorkflow:
                 raise ValueError("context version changed")
             context = json.loads(row["context_json"])
             if "objective" in body:
-                if not isinstance(objective, str) or not objective.strip() or len(objective) > 20_000:
-                    raise ValueError("invalid objective")
                 context["objective"] = objective
-            if "self_contained" in body:
-                if type(self_contained) is not bool:
-                    raise ValueError("self_contained must be boolean")
-                context["self_contained"] = self_contained
             if "artifacts" in body:
-                additions = self._artifact_refs(db, artifacts)
-                existing = {(a["artifact_id"], a["role"]) for a in context["artifacts"]}
-                if any((a["artifact_id"], a["role"]) in existing for a in additions):
+                additions = self._artifact_refs(db, artifacts, roles=_TASK_ROLES, default_role="reference")
+                existing = {a["artifact_id"] for a in context["artifacts"]}
+                if any(a["artifact_id"] in existing for a in additions):
                     raise ValueError("artifact already attached")
-                opposite = {"original_input": "submitted_output", "submitted_output": "original_input"}
-                if any((a["artifact_id"], opposite[a["role"]]) in existing for a in additions if a["role"] in opposite):
-                    raise ValueError("original input and submitted output cannot share an artifact")
                 context["artifacts"].extend(additions)
                 if len(context["artifacts"]) > 100:
                     raise ValueError("too many artifacts")
@@ -157,62 +172,61 @@ class LocalTaskWorkflow:
         # A published Recipe is a method, not evidence about the task.
         return memory_snapshot([item for item in items if not _published_recipe(item.get("text"))])
 
-    def _execution_intent(self, db, task_id, key, recipe_id, recall_memory):
-        """Return the replayed or needs-context response, or the frozen request to create."""
+    def _execution_intent(self, db, task_id, key, source, body, recipe_id, recall_memory):
+        """Return the replayed response, or the frozen request to create; refuses an incomplete input."""
         row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         if row is None:
             raise LookupError("task not found")
-        context = json.loads(row["context_json"])
-        missing = _missing(context, row["mode"])
+        kind = _SOURCES[source]
+        value = {"objective": body.get("objective"), "self_contained": body.get("self_contained", False),
+                 "artifacts": self._artifact_refs(db, body["artifacts"], roles=_INPUT_ROLES,
+                                                  default_role="original_input" if kind == "original" else "submitted_output")}
+        missing = _input_missing(value, kind)
         if missing:
-            return {"response": {"task_id": task_id, "status": "needs_context", "missing": missing}}
-        kind = "reconstructed" if row["mode"] == "reconstruct" else "original"
-        request = {"task_id": task_id, "kind": kind, "context": context, "context_version": row["context_version"],
-                   "trace_origin": kind}
+            raise ValueError(f"the execution input is incomplete: {', '.join(missing)}")
+        request = {"task_id": task_id, "kind": kind, "trace_origin": kind,
+                   "task_context": {**json.loads(row["context_json"]), "context_version": row["context_version"]},
+                   "input": value}
         intent = fingerprint({**request, **({"requested_recipe_id": recipe_id} if recipe_id else {}),
                               **({"recall_memory": True} if recall_memory else {})})
         operation = "start_execution:" + task_id
         saved = self._store.replay(db, operation, key, intent)
         if saved is not None:
             return {"response": saved}
-        return {"request": request, "intent": intent, "operation": operation, "kind": kind, "objective": context["objective"]}
+        return {"request": request, "intent": intent, "operation": operation, "kind": kind}
 
-    async def start_execution(self, task_id, *, key, recipe_id=None, recall_memory=False):
+    async def start_execution(self, task_id, *, key, source, objective=None, artifacts=None, self_contained=None,
+                              recipe_id=None, recall_memory=False):
         key = stable_key(key)
         if type(recall_memory) is not bool:
             raise ValueError("recall_memory must be boolean")
+        body = _input(source, objective, artifacts, self_contained)
         if recall_memory and self._atoms is None:
             raise ValueError("recall_memory requires a client")
         with self._store.transaction() as db:
-            first = self._execution_intent(db, task_id, key, recipe_id, recall_memory)
+            first = self._execution_intent(db, task_id, key, source, body, recipe_id, recall_memory)
         if "response" in first:
             return result(first["response"])
         # Recall runs outside the transaction, so a concurrent caller with this key is re-checked below.
-        memory = await self._recall_snapshot(first["objective"]) if recall_memory else None
+        memory = await self._recall_snapshot(first["request"]["input"]["objective"]) if recall_memory else None
         with self._store.transaction() as db:
-            intent = self._execution_intent(db, task_id, key, recipe_id, recall_memory)
+            intent = self._execution_intent(db, task_id, key, source, body, recipe_id, recall_memory)
             if "response" in intent:
                 return result(intent["response"])
             if intent["intent"] != first["intent"]:
                 raise ValueError("task context changed while recalling Memory; start the execution again")
             request = intent["request"]
-            head = self._head(db, task_id)
-            if recipe_id is not None:
-                method = self._method(db, recipe_id)
-                if head and head["recipe_id"] != recipe_id:
-                    raise ValueError("task is already bound to another Recipe")
-                if not head:
-                    db.execute("INSERT INTO task_recipes VALUES(?,?)", (task_id, recipe_id))
+            method = self._execution_method(db, task_id, recipe_id)
+            if method:
                 request["method"] = method
-            elif head and head["current_candidate_id"]:
-                request["method"] = self._method(db, head["recipe_id"])
             if memory is not None:
                 request["memory"] = memory
             request_sha, execution_id = fingerprint(request), "execution_" + uuid4().hex
-            db.execute("INSERT INTO executions VALUES(?,?,?,?,?,?,NULL)",
-                       (execution_id, task_id, intent["kind"], "awaiting_execution", canonical_json(request), request_sha))
-            response = {"task_id": task_id, "execution_id": execution_id, "status": "awaiting_execution",
-                        "request_sha256": request_sha, "request": request}
+            db.execute("INSERT INTO executions VALUES(?,?,?,?,?,?,NULL,?)",
+                       (execution_id, task_id, intent["kind"], "awaiting_execution", canonical_json(request), request_sha,
+                        execution_id))
+            response = {"task_id": task_id, "execution_id": execution_id, "instance_id": execution_id,
+                        "status": "awaiting_execution", "request_sha256": request_sha, "request": request}
             self._store.remember(db, intent["operation"], key, intent["intent"], response)
         return result(response)
 
@@ -221,7 +235,8 @@ class LocalTaskWorkflow:
         if row is None:
             raise LookupError("execution not found")
         saved = json.loads(row["result_json"]) if row["result_json"] else None
-        return result({"execution_id": execution_id, "task_id": row["task_id"], "kind": row["kind"], "status": row["status"],
+        return result({"execution_id": execution_id, "task_id": row["task_id"], "instance_id": row["instance_id"],
+                       "kind": row["kind"], "status": row["status"],
                        "request_sha256": row["request_sha"], "request": json.loads(row["request_json"]),
                        "result": saved["response"] if saved else None})
 
@@ -238,7 +253,7 @@ class LocalTaskWorkflow:
                 if saved["submitted"] != body:
                     raise ValueError("execution result already frozen")
                 return result(saved["response"])
-            refs = self._artifact_refs(db, artifacts)
+            refs = self._artifact_refs(db, artifacts, roles=_INPUT_ROLES)
             response = {"task_id": row["task_id"], "execution_id": execution_id, "status": outcome, "revision_id": None,
                         "trace_origin": row["kind"]}
             if outcome == "completed":
@@ -292,7 +307,8 @@ class LocalTaskWorkflow:
         operation = "start_revision:" + revision_id
         with self._store.transaction() as db:
             row = db.execute(
-                "SELECT r.*,e.request_json FROM revisions r JOIN executions e ON e.id=r.execution_id WHERE r.id=?",
+                "SELECT r.*,e.request_json,e.instance_id FROM revisions r JOIN executions e ON e.id=r.execution_id "
+                "WHERE r.id=?",
                 (revision_id,)).fetchone()
             if row is None:
                 raise LookupError("revision not found")
@@ -301,16 +317,17 @@ class LocalTaskWorkflow:
             if old is not None:
                 return result(json.loads(old["response_json"]))
             previous = json.loads(row["request_json"])
-            request = {"task_id": row["task_id"], "kind": "revision", "trace_origin": "revision", "context": previous["context"],
-                       "context_version": previous["context_version"], "base_revision_id": revision_id,
+            request = {"task_id": row["task_id"], "kind": "revision", "trace_origin": "revision",
+                       "task_context": previous["task_context"], "input": previous["input"], "base_revision_id": revision_id,
                        "base_result": json.loads(row["result_json"]), "feedback": self._revision_feedback(db, revision_id)}
-            head = self._head(db, row["task_id"])
-            if head and head["current_candidate_id"]:
-                request["method"] = self._method(db, head["recipe_id"])
+            method = self._correction_method(db, row["task_id"], previous)
+            if method:
+                request["method"] = method
             digest, execution_id = fingerprint(request), "execution_" + uuid4().hex
-            db.execute("INSERT INTO executions VALUES(?,?,?,?,?,?,NULL)",
-                       (execution_id, row["task_id"], "revision", "awaiting_execution", canonical_json(request), digest))
-            response = {"task_id": row["task_id"], "execution_id": execution_id, "status": "awaiting_execution",
-                        "request_sha256": digest, "request": request}
+            db.execute("INSERT INTO executions VALUES(?,?,?,?,?,?,NULL,?)",
+                       (execution_id, row["task_id"], "revision", "awaiting_execution", canonical_json(request), digest,
+                        row["instance_id"]))
+            response = {"task_id": row["task_id"], "execution_id": execution_id, "instance_id": row["instance_id"],
+                        "status": "awaiting_execution", "request_sha256": digest, "request": request}
             self._store.remember(db, operation, key, digest, response)
         return result(response)

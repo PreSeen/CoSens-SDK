@@ -18,7 +18,7 @@ async def generate(rsi, task, done):
 
 
 async def next_revision(rsi, task, key):
-    started = await rsi.start_execution(task.task_id, key=key)
+    started = await rsi.start_execution(task.task_id, source="new_task", objective="Do the task", key=key)
     return started, await complete_execution(rsi, started, key=key + "-out")
 
 
@@ -463,3 +463,83 @@ async def test_wait_rejects_other_job_kinds_and_bad_timeouts(tmp_path):
         await rsi.wait_workflow_job("recipe_candidate", "x", timeout=float("nan"))
 
 
+
+
+async def test_the_task_shows_which_recipe_is_learning(tmp_path):
+    rsi, _ = make_rsi(tmp_path, ModelUnavailable("down"), recipe_reply("V1"), recipe_reply("V2"))
+    task, _, done = await first_revision(rsi)
+    candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
+    # The first learning creates the Recipe; it has no current version yet and is being iterated.
+    [recipe] = (await rsi.get_task(task.task_id)).recipes
+    assert recipe == {"recipe_id": candidate.recipe_id, "current_version": None, "latest_version": 1,
+                      "learning": {"execution_id": done.execution_id, "version": 1, "status": "queued",
+                                   "phase": "queued", "error": None}}
+    with pytest.raises(RSICandidateFailed):
+        await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    [recipe] = (await rsi.get_task(task.task_id)).recipes
+    assert recipe["learning"]["status"] == "failed" and recipe["learning"]["error"] == "upstream_unavailable"
+    await rsi.resume_recipe_candidate(candidate.recipe_candidate_id)
+    await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    [recipe] = (await rsi.get_task(task.task_id)).recipes
+    assert recipe == {"recipe_id": candidate.recipe_id, "current_version": 1, "latest_version": 1,
+                      "learning": {"execution_id": done.execution_id, "version": 1, "status": "completed",
+                                   "phase": "completed", "error": None}}
+    started, second = await next_revision(rsi, task, "two")
+    assert started.request["method"]["recipe_id"] == candidate.recipe_id
+    await generate(rsi, task, second)
+    [recipe] = (await rsi.get_task(task.task_id)).recipes
+    assert (recipe["current_version"], recipe["latest_version"]) == (2, 2)
+    assert recipe["learning"]["execution_id"] == second.execution_id and recipe["learning"]["version"] == 2
+
+
+async def test_a_recipe_belongs_to_its_task(tmp_path):
+    rsi, _ = make_rsi(tmp_path, recipe_reply("V1"))
+    task, _, done = await first_revision(rsi)
+    job = await generate(rsi, task, done)
+    named = await rsi.start_execution(task.task_id, key="named", source="new_task", objective="Again", recipe_id=job.recipe_id)
+    assert named.request["method"]["recipe_id"] == job.recipe_id
+    other = await rsi.create_task(key="other", objective="Assess quarterly performance")
+    with pytest.raises(LookupError, match="not found in this task"):
+        await rsi.start_execution(other.task_id, key="o", source="new_task", objective="Q4", recipe_id=job.recipe_id)
+    assert (await rsi.get_task(other.task_id)).recipes == []
+
+
+async def test_a_task_with_several_recipes_needs_a_recipe_choice(tmp_path):
+    rsi, _ = make_rsi(tmp_path, recipe_reply("V1"))
+    task, _, done = await first_revision(rsi)
+    job = await generate(rsi, task, done)
+    with rsi._store.transaction() as db:  # delivery 1 has no way to add a second Recipe; write one directly
+        candidate = db.execute("SELECT * FROM recipe_candidates WHERE id=?", (job.recipe_candidate_id,)).fetchone()
+        db.execute("INSERT INTO recipe_candidates(id,task_id,revision_id,state,phase,context_json,context_sha,recipe_json,"
+                   "recipe_sha) VALUES('second',?,NULL,'candidate','completed',?,?,?,?)",
+                   (task.task_id, candidate["context_json"], candidate["context_sha"], candidate["recipe_json"],
+                    candidate["recipe_sha"]))
+        db.execute("INSERT INTO recipe_heads(recipe_id,current_candidate_id,latest_candidate_id) VALUES('second','second','second')")
+        db.execute("INSERT INTO recipe_versions VALUES('second','second',1,NULL)")
+        db.execute("INSERT INTO task_recipes VALUES(?,'second')", (task.task_id,))
+    with pytest.raises(ValueError, match="^the task has several Recipes; name one with recipe_id$"):
+        await rsi.start_execution(task.task_id, key="e", source="new_task", objective="Again")
+    chosen = await rsi.start_execution(task.task_id, key="e", source="new_task", objective="Again", recipe_id="second")
+    assert chosen.request["method"]["recipe_id"] == "second"
+    assert [r["recipe_id"] for r in (await rsi.get_task(task.task_id)).recipes] == sorted([job.recipe_id, "second"])
+    [imported] = [r for r in (await rsi.get_task(task.task_id)).recipes if r["recipe_id"] == "second"]
+    assert imported["learning"] is None  # its newest version was not learned from an execution
+
+
+async def test_learning_freezes_the_task_context_and_each_input(tmp_path):
+    rsi, model = make_rsi(tmp_path, attribution_reply(True), recipe_reply("V1"))
+    template = await rsi.artifact(name="template.md", content="## Risks")
+    task = await rsi.create_task(key="t", objective="Write the weekly report", artifacts=[template.artifact_id])
+    started = await rsi.start_execution(task.task_id, key="w1", source="new_task", objective="Week 1")
+    done = await complete_execution(rsi, started, key="w1-out")
+    await rsi.record_feedback(done.revision_id, feedback="Add risks", source="human", key="f")
+    correction = await rsi.start_revision(done.revision_id, key="r")
+    again = await complete_execution(rsi, correction, key="r-out")
+    await generate(rsi, task, again)
+    context = model.calls[0]["context"]["context"]
+    assert context["schema"] == "workflow-recipe-context-v3"
+    assert context["task_context"] == {"objective": "Write the weekly report", "context_version": 1,
+                                       "artifacts": [dict(a) for a in task.artifacts]}
+    assert [m["content"] for m in context["task_materials"]] == ["## Risks"]
+    assert [h["input"]["objective"] for h in context["history"]] == ["Week 1", "Week 1"]
+    assert all("context" not in h for h in context["history"])

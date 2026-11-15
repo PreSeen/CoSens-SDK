@@ -1,4 +1,5 @@
-"""Opening a LocalRSI store written before evidence references named executions upgrades it once."""
+"""Opening a LocalRSI store written by an earlier SDK upgrades it once: evidence references name executions (version 1),
+then tasks become capabilities and each execution carries its own input (version 2)."""
 import hashlib
 import json
 import sqlite3
@@ -60,8 +61,83 @@ def user_version(path):
         return db.execute("PRAGMA user_version").fetchone()[0]
 
 
+TABLES = ("tasks", "executions", "task_recipes", "recipe_candidates", "idempotency")
+
+
+def state(path):
+    with sqlite3.connect(path) as db:
+        return {table: db.execute(f"SELECT rowid,* FROM {table} ORDER BY rowid").fetchall() for table in TABLES}
+
+
+def columns(path, table):
+    with sqlite3.connect(path) as db:
+        return [(row[1], row[2], row[3], row[5]) for row in db.execute(f"PRAGMA table_info({table})")]
+
+
+def old_request(request):
+    """A request as version 1 froze it: the task's context under "context", its version beside it."""
+    request = dict(request)
+    request["context"], version = request.pop("input"), request.pop("task_context")["context_version"]
+    request["context_version"] = version
+    return request
+
+
+def old_context(context):
+    """A learning context as version 1 froze it: history entries name the input "context", no task context."""
+    context = {key: value for key, value in context.items() if key not in ("task_context", "task_materials")}
+    context["schema"] = "workflow-recipe-context-v2"
+    context["history"] = [{("context" if key == "input" else key): value for key, value in entry.items()}
+                          for entry in context["history"]]
+    return context
+
+
+def to_version_1(path, *, break_context_hash_of=None):
+    """Write the store back as the previous SDK did: a task holds a mode and the instance input, requests freeze it as
+    "context", executions have no instance, a Recipe may serve several tasks, learning contexts are v2."""
+    db = sqlite3.connect(path)
+    db.executescript("""
+        CREATE TABLE tasks_v1(
+          id TEXT PRIMARY KEY, mode TEXT NOT NULL, context_json TEXT NOT NULL, context_version INTEGER NOT NULL);
+        INSERT INTO tasks_v1(rowid,id,mode,context_json,context_version)
+          SELECT rowid,id,'execute',json_object('objective',json_extract(context_json,'$.objective'),
+                                                'self_contained',json('false'),'artifacts',json('[]')),context_version
+          FROM tasks;
+        CREATE TABLE executions_v1(
+          id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), kind TEXT NOT NULL, status TEXT NOT NULL,
+          request_json TEXT NOT NULL, request_sha TEXT NOT NULL, result_json TEXT);
+        INSERT INTO executions_v1(rowid,id,task_id,kind,status,request_json,request_sha,result_json)
+          SELECT rowid,id,task_id,kind,status,request_json,request_sha,result_json FROM executions;
+        CREATE TABLE task_recipes_v1(
+          task_id TEXT PRIMARY KEY REFERENCES tasks(id), recipe_id TEXT NOT NULL REFERENCES recipe_heads(recipe_id));
+        INSERT INTO task_recipes_v1(rowid,task_id,recipe_id) SELECT rowid,task_id,recipe_id FROM task_recipes;
+        DROP TABLE tasks; DROP TABLE executions; DROP TABLE task_recipes;
+        ALTER TABLE tasks_v1 RENAME TO tasks; ALTER TABLE executions_v1 RENAME TO executions;
+        ALTER TABLE task_recipes_v1 RENAME TO task_recipes;
+    """)
+    for execution_id, request_text in db.execute("SELECT id,request_json FROM executions").fetchall():
+        db.execute("UPDATE executions SET request_json=? WHERE id=?",
+                   (canonical_json(old_request(json.loads(request_text))), execution_id))
+    for operation, key, response_text in db.execute(
+            "SELECT operation,request_key,response_json FROM idempotency "
+            "WHERE operation LIKE 'start_execution:%' OR operation LIKE 'start_revision:%'").fetchall():
+        response = json.loads(response_text)
+        del response["instance_id"]
+        response["request"] = old_request(response["request"])
+        db.execute("UPDATE idempotency SET response_json=? WHERE operation=? AND request_key=?",
+                   (canonical_json(response), operation, key))
+    for row_id, context_text in db.execute(
+            "SELECT id,context_json FROM recipe_candidates WHERE revision_id IS NOT NULL").fetchall():
+        context = old_context(json.loads(context_text))
+        sha = "0" * 64 if break_context_hash_of == row_id else fingerprint(context)
+        db.execute("UPDATE recipe_candidates SET context_json=?,context_sha=? WHERE id=?", (canonical_json(context), sha, row_id))
+    db.execute("PRAGMA user_version=1")
+    db.commit()
+    db.close()
+
+
 def to_revisions(path, *, break_hash_of=None, unknown_execution=False):
-    """Write the store back as an earlier SDK did: revision keys, history origin "revision", hashes of that text."""
+    """Write the store back as an SDK before version 1 did: revision keys, history origin "revision", hashes of that text."""
+    to_version_1(path)
     db = sqlite3.connect(path)
     revision_of = dict(db.execute("SELECT execution_id,id FROM revisions"))
     if unknown_execution:
@@ -118,7 +194,7 @@ async def test_local_store_saves_recipe_and_context_as_their_fingerprint_text(tm
 
 async def test_a_new_store_is_marked_as_upgraded(tmp_path):
     LocalStore(tmp_path / "s.sqlite3").close()
-    assert user_version(tmp_path / "s.sqlite3") == 1
+    assert user_version(tmp_path / "s.sqlite3") == STORE_VERSION == 2
 
 
 async def test_an_old_store_upgrades_to_execution_ids_once(tmp_path):
@@ -132,7 +208,7 @@ async def test_an_old_store_upgrades_to_execution_ids_once(tmp_path):
 
     LocalStore(path).close()
     assert rows(path) == current  # the exact text and hashes the current SDK writes
-    assert user_version(path) == 1
+    assert user_version(path) == STORE_VERSION
     assert not [row for row in rows(path) if any(text and "revision" in text for text in (row[1], row[3], row[5]))]
 
     LocalStore(path).close()  # a second open changes nothing
@@ -185,15 +261,100 @@ async def test_a_store_from_a_newer_sdk_is_refused(tmp_path):
     assert user_version(path) == STORE_VERSION + 1
 
 
-async def test_a_0_6_store_gets_both_upgrades_in_one_open(tmp_path):
+async def test_a_0_6_store_gets_every_upgrade_in_one_open(tmp_path):
     path, _ = await learned_store(tmp_path)
-    current = rows(path)
+    current, everything = rows(path), state(path)
     to_revisions(path)
     with sqlite3.connect(path) as db:  # 0.6 had no remote_version and published to Memory
         db.execute("ALTER TABLE recipe_heads DROP COLUMN remote_version")
         db.execute("UPDATE recipe_candidates SET publish_state='published'")
     LocalStore(path).close()
     assert rows(path) == current and user_version(path) == STORE_VERSION
+    upgraded = state(path)
+    assert {table: upgraded[table] for table in ("tasks", "executions", "task_recipes", "idempotency")} == {
+        table: everything[table] for table in ("tasks", "executions", "task_recipes", "idempotency")}
     with sqlite3.connect(path) as db:
         assert "remote_version" in {row[1] for row in db.execute("PRAGMA table_info(recipe_heads)")}
         assert {row[0] for row in db.execute("SELECT publish_state FROM recipe_candidates")} == {"pending"}
+
+
+async def test_a_version_1_store_upgrades_to_capability_tasks_once(tmp_path):
+    path, candidate_id = await learned_store(tmp_path)
+    current, shapes = state(path), {table: columns(path, table) for table in ("tasks", "executions", "task_recipes")}
+    to_version_1(path)
+    old = state(path)
+    assert "mode" in [name for name, *_ in columns(path, "tasks")]
+    assert all('"context":' in row[5] and '"input"' not in row[5] for row in old["executions"])
+    assert '"workflow-recipe-context-v2"' in old["recipe_candidates"][1][6]
+
+    LocalStore(path).close()
+    assert state(path) == current  # tasks, requests, receipts, instances and learning contexts as the current SDK writes them
+    assert {table: columns(path, table) for table in shapes} == shapes
+    assert user_version(path) == STORE_VERSION
+    with sqlite3.connect(path) as db:
+        tasks = [json.loads(text) for (text,) in db.execute("SELECT context_json FROM tasks")]
+        executions = db.execute("SELECT id,kind,instance_id,request_json FROM executions ORDER BY rowid").fetchall()
+    assert tasks == [{"objective": "Do the task", "artifacts": []}]
+    (original, _, _, _), (correction, kind, instance, request_text) = executions
+    assert kind == "revision" and instance == original != correction
+    assert json.loads(request_text)["task_context"] == {"objective": "Do the task", "artifacts": [], "context_version": 1}
+    context = json.loads([row for row in rows(path) if row[0] == candidate_id][0][1])
+    assert context["schema"] == "workflow-recipe-context-v3" and context["task_materials"] == []
+    assert all("input" in entry and "context" not in entry for entry in context["history"])
+
+    LocalStore(path).close()  # a second open changes nothing
+    assert state(path) == current
+    rsi, _ = make_rsi(tmp_path)
+    try:
+        assert (await rsi.get_recipe_candidate(candidate_id)).status == "candidate"  # stored hashes verify
+        [recipe] = (await rsi.get_task(context["task_id"])).recipes
+        assert (recipe["current_version"], recipe["latest_version"]) == (2, 2)
+    finally:
+        await rsi.aclose()
+
+
+async def test_a_version_1_upgrade_stops_on_a_recipe_shared_by_two_tasks(tmp_path):
+    path, _ = await learned_store(tmp_path)
+    to_version_1(path)
+    with sqlite3.connect(path) as db:
+        task_id, recipe_id = db.execute("SELECT task_id,recipe_id FROM task_recipes").fetchone()
+        db.execute("INSERT INTO tasks VALUES('task_0','execute',?,1)",
+                   (canonical_json({"objective": "B", "self_contained": False, "artifacts": []}),))
+        db.execute("INSERT INTO task_recipes VALUES('task_0',?)", (recipe_id,))
+    old = state(path)
+    with pytest.raises(LocalStoreUpgradeError) as caught:
+        LocalStore(path)
+    message = str(caught.value)
+    for part in (str(path), f"Recipes bound to more than one task: {recipe_id} (tasks task_0 {task_id})",
+                 "nothing was changed", "previous cosens-sdk release", "move the file aside"):
+        assert part in message
+    assert caught.value.path == str(path)
+    assert state(path) == old and user_version(path) == 1
+    assert "mode" in [name for name, *_ in columns(path, "tasks")]
+
+
+async def test_a_version_1_upgrade_stops_on_a_changed_context_hash(tmp_path):
+    path, candidate_id = await learned_store(tmp_path)
+    to_version_1(path, break_context_hash_of=candidate_id)
+    old = state(path)
+    with pytest.raises(LocalStoreUpgradeError) as caught:
+        LocalStore(path)
+    for part in (candidate_id, "context_json", "does not match its hash", "nothing was changed"):
+        assert part in str(caught.value)
+    assert (caught.value.candidate_id, caught.value.column) == (candidate_id, "context_json")
+    assert state(path) == old and user_version(path) == 1
+
+
+async def test_a_version_1_upgrade_stops_on_a_revision_chain_it_cannot_follow(tmp_path):
+    path, _ = await learned_store(tmp_path)
+    to_version_1(path)
+    with sqlite3.connect(path) as db:
+        execution_id, request_text = db.execute("SELECT id,request_json FROM executions WHERE kind='revision'").fetchone()
+        request = {**json.loads(request_text), "base_revision_id": "revision_missing"}
+        db.execute("UPDATE executions SET request_json=? WHERE id=?", (canonical_json(request), execution_id))
+    old = state(path)
+    with pytest.raises(LocalStoreUpgradeError) as caught:
+        LocalStore(path)
+    for part in (execution_id, "revision_missing", "nothing was changed"):
+        assert part in str(caught.value)
+    assert state(path) == old and user_version(path) == 1

@@ -186,7 +186,9 @@ def evidence_index(context):
     history = context["history"]
     return EvidenceIndex(
         events=frozenset((h["execution_id"], e["id"]) for h in history for e in h["events"]),
-        artifacts=frozenset(a["artifact_id"] for h in history for a in h["materials"] + h["outputs"]),
+        # Evidence may also cite the task's reference material.
+        artifacts=frozenset(a["artifact_id"] for h in history for a in h["materials"] + h["outputs"])
+        | frozenset(a["artifact_id"] for a in context.get("task_materials", [])),
         memories=frozenset(item["id"] for item in context["memory"].get("items", [])),
         feedback=frozenset(f["feedback_id"] for h in history for f in h.get("feedback", [])),
     )

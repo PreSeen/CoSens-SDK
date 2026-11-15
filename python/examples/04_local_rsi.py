@@ -23,8 +23,9 @@ async def main():
     cosens_client = CoSensClient() if os.getenv("COSENS_API_KEY") else None
     with tempfile.TemporaryDirectory() as directory:
         rsi = LocalRSI(client=cosens_client, model=build_model(), state_path=f"{directory}/state.sqlite3")
-        task = await rsi.create_task(source="new_task", key="demo", objective="Sort a list of words alphabetically.")
-        started = await rsi.start_execution(task.task_id, key="demo-run")
+        task = await rsi.create_task(key="demo", objective="Sort a list of words alphabetically.")
+        started = await rsi.start_execution(task.task_id, key="demo-run", source="new_task",
+                                            objective="Sort: cherry, apple, banana.", self_contained=True)
         # Your own Agent does the work here; this example records a finished result.
         output = await rsi.artifact(name="answer.txt", content="apple, banana, cherry")
         finished = await rsi.submit_execution(

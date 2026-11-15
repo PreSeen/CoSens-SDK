@@ -87,9 +87,43 @@ def _failure_detail(exc, phase):
 
 class LocalRecipeLifecycle:
     @staticmethod
-    def _head(db, task_id):
-        return db.execute("SELECT h.* FROM task_recipes t JOIN recipe_heads h ON h.recipe_id=t.recipe_id WHERE t.task_id=?",
-                          (task_id,)).fetchone()
+    def _task_heads(db, task_id):
+        """Every Recipe of the task; each Recipe belongs to exactly one task."""
+        return db.execute("SELECT h.* FROM task_recipes t JOIN recipe_heads h ON h.recipe_id=t.recipe_id WHERE t.task_id=? "
+                          "ORDER BY h.recipe_id", (task_id,)).fetchall()
+
+    def _execution_method(self, db, task_id, recipe_id=None):
+        """The method a new execution freezes: the named Recipe of this task, else the task's only usable Recipe."""
+        heads = self._task_heads(db, task_id)
+        if recipe_id is not None:
+            if recipe_id not in {head["recipe_id"] for head in heads}:
+                raise LookupError("Recipe not found in this task")
+            return self._method(db, recipe_id)
+        if len(heads) > 1:
+            raise ValueError("the task has several Recipes; name one with recipe_id")
+        if heads and heads[0]["current_candidate_id"]:
+            return self._method(db, heads[0]["recipe_id"])
+        return None
+
+    def _correction_method(self, db, task_id, previous_request):
+        """A revision follows the current version of the Recipe the previous execution followed."""
+        used = previous_request.get("method")
+        if used:
+            return self._method(db, used["recipe_id"])
+        return self._execution_method(db, task_id)
+
+    def _learning_head(self, db, task_id, request):
+        """The Recipe a learning adds a version to: the one the learned execution followed, else the task's only one."""
+        heads = self._task_heads(db, task_id)
+        used = request.get("method")
+        if used:
+            for head in heads:
+                if head["recipe_id"] == used["recipe_id"]:
+                    return head
+            raise ValueError("the execution followed a Recipe of another task")
+        if len(heads) > 1:
+            raise ValueError("the execution followed no Recipe and the task has several")
+        return heads[0] if heads else None
 
     @staticmethod
     def _lineage(db, candidate_id):
@@ -135,8 +169,7 @@ class LocalRecipeLifecycle:
         view = self._checked_view(db, self._candidate(db, head["current_candidate_id"]))
         return {k: view[k] for k in ("recipe_id", "recipe_candidate_id", "version", "recipe_sha256", "recipe")}
 
-    def _register_version(self, db, candidate_id, task_id):
-        head = self._head(db, task_id)
+    def _register_version(self, db, candidate_id, task_id, head):
         if head is None:
             recipe_id, parent, version = candidate_id, None, 1
             db.execute("INSERT INTO recipe_heads(recipe_id,current_candidate_id,latest_candidate_id) VALUES(?,NULL,?)",
@@ -170,8 +203,11 @@ class LocalRecipeLifecycle:
         recipe = json.loads(json.dumps(check_upload(view["recipe"]) if uploaded else upload_form(view["recipe"])))
         candidate_id = "recipe_candidate_" + uuid4().hex
         recipe_id, version = (view["recipe_id"], view["version"]) if uploaded else (candidate_id, 1)
-        if db.execute("SELECT 1 FROM recipe_heads WHERE recipe_id=?", (recipe_id,)).fetchone() is not None:
-            raise ValueError(f"Recipe {recipe_id} is already on this machine; start an execution with its recipe_id")
+        owner = db.execute("SELECT h.recipe_id,t.task_id FROM recipe_heads h LEFT JOIN task_recipes t ON t.recipe_id=h.recipe_id "
+                           "WHERE h.recipe_id=?", (recipe_id,)).fetchone()
+        if owner is not None:
+            raise ValueError(f"Recipe {recipe_id} is already on this machine, in task {owner['task_id']}; "
+                             "start an execution of that task with its recipe_id")
         context = {"schema": "workflow-recipe-context-v2", "task_id": task_id, "history": [],
                    "memory": {"status": "not_requested", "items": []}, "initial": True,
                    "imported_from": {k: view[k] for k in ("recipe_id", "origin", "version")}}
@@ -184,6 +220,15 @@ class LocalRecipeLifecycle:
         db.execute("INSERT INTO recipe_versions VALUES(?,?,?,NULL)", (candidate_id, recipe_id, version))
         db.execute("INSERT INTO task_recipes VALUES(?,?)", (task_id, recipe_id))
 
+    @staticmethod
+    def _material(db, ref):
+        """An artifact a request froze, with its content; refuses one that is gone or changed."""
+        item = db.execute("SELECT content,content_hash FROM artifacts WHERE id=?", (ref["artifact_id"],)).fetchone()
+        if (item is None or item["content_hash"] != ref["content_hash"]
+                or item["content_hash"] != "sha256:" + fingerprint(item["content"])):
+            raise ValueError("historical artifact unavailable or changed")
+        return {**ref, "content": item["content"]}
+
     def _history(self, db, task_id, revision_id):
         history, current, seen = [], revision_id, set()
         while current:
@@ -195,21 +240,13 @@ class LocalRecipeLifecycle:
             if row is None:
                 raise LookupError("task revision history not found")
             execution, outcome = json.loads(row["request_json"]), json.loads(row["result_json"])
-
-            def material(ref):
-                item = db.execute("SELECT content,content_hash FROM artifacts WHERE id=?", (ref["artifact_id"],)).fetchone()
-                if (item is None or item["content_hash"] != ref["content_hash"]
-                        or item["content_hash"] != "sha256:" + fingerprint(item["content"])):
-                    raise ValueError("historical artifact unavailable or changed")
-                return {**ref, "content": item["content"]}
-
             # The learning context names executions, as the service's does; a revision execution is a correction.
             feedback = [{**{k: v for k, v in item.items() if k != "revision_id"}, "execution_id": row["execution_id"]}
                         for item in self._revision_feedback(db, current)]
             history.append({"task_id": task_id, "execution_id": row["execution_id"],
-                            "origin": "correction" if row["kind"] == "revision" else row["kind"], "context": execution["context"],
-                            "materials": [material(ref) for ref in execution["context"]["artifacts"]],
-                            "outputs": [material(ref) for ref in outcome["artifacts"]], "events": outcome["events"],
+                            "origin": "correction" if row["kind"] == "revision" else row["kind"], "input": execution["input"],
+                            "materials": [self._material(db, ref) for ref in execution["input"]["artifacts"]],
+                            "outputs": [self._material(db, ref) for ref in outcome["artifacts"]], "events": outcome["events"],
                             "trace_coverage": outcome["trace_coverage"], "feedback": feedback})
             current = execution.get("base_revision_id")
         return list(reversed(history))
@@ -243,23 +280,26 @@ class LocalRecipeLifecycle:
             source = json.loads(db.execute("SELECT e.request_json FROM revisions r JOIN executions e ON e.id=r.execution_id "
                                            "WHERE r.id=?", (revision_id,)).fetchone()["request_json"])
         # Memory reaches a Recipe only when the execution behind this revision asked for it.
-        memory = await self._recall_snapshot(source["context"]["objective"]) if "memory" in source else {
+        memory = await self._recall_snapshot(source["input"]["objective"]) if "memory" in source else {
             "status": "not_requested", "items": []}
         with self._store.transaction() as db:
             found = self._existing_candidate(db, task_id, revision_id, key, request_hash)
             if found is not None:
                 return result(found)
             history = self._history(db, task_id, revision_id)
-            context = {"schema": "workflow-recipe-context-v2", "task_id": task_id, "source_execution_id": history[-1]["execution_id"],
+            context = {"schema": "workflow-recipe-context-v3", "task_id": task_id, "source_execution_id": history[-1]["execution_id"],
+                       "task_context": source["task_context"],
+                       "task_materials": [self._material(db, ref) for ref in source["task_context"]["artifacts"]],
                        "history": history, "memory": memory, "confirmation_source": "explicit_generation_request"}
             if len(canonical_json(context).encode()) > MAX_CONTEXT_BYTES:
                 raise ValueError("recipe history exceeds 4 MB; narrow the context")
             candidate_id = "recipe_candidate_" + uuid4().hex
-            context["initial"] = self._head(db, task_id) is None
+            head = self._learning_head(db, task_id, source)
+            context["initial"] = head is None
             context_sha = fingerprint(context)
             db.execute("INSERT INTO recipe_candidates(id,task_id,revision_id,state,context_json,context_sha) VALUES(?,?,?,'queued',?,?)",
                        (candidate_id, task_id, revision_id, canonical_json(context), context_sha))
-            lineage = self._register_version(db, candidate_id, task_id)
+            lineage = self._register_version(db, candidate_id, task_id, head)
             response = {"recipe_candidate_id": candidate_id, "revision_id": revision_id, "status": "queued",
                         "context_sha256": context_sha, **lineage}
             self._store.remember(db, "recipe_candidate", key, request_hash, response)
@@ -466,7 +506,10 @@ class LocalRecipeLifecycle:
         with self._store.reading() as db:
             if db.execute("SELECT id FROM tasks WHERE id=?", (task_id,)).fetchone() is None:
                 raise LookupError("task not found")
-            head = self._head(db, task_id)
+            heads = self._task_heads(db, task_id)
+            if len(heads) > 1:
+                raise ValueError("the task has several Recipes; read each with get_recipe_versions")
+            head = heads[0] if heads else None
             if head is None:
                 return result({"task_id": task_id, "status": "awaiting_execution", "recipe_id": None, "current": None, "latest": None})
             current = self._checked_view(db, self._candidate(db, head["current_candidate_id"])) if head["current_candidate_id"] else None

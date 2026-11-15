@@ -118,7 +118,7 @@ async def generate(rsi, task, revision_id):
 
 
 async def improve(rsi, task, key):
-    started = await rsi.start_execution(task.task_id, key=key)
+    started = await rsi.start_execution(task.task_id, source="new_task", objective="Do the task", key=key)
     done = await complete_execution(rsi, started, key=key + "-out")
     return await generate(rsi, task, done.revision_id)
 
@@ -216,8 +216,8 @@ async def test_search_get_and_continue_an_uploaded_recipe_on_another_machine(tmp
     assert [item.recipe_id for item in found["items"]] == [shared.recipe_id]
     assert [item.recipe_id for item in (await second.list_recipes(origin="uploaded"))["items"]] == [shared.recipe_id]
     view = await second.get_recipe(found["items"][0].recipe_id)
-    imported = await second.create_task(source="new_task", key="new", objective="Do it", recipe=view)
-    started = await second.start_execution(imported.task_id, key="e")
+    imported = await second.create_task(key="new", objective="Do it", recipe=view)
+    started = await second.start_execution(imported.task_id, source="new_task", objective="Do the task", key="e")
     assert started.request["method"]["recipe"]["title"] == "Shared"
     assert started.request["method"]["recipe_id"] == shared.recipe_id
     done = await complete_execution(second, started, key="o")
@@ -231,8 +231,8 @@ async def test_an_imported_version_continues_from_the_server_version(tmp_path):
     rsi, _, server = setup(tmp_path, recipe_reply("Next"))
     for version in (1, 2, 3):
         server.add("team-recipe", {**PLAIN, "title": f"V{version}"}, version=version)
-    task = await rsi.create_task(source="new_task", key="k", objective="A", recipe=await rsi.get_recipe("team-recipe"))
-    started = await rsi.start_execution(task.task_id, key="e")
+    task = await rsi.create_task(key="k", objective="A", recipe=await rsi.get_recipe("team-recipe"))
+    started = await rsi.start_execution(task.task_id, source="new_task", objective="Do the task", key="e")
     assert started.request["method"]["version"] == 3
     done = await complete_execution(rsi, started, key="o")
     job = await generate(rsi, task, done.revision_id)
@@ -245,8 +245,8 @@ async def test_a_generated_recipe_starts_a_new_chain_without_evidence(tmp_path):
     rsi, _, server = setup(tmp_path, recipe_reply("Next"))
     server.add("task-recipe", RECIPE, version=2, origin="generated")
     view = await rsi.get_recipe("task-recipe")
-    task = await rsi.create_task(source="new_task", key="k", objective="A", recipe=view)
-    started = await rsi.start_execution(task.task_id, key="e")
+    task = await rsi.create_task(key="k", objective="A", recipe=view)
+    started = await rsi.start_execution(task.task_id, source="new_task", objective="Do the task", key="e")
     method = started.request["method"]
     assert method["recipe_id"] != "task-recipe" and method["version"] == 1
     assert method["recipe"] == upload_form(RECIPE)
@@ -267,7 +267,7 @@ async def test_a_generated_recipe_starts_a_new_chain_without_evidence(tmp_path):
 async def test_import_rejects_anything_but_a_valid_recipe_view(tmp_path, item):
     rsi, _, _ = setup(tmp_path)
     with pytest.raises(ValueError, match="get_recipe|upload schema"):
-        await rsi.create_task(source="new_task", key="k", objective="A", recipe=item)
+        await rsi.create_task(key="k", objective="A", recipe=item)
     assert (await rsi.list_tasks())["items"] == []
 
 
@@ -276,7 +276,7 @@ async def test_an_uploaded_chain_already_on_this_machine_is_not_imported_again(t
     task, _, done = await first_revision(rsi)
     job = await generate(rsi, task, done.revision_id)
     with pytest.raises(ValueError, match="recipe_id"):
-        await rsi.create_task(source="new_task", key="k", objective="A", recipe=await rsi.get_recipe(job.recipe_id))
+        await rsi.create_task(key="k", objective="A", recipe=await rsi.get_recipe(job.recipe_id))
 
 
 async def test_recall_memory_freezes_a_snapshot_and_reaches_the_recipe_context(tmp_path):
@@ -291,17 +291,17 @@ async def test_recall_memory_freezes_a_snapshot_and_reaches_the_recipe_context(t
 async def test_recall_failure_is_raised_not_skipped(tmp_path):
     rsi, _, server = setup(tmp_path)
     server.fail_status = 503
-    task = await rsi.create_task(source="new_task", key="k", objective="A")
+    task = await rsi.create_task(key="k", objective="A")
     with pytest.raises(RSIHTTPError):
-        await rsi.start_execution(task.task_id, key="e", recall_memory=True)
+        await rsi.start_execution(task.task_id, source="new_task", objective="Do the task", key="e", recall_memory=True)
 
 
 async def test_recipes_published_to_memory_by_0_6_are_not_frozen_as_evidence(tmp_path):
     rsi, _, server = setup(tmp_path)
     server.memory["old"] = canonical_json({"schema": "cosens-recipe/v1", "recipe_id": "r", "version": 1, "recipe": PLAIN})
     server.memory["fact"] = "a useful fact"
-    task = await rsi.create_task(source="new_task", key="k", objective="A")
-    started = await rsi.start_execution(task.task_id, key="e", recall_memory=True)
+    task = await rsi.create_task(key="k", objective="A")
+    started = await rsi.start_execution(task.task_id, source="new_task", objective="Do the task", key="e", recall_memory=True)
     assert [item["id"] for item in started.request["memory"]["items"]] == ["fact"]
 
 
@@ -340,7 +340,8 @@ async def test_a_0_6_0_database_is_upgraded_in_place(tmp_path):
     context = {"schema": "workflow-recipe-context-v2", "task_id": "task_1", "history": [],
                "memory": {"status": "not_requested", "items": []}, "initial": True}
     db = sqlite3.connect(tmp_path / "old.sqlite3")
-    db.executescript(SCHEMA.replace("remote_version INTEGER", "memory_source_id TEXT, memory_revision INTEGER NOT NULL DEFAULT 0"))
+    old_schema = SCHEMA.replace("remote_version INTEGER", "memory_source_id TEXT, memory_revision INTEGER NOT NULL DEFAULT 0")
+    db.executescript(old_schema.replace("tasks(id TEXT PRIMARY KEY, context_json", "tasks(id TEXT PRIMARY KEY, mode TEXT NOT NULL, context_json"))
     db.execute("INSERT INTO tasks VALUES('task_1','execute',?,1)", (canonical_json({"objective": "A", "artifacts": []}),))
     db.execute("INSERT INTO recipe_candidates(id,task_id,state,phase,context_json,context_sha,recipe_json,recipe_sha,"
                "publish_state) VALUES('c1','task_1','candidate','completed',?,?,?,?,'published')",
@@ -353,6 +354,8 @@ async def test_a_0_6_0_database_is_upgraded_in_place(tmp_path):
 
     rsi, _, server = setup(tmp_path, name="old.sqlite3")
     assert rsi._store.read_one("SELECT remote_version FROM recipe_heads")["remote_version"] is None
+    task = await rsi.get_task("task_1")
+    assert (task.objective, task.artifacts, [r["recipe_id"] for r in task.recipes]) == ("A", [], ["c1"])
     assert (await rsi.get_recipe_candidate("c1")).publish_state == "pending"  # it was in Memory, not the Recipe store
     assert (await rsi.publish_recipe("c1")).publish_state == "published"
     assert server.uploads == [{"recipe_id": "c1", "version": 3, "recipe": upload_form(RECIPE)}]

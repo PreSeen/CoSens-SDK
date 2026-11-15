@@ -52,7 +52,8 @@ async def complete_execution(rsi, started, key="out"):
 
 
 async def first_revision(rsi, key="t1", objective="Do the task", recall_memory=False):
-    task = await rsi.create_task(source="new_task", key=key, objective=objective)
-    started = await rsi.start_execution(task.task_id, key=key + "-e", recall_memory=recall_memory)
+    task = await rsi.create_task(key=key, objective=objective)
+    started = await rsi.start_execution(task.task_id, key=key + "-e", source="new_task", objective=objective,
+                                       recall_memory=recall_memory)
     done = await complete_execution(rsi, started, key=key + "-out")
     return task, started, done
