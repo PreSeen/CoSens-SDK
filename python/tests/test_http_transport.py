@@ -46,7 +46,7 @@ async def test_gateway_key_is_the_only_caller_credential(monkeypatch):
         requests.append(request)
         return httpx.Response(200, json={"run_id": "r1", "status": "ready"})
     async with CoSensClient(api_key="test-gateway", _http_transport=httpx.MockTransport(server)) as client:
-        await client.atoms.create_task(source="new_task", objective="task", key="key")
+        await client.atoms.create_task(objective="task", key="key")
         client.sync_atoms.get_task("r1")
     assert len(requests) == 2
     assert all(r.headers["authorization"] == "Bearer test-gateway" and r.headers["x-auth-type"] == "api_key" and "api-key" not in r.headers for r in requests)

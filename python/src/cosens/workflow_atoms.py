@@ -46,7 +46,7 @@ def _recipe_data(model, max_completion_tokens):
     return data
 
 
-_ROLES = {"original_input", "submitted_output", "acceptance", "external_trace"}
+_INPUT_ROLES = {"original_input", "submitted_output", "acceptance", "external_trace"}
 # Learning states the service moves on by itself, and states only the caller can change.
 _LEARNING_IN_FLIGHT = {"queued", "running", "awaiting_previous_version"}
 _LEARNING_STOPPED = {"interrupted", "awaiting_runner", "awaiting_material"}
@@ -67,11 +67,44 @@ def validate_artifact(name, content):
         raise ValueError("artifact content must be nonempty UTF-8 text of at most 1,000,000 bytes")
 
 
-def _task(source, objective, artifacts, self_contained):
+def _objective(objective):
+    if not isinstance(objective, str) or not objective.strip() or len(objective) > 20_000:
+        raise ValueError("objective must be nonempty text of at most 20,000 characters")
+    return objective
+
+
+def _references(artifacts):
+    artifacts = artifacts if artifacts is not None else []
+    if not isinstance(artifacts, list) or len(artifacts) > 100:
+        raise ValueError("artifacts must contain at most 100 references")
+    for artifact in artifacts:
+        if not (isinstance(artifact, str) and artifact) and not (
+                isinstance(artifact, dict) and isinstance(artifact.get("artifact_id"), str) and artifact["artifact_id"]
+                and artifact.get("role") == "reference"):
+            raise ValueError("a task's artifacts are ids or references with role reference")
+    return artifacts
+
+
+def _task(objective, artifacts):
+    return {"objective": _objective(objective), "artifacts": _references(artifacts)}
+
+
+def _context(expected_context_version, objective, artifacts):
+    if not isinstance(expected_context_version, int) or isinstance(expected_context_version, bool) or expected_context_version < 1:
+        raise ValueError("expected_context_version must be a positive integer")
+    body = {"expected_context_version": expected_context_version}
+    if objective is not None:
+        body["objective"] = _objective(objective)
+    if artifacts is not None:
+        body["artifacts"] = _references(artifacts)
+    return body
+
+
+def _input(source, objective, artifacts, self_contained):
     if source not in {"new_task", "external_artifact"}:
         raise ValueError("source must be new_task or external_artifact")
-    if objective is not None and (not isinstance(objective, str) or not objective.strip() or len(objective) > 20_000):
-        raise ValueError("objective must be nonempty text of at most 20,000 characters")
+    if objective is not None:
+        _objective(objective)
     artifacts = artifacts if artifacts is not None else []
     if not isinstance(artifacts, list) or len(artifacts) > 100:
         raise ValueError("artifacts must contain at most 100 references")
@@ -79,7 +112,7 @@ def _task(source, objective, artifacts, self_contained):
     for artifact in artifacts:
         if isinstance(artifact, str) and artifact:
             roles.append("original_input" if source == "new_task" else "submitted_output")
-        elif isinstance(artifact, dict) and isinstance(artifact.get("artifact_id"), str) and artifact["artifact_id"] and artifact.get("role") in _ROLES:
+        elif isinstance(artifact, dict) and isinstance(artifact.get("artifact_id"), str) and artifact["artifact_id"] and artifact.get("role") in _INPUT_ROLES:
             roles.append(artifact["role"])
         else:
             raise ValueError("invalid artifact reference or role")
@@ -93,21 +126,11 @@ def _task(source, objective, artifacts, self_contained):
         raise ValueError("one artifact cannot be both original_input and submitted_output")
     if self_contained is not None and not isinstance(self_contained, bool):
         raise ValueError("self_contained must be a boolean")
-    body = {"source": source, "artifacts": artifacts}
+    body = {"artifacts": artifacts}
     if objective is not None:
         body["objective"] = objective
     if self_contained is not None:
         body["self_contained"] = self_contained
-    return body
-
-
-def _context(expected_context_version, objective, artifacts, self_contained):
-    if not isinstance(expected_context_version, int) or isinstance(expected_context_version, bool) or expected_context_version < 1:
-        raise ValueError("expected_context_version must be a positive integer")
-    body = {"expected_context_version": expected_context_version}
-    for field, value in (("objective", objective), ("artifacts", artifacts), ("self_contained", self_contained)):
-        if value is not None:
-            body[field] = value
     return body
 
 
@@ -186,21 +209,31 @@ def _result(request_sha256, outcome, artifacts, events, trace_coverage):
     return body
 
 
-def _execution_start(recipe_id, model, recall_memory, previous_execution_id):
+def _execution_start(task_id, source, objective, artifacts, self_contained, recipe_id, model, recall_memory,
+                     previous_execution_id):
     data = _model_data(model)
     if type(recall_memory) is not bool:
         raise ValueError('recall_memory must be boolean')
+    if task_id is not None:
+        path_part(task_id)
+        data['task_id'] = task_id
     if previous_execution_id is not None:
-        if recipe_id is not None or recall_memory:
-            raise ValueError("a correction takes only previous_execution_id and model")
+        if (source is not None or objective is not None or artifacts is not None or self_contained is not None
+                or recipe_id is not None or recall_memory):
+            raise ValueError("a correction takes only previous_execution_id, task_id and model")
         path_part(previous_execution_id)
         data['previous_execution_id'] = previous_execution_id
+        return data
+    if task_id is None or source is None:
+        raise ValueError("a new execution needs task_id and source")
+    data['source'] = source
+    data['input'] = _input(source, objective, artifacts, self_contained)
     if recall_memory:
         data['recall_memory'] = True
     if recipe_id is not None:
         path_part(recipe_id)
         data['recipe_id'] = recipe_id
-    return {'body': data} if data else {}
+    return data
 
 
 def _waited_learning(execution, execution_id):
@@ -225,8 +258,8 @@ class AsyncWorkflowAtoms:
     async def get_artifact(self, artifact_id):
         return await self._http.request("GET", f"/artifacts/{path_part(artifact_id)}")
 
-    async def create_task(self, *, source, key, objective=None, artifacts=None, self_contained=None):
-        return await self._http.request("POST", "/tasks", body=_task(source, objective, artifacts, self_contained), key=stable_key(key))
+    async def create_task(self, *, key, objective, artifacts=None):
+        return await self._http.request("POST", "/tasks", body=_task(objective, artifacts), key=stable_key(key))
 
     async def get_task(self, task_id):
         return await self._http.request("GET", f"/tasks/{path_part(task_id)}")
@@ -234,14 +267,18 @@ class AsyncWorkflowAtoms:
     async def list_tasks(self, *, limit=20, cursor=None):
         return await self._http.request('GET', '/tasks?'+urlencode({'limit':limit, **({'cursor':cursor} if cursor else {})}))
 
-    async def supplement_task_context(self, task_id, *, expected_context_version, objective=None, artifacts=None, self_contained=None):
+    async def supplement_task_context(self, task_id, *, expected_context_version, objective=None, artifacts=None):
         return await self._http.request("POST", f"/tasks/{path_part(task_id)}/context",
-                                        body=_context(expected_context_version, objective, artifacts, self_contained))
+                                        body=_context(expected_context_version, objective, artifacts))
 
-    async def start_execution(self, task_id, *, key, recipe_id=None, model=None, recall_memory=False, previous_execution_id=None):
-        """Start an execution; with ``previous_execution_id`` it is a correction of that execution."""
-        options = _execution_start(recipe_id, model, recall_memory, previous_execution_id)
-        return await self._http.request("POST", f"/tasks/{path_part(task_id)}/executions", key=stable_key(key), **options)
+    async def start_execution(self, task_id=None, *, key, source=None, objective=None, artifacts=None,
+                              self_contained=None, recipe_id=None, model=None, recall_memory=False,
+                              previous_execution_id=None):
+        """Start a new execution of a task with its own input; with ``previous_execution_id`` a correction."""
+        key = stable_key(key)
+        body = _execution_start(task_id, source, objective, artifacts, self_contained, recipe_id, model, recall_memory,
+                                previous_execution_id)
+        return await self._http.request("POST", "/executions", body=body, key=key)
 
     async def get_execution(self, execution_id):
         return await self._http.request("GET", f"/executions/{path_part(execution_id)}")
@@ -314,8 +351,8 @@ class SyncWorkflowAtoms:
     def get_artifact(self, artifact_id):
         return self._http.request("GET", f"/artifacts/{path_part(artifact_id)}")
 
-    def create_task(self, *, source, key, objective=None, artifacts=None, self_contained=None):
-        return self._http.request("POST", "/tasks", body=_task(source, objective, artifacts, self_contained), key=stable_key(key))
+    def create_task(self, *, key, objective, artifacts=None):
+        return self._http.request("POST", "/tasks", body=_task(objective, artifacts), key=stable_key(key))
 
     def get_task(self, task_id):
         return self._http.request("GET", f"/tasks/{path_part(task_id)}")
@@ -323,13 +360,18 @@ class SyncWorkflowAtoms:
     def list_tasks(self, *, limit=20, cursor=None):
         return self._http.request('GET', '/tasks?'+urlencode({'limit':limit, **({'cursor':cursor} if cursor else {})}))
 
-    def supplement_task_context(self, task_id, *, expected_context_version, objective=None, artifacts=None, self_contained=None):
+    def supplement_task_context(self, task_id, *, expected_context_version, objective=None, artifacts=None):
         return self._http.request("POST", f"/tasks/{path_part(task_id)}/context",
-                                  body=_context(expected_context_version, objective, artifacts, self_contained))
+                                  body=_context(expected_context_version, objective, artifacts))
 
-    def start_execution(self, task_id, *, key, recipe_id=None, model=None, recall_memory=False, previous_execution_id=None):
-        options = _execution_start(recipe_id, model, recall_memory, previous_execution_id)
-        return self._http.request("POST", f"/tasks/{path_part(task_id)}/executions", key=stable_key(key), **options)
+    def start_execution(self, task_id=None, *, key, source=None, objective=None, artifacts=None,
+                        self_contained=None, recipe_id=None, model=None, recall_memory=False,
+                        previous_execution_id=None):
+        """Start a new execution of a task with its own input; with ``previous_execution_id`` a correction."""
+        key = stable_key(key)
+        body = _execution_start(task_id, source, objective, artifacts, self_contained, recipe_id, model, recall_memory,
+                                previous_execution_id)
+        return self._http.request("POST", "/executions", body=body, key=key)
 
     def get_execution(self, execution_id):
         return self._http.request("GET", f"/executions/{path_part(execution_id)}")

@@ -63,15 +63,23 @@ def no_sleep(monkeypatch):
 @pytest.mark.parametrize('asynchronous', MODES)
 async def test_start_execution_sends_a_correction_with_previous_execution_id(asynchronous):
     server = Server()
-    await _run(asynchronous, server, 'start_execution', 't1', key='k', previous_execution_id='e0')
-    assert server.seen == [('POST', '/api/tasks/t1/executions', {'previous_execution_id': 'e0'}, 'k')]
+    await _run(asynchronous, server, 'start_execution', key='k', previous_execution_id='e0')
+    assert server.seen == [('POST', '/api/executions', {'previous_execution_id': 'e0'}, 'k')]
 
 
 @pytest.mark.parametrize('asynchronous', MODES)
-@pytest.mark.parametrize('extra', [{'recipe_id': 'r'}, {'recall_memory': True}])
-async def test_a_correction_rejects_recipe_and_memory_before_sending(asynchronous, extra):
+async def test_a_correction_may_name_its_task(asynchronous):
     server = Server()
-    with pytest.raises(ValueError, match='previous_execution_id'):
+    await _run(asynchronous, server, 'start_execution', 't1', key='k', previous_execution_id='e0')
+    assert server.seen == [('POST', '/api/executions', {'task_id': 't1', 'previous_execution_id': 'e0'}, 'k')]
+
+
+@pytest.mark.parametrize('asynchronous', MODES)
+@pytest.mark.parametrize('extra', [{'recipe_id': 'r'}, {'recall_memory': True}, {'source': 'new_task'},
+                                   {'objective': 'w1'}])
+async def test_a_correction_rejects_new_execution_fields_before_sending(asynchronous, extra):
+    server = Server()
+    with pytest.raises(ValueError, match='a correction takes only previous_execution_id, task_id and model'):
         await _run(asynchronous, server, 'start_execution', 't1', key='k', previous_execution_id='e0', **extra)
     assert server.seen == []
 
@@ -79,8 +87,35 @@ async def test_a_correction_rejects_recipe_and_memory_before_sending(asynchronou
 @pytest.mark.parametrize('asynchronous', MODES)
 async def test_a_correction_may_name_the_model(asynchronous):
     server = Server()
-    await _run(asynchronous, server, 'start_execution', 't1', key='k', previous_execution_id='e0', model='m')
+    await _run(asynchronous, server, 'start_execution', key='k', previous_execution_id='e0', model='m')
     assert server.seen[0][2] == {'model': 'm', 'previous_execution_id': 'e0'}
+
+
+@pytest.mark.parametrize('asynchronous', MODES)
+async def test_a_new_execution_carries_its_own_input(asynchronous):
+    server = Server()
+    await _run(asynchronous, server, 'start_execution', 't1', key='k', source='new_task', objective='w1',
+               self_contained=True)
+    assert server.seen == [('POST', '/api/executions',
+                            {'task_id': 't1', 'source': 'new_task',
+                             'input': {'artifacts': [], 'objective': 'w1', 'self_contained': True}}, 'k')]
+
+
+@pytest.mark.parametrize('asynchronous', MODES)
+async def test_a_new_execution_needs_task_and_source(asynchronous):
+    server = Server()
+    with pytest.raises(ValueError, match='a new execution needs task_id and source'):
+        await _run(asynchronous, server, 'start_execution', 't1', key='k')
+    assert server.seen == []
+
+
+@pytest.mark.parametrize('asynchronous', MODES)
+async def test_an_external_artifact_execution_needs_a_submitted_output(asynchronous):
+    server = Server()
+    with pytest.raises(ValueError, match='external_artifact requires submitted_output'):
+        await _run(asynchronous, server, 'start_execution', 't1', key='k', source='external_artifact',
+                   artifacts=[{'artifact_id': 'a1', 'role': 'original_input'}])
+    assert server.seen == []
 
 
 @pytest.mark.parametrize('asynchronous', MODES)
