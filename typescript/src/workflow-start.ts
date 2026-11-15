@@ -28,6 +28,8 @@ export function executionOptions(task: WorkflowSnapshot['task'], { createsTask, 
   if (!task || typeof task !== 'object' || Array.isArray(task)) throw new TypeError("prepare requires task: the execution's source, objective and artifacts");
   if (task.source === undefined) throw new TypeError('task.source is required');
   if (createsTask) taskObjective(task.objective);
+  // The service freezes a task's model, so every version of its Recipes stays on one model.
+  else if (model !== undefined) throw new TypeError('model names the model of a task the prepare creates; an existing task keeps its own');
   executionInput(task.source, task.objective, task.artifacts, task.self_contained);
   if (recipeId !== undefined) pathPart(recipeId);
   return { source: task.source, objective: task.objective, artifacts: task.artifacts, selfContained: task.self_contained, ...modelData(model),

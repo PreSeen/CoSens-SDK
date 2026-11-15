@@ -186,6 +186,25 @@ test('start approval names the Recipe task and refuses a foreign one before aski
   assert.deepEqual(asked, [['prepare', { task: spec, task_id: owner }]]); assert.equal(prepared.task_id, owner);
 });
 
+test('start takes a model only for a task it creates, before asking or sending', async () => {
+  // An existing task keeps its frozen model, so a model with recipeId or task_id is refused before the host approves.
+  const service = new ServiceFake(); const asked: unknown[] = [];
+  const owner = service.addTask('Write the quarterly report');
+  service.recipes = [recipeView('recipe_1', owner)];
+  const client = new CoSensClient({ apiKey: 'test-key', fetch: service.fetch });
+  await client.atoms.startExecution(owner, { key: 'first', model: 'm-old', ...NEW });
+  const before = service.requests.length;
+  const spec = { source: 'new_task', objective: 'Produce a report' } as const;
+  const authorize = (...args: unknown[]) => { asked.push(args); return true; };
+  for (const [snapshot, extra] of [[{ task: spec }, { recipeId: 'recipe_1' }], [{ task: spec, task_id: owner }, {}]] as const) {
+    await assert.rejects(client.start(snapshot, { requestKey: 'prepare-1', model: 'm-new', mode: 'approval', authorize, ...extra }),
+      /model names the model of a task the prepare creates; an existing task keeps its own/);
+  }
+  assert.deepEqual(asked, []); assert.equal(service.requests.length, before);
+  const prepared = await client.start({ task: spec }, { requestKey: 'prepare-2', recipeId: 'recipe_1', mode: 'approval', authorize });
+  assert.equal(prepared.task_id, owner); assert.ok(!('model' in service.requests.at(-1)!.body));
+});
+
 test('auto runs a matched Recipe in the task that owns it', async () => {
   // Reusing a Recipe creates no task: the execution goes to the Recipe's task and keeps that task's model.
   const service = new ServiceFake();
@@ -295,17 +314,25 @@ test('the fake follows the service: keys, feedback, request hashes, a frozen mod
   assert.equal(first.request.method.version, 3);
   assert.equal((await a.startExecution('task_1', { key: 'same', ...NEW })).execution_id, first.execution_id);
   for (const changed of [{ recallMemory: true }, { objective: 'Another week' }]) {
-    await assert.rejects(a.startExecution('task_1', { key: 'same', ...NEW, ...changed }), (e: any) => status(e) === 422 && /different context/.test(e.message));
+    await assert.rejects(a.startExecution('task_1', { key: 'same', ...NEW, ...changed }), (e: any) => status(e) === 422 && /different execution/.test(e.message));
   }
+  // One key space across tasks: a key the first task's start took is refused in another task.
+  service.addTask('Produce another output');
+  await assert.rejects(a.startExecution('task_2', { key: 'same', ...NEW }), (e: any) => status(e) === 422 && /different execution/.test(e.message));
   await assert.rejects(a.startExecution('task_1', { key: 'other-model', model: 'm2', ...NEW }), (e: any) => status(e) === 422 && /frozen/.test(e.message));
   await assert.rejects(a.submitExecution(first.execution_id, { requestSha256: 'stale', outcome: 'completed', artifacts: [{ artifact_id: 'a1', role: 'submitted_output' }] }), /request hash mismatch/);
   await assert.rejects(a.startExecution('task_1', { key: 'early', previousExecutionId: first.execution_id }), (e: any) => status(e) === 422 && /no completed output/.test(e.message));
   await a.submitExecution(first.execution_id, { requestSha256: first.request_sha256, outcome: 'completed', artifacts: [{ artifact_id: 'a1', role: 'submitted_output' }] });
   const second = await a.startExecution('task_1', { key: 'other', ...NEW });
   await a.submitExecution(second.execution_id, { requestSha256: second.request_sha256, outcome: 'completed', artifacts: [{ artifact_id: 'a2', role: 'submitted_output' }] });
-  // A correction key is scoped to the execution it corrects.
+  // A start key belongs to one execution start: a correction replays its own key and refuses another start's.
   const fixFirst = await a.startExecution('task_1', { key: 'fix', previousExecutionId: first.execution_id });
-  const fixSecond = await a.startExecution('task_1', { key: 'fix', previousExecutionId: second.execution_id });
+  assert.deepEqual(await a.startExecution('task_1', { key: 'fix', previousExecutionId: first.execution_id }), fixFirst);
+  for (const [key, previous] of [['fix', second.execution_id], ['other', first.execution_id]]) {
+    await assert.rejects(a.startExecution('task_1', { key, previousExecutionId: previous }), (e: any) => status(e) === 422 && /different execution/.test(e.message));
+  }
+  await assert.rejects(a.startExecution('task_1', { key: 'fix', ...NEW }), (e: any) => status(e) === 422 && /different execution/.test(e.message));
+  const fixSecond = await a.startExecution('task_1', { key: 'fix-second', previousExecutionId: second.execution_id });
   assert.equal(new Set([first, second, fixFirst, fixSecond].map(x => x.execution_id)).size, 4);
   assert.equal(fixFirst.request.method.version, 3);
   for (const [taskId, previous, code] of [['task_1', 'execution_99', 404], ['task_2', first.execution_id, 422]] as const) {

@@ -29,7 +29,8 @@ export class ServiceFake {
   readonly executions = new Map<string, Execution>();
   readonly tasks = new Map<string, Task>();
   private readonly taskKeys = new Map<string, { body: string; taskId: string }>();
-  private readonly keys = new Map<string, { intent?: string; receipt: any }>();
+  /** One start key per principal across every POST /executions start: what it started and the receipt it replays. */
+  private readonly keys = new Map<string, { target: string; intent?: string; receipt: any }>();
   private readonly feedbackKeys = new Map<string, any>();
   private readonly taskModels = new Map<string, string>();
   generations = 0;
@@ -156,8 +157,8 @@ export class ServiceFake {
   /** POST /executions: a new execution names task_id, source and input; a correction names previous_execution_id. */
   private start(body: any, key: string): Response {
     const previous = body.previous_execution_id ?? null;
-    let taskId: string; let requestInput: any; let instanceId: string | undefined; let method: any;
-    let scope: string; let intent: string | undefined;
+    let taskId: string; let requestInput: any; let instanceId: string | undefined; let method: () => any;
+    let target: string; let intent: string | undefined;
     if (previous !== null) {
       if (Object.keys(body).some(field => !['previous_execution_id', 'task_id', 'model'].includes(field))) return invalid('a correction takes only previous_execution_id, task_id and model');
       const before = this.executions.get(previous);
@@ -165,9 +166,9 @@ export class ServiceFake {
       if (before.status !== 'completed') return invalid('execution has no completed output');
       if (body.task_id !== undefined && body.task_id !== before.taskId) return invalid('previous execution belongs to another task');
       taskId = before.taskId; requestInput = before.input; instanceId = before.instanceId;
-      scope = JSON.stringify(['correction', previous, key]);
+      target = JSON.stringify(['correction', previous]);
       // A correction follows the current version of the Recipe the previous execution followed.
-      method = before.method ? this.method(before.method.recipe_id) : this.taskMethod(taskId, undefined);
+      method = () => before.method ? this.method(before.method.recipe_id) : this.taskMethod(taskId, undefined);
     } else {
       if (!body.task_id || !['new_task', 'external_artifact'].includes(body.source) || !body.input || typeof body.input !== 'object') {
         return invalid('a new execution needs task_id, source and input');
@@ -177,24 +178,26 @@ export class ServiceFake {
       const [value, missing] = ServiceFake.input(body.source, body.input);
       if (missing.length) return json({ error: { code: 'input_incomplete', message: 'the execution input is incomplete', missing } }, 422);
       requestInput = value;
-      scope = JSON.stringify(['original', taskId, key]);
-      intent = canonical([body.source, value, body.recipe_id ?? null, Boolean(body.recall_memory)]);
-      method = this.taskMethod(taskId, body.recipe_id);
+      target = JSON.stringify(['original']);
+      intent = canonical([taskId, body.source, value, body.recipe_id ?? null, Boolean(body.recall_memory)]);
+      method = () => this.taskMethod(taskId, body.recipe_id);
     }
-    if (method instanceof Response) return method;
     const frozen = this.freezeModel(taskId, body.model);
     if (frozen) return frozen;
-    const saved = this.keys.get(scope);
-    if (saved) return saved.intent === intent ? json(saved.receipt) : invalid('idempotency key reused with different context');
+    // A replay resolves before the Recipe; a key another start took, or the same start changed, is refused.
+    const saved = this.keys.get(key);
+    if (saved) return saved.target === target && saved.intent === intent ? json(saved.receipt) : invalid('idempotency key reused with different execution');
+    const frozenMethod = method();
+    if (frozenMethod instanceof Response) return frozenMethod;
     const executionId = `execution_${this.executions.size + 1}`;
     const kind = previous ? 'correction' : 'original';
     instanceId ??= executionId;
     this.executions.set(executionId, { taskId, kind, status: 'awaiting_execution', previous, requestSha256: 'sha-' + executionId,
-      input: requestInput, instanceId, method });
+      input: requestInput, instanceId, method: frozenMethod });
     const task = this.tasks.get(taskId)!;
     const receipt = { task_id: taskId, execution_id: executionId, instance_id: instanceId, kind, request_sha256: 'sha-' + executionId, status: 'awaiting_execution',
-      request: { task_context: { objective: task.objective, artifacts: task.artifacts, context_version: task.context_version }, input: requestInput, method } };
-    this.keys.set(scope, { intent, receipt });
+      request: { task_context: { objective: task.objective, artifacts: task.artifacts, context_version: task.context_version }, input: requestInput, method: frozenMethod } };
+    this.keys.set(key, { target, intent, receipt });
     return json(receipt);
   }
 

@@ -36,7 +36,9 @@ class Backend:
     RESUMABLE={'failed','interrupted','awaiting_runner'}
 
     def __init__(self):
-        self.seen=[];self.headers=[];self.count=0;self.generations=0;self.learnings={};self.executions={};self.keys={}
+        self.seen=[];self.headers=[];self.count=0;self.generations=0;self.learnings={};self.executions={}
+        # One start key per principal across every POST /executions start: (target, intent, receipt).
+        self.keys={}
         self.feedback_keys={};self.tasks={};self.task_keys={}
         # Recipe version views {recipe_id, origin, version, task_id, recipe, ...} served by GET /recipes and
         # /recipes/{id}; a generated Recipe's task_id names the one task that owns it.
@@ -109,9 +111,9 @@ class Backend:
             if body.get('task_id') not in (None,before['task_id']):
                 return invalid('previous execution belongs to another task')
             task_id,request_input,instance_id=before['task_id'],before['input'],before['instance_id']
-            scope,intent=('correction',previous,key),None
+            target,intent=('correction',previous),None
             # A correction follows the current version of the Recipe the previous execution followed.
-            method=self._method(before['method']['recipe_id']) if before['method'] else self._task_method(task_id,None)
+            method=lambda:self._method(before['method']['recipe_id']) if before['method'] else self._task_method(task_id,None)
         else:
             task_id,source,request_input=body.get('task_id'),body.get('source'),body.get('input')
             if not task_id or source not in {'new_task','external_artifact'} or not isinstance(request_input,dict):
@@ -122,17 +124,19 @@ class Backend:
             if missing:
                 return httpx.Response(422,json={'error':{'code':'input_incomplete','message':'the execution input is incomplete','missing':missing}})
             instance_id=None
-            scope,intent=('original',task_id,key),(source,json.dumps(request_input,sort_keys=True),body.get('recipe_id'),bool(body.get('recall_memory')))
-            method=self._task_method(task_id,body.get('recipe_id'))
-        if isinstance(method,httpx.Response):
-            return method
+            target,intent=('original',),(task_id,source,json.dumps(request_input,sort_keys=True),body.get('recipe_id'),bool(body.get('recall_memory')))
+            method=lambda:self._task_method(task_id,body.get('recipe_id'))
         frozen=self._freeze_model(task_id,body.get('model'))
         if frozen is not None:
             return frozen
-        if scope in self.keys:
-            if self.keys[scope][0]!=intent:
-                return invalid('idempotency key reused with different context')
-            return self.keys[scope][1]
+        # A replay resolves before the Recipe; a key another start took, or the same start changed, is refused.
+        if key in self.keys:
+            if self.keys[key][:2]!=(target,intent):
+                return invalid('idempotency key reused with different execution')
+            return self.keys[key][2]
+        method=method()
+        if isinstance(method,httpx.Response):
+            return method
         execution_id=f'execution_{len(self.executions)+1}'
         kind='correction' if previous else 'original'
         instance_id=instance_id or execution_id
@@ -144,7 +148,7 @@ class Backend:
                  'input':request_input,'method':method}
         receipt={'task_id':task_id,'execution_id':execution_id,'instance_id':instance_id,'kind':kind,
                  'request_sha256':'sha-'+execution_id,'status':'awaiting_execution','request':request}
-        self.keys[scope]=(intent,receipt)
+        self.keys[key]=(target,intent,receipt)
         return receipt
 
     def _freeze_model(self,task_id,model):
@@ -550,6 +554,24 @@ async def test_start_approval_names_the_recipe_task_and_refuses_a_foreign_one_be
     assert asked==[('prepare',{'task':spec,'task_id':owner})] and prepared['task_id']==owner
 
 
+@pytest.mark.asyncio
+async def test_start_takes_a_model_only_for_a_task_it_creates_before_asking_or_sending(tmp_path):
+    """An existing task keeps its frozen model, so a model with recipe_id or task_id is refused before the host approves."""
+    backend=Backend();asked=[]
+    owner=backend.add_task('Write the quarterly report')
+    backend.task_models[owner]='m-old'
+    backend.recipes=[_recipe_view('recipe_1',owner)]
+    spec={'source':'new_task','objective':'Produce a report'}
+    authorize=lambda *args:asked.append(args) or True
+    async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(backend)) as sdk:
+        for snapshot,extra in (({'task':spec},{'recipe_id':'recipe_1'}),({'task':spec,'task_id':owner},{})):
+            with pytest.raises(ValueError, match='model names the model of a task the prepare creates; an existing task keeps its own'):
+                await sdk.start(snapshot,request_key='prepare-1',model='m-new',mode='approval',authorize=authorize,**extra)
+        assert asked==[] and backend.seen==[]
+        prepared=await sdk.start({'task':spec},request_key='prepare-2',recipe_id='recipe_1',mode='approval',authorize=authorize)
+    assert prepared['task_id']==owner and 'model' not in backend.seen[-1][2]
+
+
 def _policy(match):
     """A decision model that activates every turn and answers the Recipe matcher with ``match``."""
     def native(r):
@@ -705,17 +727,27 @@ async def test_execution_keys_feedback_keys_and_request_hashes_follow_the_servic
         assert first['request']['method']['version']==3
         assert (await a.start_execution('task_1',key='same',**NEW))['execution_id']==first['execution_id']
         for changed in ({'recall_memory':True},{'objective':'Another week'}):
-            with pytest.raises(RSIHTTPError, match='different context') as caught:
+            with pytest.raises(RSIHTTPError, match='different execution') as caught:
                 await a.start_execution('task_1',key='same',**{**NEW,**changed})
             assert caught.value.status_code==422
+        # One key space across tasks: a key the first task's start took is refused in another task.
+        backend.add_task('Produce another output')
+        with pytest.raises(RSIHTTPError, match='different execution') as caught:
+            await a.start_execution('task_2',key='same',**NEW)
+        assert caught.value.status_code==422
         with pytest.raises(RSIHTTPError, match='request hash mismatch'):
             await a.submit_execution(first['execution_id'],request_sha256='stale',outcome='completed',artifacts=[{'artifact_id':'a1','role':'submitted_output'}])
         await a.submit_execution(first['execution_id'],request_sha256=first['request_sha256'],outcome='completed',artifacts=[{'artifact_id':'a1','role':'submitted_output'}])
         second=await a.start_execution('task_1',key='other',**NEW)
         await a.submit_execution(second['execution_id'],request_sha256=second['request_sha256'],outcome='completed',artifacts=[{'artifact_id':'a2','role':'submitted_output'}])
-        # A correction key is scoped to the execution it corrects.
+        # A start key belongs to one execution start: a correction replays its own key and refuses another start's.
         fix_first=await a.start_execution('task_1',key='fix',previous_execution_id=first['execution_id'])
-        fix_second=await a.start_execution('task_1',key='fix',previous_execution_id=second['execution_id'])
+        assert await a.start_execution('task_1',key='fix',previous_execution_id=first['execution_id'])==fix_first
+        for key,options in (('fix',{'previous_execution_id':second['execution_id']}),('other',{'previous_execution_id':first['execution_id']}),('fix',NEW)):
+            with pytest.raises(RSIHTTPError, match='different execution') as caught:
+                await a.start_execution('task_1',key=key,**options)
+            assert caught.value.status_code==422
+        fix_second=await a.start_execution('task_1',key='fix-second',previous_execution_id=second['execution_id'])
         assert len({fix_first['execution_id'],fix_second['execution_id'],first['execution_id'],second['execution_id']})==4
         assert fix_first['request']['method']['version']==3
         for task_id,previous,status in (('task_1','execution_99',404),('task_2',first['execution_id'],422)):

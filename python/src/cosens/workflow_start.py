@@ -25,6 +25,9 @@ def _execution_options(task_data, *, creates_task, recipe_id=None, model=None, r
         raise ValueError("task.source is required")
     if creates_task:
         _objective(task_data.get("objective"))
+    elif model is not None:
+        # The service freezes a task's model, so every version of its Recipes stays on one model.
+        raise ValueError("model names the model of a task the prepare creates; an existing task keeps its own")
     options = {"source": task_data["source"], "objective": task_data.get("objective"),
                "artifacts": task_data.get("artifacts"), "self_contained": task_data.get("self_contained")}
     _input(**options)
