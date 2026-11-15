@@ -94,8 +94,8 @@ test('auto recipe match timeout still captures the turn without a Recipe', async
         ? { recipe_id: 'recipe', origin: 'generated', version: 1,
             recipe: { title: 'Test', when: 'tests', when_not: 'never', steps: [] } }
         : path === '/artifacts' ? { artifact_id: 'artifact', content_hash: 'sha256:x' }
-        : path === '/tasks' ? { task_id: 'task', status: 'ready' }
-        : path.endsWith('/executions') ? { execution_id: 'execution', status: 'awaiting_execution', request_sha256: 'sha', request: {} }
+        : path === '/tasks' ? { task_id: 'task', objective: 'task', artifacts: [], context_version: 1 }
+        : path === '/executions' ? { execution_id: 'execution', status: 'awaiting_execution', request_sha256: 'sha', request: {} }
         : path.endsWith('/result') ? { task_id: 'task', execution_id: 'execution', status: 'completed', trace_origin: 'original' }
         : { items: [] };
     return new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } });

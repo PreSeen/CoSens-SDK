@@ -47,19 +47,95 @@ afterEach(() => { Object.assign(clock, real); });
 
 test('startExecution sends a correction with previousExecutionId', async () => {
   const { seen, client } = server();
-  await client.atoms.startExecution('t1', { key: 'k', previousExecutionId: 'e0' });
-  assert.deepEqual(seen, [['POST', '/api/tasks/t1/executions', { previous_execution_id: 'e0' }, 'k']]);
-  await client.atoms.startExecution('t1', { key: 'k2', previousExecutionId: 'e0', model: 'm' });
+  await client.atoms.startExecution(undefined, { key: 'k', previousExecutionId: 'e0' });
+  assert.deepEqual(seen, [['POST', '/api/executions', { previous_execution_id: 'e0' }, 'k']]);
+  await client.atoms.startExecution(undefined, { key: 'k2', previousExecutionId: 'e0', model: 'm' });
   assert.deepEqual(seen[1]![2], { model: 'm', previous_execution_id: 'e0' });
 });
 
-for (const extra of [{ recipeId: 'r' }, { recallMemory: true }]) {
+test('a correction may name its task', async () => {
+  const { seen, client } = server();
+  await client.atoms.startExecution('t1', { key: 'k', previousExecutionId: 'e0' });
+  assert.deepEqual(seen, [['POST', '/api/executions', { task_id: 't1', previous_execution_id: 'e0' }, 'k']]);
+});
+
+for (const extra of [{ recipeId: 'r' }, { recallMemory: true }, { source: 'new_task' }, { objective: 'w1' }, { artifacts: [] }, { selfContained: false }]) {
   test(`a correction rejects ${Object.keys(extra)[0]} before sending`, async () => {
     const { seen, client } = server();
-    assert.throws(() => client.atoms.startExecution('t1', { key: 'k', previousExecutionId: 'e0', ...extra }), /previousExecutionId/);
+    assert.throws(() => client.atoms.startExecution('t1', { key: 'k', previousExecutionId: 'e0', ...extra } as any),
+      /a correction takes only previousExecutionId, taskId and model/);
     assert.deepEqual(seen, []);
   });
 }
+
+test('a new execution carries its own input', async () => {
+  const { seen, client } = server();
+  await client.atoms.startExecution('t1', { key: 'k', source: 'new_task', objective: 'w1', selfContained: true });
+  assert.deepEqual(seen, [['POST', '/api/executions', { task_id: 't1', source: 'new_task', input: { artifacts: [], objective: 'w1', self_contained: true } }, 'k']]);
+  await client.atoms.startExecution('t1', { key: 'k2', source: 'external_artifact', artifacts: ['out', { artifact_id: 'in', role: 'original_input' }], recipeId: 'r1', recallMemory: true, model: 'm' });
+  assert.deepEqual(seen[1]![2], { model: 'm', task_id: 't1', source: 'external_artifact', recall_memory: true, recipe_id: 'r1',
+    input: { artifacts: ['out', { artifact_id: 'in', role: 'original_input' }] } });
+});
+
+test('a new execution needs taskId and source', async () => {
+  const { seen, client } = server();
+  assert.throws(() => client.atoms.startExecution('t1', { key: 'k' } as any), /a new execution needs taskId and source/);
+  assert.throws(() => client.atoms.startExecution(undefined, { key: 'k', source: 'new_task', objective: 'w1' }), /a new execution needs taskId and source/);
+  assert.deepEqual(seen, []);
+});
+
+for (const [options, message] of [
+  [{ source: 'external_artifact', artifacts: [{ artifact_id: 'a1', role: 'original_input' }] }, /external_artifact requires submitted_output/],
+  [{ source: 'bogus' }, /source must be new_task or external_artifact/],
+  [{ source: 'new_task', objective: ' ' }, /objective must be nonempty text of at most 20,000 characters/],
+  [{ source: 'new_task', artifacts: [{ artifact_id: 'a1', role: 'reference' }] }, /invalid artifact reference or role/],
+  [{ source: 'new_task', artifacts: ['a1', { artifact_id: 'a1', role: 'submitted_output' }] }, /one artifact cannot be both original_input and submitted_output/],
+  [{ source: 'new_task', selfContained: 'yes' }, /selfContained must be a boolean/],
+] as const) {
+  test(`a new execution input is checked before sending: ${message.source}`, async () => {
+    const { seen, client } = server();
+    assert.throws(() => client.atoms.startExecution('t1', { key: 'k', ...options } as any), message);
+    assert.deepEqual(seen, []);
+  });
+}
+
+test('startExecution checks the key before the body', async () => {
+  const { seen, client } = server();
+  assert.throws(() => client.atoms.startExecution('t1', { key: '', source: 'bogus' } as any), /key must be/);
+  assert.deepEqual(seen, []);
+});
+
+test('createTask sends the capability', async () => {
+  const { seen, client } = server();
+  await client.atoms.createTask({ key: 'k', objective: 'Weekly report', artifacts: ['a1', { artifact_id: 'a2', role: 'reference' }] });
+  assert.deepEqual(seen, [['POST', '/api/tasks', { objective: 'Weekly report', artifacts: ['a1', { artifact_id: 'a2', role: 'reference' }] }, 'k']]);
+});
+
+for (const [options, message] of [
+  [{ objective: 'w', artifacts: [{ artifact_id: 'a1', role: 'original_input' }] }, /a task's artifacts are ids or references with role reference/],
+  [{ objective: '' }, /objective must be nonempty/],
+  [{ objective: '   ' }, /objective must be nonempty/],
+  [{ objective: 'x'.repeat(20_001) }, /objective must be nonempty/],
+  [{ objective: 'w', artifacts: Array.from({ length: 101 }, (_, n) => `a${n}`) }, /artifacts must contain at most 100 references/],
+] as const) {
+  test(`createTask rejects ${message.source} before sending`, async () => {
+    const { seen, client } = server();
+    assert.throws(() => client.atoms.createTask({ key: 'k', ...options } as any), message);
+    assert.deepEqual(seen, []);
+  });
+}
+
+test('supplementTaskContext sends reference artifacts and the expected version', async () => {
+  const { seen, client } = server();
+  await client.atoms.supplementTaskContext('t1', { expectedContextVersion: 2, objective: 'Weekly report', artifacts: ['a1'] });
+  await client.atoms.supplementTaskContext('t1', { expectedContextVersion: 3 });
+  assert.deepEqual(seen.map(entry => [entry[1], entry[2]]), [
+    ['/api/tasks/t1/context', { expected_context_version: 2, objective: 'Weekly report', artifacts: ['a1'] }],
+    ['/api/tasks/t1/context', { expected_context_version: 3 }]]);
+  assert.throws(() => client.atoms.supplementTaskContext('t1', { expectedContextVersion: 0 }), /expectedContextVersion must be a positive integer/);
+  assert.throws(() => client.atoms.supplementTaskContext('t1', { expectedContextVersion: 1, artifacts: [{ artifact_id: 'a1', role: 'acceptance' }] } as any), /role reference/);
+  assert.equal(seen.length, 2);
+});
 
 test('recordFeedback is keyed by execution', async () => {
   const { seen, client } = server();

@@ -260,7 +260,7 @@ export class OpenAIWrapper {
     if (!decision.activate && !turn.executionId) {
       // A declined turn must not recall or inject context without an
       // execution that records the method actually used by the host.
-      delete turn.frozenContext;
+      delete turn.frozenContext; delete turn.taskId;
       turn.visibleInput = userText(path, params);
       turn.state = 'native_running'; this.save(turn);
       return { turn, updated: params };
@@ -268,6 +268,8 @@ export class OpenAIWrapper {
     if(!turn.frozenContext){
       try {
         turn.frozenContext=await this.lookup(turn.objective,params);
+        // A matched Recipe's execution runs in that Recipe's task.
+        if(turn.frozenContext.recipe.status==='matched')turn.taskId=turn.frozenContext.recipe.task_id;
         this.save(turn);
       } catch (error) {
         turn.decision = { ...turn.decision, capture: 'policy_failed' };
@@ -279,14 +281,16 @@ export class OpenAIWrapper {
       }
     }
     if(decision.activate && !turn.executionId){
-      if(!turn.taskId){
-        if(turn.inputPending)throw new RSIRecoveryRequired('Input upload receipt unknown');
-        if(!turn.inputArtifact){turn.inputPending=true;this.save(turn);const ref=await this.client.atoms.artifact({name:'input.json',content:JSON.stringify({request:params})});turn.inputArtifact=ref.artifact_id;turn.inputPending=false;this.save(turn);}
-        const task=await this.client.atoms.createTask({source:'new_task',objective:turn.objective,artifacts:[turn.inputArtifact!],key:'task:'+turn.turnId});turn.taskId=task.task_id;this.save(turn);
-      }
+      // The turn's own request is the execution's input; the artifact is keyed on the turn, so a retry reuses it.
+      if(turn.inputPending)throw new RSIRecoveryRequired('Input upload receipt unknown');
+      if(!turn.inputArtifact){turn.inputPending=true;this.save(turn);const ref=await this.client.atoms.artifact({name:'input.json',content:JSON.stringify({request:params})});turn.inputArtifact=ref.artifact_id;turn.inputPending=false;this.save(turn);}
+      if(!turn.taskId){const task=await this.client.atoms.createTask({objective:turn.objective,key:'task:'+turn.turnId});turn.taskId=task.task_id;this.save(turn);}
       const selected = turn.frozenContext.recipe;
       const matched = selected.status === 'matched';
-      const execution = await this.client.atoms.startExecution(turn.taskId!, { key: 'execution:' + turn.turnId, model: params.model, ...(matched ? { recipeId: selected.recipe_id } : {}) });
+      // A matched Recipe runs in its own task, which keeps the model its versions were learned with;
+      // only a task this turn created takes the turn's model.
+      const execution = await this.client.atoms.startExecution(turn.taskId!, { key: 'execution:' + turn.turnId, source: 'new_task', objective: turn.objective,
+        artifacts: [turn.inputArtifact!], ...(matched ? { recipeId: selected.recipe_id } : { model: params.model }) });
       // Verify the service bound the same immutable method we will inject.
       const method = execution.request?.method;
       if (matched && (method?.recipe_id !== selected.recipe_id || method?.version !== selected.version)) {
@@ -327,6 +331,8 @@ export class OpenAIWrapper {
         matchError = { type: error instanceof Error ? error.name : typeof error, message: String(error instanceof Error ? error.message : error).slice(0, 500) };
       }
     }
+    // A Recipe belongs to one task; reusing it means running in that task.
+    if (recipe.status === 'matched' && (typeof recipe.task_id !== 'string' || !recipe.task_id)) throw new RSIRecoveryRequired('Matched Recipe has no task');
     const memory = await this.client.atoms.memoryRecall({ query: objective });
     return { recipe, context: { source: 'workflow_recipe_lookup', lookup_complete: complete, ...(matchError ? { recipe_match_error: matchError } : {}) }, snapshot: { evidence: memory.items } };
   }
@@ -345,7 +351,7 @@ export class OpenAIWrapper {
     if (!chosen.recipe_id) return { status: 'not_found' };
     const selected = recipes.find(r => r.recipe_id === chosen.recipe_id);
     if (!selected) throw new RSIRecoveryRequired('Recipe matcher returned an unknown Recipe');
-    return { status: 'matched', recipe_id: selected.recipe_id, version: selected.version, bundle: selected.recipe, provisional: true };
+    return { status: 'matched', recipe_id: selected.recipe_id, version: selected.version, task_id: selected.task_id, bundle: selected.recipe, provisional: true };
   }
   private async complete(turn:Turn,response:any):Promise<void>{
  if(!terminal(response)){

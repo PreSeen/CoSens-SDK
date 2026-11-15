@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CoSensClient, RSILearningFailedError, RSILearningStoppedError } from '../src/index.ts';
+import { CoSensClient, RSIHTTPError, RSILearningFailedError, RSILearningStoppedError } from '../src/index.ts';
 
 const DETAIL = { code: 'insufficient_credits', message: 'The model gateway reported insufficient credits.',
   retryable: false, phase: 'analyzing', upstream_status: 402, upstream_code: 'gateway_credit_insufficient' };
@@ -39,3 +39,19 @@ test('waitLearning stops on interrupted with the learning', async () => {
   assert.ok(error instanceof RSILearningStoppedError);
   assert.equal(error.status, 'interrupted'); assert.deepEqual(error.learning, learning);
 });
+
+for (const [payload, missing, recipeIds] of [
+  [{ error: { code: 'input_incomplete', message: 'm', missing: ['objective', 'submitted_output'] } }, ['objective', 'submitted_output'], undefined],
+  [{ error: { code: 'recipe_choice_required', message: 'm', recipe_ids: ['r1', 'r2'] } }, undefined, ['r1', 'r2']],
+  [{ detail: { code: 'input_incomplete', message: 'm', missing: ['objective'] } }, ['objective'], undefined],
+  [{ error: { code: 'input_incomplete', message: 'm', missing: ['objective', 3] } }, undefined, undefined],
+  [{ error: { code: 'input_incomplete', message: 'm', missing: 'objective' } }, undefined, undefined],
+  [{ error: { code: 'recipe_choice_required', message: 'm', recipe_ids: ['service-key-recipe'] } }, undefined, ['[REDACTED]-recipe']],
+] as const) {
+  test(`a structured error detail keeps lists of names: ${JSON.stringify(payload)}`, async () => {
+    const client = new CoSensClient({ apiKey: 'service-key', fetch: async () => new Response(JSON.stringify(payload), { status: 422 }) });
+    const error = await client.atoms.getTask('r1').then(() => undefined, value => value);
+    assert.ok(error instanceof RSIHTTPError);
+    assert.deepEqual([error.missing, error.recipeIds], [missing, recipeIds]);
+  });
+}

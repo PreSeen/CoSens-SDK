@@ -1,7 +1,9 @@
 export class RSIError extends Error { name = 'RSIError'; }
+/** `missing` (input_incomplete) is what the execution input lacks; `recipeIds` (recipe_choice_required) are the task's Recipes, one of which to name. */
 export class RSIHTTPError extends RSIError {
   name = 'RSIHTTPError';
-  constructor(public statusCode: number, message: string, public code?: string, public requestId?: string) { super(message); }
+  constructor(public statusCode: number, message: string, public code?: string, public requestId?: string,
+    public missing?: string[], public recipeIds?: string[]) { super(message); }
 }
 export class RSITransportError extends RSIError { name = 'RSITransportError'; }
 export class RSIDecisionUnavailable extends RSIError { name = 'RSIDecisionUnavailable'; }

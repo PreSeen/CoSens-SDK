@@ -99,7 +99,7 @@ test('the pinned OpenAI Chat stream keeps a tool call on the same CoSens executi
     if(path.endsWith('/recipes'))return new Response(JSON.stringify({items:[],has_more:false}));
     if(path.endsWith('/memory/recall'))return new Response(JSON.stringify({items:[]}));
     if(path.endsWith('/artifacts'))return new Response(JSON.stringify({artifact_id:'artifact-1',content_hash:'sha256:test'}));
-    if(path.endsWith('/tasks'))return new Response(JSON.stringify({task_id:'task-1',status:'ready'}));
+    if(path.endsWith('/tasks'))return new Response(JSON.stringify({task_id:'task-1',objective:'hello',artifacts:[],context_version:1}));
     if(path.endsWith('/executions')){prepares++;return new Response(JSON.stringify({execution_id:'execution-1',status:'awaiting_execution',request_sha256:'hash',request:{}}));}
     if(path.endsWith('/result')){submits++;events.push(...JSON.parse(String(init?.body)).events);return new Response(JSON.stringify({status:'completed',trace_origin:'original'}));}
     throw Error(path);

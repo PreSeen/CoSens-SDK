@@ -1,10 +1,10 @@
 /** Opt-in native Runner wrapper for the task workflow protocol. */
 import { Runner, RunState } from '@openai/agents';
 import { CoSensClient, type FeedbackSource, type WorkflowOutputRef } from './atoms.js';
-import { RSIApprovalUnavailable, RSIRecoveryRequired } from './errors.js';
+import { RSIApprovalUnavailable, RSIHTTPError, RSIRecoveryRequired } from './errors.js';
 import type { CoSensMode } from './openai-proxy.js';
 import { canonical, hash, TurnStore } from './state.js';
-import type { WorkflowPhase, WorkflowSnapshot } from './workflow-start.js';
+import { executionOptions, type WorkflowPhase, type WorkflowSnapshot } from './workflow-start.js';
 import { DEFAULT_MAX_CONTEXT_CHARS, renderExecutionRequest, validateMaxContextChars } from './render.js';
 
 interface TaskTurn {
@@ -15,6 +15,8 @@ interface TaskTurn {
   uploadInflight?: number | null; resultBody?: { requestSha256: string; outcome: 'completed'; artifacts: WorkflowOutputRef[]; events: Array<{ id: string; kind: string; payload: Record<string, unknown> }>; traceCoverage: 'full' | 'partial' | 'unknown' };
   events?: Array<{ id: string; kind: string; payload: Record<string, unknown> }>; traceCoverage?: 'full' | 'partial' | 'unknown';
   learning?: any; nativeState?: string; lastError?: string;
+  /** The service refused the latest start as input_incomplete, so the next call may replace the spec. */
+  taskSpecIncomplete?: boolean;
 }
 export interface TaskRunnerOptions {
   mode?: CoSensMode; apiKey?: string; statePath?: string; region?: string; fetch?: typeof fetch;
@@ -27,6 +29,11 @@ export interface TaskRunnerOptions {
 export interface TaskRunOptions {
   rsi?: { turnId: string; task: NonNullable<WorkflowSnapshot['task']>; authorize?: (phase: WorkflowPhase, snapshot: WorkflowSnapshot) => boolean | Promise<boolean> };
   [key: string]: any;
+}
+
+/** The Agent's model when it names one; a model object is the host's own and is not sent. */
+function agentModel(agent: any): string | undefined {
+  return typeof agent?.model === 'string' && agent.model.trim() ? agent.model : undefined;
 }
 
 function withRequest(agent: any, request: unknown, maxChars = DEFAULT_MAX_CONTEXT_CHARS): any {
@@ -89,8 +96,15 @@ export class TaskWorkflowRunner {
     state.state = 'native_running';
     if (!this.turns!.claimState(state.turnId, expected, state)) throw new RSIRecoveryRequired('Workflow turn was claimed by another runner; reconcile before retrying');
   }
-  private savePending(state: TaskTurn) {
-    if (!this.turns!.updatePending(state.turnId, state)) throw new RSIRecoveryRequired('Workflow turn changed during preparation; reconcile before retrying');
+  private savePending(state: TaskTurn, previousTaskSpec?: TaskTurn['taskSpec']) {
+    if (!this.turns!.updatePending(state.turnId, state, { previousTaskSpec })) throw new RSIRecoveryRequired('Workflow turn changed during preparation; reconcile before retrying');
+  }
+  /** Only an input_incomplete refusal of the latest start lets the caller correct the spec; any other failure may have started an execution. */
+  private settleIncompleteSpec(state: TaskTurn, error: unknown) {
+    if (error instanceof RSIHTTPError && error.statusCode >= 400 && error.statusCode < 500 && error.code === 'input_incomplete') state.taskSpecIncomplete = true;
+    else if (state.taskSpecIncomplete) delete state.taskSpecIncomplete;
+    else return;
+    this.savePending(state);
   }
   private async sessionIdentity(session: any): Promise<[string | null, string]> {
     if (session == null) return [null, '0'];
@@ -116,13 +130,25 @@ export class TaskWorkflowRunner {
   private async prepare(rsi: NonNullable<TaskRunOptions['rsi']>, agent: any, input: unknown, session: any): Promise<TaskTurn> {
     if (!rsi || typeof rsi.turnId !== 'string' || !rsi.turnId.trim()) throw new TypeError('rsi.turnId is required for a recoverable workflow turn');
     if (!rsi.task || typeof rsi.task !== 'object' || Array.isArray(rsi.task)) throw new TypeError('rsi.task is required for a workflow turn');
+    // A turn always creates its task, so the spec and the model are checked before anything is recorded or sent.
+    executionOptions(rsi.task, { createsTask: true, model: agentModel(agent) });
     const [sessionId, sessionIncarnation] = await this.sessionIdentity(session);
     const inputHash = hash({ agentName: agent?.name ?? null, input });
     let state = this.turns!.get<TaskTurn>(rsi.turnId);
     if (state && state.state !== 'pre_execution_pending') throw new RSIRecoveryRequired(`Workflow turn ${rsi.turnId} may have executed; reconcile without rerunning Agent`);
-    if (state && canonical(state.taskSpec) !== canonical(rsi.task)) throw new RSIRecoveryRequired('Workflow task changed while recovering the same turn');
     if (state && (state.sessionId !== sessionId || state.sessionIncarnation !== sessionIncarnation || state.inputHash !== inputHash)) {
       throw new RSIRecoveryRequired('Workflow turn input or Session identity changed during recovery');
+    }
+    if (state && state.mode !== this.cosens.mode) throw new RSIRecoveryRequired('Workflow turn originated in a different mode');
+    if (state && canonical(state.taskSpec) !== canonical(rsi.task)) {
+      if (!state.taskSpecIncomplete) throw new RSIRecoveryRequired('Workflow task changed while recovering the same turn');
+      // The task is created and keyed from the objective, so a correction completes only the execution input.
+      if (rsi.task.objective !== state.taskSpec?.objective) throw new RSIRecoveryRequired('Workflow task objective changed; start a new turn');
+      // The service refused the previous spec as incomplete and started nothing: take the corrected one.
+      // The flag stays until a start is attempted, so a host refusal of this spec leaves it correctable.
+      const previous = state.taskSpec;
+      state.taskSpec = rsi.task;
+      this.savePending(state, previous);
     }
     if (!state) {
       state = { turnId: rsi.turnId, taskSpec: rsi.task, state: 'pre_execution_pending', mode: this.cosens.mode,
@@ -138,12 +164,21 @@ export class TaskWorkflowRunner {
     if (state.mode !== this.cosens.mode) throw new RSIRecoveryRequired('Workflow turn originated in a different mode');
     this.cosens.lastTurnId = state.turnId;
     if (!state.executionId) {
-      const started = await this.client!.start(state.taskId ? { task_id: state.taskId } : { task: state.taskSpec }, { phase: 'prepare', mode: state.mode, requestKey: state.turnId, authorize: rsi.authorize, ...(typeof agent?.model==='string'&&agent.model.trim()?{model:agent.model}:{}) });
-      if (started?.task_id || started?.task?.task_id) {
-        state.taskId = started.task_id ?? started.task.task_id; this.savePending(state);
+      // What a prepare sends: the task spec (the execution's input) and the task once one exists.
+      const snapshot: WorkflowSnapshot = { task: state.taskSpec, ...(state.taskId ? { task_id: state.taskId } : {}) };
+      let started: any;
+      try {
+        started = await this.client!.start(snapshot, { phase: 'prepare', mode: state.mode, requestKey: state.turnId, authorize: rsi.authorize, ...(agentModel(agent) ? { model: agentModel(agent) } : {}) });
+      } catch (error) {
+        // A host refusal comes before anything is sent, so an earlier refusal still stands.
+        if (!(error instanceof RSIApprovalUnavailable)) this.settleIncompleteSpec(state, error);
+        throw error;
       }
+      delete state.taskSpecIncomplete;
+      if (started?.task_id || started?.task?.task_id) state.taskId = started.task_id ?? started.task.task_id;
+      this.savePending(state);
       if (started?.status !== 'awaiting_execution' || !started?.execution_id || !started?.request_sha256 || !started?.execution_request || typeof started.execution_request !== 'object') {
-        throw new RSIRecoveryRequired(`Workflow task is ${started?.status}; provide context before executing`);
+        throw new RSIRecoveryRequired(`Workflow execution is ${started?.status}; reconcile before executing`);
       }
       state.taskId = started.task_id; state.executionId = started.execution_id;
       state.requestSha256 = started.request_sha256; state.request = started.execution_request; this.savePending(state);

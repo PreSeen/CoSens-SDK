@@ -18,17 +18,17 @@ function sdk(t: TestContext, options: { status?: number; payload?: unknown; raw?
 
 test('R01 maximum length key and manual replay keep identical requests', async t => {
   const { a, seen } = sdk(t, { payload: { task_id: 'task-1' } });
-  for (let i = 0; i < 2; i++) assert.equal((await a.createTask({ source: 'new_task', objective: '整理资料', key: 'k'.repeat(256) })).task_id, 'task-1');
+  for (let i = 0; i < 2; i++) assert.equal((await a.createTask({ objective: '整理资料', key: 'k'.repeat(256) })).task_id, 'task-1');
   assert.equal(seen.length, 2);
   const bodies = await Promise.all(seen.map(r => r.text()));
   assert.equal(bodies[0], bodies[1]);
-  assert.deepEqual(JSON.parse(bodies[0]!), { source: 'new_task', objective: '整理资料', artifacts: [] });
+  assert.deepEqual(JSON.parse(bodies[0]!), { objective: '整理资料', artifacts: [] });
   assert.ok(seen.every(r => r.headers.get('idempotency-key') === 'k'.repeat(256)));
 });
 
 test('R02 oversized key is rejected before sending', async t => {
   const { a, seen } = sdk(t);
-  await assert.rejects(async () => a.startExecution('task-1', { key: 'k'.repeat(257) }), /key/);
+  await assert.rejects(async () => a.startExecution('task-1', { key: 'k'.repeat(257), source: 'new_task', objective: '整理资料' }), /key/);
   assert.equal(seen.length, 0);
 });
 
@@ -41,7 +41,7 @@ test('R03 empty feedback keys are rejected before sending',async t=>{
 test('R04 control characters in keys are rejected before sending', async t => {
   const { a, seen } = sdk(t);
   for (const key of ['safe\r\nX-Injected: yes', 'nul\x00key', 'del\x7fkey']) {
-    await assert.rejects(async () => a.startExecution('task-1', { key }), TypeError);
+    await assert.rejects(async () => a.startExecution('task-1', { key, source: 'new_task', objective: '整理资料' }), TypeError);
   }
   assert.equal(seen.length, 0);
 });
@@ -56,7 +56,7 @@ test('R05 memory request key stays in JSON and preserves false and zero', async 
 
 test('R06 key does not leak into following read request', async t => {
   const { a, seen } = sdk(t);
-  await a.startExecution('task-1', { key: 'execution-key' });
+  await a.startExecution('task-1', { key: 'execution-key', source: 'new_task', objective: '整理资料' });
   await a.getTask('task-1');
   await a.getExecution('execution-1');
   assert.equal(seen.length, 3);
@@ -67,7 +67,7 @@ test('R06 key does not leak into following read request', async t => {
 
 test('R07 conflict preserves diagnostics and is not retried', async t => {
   const { a, seen } = sdk(t, { status: 409, payload: { error: { code: 'idempotency_conflict', message: 'request body changed' } }, headers: { 'x-request-id': 'request-409' } });
-  await assert.rejects(a.startExecution('task-1', { key: 'conflict-key' }), (error: unknown) => {
+  await assert.rejects(a.startExecution('task-1', { key: 'conflict-key', source: 'new_task', objective: '整理资料' }), (error: unknown) => {
     assert.ok(error instanceof RSIHTTPError);
     assert.deepEqual([error.statusCode, error.code, error.requestId, error.message], [409, 'idempotency_conflict', 'request-409', 'request body changed']);
     return true;
@@ -91,7 +91,7 @@ test('R07 conflict preserves diagnostics and is not retried', async t => {
 
 test('R08 rate limit does not trigger automatic mutation retry', async t => {
   const { a, seen } = sdk(t, { status: 429, payload: { detail: 'rate limited' }, headers: { 'retry-after': '0' } });
-  await assert.rejects(a.startExecution('task-1', { key: 'rate-key' }), (error: unknown) => {
+  await assert.rejects(a.startExecution('task-1', { key: 'rate-key', source: 'new_task', objective: '整理资料' }), (error: unknown) => {
     assert.ok(error instanceof RSIHTTPError); assert.equal(error.statusCode, 429); return true;
   });
   assert.equal(seen.length, 1);
@@ -139,8 +139,8 @@ test('R11 concurrent requests keep their own keys and bodies', { timeout: 3000 }
   } });
   t.after(() => client.close());
   const results = await Promise.all([
-    client.atoms.createTask({ source: 'new_task', objective: 'alpha', key: 'key-alpha' }),
-    client.atoms.createTask({ source: 'new_task', objective: 'beta', key: 'key-beta' }),
+    client.atoms.createTask({ objective: 'alpha', key: 'key-alpha' }),
+    client.atoms.createTask({ objective: 'beta', key: 'key-beta' }),
   ]);
   assert.deepEqual(results.map(r => r.objective), ['alpha', 'beta']);
   assert.deepEqual((await Promise.all(seen.map(async r => [r.headers.get('idempotency-key'), (await r.json()).objective]))).sort(), [['key-alpha', 'alpha'], ['key-beta', 'beta']]);

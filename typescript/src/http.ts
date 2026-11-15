@@ -61,7 +61,12 @@ export class Transport {
       const error = typeof payload?.error === 'object' ? payload.error : undefined;
       const detail = typeof payload?.detail === 'object' && payload.detail !== null ? payload.detail : undefined;
       const code = error?.code ?? detail?.code;
-      throw new RSIHTTPError(response.status, redact(error?.message ?? detail?.message ?? payload?.detail ?? response.statusText), code == null ? undefined : redact(code), requestId);
+      const names = (field: string): string[] | undefined => {
+        const value = error?.[field] ?? detail?.[field];
+        return Array.isArray(value) && value.every(item => typeof item === 'string') ? value.map(redact) : undefined;
+      };
+      throw new RSIHTTPError(response.status, redact(error?.message ?? detail?.message ?? payload?.detail ?? response.statusText), code == null ? undefined : redact(code), requestId,
+        names('missing'), names('recipe_ids'));
     }
     // Expose x-request-id without changing the object's enumerable fields or JSON.
     if (payload && typeof payload === 'object' && !Array.isArray(payload) && !Object.hasOwn(payload, 'requestId')) {

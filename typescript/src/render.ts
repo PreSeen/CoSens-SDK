@@ -81,11 +81,15 @@ function feedbackLines(feedback: unknown): string[] {
 /** Agent instruction text for a frozen task execution request. */
 export function renderExecutionRequest(value: unknown, maxChars = DEFAULT_MAX_CONTEXT_CHARS): string {
   const request = record(value) ?? {};
-  const context = record(request.context) ?? {};
+  const taskContext = record(request.task_context) ?? {};
+  const input = record(request.input) ?? {};
   const lines: string[] = [];
   if (request.task_id) lines.push(`Task: ${request.task_id}` + (request.kind ? ` (${request.kind})` : ''));
-  if (text(context.objective)) lines.push('Objective: ' + text(context.objective));
-  const artifacts = list(context.artifacts).filter(artifact => record(artifact));
+  if (text(taskContext.objective)) lines.push('Task objective: ' + text(taskContext.objective));
+  const references = list(taskContext.artifacts).filter(artifact => record(artifact));
+  if (references.length) lines.push('Reference artifacts: ' + references.map(artifact => String(artifact.artifact_id)).join(', '));
+  if (text(input.objective)) lines.push('Objective: ' + text(input.objective));
+  const artifacts = list(input.artifacts).filter(artifact => record(artifact));
   if (artifacts.length) lines.push('Input artifacts: ' + artifacts.map(artifact => `${artifact.artifact_id} (${artifact.role})`).join(', '));
   lines.push(...feedbackLines(request.feedback));
   const method = record(request.method) ?? {};

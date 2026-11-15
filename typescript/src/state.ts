@@ -63,12 +63,18 @@ export class TurnStore {
     const result = this.db.prepare('INSERT OR IGNORE INTO ts_turns(key,value) VALUES(?,?)').run(this.prefix + id, JSON.stringify(value));
     return result.changes === 1;
   }
-  updatePending(id: string, value: { state: string; taskSpec?: unknown; mode?: string; taskId?: string; executionId?: string; requestSha256?: string }): boolean {
+  /**
+   * Update pre-execution metadata without rolling back a native dispatch. The stored task spec must equal the
+   * new one, or `previousTaskSpec` when the update replaces it.
+   */
+  updatePending(id: string, value: { state: string; taskSpec?: unknown; mode?: string; taskId?: string; executionId?: string; requestSha256?: string },
+    { previousTaskSpec }: { previousTaskSpec?: unknown } = {}): boolean {
+    const expectedSpec = previousTaskSpec === undefined ? value.taskSpec : previousTaskSpec;
     return this.db.transaction(() => {
       const key = this.prefix + id;
       const row = this.db.prepare('SELECT value FROM ts_turns WHERE key=?').get(key) as { value: string } | undefined;
       const current = row ? JSON.parse(row.value) : undefined;
-      if (!current || current.state !== 'pre_execution_pending' || canonical(current.taskSpec) !== canonical(value.taskSpec) || current.mode !== value.mode ||
+      if (!current || current.state !== 'pre_execution_pending' || canonical(current.taskSpec) !== canonical(expectedSpec) || current.mode !== value.mode ||
         (current.taskId && current.taskId !== value.taskId) ||
         (current.executionId && current.executionId !== value.executionId) ||
         (current.requestSha256 && current.requestSha256 !== value.requestSha256)) return false;

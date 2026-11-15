@@ -1,5 +1,5 @@
 export { CoSensClient, Atoms, FEEDBACK_SOURCES } from './atoms.js';
-export type { StartExecutionOptions, WorkflowArtifactRef, WorkflowOutputRef, WorkflowEvent, FeedbackSource } from './atoms.js';
+export type { StartExecutionOptions, TaskArtifactRef, WorkflowArtifactRef, WorkflowOutputRef, WorkflowEvent, FeedbackSource } from './atoms.js';
 export type { DocumentUploadGrant, DocumentUploadMetadata } from './document-upload.js';
 export type { WorkflowPhase, WorkflowSnapshot, WorkflowStartOptions } from './workflow-start.js';
 export * from './errors.js';

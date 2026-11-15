@@ -37,3 +37,15 @@ test('workflow native dispatch claim is atomic across state store instances', ()
   assert.equal(first.get<{ state: string }>('turn-1')?.state, 'native_running');
   first.close(); second.close();
 });
+
+test('a pending turn replaces its task spec only from the stored one', () => {
+  const store = new TurnStore(join(mkdtempSync(join(tmpdir(), 'cosens-spec-state-')), 'state.sqlite3'), 'key', 'service');
+  const pending = { turnId: 'turn-1', state: 'pre_execution_pending', taskSpec: { source: 'new_task' }, mode: 'auto' };
+  assert.equal(store.insertIfAbsent('turn-1', pending), true);
+  const corrected = { ...pending, taskSpec: { source: 'new_task', self_contained: true } };
+  assert.equal(store.updatePending('turn-1', corrected), false);
+  assert.equal(store.updatePending('turn-1', corrected, { previousTaskSpec: { source: 'external_artifact' } }), false);
+  assert.equal(store.updatePending('turn-1', corrected, { previousTaskSpec: pending.taskSpec }), true);
+  assert.deepEqual(store.get<typeof corrected>('turn-1')?.taskSpec, corrected.taskSpec);
+  store.close();
+});

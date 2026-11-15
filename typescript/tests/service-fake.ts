@@ -1,4 +1,9 @@
-/** The execution API as cosens-rsi serves it, for tests: fresh execution IDs per key, one learning per execution. */
+/**
+ * The execution API as cosens-rsi serves it, for tests: a task is created once per key, each Recipe belongs to one
+ * task, fresh execution IDs per key, one learning per execution.
+ */
+import { canonical } from '../src/state.ts';
+
 export const DEFAULT_BUDGET = 32_000; // the service's DEFAULT_RECIPE_MAX_COMPLETION_TOKENS
 
 export function learningView(executionId: string, status = 'queued', fields: Record<string, unknown> = {}) {
@@ -15,21 +20,25 @@ const invalid = (message: string) => json({ error: { code: 'invalid_request', me
 const notFound = (message: string) => json({ error: { code: 'resource_not_found', message } }, 404);
 
 export interface RecordedRequest { method: string; path: string; search: URLSearchParams; body: any; headers: Headers }
-interface Execution { taskId: string; kind: string; status: string; previous: string | null; requestSha256: string }
+interface Execution { taskId: string; kind: string; status: string; previous: string | null; requestSha256: string; input: any; instanceId: string; method: any }
+interface Task { task_id: string; objective: string; artifacts: Array<{ artifact_id: string; role: string }>; context_version: number }
 
 export class ServiceFake {
   readonly requests: RecordedRequest[] = [];
   readonly learnings = new Map<string, Record<string, any>>();
   readonly executions = new Map<string, Execution>();
+  readonly tasks = new Map<string, Task>();
+  private readonly taskKeys = new Map<string, { body: string; taskId: string }>();
   private readonly keys = new Map<string, { intent?: string; receipt: any }>();
   private readonly feedbackKeys = new Map<string, any>();
   private readonly taskModels = new Map<string, string>();
   generations = 0;
   private artifacts = 0;
-  /** Recipe version views ({recipe_id, origin, version, recipe, ...}) served by GET /recipes and /recipes/{id}. */
+  /**
+   * Recipe version views ({recipe_id, origin, version, task_id, recipe, ...}) served by GET /recipes and
+   * /recipes/{id}; a generated Recipe's task_id names the one task that owns it.
+   */
   recipes: any[] = [];
-  /** The task's current Recipe method; the service binds it to every new execution. */
-  head: any = null;
   /** Called before each request; return a Response to answer it instead. */
   intercept: (request: RecordedRequest) => Response | undefined = () => undefined;
 
@@ -49,10 +58,11 @@ export class ServiceFake {
     }
     if (path === '/v1/memory/recall') return json({ items: [] });
     if (path === '/artifacts') return json({ artifact_id: `artifact_${++this.artifacts}`, content_hash: 'sha256:test' });
-    if (path === '/tasks' && method === 'POST') return json({ task_id: 'task_1', status: 'ready' });
+    if (path === '/tasks' && method === 'POST') return this.createTask(body ?? {}, headers.get('idempotency-key')!);
+    if (path.startsWith('/tasks/') && method === 'GET') return this.getTask(decodeURIComponent(path.split('/')[2]!));
     if (path === '/recipes' && method === 'GET') return this.listRecipes(search);
     if (path.startsWith('/recipes/') && method === 'GET') return this.getRecipe(decodeURIComponent(path.split('/')[2]!), search.get('version'));
-    if (path.endsWith('/executions') && method === 'POST') return this.start(path.split('/')[2]!, body ?? {}, headers.get('idempotency-key')!);
+    if (path === '/executions' && method === 'POST') return this.start(body ?? {}, headers.get('idempotency-key')!);
     const executionId = path.startsWith('/executions/') ? path.split('/')[2]! : undefined;
     const execution = executionId ? this.executions.get(executionId) : undefined;
     if (!executionId || !execution) return notFound('execution not found');
@@ -73,8 +83,8 @@ export class ServiceFake {
         learning = { ...learning, status: 'completed', current: true, recipe: { steps: [] } };
         this.learnings.set(executionId, learning);
       }
-      return json({ execution_id: executionId, task_id: execution.taskId, kind: execution.kind, status: execution.status,
-        previous_execution_id: execution.previous, learning: learning ?? null });
+      return json({ execution_id: executionId, task_id: execution.taskId, instance_id: execution.instanceId, kind: execution.kind,
+        status: execution.status, previous_execution_id: execution.previous, learning: learning ?? null });
     }
     return notFound(`no route ${method} ${path}`);
   }
@@ -88,29 +98,102 @@ export class ServiceFake {
     return undefined;
   }
 
-  private start(taskId: string, body: any, key: string): Response {
+  /** A task as POST /tasks stores it; tests also call it for a task made before the test, such as a Recipe's. */
+  addTask(objective: string, artifacts: Array<string | { artifact_id: string; role: string }> = []): string {
+    const taskId = `task_${this.tasks.size + 1}`;
+    this.tasks.set(taskId, { task_id: taskId, objective, context_version: 1,
+      artifacts: artifacts.map(artifact => typeof artifact === 'string' ? { artifact_id: artifact, role: 'reference' } : artifact) });
+    return taskId;
+  }
+
+  /** POST /tasks: one task per idempotency key; the same key with another body is refused. */
+  private createTask(body: any, key: string): Response {
+    if (Object.keys(body).some(field => !['objective', 'artifacts'].includes(field)) || !body.objective) return invalid('unknown task fields');
+    const saved = this.taskKeys.get(key);
+    if (saved) return saved.body === canonical(body) ? json(this.tasks.get(saved.taskId)) : invalid('idempotency key reused with different task');
+    const taskId = this.addTask(body.objective, body.artifacts ?? []);
+    this.taskKeys.set(key, { body: canonical(body), taskId });
+    return json(this.tasks.get(taskId));
+  }
+
+  private getTask(taskId: string): Response {
+    const task = this.tasks.get(taskId);
+    if (!task) return notFound('task not found');
+    const executions = [...this.executions].filter(([, execution]) => execution.taskId === taskId).map(([executionId, execution]) => ({
+      execution_id: executionId, instance_id: execution.instanceId, kind: execution.kind, status: execution.status, request_sha256: execution.requestSha256 }));
+    const recipes = this.current().filter(recipe => recipe.task_id === taskId).map(recipe => ({
+      recipe_id: recipe.recipe_id, current_version: recipe.version, latest_version: recipe.version, learning: null }));
+    return json({ ...task, executions, recipes });
+  }
+
+  private method(recipeId: string) {
+    const recipe = this.current().find(item => item.recipe_id === recipeId);
+    return { recipe_id: recipeId, version: recipe.version, recipe_sha256: 'f'.repeat(64), recipe: recipe.recipe };
+  }
+
+  /** The method a new execution freezes: the named Recipe of this task, else the task's only Recipe. */
+  private taskMethod(taskId: string, recipeId: string | undefined): any {
+    const owned = [...new Set(this.recipes.filter(recipe => recipe.task_id === taskId).map(recipe => recipe.recipe_id as string))].sort();
+    if (recipeId !== undefined) return owned.includes(recipeId) ? this.method(recipeId) : notFound('Recipe not found in this task');
+    if (owned.length > 1) return json({ error: { code: 'recipe_choice_required', recipe_ids: owned, message: 'the task has several Recipes; name one with recipe_id' } }, 422);
+    return owned.length ? this.method(owned[0]!) : null;
+  }
+
+  /** The frozen input and what it lacks; a reconstruction also needs what it started from and what it produced. */
+  static input(source: string, requestInput: any): [any, string[]] {
+    const role = source === 'new_task' ? 'original_input' : 'submitted_output';
+    const artifacts = (requestInput.artifacts ?? []).map((artifact: any) => typeof artifact === 'string' ? { artifact_id: artifact, role } : artifact);
+    const value = { objective: requestInput.objective ?? null, artifacts, self_contained: Boolean(requestInput.self_contained) };
+    const missing = value.objective ? [] : ['objective'];
+    if (source === 'external_artifact') {
+      const roles = new Set(artifacts.map((artifact: any) => artifact.role));
+      if (!roles.has('original_input') && !value.self_contained) missing.push('original_input_or_self_contained_task');
+      if (!roles.has('submitted_output')) missing.push('submitted_output');
+    }
+    return [value, missing];
+  }
+
+  /** POST /executions: a new execution names task_id, source and input; a correction names previous_execution_id. */
+  private start(body: any, key: string): Response {
     const previous = body.previous_execution_id ?? null;
+    let taskId: string; let requestInput: any; let instanceId: string | undefined; let method: any;
     let scope: string; let intent: string | undefined;
     if (previous !== null) {
-      if (body.recipe_id !== undefined || body.recall_memory) return invalid('a correction takes only previous_execution_id and model');
+      if (Object.keys(body).some(field => !['previous_execution_id', 'task_id', 'model'].includes(field))) return invalid('a correction takes only previous_execution_id, task_id and model');
       const before = this.executions.get(previous);
       if (!before) return notFound('execution not found');
       if (before.status !== 'completed') return invalid('execution has no completed output');
-      if (before.taskId !== taskId) return notFound('previous execution not found in this task');
+      if (body.task_id !== undefined && body.task_id !== before.taskId) return invalid('previous execution belongs to another task');
+      taskId = before.taskId; requestInput = before.input; instanceId = before.instanceId;
       scope = JSON.stringify(['correction', previous, key]);
+      // A correction follows the current version of the Recipe the previous execution followed.
+      method = before.method ? this.method(before.method.recipe_id) : this.taskMethod(taskId, undefined);
     } else {
+      if (!body.task_id || !['new_task', 'external_artifact'].includes(body.source) || !body.input || typeof body.input !== 'object') {
+        return invalid('a new execution needs task_id, source and input');
+      }
+      taskId = body.task_id;
+      if (!this.tasks.has(taskId)) return notFound('task not found');
+      const [value, missing] = ServiceFake.input(body.source, body.input);
+      if (missing.length) return json({ error: { code: 'input_incomplete', message: 'the execution input is incomplete', missing } }, 422);
+      requestInput = value;
       scope = JSON.stringify(['original', taskId, key]);
-      intent = JSON.stringify([body.recipe_id ?? null, Boolean(body.recall_memory)]);
+      intent = canonical([body.source, value, body.recipe_id ?? null, Boolean(body.recall_memory)]);
+      method = this.taskMethod(taskId, body.recipe_id);
     }
+    if (method instanceof Response) return method;
     const frozen = this.freezeModel(taskId, body.model);
     if (frozen) return frozen;
     const saved = this.keys.get(scope);
     if (saved) return saved.intent === intent ? json(saved.receipt) : invalid('idempotency key reused with different context');
     const executionId = `execution_${this.executions.size + 1}`;
     const kind = previous ? 'correction' : 'original';
-    this.executions.set(executionId, { taskId, kind, status: 'awaiting_execution', previous, requestSha256: 'sha-' + executionId });
-    const receipt = { task_id: taskId, execution_id: executionId, kind, request_sha256: 'sha-' + executionId, status: 'awaiting_execution',
-      request: { context: { objective: 'Produce output' }, method: this.head } };
+    instanceId ??= executionId;
+    this.executions.set(executionId, { taskId, kind, status: 'awaiting_execution', previous, requestSha256: 'sha-' + executionId,
+      input: requestInput, instanceId, method });
+    const task = this.tasks.get(taskId)!;
+    const receipt = { task_id: taskId, execution_id: executionId, instance_id: instanceId, kind, request_sha256: 'sha-' + executionId, status: 'awaiting_execution',
+      request: { task_context: { objective: task.objective, artifacts: task.artifacts, context_version: task.context_version }, input: requestInput, method } };
     this.keys.set(scope, { intent, receipt });
     return json(receipt);
   }
@@ -166,7 +249,7 @@ export class ServiceFake {
   }
 
   private listRecipes(search: URLSearchParams): Response {
-    const summary = (recipe: any) => ({ recipe_id: recipe.recipe_id, origin: recipe.origin, version: recipe.version, title: recipe.recipe.title, task_id: 'task_0', updated_at: 't' });
+    const summary = (recipe: any) => ({ recipe_id: recipe.recipe_id, origin: recipe.origin, version: recipe.version, title: recipe.recipe.title, task_id: recipe.task_id ?? null, updated_at: 't' });
     const q = search.get('q');
     if (q !== null) {
       if (search.has('cursor') || search.has('origin')) return invalid('search takes no cursor or origin');
@@ -182,6 +265,6 @@ export class ServiceFake {
   private getRecipe(recipeId: string, version: string | null): Response {
     const recipe = version === null ? this.current().find(item => item.recipe_id === recipeId)
       : this.recipes.find(item => item.recipe_id === recipeId && item.version === Number(version));
-    return recipe ? json(recipe) : notFound('Recipe not found');
+    return recipe ? json({ task_id: null, ...recipe }) : notFound('Recipe not found');
   }
 }

@@ -23,22 +23,24 @@ function recipe(steps = 3, origin = 'generated', recipeId = 'recipe_1') {
       lessons: [{ when: 'Always', do: 'Cite the source', why: 'Trust', when_not: 'Never', evidence_refs: [{ event_id: 'e1' }] }] } };
 }
 
-/** Minimal service: optional Recipes, Memory, task and execution. */
+/** Minimal service: optional Recipes, Memory, task and execution; `posts` holds each POST's path and body. */
 function algorithm(recipes: any[] = []) {
   const paths: string[] = [];
+  const posts: Array<[string, any]> = [];
   const fetcher: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     const path = url.pathname.replace(/^\/api/, '');
     paths.push(path);
+    if (init?.method === 'POST') posts.push([path, typeof init.body === 'string' ? JSON.parse(init.body) : undefined]);
     if (path === '/recipes') {
       assert.deepEqual(Object.fromEntries(url.searchParams), { limit: '100', origin: 'generated' });
-      return json({ items: recipes.filter(r => r.origin === url.searchParams.get('origin')).map(r => ({ recipe_id: r.recipe_id, origin: r.origin, version: r.version, title: r.recipe.title })), has_more: false });
+      return json({ items: recipes.filter(r => r.origin === url.searchParams.get('origin')).map(r => ({ recipe_id: r.recipe_id, origin: r.origin, version: r.version, title: r.recipe.title, task_id: r.task_id ?? null })), has_more: false });
     }
     if (path.startsWith('/recipes/')) return json(recipes.find(r => path === '/recipes/' + r.recipe_id));
     if (path === '/v1/memory/recall') return json({ items: [{ id: 'm1', kind: 'source', text: 'Reports use the Q3 template.', refs: [{ source_id: 's1' }], score: 0.9 }] });
     if (path === '/artifacts') return json({ artifact_id: 'artifact_1', content_hash: 'sha256:x' });
-    if (path === '/tasks') return json({ task_id: 'task_1', status: 'ready' });
-    if (path.endsWith('/executions')) {
+    if (path === '/tasks') return json({ task_id: 'task_1', objective: 'Produce a report', artifacts: [], context_version: 1 });
+    if (path === '/executions') {
       const body = JSON.parse(String(init?.body));
       const chosen = recipes.find(r => r.recipe_id === body.recipe_id);
       return json({ execution_id: 'execution_1', status: 'awaiting_execution', request_sha256: 'sha',
@@ -47,7 +49,7 @@ function algorithm(recipes: any[] = []) {
     if (path.endsWith('/result')) return json({ task_id: 'task_1', execution_id: 'execution_1', status: 'completed', trace_origin: 'original' });
     throw new Error(path);
   };
-  return { paths, fetcher };
+  return { paths, posts, fetcher };
 }
 
 test('the decision is a single unretried call and falls back to the native request', async () => {
@@ -87,7 +89,28 @@ test('decisionClient and decisionExtraBody cover the decision and Recipe match',
     assert.ok(decisionBodies.every(body => body.enable_thinking === false && body.max_completion_tokens === 1024));
     const matchInput = decisionBodies[1].messages[0].content;
     assert.ok(matchInput.includes('Writing a report') && !matchInput.includes('Do step 1') && !matchInput.includes('evidence_refs'));
-    assert.equal(client.cosens.getTurn(client.cosens.lastTurnId)?.frozenContext.recipe.recipe_id, 'recipe_1');
+    const turn = client.cosens.getTurn(client.cosens.lastTurnId);
+    assert.deepEqual([turn?.frozenContext.recipe.recipe_id, turn?.state], ['recipe_1', 'completed']);
+    // The matched Recipe runs in the task that owns it; the turn creates no task.
+    assert.deepEqual(service.posts.filter(([path]) => path === '/tasks'), []);
+    const execution = service.posts.find(([path]) => path === '/executions')![1];
+    assert.deepEqual([execution.task_id, execution.recipe_id, 'model' in execution], ['task_0', 'recipe_1', false]);
+  } finally { await client.close(); }
+});
+
+test('a matched Recipe without a task passes the turn through', async () => {
+  const native = new OpenAI({ apiKey: 'model-key', baseURL: 'https://model.example/v1', fetch: async (input, init) => {
+    if (String(input).endsWith('/chat/completions')) return chat(JSON.parse(String(init?.body)).response_format.json_schema.name === 'cosens_recipe_match' ? { recipe_id: 'recipe_1' } : ACTIVATE);
+    return json(RESPONSE);
+  } });
+  const { task_id: _, ...unowned } = recipe();
+  const service = algorithm([unowned]);
+  const client = cosens(native, { apiKey: 'service-key', mode: 'auto', fetch: service.fetcher, statePath: statePath() });
+  try {
+    assert.equal((await client.responses.create({ model: 'm', input: 'Produce a report' })).id, 'resp-1');
+    const turn = client.cosens.getTurn(client.cosens.lastTurnId);
+    assert.deepEqual([turn?.decision.capture, client.cosens.rsiCapture, turn?.taskId, turn?.executionId], ['policy_failed', 'policy_failed', undefined, undefined]);
+    assert.deepEqual(service.posts.filter(([path]) => path === '/tasks' || path === '/executions'), []);
   } finally { await client.close(); }
 });
 

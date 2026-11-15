@@ -4,7 +4,7 @@ import { clock } from './clock.js';
 import { startWorkflow, type WorkflowSnapshot, type WorkflowStartOptions } from './workflow-start.js';
 import { documentBytes, documentMetadata, documentStatusBody, uploadTarget, type DocumentUploadGrant, type DocumentUploadMetadata } from './document-upload.js';
 
-function modelData(model?:string):Record<string,string>{
+export function modelData(model?:string):Record<string,string>{
  if(model===undefined)return {};
  if(typeof model!=='string'||!model.trim()||model.length>256)throw new TypeError('model must be a public model ID');
  return {model:model.trim()};
@@ -22,11 +22,17 @@ function boundedInteger(value: number, name: string, maximum: number, minimum = 
   return value;
 }
 
-/** A new execution may follow a Recipe or recall Memory; a correction (`previousExecutionId`) takes neither. */
-export type StartExecutionOptions = { key: string; model?: string } & (
-  | { previousExecutionId?: undefined; recipeId?: string; recallMemory?: boolean }
-  | { previousExecutionId: string; recipeId?: undefined; recallMemory?: false });
+/** A task's artifacts are references; a bare id is a reference. */
+export type TaskArtifactRef = string | { artifact_id: string; role: 'reference' };
 export type WorkflowArtifactRef = string | { artifact_id: string; role: 'original_input' | 'submitted_output' | 'acceptance' | 'external_trace' };
+export type ExecutionSource = 'new_task' | 'external_artifact';
+/**
+ * A new execution names its source and carries its own input, and may follow a Recipe or recall Memory;
+ * a correction (`previousExecutionId`) keeps the input of the execution it corrects and takes none of these.
+ */
+export type StartExecutionOptions = { key: string; model?: string } & (
+  | { previousExecutionId?: undefined; source: ExecutionSource; objective?: string; artifacts?: WorkflowArtifactRef[]; selfContained?: boolean; recipeId?: string; recallMemory?: boolean }
+  | { previousExecutionId: string; source?: undefined; objective?: undefined; artifacts?: undefined; selfContained?: undefined; recipeId?: undefined; recallMemory?: false });
 export type WorkflowOutputRef = { artifact_id: string; role: 'submitted_output' };
 export type WorkflowEvent = { id: string; kind: string; payload: Record<string, unknown> };
 /** Where a feedback text comes from; the service weighs feedback by its source. */
@@ -35,6 +41,62 @@ export type FeedbackSource = typeof FEEDBACK_SOURCES[number];
 function feedbackSource(source: FeedbackSource) {
   if (!(FEEDBACK_SOURCES as readonly string[]).includes(source)) throw new TypeError(`source must be one of ${FEEDBACK_SOURCES.join(', ')}`);
   return source;
+}
+
+const INPUT_ROLES = ['original_input', 'submitted_output', 'acceptance', 'external_trace'];
+
+export function taskObjective(objective: unknown): string {
+  if (typeof objective !== 'string' || !objective.trim() || objective.length > 20_000) throw new TypeError('objective must be nonempty text of at most 20,000 characters');
+  return objective;
+}
+
+function references(artifacts: TaskArtifactRef[] = []): TaskArtifactRef[] {
+  if (!Array.isArray(artifacts) || artifacts.length > 100) throw new TypeError('artifacts must contain at most 100 references');
+  if (artifacts.some(a => !(typeof a === 'string' && a) && !(a && typeof a === 'object' && typeof a.artifact_id === 'string' && a.artifact_id && a.role === 'reference'))) {
+    throw new TypeError("a task's artifacts are ids or references with role reference");
+  }
+  return artifacts;
+}
+
+/** The execution's own input; a bare id is the source's original input or submitted output. */
+export function executionInput(source: ExecutionSource, objective?: string, artifacts: WorkflowArtifactRef[] = [], selfContained?: boolean): Record<string, unknown> {
+  if (!['new_task', 'external_artifact'].includes(source)) throw new TypeError('source must be new_task or external_artifact');
+  if (objective !== undefined) taskObjective(objective);
+  if (!Array.isArray(artifacts) || artifacts.length > 100) throw new TypeError('artifacts must contain at most 100 references');
+  const roles = artifacts.map(a => typeof a === 'string' ? (a ? source === 'new_task' ? 'original_input' : 'submitted_output' : undefined) :
+    a && typeof a.artifact_id === 'string' && a.artifact_id && INPUT_ROLES.includes(a.role) ? a.role : undefined);
+  if (roles.includes(undefined)) throw new TypeError('invalid artifact reference or role');
+  if (source === 'external_artifact' && !roles.includes('submitted_output')) throw new TypeError('external_artifact requires submitted_output');
+  const rolesById = new Map<string, Set<string>>();
+  artifacts.forEach((artifact, index) => {
+    const id = typeof artifact === 'string' ? artifact : artifact.artifact_id;
+    const itemRoles = rolesById.get(id) ?? new Set<string>();
+    itemRoles.add(roles[index]!); rolesById.set(id, itemRoles);
+  });
+  if ([...rolesById.values()].some(itemRoles => itemRoles.has('original_input') && itemRoles.has('submitted_output'))) throw new TypeError('one artifact cannot be both original_input and submitted_output');
+  if (selfContained !== undefined && typeof selfContained !== 'boolean') throw new TypeError('selfContained must be a boolean');
+  return { artifacts, ...(objective === undefined ? {} : { objective }), ...(selfContained === undefined ? {} : { self_contained: selfContained }) };
+}
+
+/** The POST /executions body: a new execution's task, source and input, or a correction's previous execution. */
+function executionStart(taskId: string | undefined, { model, source, objective, artifacts, selfContained, recipeId, recallMemory = false, previousExecutionId }: Omit<StartExecutionOptions, 'key'>): Record<string, unknown> {
+  const body: Record<string, unknown> = modelData(model);
+  if (typeof recallMemory !== 'boolean') throw new TypeError('recallMemory must be boolean');
+  if (taskId !== undefined) { pathPart(taskId); body.task_id = taskId; }
+  if (previousExecutionId !== undefined) {
+    if (source !== undefined || objective !== undefined || artifacts !== undefined || selfContained !== undefined || recipeId !== undefined || recallMemory) {
+      throw new TypeError('a correction takes only previousExecutionId, taskId and model');
+    }
+    pathPart(previousExecutionId);
+    body.previous_execution_id = previousExecutionId;
+    return body;
+  }
+  if (taskId === undefined || source === undefined) throw new TypeError('a new execution needs taskId and source');
+  body.source = source;
+  body.input = executionInput(source, objective, artifacts, selfContained);
+  if (recallMemory) body.recall_memory = true;
+  if (recipeId !== undefined) { pathPart(recipeId); body.recipe_id = recipeId; }
+  return body;
 }
 
 function learningData(model?: string, maxCompletionTokens?: number): Record<string, unknown> {
@@ -95,41 +157,19 @@ export class Atoms {
   getArtifact(id: string) { return this.http.request('GET', `/artifacts/${pathPart(id)}`); }
 
   // Task workflow atoms; each call maps to one HTTP request and never runs an Agent.
-  createTask({ source, key, objective, artifacts = [], selfContained }: { source: 'new_task' | 'external_artifact'; key: string; objective?: string; artifacts?: WorkflowArtifactRef[]; selfContained?: boolean }) {
-    if (!['new_task', 'external_artifact'].includes(source)) throw new TypeError('source must be new_task or external_artifact');
-    if (objective !== undefined && (typeof objective !== 'string' || !objective.trim() || objective.length > 20_000)) throw new TypeError('objective must be 1–20,000 characters');
-    if (!Array.isArray(artifacts) || artifacts.length > 100) throw new TypeError('artifacts must contain at most 100 references');
-    const roles = artifacts.map(a => typeof a === 'string' ? (a ? source === 'new_task' ? 'original_input' : 'submitted_output' : undefined) :
-      a && typeof a.artifact_id === 'string' && a.artifact_id && ['original_input', 'submitted_output', 'acceptance', 'external_trace'].includes(a.role) ? a.role : undefined);
-    if (roles.includes(undefined)) throw new TypeError('invalid artifact reference or role');
-    if (source === 'external_artifact' && !roles.includes('submitted_output')) throw new TypeError('external_artifact requires submitted_output');
-    const rolesById = new Map<string, Set<string>>();
-    artifacts.forEach((artifact, index) => {
-      const id = typeof artifact === 'string' ? artifact : artifact.artifact_id;
-      const itemRoles = rolesById.get(id) ?? new Set<string>();
-      itemRoles.add(roles[index]!); rolesById.set(id, itemRoles);
-    });
-    if ([...rolesById.values()].some(itemRoles => itemRoles.has('original_input') && itemRoles.has('submitted_output'))) throw new TypeError('one artifact cannot be both original_input and submitted_output');
-    if (selfContained !== undefined && typeof selfContained !== 'boolean') throw new TypeError('selfContained must be a boolean');
-    return this.http.request('POST', '/tasks', { source, artifacts, ...(objective === undefined ? {} : { objective }), ...(selfContained === undefined ? {} : { self_contained: selfContained }) }, stableKey(key));
+  createTask({ key, objective, artifacts = [] }: { key: string; objective: string; artifacts?: TaskArtifactRef[] }) {
+    return this.http.request('POST', '/tasks', { objective: taskObjective(objective), artifacts: references(artifacts) }, stableKey(key));
   }
   getTask(taskId: string) { return this.http.request('GET', `/tasks/${pathPart(taskId)}`); }
-  supplementTaskContext(taskId: string, { expectedContextVersion, objective, artifacts, selfContained }: { expectedContextVersion: number; objective?: string; artifacts?: WorkflowArtifactRef[]; selfContained?: boolean }) {
+  supplementTaskContext(taskId: string, { expectedContextVersion, objective, artifacts }: { expectedContextVersion: number; objective?: string; artifacts?: TaskArtifactRef[] }) {
     if (!Number.isInteger(expectedContextVersion) || expectedContextVersion < 1) throw new TypeError('expectedContextVersion must be a positive integer');
-    return this.http.request('POST', `/tasks/${pathPart(taskId)}/context`, { expected_context_version: expectedContextVersion, ...(objective === undefined ? {} : { objective }), ...(artifacts === undefined ? {} : { artifacts }), ...(selfContained === undefined ? {} : { self_contained: selfContained }) });
+    return this.http.request('POST', `/tasks/${pathPart(taskId)}/context`, { expected_context_version: expectedContextVersion,
+      ...(objective === undefined ? {} : { objective: taskObjective(objective) }), ...(artifacts === undefined ? {} : { artifacts: references(artifacts) }) });
   }
-  /** Start an execution; with `previousExecutionId` it is a correction of that execution and takes only `model`. */
-  startExecution(taskId: string, { key, model, recipeId, recallMemory = false, previousExecutionId }: StartExecutionOptions) {
-    if (typeof recallMemory !== 'boolean') throw new TypeError('recallMemory must be boolean');
-    if (previousExecutionId !== undefined) {
-      if (recipeId !== undefined || recallMemory) throw new TypeError('a correction takes only previousExecutionId and model');
-      pathPart(previousExecutionId);
-    }
-    if (recipeId !== undefined) pathPart(recipeId);
-    const body = { ...modelData(model), ...(previousExecutionId === undefined ? {} : { previous_execution_id: previousExecutionId }),
-      ...(recipeId === undefined ? {} : { recipe_id: recipeId }), ...(recallMemory ? { recall_memory: true } : {}) };
-    return this.http.request('POST', `/tasks/${pathPart(taskId)}/executions`,
-      Object.keys(body).length ? body : undefined, stableKey(key), undefined);
+  /** Start a new execution of a task with its own input; with `previousExecutionId` a correction, which takes only `taskId` and `model`. */
+  startExecution(taskId: string | undefined, { key, ...options }: StartExecutionOptions) {
+    const stable = stableKey(key);
+    return this.http.request('POST', '/executions', executionStart(taskId, options), stable, undefined);
   }
   getRecipeVersions(recipeId: string) { return this.http.request('GET', `/recipes/${pathPart(recipeId)}/versions`); }
   getExecution(executionId: string) { return this.http.request('GET', `/executions/${pathPart(executionId)}`); }
