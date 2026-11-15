@@ -1,5 +1,5 @@
 export class RSIError extends Error { name = 'RSIError'; }
-/** `missing` (input_incomplete) is what the execution input lacks; `recipeIds` (recipe_choice_required) are the task's Recipes, one of which to name. */
+/** `missing` (input_incomplete) is what the execution input lacks; `recipeIds` (recipe_choice_required) are the task's Recipes; a new execution names one, a correction or learning cannot. */
 export class RSIHTTPError extends RSIError {
   name = 'RSIHTTPError';
   constructor(public statusCode: number, message: string, public code?: string, public requestId?: string,

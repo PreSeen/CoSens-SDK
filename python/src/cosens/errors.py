@@ -15,7 +15,7 @@ class RSIHTTPError(RSIError):
         self.request_id = request_id
         self.current_version = current_version  # a Recipe version conflict reports the chain's current version
         self.missing = missing  # input_incomplete: what the execution input lacks
-        self.recipe_ids = recipe_ids  # recipe_choice_required: the task's Recipes, one of which to name
+        self.recipe_ids = recipe_ids  # recipe_choice_required: the task's Recipes; a new execution names one, a correction or learning cannot
 
 
 class RSITransportError(RSIError):

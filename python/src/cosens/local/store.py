@@ -258,7 +258,8 @@ def _upgrade_to_capability_tasks(db):
     db.execute("DELETE FROM idempotency WHERE operation LIKE 'start_execution:%' AND rowid NOT IN "
                "(SELECT min(rowid) FROM idempotency WHERE operation LIKE 'start_execution:%' GROUP BY request_key)")
     db.execute("UPDATE idempotency SET operation='start_execution' WHERE operation LIKE 'start_execution:%'")
-    # A task's old artifacts were the instance input, which every execution froze in its request.
+    # A task's old artifacts were the instance input, frozen in the request of each execution started after they
+    # were attached; those attached after the last start, or to a task that never ran, are no longer referenced.
     tasks = [(row["position"], row["id"],
               canonical_json({"objective": json.loads(row["context_json"])["objective"], "artifacts": []}),
               row["context_version"])
