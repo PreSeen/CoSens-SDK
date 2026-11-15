@@ -189,9 +189,6 @@ class LocalTaskWorkflow:
 
     def _execution_intent(self, db, task_id, key, source, body, recipe_id, recall_memory):
         """Return the replayed response, or the frozen request to create; refuses an incomplete input."""
-        row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if row is None:
-            raise LookupError("task not found")
         kind = _SOURCES[source]
         value = {"objective": body.get("objective"), "self_contained": body.get("self_contained", False),
                  "artifacts": self._artifact_refs(db, body["artifacts"], roles=_INPUT_ROLES,
@@ -199,18 +196,23 @@ class LocalTaskWorkflow:
         missing = _input_missing(value, kind)
         if missing:
             raise ValueError(f"the execution input is incomplete: {', '.join(missing)}")
-        request = {"task_id": task_id, "kind": kind, "trace_origin": kind,
-                   "task_context": {**json.loads(row["context_json"]), "context_version": row["context_version"]},
-                   "input": value}
-        intent = fingerprint({**request, **({"requested_recipe_id": recipe_id} if recipe_id else {}),
+        intent = fingerprint({"task_id": task_id, "kind": kind, "input": value,
+                              **({"requested_recipe_id": recipe_id} if recipe_id else {}),
                               **({"recall_memory": True} if recall_memory else {})})
-        # One operation for every new execution: the intent covers the task, source and input, so a key resent with any
-        # of them changed is refused instead of starting a second execution.
+        # One operation for every new execution: the intent covers what the caller sent (task, source, input), so a key
+        # resent with any of them changed is refused instead of starting a second execution. It leaves out the task's
+        # context, which a supplement may change before a retry, so replay is resolved before that row is read.
         saved = self._start_record(db, key, "start_execution")
         if saved is not None:
             if saved["request_hash"] != intent:
                 raise ValueError("idempotency key reused with different execution")
             return {"response": json.loads(saved["response_json"])}
+        row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if row is None:
+            raise LookupError("task not found")
+        request = {"task_id": task_id, "kind": kind, "trace_origin": kind,
+                   "task_context": {**json.loads(row["context_json"]), "context_version": row["context_version"]},
+                   "input": value}
         return {"request": request, "intent": intent, "kind": kind}
 
     async def start_execution(self, task_id, *, key, source, objective=None, artifacts=None, self_contained=None,
@@ -231,7 +233,7 @@ class LocalTaskWorkflow:
             intent = self._execution_intent(db, task_id, key, source, body, recipe_id, recall_memory)
             if "response" in intent:
                 return result(intent["response"])
-            if intent["intent"] != first["intent"]:
+            if intent["request"]["task_context"] != first["request"]["task_context"]:
                 raise ValueError("task context changed while recalling Memory; start the execution again")
             request = intent["request"]
             method = self._execution_method(db, task_id, recipe_id)

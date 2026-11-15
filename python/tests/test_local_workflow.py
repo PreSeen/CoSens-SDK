@@ -85,6 +85,10 @@ async def test_execution_freezes_request_and_replays(tmp_path):
     assert again.execution_id == started.execution_id and again.kind == "original"
     with pytest.raises(ValueError, match="idempotency"):
         await rsi.start_execution(task.task_id, key="e", source="new_task", objective="Week 2")
+    # The key covers what the caller sent, so a supplement of the shared task does not strand a resent start.
+    await rsi.supplement_task_context(task.task_id, expected_context_version=1, objective="A v2")
+    resent = await rsi.start_execution(task.task_id, key="e", source="new_task", objective="Week 1")
+    assert resent.execution_id == started.execution_id and resent.request["task_context"]["context_version"] == 1
     execution = await rsi.get_execution(started.execution_id)
     assert execution.request_sha256 == started.request_sha256 and execution.instance_id == started.execution_id
     [listed] = (await rsi.get_task(task.task_id)).executions
@@ -132,11 +136,15 @@ async def test_revision_carries_base_result_and_feedback(tmp_path):
     rsi, _ = make_rsi(tmp_path)
     _, _, done = await first_revision(rsi)
     await rsi.record_feedback(done.revision_id, feedback="fix it", source="evaluator", key="f")
+    # A correction keeps the context its first draft saw, not the task's current one.
+    glossary = await rsi.artifact(name="glossary.md", content="ARR means annual recurring revenue.")
+    await rsi.supplement_task_context(done.task_id, expected_context_version=1, artifacts=[glossary.artifact_id])
     started = await rsi.start_revision(done.revision_id, key="r")
     assert started.request["base_revision_id"] == done.revision_id
     first = await rsi.get_execution(done.execution_id)
     assert started.request["input"] == first.request["input"]
     assert started.request["task_context"] == first.request["task_context"]
+    assert started.request["task_context"]["context_version"] == 1 and started.request["task_context"]["artifacts"] == []
     assert started.instance_id == done.execution_id and started.kind == "revision"
     assert (await rsi.get_execution(started.execution_id)).instance_id == done.execution_id
     assert started.request["feedback"][0]["message"] == "fix it"
