@@ -17,5 +17,8 @@ async def run_task(task, model):
 
 async def on_artifact_confirmed(client, turn_id):
     """Call only after the user confirmed the artifact; an execution learns once."""
-    learning = await client.cosens.generate_recipe(turn_id)
-    return await client.cosens.atoms.wait_learning(learning["execution_id"])
+    turn = client.cosens.get_turn(turn_id)
+    if not turn or turn.get("state") != "completed" or not turn.get("execution_id"):
+        return None  # nothing was recorded for this turn
+    await client.cosens.generate_recipe(turn_id)
+    return await client.cosens.atoms.wait_learning(turn["execution_id"])

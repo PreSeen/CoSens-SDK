@@ -80,12 +80,12 @@ if (turn?.state === 'completed' && turn.executionId) {
 }
 ```
 
-`generateRecipe` learns the first Recipe version, or the next one, from the turn's execution, and analyzes feedback internally. An execution learns once: calling it again returns the same learning, and it takes no key. A different `maxCompletionTokens` for an execution that already learned is rejected by the service with HTTP 422. Learning recalls related Memory only when the execution was started with `recallMemory: true`; there is no learning Memory option. `cosens.feedback(message, { source })` records feedback on the turn's execution; `source` is `human`, `evaluator`, `reference`, `automated_check` or `downstream`.
+`generateRecipe` learns the first Recipe version, or the next one, from the turn's execution; an execution learns once. `cosens.feedback(message, { source })` records feedback on the turn's execution. The learning rules, statuses and errors are in [the API reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/api-reference.md) (Python names; the TypeScript ones are camelCase).
 
 ### Differences from the Python SDK
 
-- **No automatic feedback-to-correction.** The TypeScript wrappers do not classify a follow-up message as feedback on the previous turn. Record feedback with `cosens.feedback(...)` or `atoms.recordFeedback(executionId, ...)`, then start the correction yourself with `client.start({ task_id, execution_id }, { phase: 'correct', requestKey })` or `atoms.startExecution(taskId, { key, previousExecutionId })`.
-- **No `waitLearning` / `resumeLearning` on the wrappers.** Use `client.atoms.waitLearning(executionId)` and `client.atoms.resumeLearning(executionId)`; the turn's `executionId` and its stored `learning` are on `getTurn(turnId)`.
+- **No automatic feedback-to-correction.** The TypeScript wrappers do not classify a follow-up message as feedback on the previous turn. Record feedback with `cosens.feedback(...)`, then start the correction with a `CoSensClient`'s `start({ task_id, execution_id }, { phase: 'correct', requestKey })` or its `atoms.startExecution(taskId, { key, previousExecutionId })`.
+- **No `waitLearning` / `resumeLearning` on the wrappers.** Use a `CoSensClient`'s `atoms.waitLearning(executionId)` and `atoms.resumeLearning(executionId)`; the agent runner also exposes them as `client.cosens.atoms`. The turn's `executionId` and its stored `learning` are on `getTurn(turnId)`.
 - **The feedback key option is the other way round.** The transparent wrapper's `cosens.feedback(message, { source, turnId, requestKey })` accepts a `requestKey` and the agent runner's `cosens.feedback(message, source, turnId)` does not; in Python the agent runner's `feedback` takes `request_key` and the transparent wrapper's does not.
 
 ## Run an OpenAI Agents agent
@@ -106,6 +106,9 @@ const result = await runner.run(agent, 'Produce a report');
 Use `CoSensClient.atoms` for Task, Execution, feedback, learning, Recipe and Memory operations. Each call sends one request. Keep the same key when retrying an uncertain response.
 
 ```ts
+import { CoSensClient } from 'cosens-sdk';
+
+const client = new CoSensClient();
 const execution = await client.atoms.startExecution(taskId, { key: 'run-1', model: '<public-model-id>' });
 const result = await client.atoms.submitExecution(execution.execution_id, { requestSha256: execution.request_sha256, outcome: 'completed', artifacts });
 if (result.status !== 'completed') throw new Error('The execution result was not confirmed');
@@ -130,16 +133,11 @@ try {
 }
 ```
 
-- `learn` sends no key; repeating it returns the same learning. `maxCompletionTokens` is an integer from 1 to 1,000,000; the service defaults to 32,000, and a different value for an execution that already learned gets HTTP 422.
-- `resumeLearning` retries a `failed`, `interrupted` or `awaiting_runner` learning, optionally with a new budget. It returns an active or completed learning unchanged (a different budget then gets 422) and answers 422 before any learning and for `awaiting_material`.
-- `waitLearning(executionId, { timeout = 300 })` (seconds) polls every 2 s, doubling to 30 s. It returns a `completed` learning and throws:
-  - `RSILearningFailedError` on `failed`, with `executionId`, `code`, `detailMessage`, `retryable`, `phase`, `upstreamStatus`, `upstreamCode` and `requestId`. `retryable` is `true`, `false`, or `undefined` when the service does not say (a bare code such as `previous_version_failed` can still be resumed).
-  - `RSILearningStoppedError` on `interrupted`, `awaiting_runner` or `awaiting_material`, with `learning`, `executionId`, `status` and `requestId`. These are not failures; nothing changes until you resume (or, for `awaiting_material`, give feedback in a correction).
-  - an `Error` named `TimeoutError` while the learning is still in flight, and `RSIRecoveryRequired` when the execution has no learning or an unknown status.
+`learn` and `resumeLearning` send no key, and `waitLearning(executionId, { timeout })` takes seconds. When each error is thrown, and the 422 cases, are in [the API reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/api-reference.md). The TypeScript fields: `RSILearningFailedError` has `executionId`, `code`, `detailMessage` (the service's text; `message` is the error's own), `retryable` (`true`, `false` or `undefined`), `phase`, `upstreamStatus`, `upstreamCode` and `requestId`; `RSILearningStoppedError` has `learning`, `executionId`, `status` and `requestId`. A learning still in flight at the deadline throws an `Error` named `TimeoutError`.
 
 The Recipe store: `uploadRecipe(recipeId, { version, recipe, previousVersion })`, `getRecipe(recipeId, { version })`, `listRecipes({ limit, cursor, origin })` and `searchRecipes(query, { limit })`. Only `generated` Recipes can be applied to an execution with `recipeId`, so the transparent wrapper's lookup offers only those.
 
-`client.start(snapshot, { phase })` takes `prepare` (a task execution; needs `requestKey`), `correct` (a correction of `snapshot.execution_id`; needs `requestKey`) or `learn` (learns from `snapshot.execution_id`; no key). Returned objects have a non-enumerable `requestId` holding the response's `x-request-id`.
+A `CoSensClient`'s `start(snapshot, { phase })` takes `prepare` (a task execution; needs `requestKey`), `correct` (a correction of `snapshot.execution_id`; needs `requestKey`) or `learn` (learns from `snapshot.execution_id`; no key). Returned objects have a non-enumerable `requestId` holding the response's `x-request-id`.
 
 ## More
 

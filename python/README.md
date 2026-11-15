@@ -38,7 +38,7 @@ turn_id = client.cosens.last_turn_id
 
 The response is the native OpenAI result. `AsyncOpenAI` works the same way and exposes async CoSens calls.
 
-In `auto` mode the SDK first makes a short structured decision call through your client (Chat Completions with a JSON schema `response_format`), so the model must support structured output. The model writes only `{"activate": ..., "reason": ...}`; the task objective is your user's text. The call is made once, without retries, with a 5-second timeout and a 1024-token output budget (reasoning included). If the decision or the read-only Recipe lookup fails or times out, your request still runs without CoSens capture, and the turn records why: `client.cosens.get_turn(client.cosens.last_turn_id)` has `capture == "decision_failed"` with `decision["error_type"]` and `decision["error"]` (for example a timeout, a gateway error, or output cut off at the token limit). A request without user text is skipped without a model call (`capture == "no_user_text"`).
+In `auto` mode the SDK first makes a short structured decision call through your client (Chat Completions with a JSON schema `response_format`), so the model must support structured output. The model writes only `{"activate": ..., "reason": ...}`, plus `"feedback": true|false` when the request follows an earlier recorded turn; the task objective is your user's text. The call is made once, without retries, with a 5-second timeout and a 1024-token output budget (reasoning included). If the decision or the read-only Recipe lookup fails or times out, your request still runs without CoSens capture, and the turn records why: `client.cosens.get_turn(client.cosens.last_turn_id)` has `capture == "decision_failed"` with `decision["error_type"]` and `decision["error"]` (for example a timeout, a gateway error, or output cut off at the token limit). A request without user text is skipped without a model call (`capture == "no_user_text"`).
 
 | Option | Default | Effect |
 | --- | --- | --- |
@@ -78,14 +78,7 @@ if turn and turn.get("state") == "completed" and turn.get("execution_id"):
     record = client.cosens.wait_learning(turn_id)
 ```
 
-This is the only learning action. It learns the first Recipe version, or the next one, from the turn's execution, and performs feedback attribution internally. An execution learns once: calling `generate_recipe` again returns the same learning, and it takes no request key. A different `max_completion_tokens` for a turn that already learned is rejected. `feedback(message, source=...)` records feedback on the turn's execution; it does not update a Recipe. When the next message is classified as feedback on this turn, the wrapper records it and runs that message as a correction; learning from the correction turn makes the next version.
-
-`client.cosens.wait_learning(turn_id)` raises:
-
-- `cosens.RSILearningFailed` when the learning failed. It has `execution_id`, `code`, `message`, `retryable`, `phase`, `upstream_status`, `upstream_code` and `request_id`. `retryable` is `True` when `client.cosens.resume_learning(turn_id)` may succeed, `False` when it will not, and `None` when the service does not say.
-- `cosens.RSILearningStopped` when the learning is `interrupted`, `awaiting_runner` or `awaiting_material`: nothing changes until you act. It has `learning`, `execution_id` and `status`. Resume an interrupted learning, or one waiting for a model; for `awaiting_material` the current version was kept (`learning["material_gap"]` says why), and learning more needs feedback in a correction.
-
-Both are raised after the turn's learning record is stored, so the turn stays resumable.
+`generate_recipe` learns the first Recipe version, or the next one, from the turn's execution; an execution learns once. `wait_learning` raises `cosens.RSILearningFailed` when the learning failed and `cosens.RSILearningStopped` when it stopped in a state only you can change; both are raised after the turn's record is stored, so `client.cosens.resume_learning(turn_id)` can continue it. `feedback(message, source=...)` records feedback on the turn's execution. The learning rules, statuses and errors are in [the API reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/api-reference.md); how a follow-up message becomes a correction is in [execution capture](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/unified-auto.md).
 
 ## Run an OpenAI Agents agent
 
@@ -121,21 +114,26 @@ rsi = LocalRSI(client=CoSensClient(), model=ChatCompletionsModel(AsyncOpenAI(bas
 # Or use your Codex login: LocalRSI(client=CoSensClient(), model=CodexCLIModel())
 ```
 
-`LocalRSI` keeps its earlier in-process workflow names and does not yet follow the execution API; see
-[Local RSI](docs/local-rsi.md). Its evidence references now use `execution_id`, and a store written by an earlier SDK
-is upgraded once when first opened (stop older LocalRSI processes first; downgrading a store is not supported). Generation runs while you wait on a candidate, so always wait for it. Each new
-version is uploaded without its evidence references. To continue a Recipe on another machine, find it with
-`search_recipes` or `list_recipes`, read it with `get_recipe` and pass it as `create_task(..., recipe=...)`. See
-`examples/04_local_rsi.py`.
+`LocalRSI` keeps its earlier in-process workflow names and does not yet follow the execution API; its methods, its
+evidence references and the one-time store upgrade are described in
+[Local RSI](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/local-rsi.md). Each new version is uploaded
+without its evidence references. To continue a Recipe on another machine, find it with `search_recipes` or
+`list_recipes`, read it with `get_recipe` and pass it as `create_task(..., recipe=...)`. See `examples/04_local_rsi.py`.
 
 ## Atomic operations
 
-`CoSensClient().atoms` (async) and `.sync_atoms` (sync) expose Task, Execution, feedback, learning, Recipe and Memory operations directly; see [the API reference](docs/api-reference.md). Keep stable idempotency keys across retries.
+`CoSensClient().atoms` (async) and `.sync_atoms` (sync) expose Task, Execution, feedback, learning, Recipe and Memory operations directly; see [the API reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/api-reference.md). Keep stable idempotency keys across retries.
 
-- `submit_execution` returns `status`; treat the execution as done only when it is `"completed"`.
-- `record_feedback(execution_id, ...)` records feedback; `start_execution(task_id, key=..., previous_execution_id=execution_id)` starts a correction.
-- `learn(execution_id)` learns once per execution and takes no key; `wait_learning(execution_id)` raises `RSILearningFailed` or `RSILearningStopped` as above, and `resume_learning(execution_id)` retries.
-- Returned JSON objects are dicts with a `request_id` attribute holding the response's `x-request-id`, for support requests.
+```python
+execution = await atoms.start_execution(task_id, key="run-1", model="<public-model-id>")
+result = await atoms.submit_execution(execution["execution_id"], request_sha256=execution["request_sha256"],
+                                      outcome="completed", artifacts=[{"artifact_id": artifact_id, "role": "submitted_output"}])
+if result["status"] == "completed":
+    await atoms.learn(execution["execution_id"])
+    learning = await atoms.wait_learning(execution["execution_id"])
+```
+
+Returned JSON objects are dicts with a `request_id` attribute holding the response's `x-request-id`, for support requests.
 
 ## More
 
