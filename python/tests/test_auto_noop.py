@@ -115,14 +115,15 @@ def test_noop_tool_continuation_keeps_original_turn_and_native_request(tmp_path,
         if legacy_context:
             runtime = wrapped.cosens._runtime
             old = runtime.turns.get(turn_id)
-            old.update(used_recipe_id='legacy-recipe', used_recipe_version=1, frozen_context={'recipe': {'status': 'matched'}})
+            old.update(used_recipe_id='legacy-recipe', used_recipe_version=1, task_id='recipe-task',
+                       frozen_context={'recipe': {'status': 'matched'}})
             runtime._save(old)
         wrapped.responses.create(**second)
         assert requests == [first, second] and calls == []
         assert len(decisions) == 1 and wrapped.cosens.last_turn_id == turn_id
         turn = wrapped.cosens.get_turn(turn_id)
         assert turn['state'] == 'completed' and not turn.get('execution_id')
-        assert not turn.get('used_recipe_id') and not turn.get('frozen_context')
+        assert not turn.get('used_recipe_id') and not turn.get('frozen_context') and not turn.get('task_id')
     finally:
         wrapped.close()
         native.close()

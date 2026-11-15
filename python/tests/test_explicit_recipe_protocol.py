@@ -467,6 +467,29 @@ async def test_start_correct_rejects_recipe_and_memory_before_asking_or_sending(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('snapshot',[{'task_id':'task_1'},{'task_id':'task_1','execution_id':''},
+                                     {'task_id':'','execution_id':'execution_1'},{'task_id':'..','execution_id':'execution_1'}])
+async def test_start_correct_checks_the_snapshot_ids_before_asking_or_sending(tmp_path,snapshot):
+    backend=Backend();asked=[]
+    async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(backend)) as sdk:
+        with pytest.raises(ValueError, match='resource ID must be a nonempty safe path segment'):
+            await sdk.start(snapshot,phase='correct',request_key='fix-1',mode='approval',
+                            authorize=lambda *args:asked.append(args) or True)
+    assert backend.seen==[] and asked==[]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('task_id',['','..',123])
+async def test_start_prepare_checks_the_task_id_before_asking_or_sending(tmp_path,task_id):
+    backend=Backend();asked=[]
+    async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(backend)) as sdk:
+        with pytest.raises(ValueError, match='resource ID must be a nonempty safe path segment'):
+            await sdk.start({'task':{'source':'new_task','objective':'Produce output'},'task_id':task_id},
+                            request_key='prepare-1',mode='approval',authorize=lambda *args:asked.append(args) or True)
+    assert backend.seen==[] and asked==[] and backend.tasks=={}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('spec,message',[
     ({'objective':'Produce output'},'task.source is required'),
     ({'source':'external_artifact','objective':'Produce output'},'external_artifact requires submitted_output'),

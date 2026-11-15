@@ -66,6 +66,8 @@ async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto"
         task_data = session_context.get("task")
         options = _execution_options(task_data, creates_task=session_context.get("task_id") is None and recipe_id is None,
                                      recipe_id=recipe_id, model=model, recall_memory=recall_memory)
+        if recipe_id is None and session_context.get("task_id") is not None:
+            path_part(session_context["task_id"])
         if recipe_id is not None:
             # The host approves the task the Recipe's execution actually runs in.
             session_context = {**session_context,
@@ -76,6 +78,8 @@ async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto"
             raise ValueError("a correction takes only previous_execution_id, task_id and model")
         stable_key(request_key)
         path_part(session_context.get('execution_id'))
+        if session_context.get('task_id') is not None:
+            path_part(session_context['task_id'])
         _model_data(model)
     if mode == "approval":
         if authorize is None:

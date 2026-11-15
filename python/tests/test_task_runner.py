@@ -6,7 +6,7 @@ import pytest
 from agents import Runner
 
 from cosens import TaskWorkflowRunner, cosens
-from cosens.errors import RSIHTTPError, RSIRecoveryRequired
+from cosens.errors import RSIApprovalRequired, RSIHTTPError, RSIRecoveryRequired
 
 
 @pytest.mark.asyncio
@@ -312,6 +312,59 @@ async def test_task_runner_keeps_the_objective_when_correcting_an_incomplete_spe
     await wrapper.aclose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("synchronous", [False, True])
+async def test_task_runner_keeps_a_spec_the_host_refused_correctable(tmp_path, synchronous):
+    server = IncompleteServer()
+    native = SyncCapableRunner()
+    wrapper = TaskWorkflowRunner(native, mode="approval", api_key="key", state_path=tmp_path / "refused.sqlite3",
+                                 _http_transport=httpx.MockTransport(server))
+    run = _runner_call(wrapper, synchronous)
+    answers, asked = [True, False, True], []
+    def authorize(phase, snapshot):
+        asked.append(snapshot["task"])
+        return answers[len(asked) - 1]
+    incomplete = {"source": "external_artifact", "objective": "work", "artifacts": ["external-output"]}
+    with pytest.raises(RSIHTTPError, match="incomplete"):
+        await run("work", {"turn_id": "turn-1", "task": incomplete, "authorize": authorize})
+    sent = len(server.seen)
+    # The host refuses the first correction before anything is sent, so the turn may still be corrected.
+    refused = {**incomplete, "self_contained": True}
+    with pytest.raises(RSIApprovalRequired):
+        await run("work", {"turn_id": "turn-1", "task": refused, "authorize": authorize})
+    turn = wrapper.cosens.get_turn("turn-1")
+    assert len(server.seen) == sent and turn["task_spec"] == refused and turn["task_spec_incomplete"] is True
+    server.incomplete = False
+    corrected = {**incomplete, "artifacts": ["external-output", {"artifact_id": "brief", "role": "original_input"}]}
+    result = await run("work", {"turn_id": "turn-1", "task": corrected, "authorize": authorize})
+    assert result.final_output == "native answer" and asked == [incomplete, refused, corrected]
+    turn = wrapper.cosens.get_turn("turn-1")
+    assert turn["execution_id"] == "e1" and turn["task_spec"] == corrected and "task_spec_incomplete" not in turn
+    assert [body["input"] for _, path, body in server.seen if path == "/api/executions"][-1] == {
+        "objective": "work", "artifacts": ["external-output", {"artifact_id": "brief", "role": "original_input"}]}
+    await wrapper.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("synchronous", [False, True])
+async def test_task_runner_checks_the_model_before_asking_the_host(tmp_path, synchronous):
+    server = IncompleteServer()
+    native = SyncCapableRunner()
+    wrapper = TaskWorkflowRunner(native, mode="approval", api_key="key", state_path=tmp_path / "model.sqlite3",
+                                 _http_transport=httpx.MockTransport(server))
+    agent, asked = FakeAgent(), []
+    agent.model = "m" * 300
+    rsi = {"turn_id": "turn-1", "task": {"source": "new_task", "objective": "work"},
+           "authorize": lambda *args: asked.append(args) or True}
+    with pytest.raises(ValueError, match="model must be a public model ID"):
+        if synchronous:
+            wrapper.run_sync(agent, "work", rsi=rsi)
+        else:
+            await wrapper.run(agent, "work", rsi=rsi)
+    assert asked == [] and server.seen == [] and wrapper.cosens.get_turn("turn-1") is None
+    await wrapper.aclose()
+
+
 def _transport_error(request):
     raise httpx.ReadTimeout("receipt lost", request=request)
 
@@ -320,7 +373,9 @@ def _transport_error(request):
 @pytest.mark.parametrize("synchronous", [False, True])
 @pytest.mark.parametrize("failure", [
     lambda request: httpx.Response(422, json={"error": {"code": "invalid_request", "message": "bad execution"}}),
-    _transport_error], ids=["refused", "receipt_lost"])
+    lambda request: httpx.Response(503, json={"error": {"code": "input_incomplete", "message": "unavailable"}}),
+    lambda request: httpx.Response(200, json={"execution_id": "e1", "status": "failed", "request_sha256": "h1", "request": {}}),
+    _transport_error], ids=["refused", "server_error", "started_not_ready", "receipt_lost"])
 async def test_task_runner_locks_the_spec_after_a_start_that_was_not_input_incomplete(tmp_path, synchronous, failure):
     server = IncompleteServer()
     native = SyncCapableRunner()

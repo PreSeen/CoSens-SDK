@@ -19,6 +19,12 @@ def _text_output(value):
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+def _agent_model(agent):
+    """The Agent's model when it names one; a model object is the host's own and is not sent."""
+    model = getattr(agent, "model", None)
+    return model if isinstance(model, str) and model.strip() else None
+
+
 def _observed_native_items(result):
     """Record bounded items actually returned by Agents, without claiming a complete trace."""
     items = getattr(result, "new_items", None)
@@ -236,8 +242,8 @@ class TaskWorkflowRunner:
             raise ValueError("rsi.turn_id is required for a recoverable workflow turn")
         if not isinstance(rsi.get("task"), dict):
             raise ValueError("rsi.task is required for a workflow turn")
-        # A turn always creates its task, so the spec is checked before anything is recorded or sent.
-        _execution_options(rsi["task"], creates_task=True)
+        # A turn always creates its task, so the spec and the model are checked before anything is recorded or sent.
+        _execution_options(rsi["task"], creates_task=True, model=_agent_model(agent))
         session_id, session_incarnation = self._session_identity(session)
         input_hash = self._input_hash(agent, user_input)
         turn_id = rsi["turn_id"]
@@ -255,9 +261,9 @@ class TaskWorkflowRunner:
             if rsi["task"].get("objective") != state["task_spec"].get("objective"):
                 raise RSIRecoveryRequired("Workflow task objective changed; start a new turn")
             # The service refused the previous spec as incomplete and started nothing: take the corrected one.
+            # The flag stays until a start is attempted, so a host refusal of this spec leaves it correctable.
             previous = state["task_spec"]
             state["task_spec"] = rsi["task"]
-            state.pop("task_spec_incomplete")
             if not self._store.update_pending(turn_id, state, previous_task_spec=previous):
                 raise RSIRecoveryRequired("Workflow turn changed during preparation; reconcile before retrying")
         if not state:
@@ -295,7 +301,8 @@ class TaskWorkflowRunner:
         if not state.get("execution_id"):
             try:
                 started = await self._client.start(self._prepare_snapshot(state), phase="prepare", mode=self.mode,
-                                                   request_key=turn_id, authorize=rsi.get("authorize"), **({"model": agent.model} if isinstance(getattr(agent,"model",None),str) and agent.model.strip() else {}))
+                                                   request_key=turn_id, authorize=rsi.get("authorize"),
+                                                   **({"model": _agent_model(agent)} if _agent_model(agent) else {}))
             except (RSIApprovalRequired, RSIApprovalUnavailable):
                 # The host refused before anything was sent, so an earlier refusal still stands.
                 raise
@@ -305,7 +312,7 @@ class TaskWorkflowRunner:
             state.pop("task_spec_incomplete", None)
             if started.get("task_id") or started.get("task", {}).get("task_id"):
                 state["task_id"] = started.get("task_id") or started["task"]["task_id"]
-                self._save_pending(state)
+            self._save_pending(state)
             if started.get("status") != "awaiting_execution" or not started.get("execution_id") or not started.get("request_sha256") or not isinstance(started.get("execution_request"), dict):
                 raise RSIRecoveryRequired(f"Workflow execution is {started.get('status')}; reconcile before executing")
             state.update(task_id=started["task_id"], execution_id=started["execution_id"],
@@ -317,6 +324,9 @@ class TaskWorkflowRunner:
     def _prepare_sync(self, rsi, *, agent, user_input, session):
         state = self._pending_state(rsi, agent=agent, user_input=user_input, session=session)
         if not state.get("execution_id"):
+            data = state["task_spec"]
+            # The task spec is the execution's input; the task itself carries only the objective.
+            options = _execution_options(data, creates_task=True, model=_agent_model(agent))
             if self.mode == "approval":
                 authorize = rsi.get("authorize")
                 if authorize is None:
@@ -329,10 +339,6 @@ class TaskWorkflowRunner:
                 if allowed is not True:
                     raise RSIApprovalRequired("host authorization was not granted")
             atoms = self._client.sync_atoms
-            data = state["task_spec"]
-            # The task spec is the execution's input; the task itself carries only the objective.
-            options = _execution_options(data, creates_task=True, model=agent.model if isinstance(
-                getattr(agent, "model", None), str) and agent.model.strip() else None)
             if not state.get("task_id"):
                 task = atoms.create_task(objective=data["objective"], key=_derived_key(state["turn_id"], "task"))
                 if not task.get("task_id"):
