@@ -212,7 +212,7 @@ def _upgrade_to_capability_tasks(db):
     if shared:
         listed = ", ".join(f"{row['recipe_id']} (tasks {row['tasks']})" for row in shared)
         raise _StoreNotUpgraded(f"Recipes bound to more than one task: {listed}. From this release on a Recipe belongs "
-                                "to one task; decide which task keeps each Recipe before upgrading")
+                                "to one task")
     executions = db.execute("SELECT rowid AS position,* FROM executions ORDER BY rowid").fetchall()
     requests = {row["id"]: json.loads(row["request_json"]) for row in executions}
     for row in db.execute("SELECT c.id,c.context_json,c.context_sha,e.id AS execution_id FROM recipe_candidates c "
@@ -268,6 +268,16 @@ def _upgrade_to_capability_tasks(db):
         raise _StoreNotUpgraded(f"table {broken[0]} row {broken[1]} refers to a missing {broken[2]} row")
 
 
+def _refresh_learning_receipts(db):
+    """A learning's start receipt reports the hash of its frozen context, which each upgrade above recomputes."""
+    shas = dict(db.execute("SELECT id,context_sha FROM recipe_candidates").fetchall())
+    for row in db.execute("SELECT request_key,response_json FROM idempotency WHERE operation='recipe_candidate'").fetchall():
+        response = json.loads(row["response_json"])
+        response = {**response, "context_sha256": shas[response["recipe_candidate_id"]]}
+        db.execute("UPDATE idempotency SET response_json=? WHERE operation='recipe_candidate' AND request_key=?",
+                   (canonical_json(response), row["request_key"]))
+
+
 def default_store_path():
     return Path.home() / ".cosens" / "local-rsi.sqlite3"
 
@@ -320,6 +330,7 @@ class LocalStore:
                 if version < 1:
                     _upgrade_evidence_to_executions(db)
                 _upgrade_to_capability_tasks(db)
+                _refresh_learning_receipts(db)
             except _RowNotUpgraded as stop:
                 raise LocalStoreUpgradeError(
                     f"Could not upgrade LocalRSI store {self._path}: Recipe candidate {stop.candidate_id}, "

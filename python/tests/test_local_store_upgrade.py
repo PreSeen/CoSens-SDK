@@ -96,10 +96,37 @@ def old_context(context):
     return context
 
 
+def learning_receipts_report_their_context(db):
+    """A learning's start receipt reports the hash of the context as it was frozen then."""
+    for key, response_text in db.execute(
+            "SELECT request_key,response_json FROM idempotency WHERE operation='recipe_candidate'").fetchall():
+        response = json.loads(response_text)
+        (context_text,) = db.execute("SELECT context_json FROM recipe_candidates WHERE id=?",
+                                     (response["recipe_candidate_id"],)).fetchone()
+        response["context_sha256"] = fingerprint(json.loads(context_text))
+        db.execute("UPDATE idempotency SET response_json=? WHERE operation='recipe_candidate' AND request_key=?",
+                   (canonical_json(response), key))
+
+
+def receipts_kept_by_the_upgrade(current, old):
+    """The idempotency rows an upgrade leaves: create_task receipts as they were, and every create_task and
+    start_execution receipt with the hash of its old request; the rest as the current SDK writes them."""
+    before = {(row[1], row[2]): row for row in old["idempotency"]}
+    kept = []
+    for row in current["idempotency"]:
+        old_row = before[(row[1], row[2])]
+        if row[1] == "create_task":
+            row = old_row
+        elif row[1].startswith("start_execution:"):
+            row = (*row[:3], old_row[3], row[4])
+        kept.append(row)
+    return {**current, "idempotency": kept}
+
+
 def to_version_1(path, *, break_context_hash_of=None):
     """Write the store back as the previous SDK did: a task holds a mode and the instance input, requests freeze it as
-    "context", executions have no instance, start receipts no kind, a Recipe may serve several tasks, learning contexts
-    are v2."""
+    "context", executions have no instance, start receipts no kind and the hash of that request, create_task receipts
+    the old task request and response, a Recipe may serve several tasks, learning contexts are v2."""
     db = sqlite3.connect(path)
     db.executescript("""
         CREATE TABLE tasks_v1(
@@ -137,11 +164,23 @@ def to_version_1(path, *, break_context_hash_of=None):
         response["request"] = old_request(response["request"])
         db.execute("UPDATE idempotency SET response_json=? WHERE operation=? AND request_key=?",
                    (canonical_json(response), operation, key))
+        if operation.startswith("start_execution:"):
+            db.execute("UPDATE idempotency SET request_hash=? WHERE operation=? AND request_key=?",
+                       (fingerprint(response["request"]), operation, key))
+    for key, response_text in db.execute(
+            "SELECT request_key,response_json FROM idempotency WHERE operation='create_task'").fetchall():
+        task_id = json.loads(response_text)["task_id"]
+        (context_text,) = db.execute("SELECT context_json FROM tasks WHERE id=?", (task_id,)).fetchone()
+        old_task = {"source": "new_task", **json.loads(context_text)}
+        db.execute("UPDATE idempotency SET request_hash=?,response_json=? WHERE operation='create_task' AND request_key=?",
+                   (fingerprint(old_task), canonical_json({"task_id": task_id, "source": "new_task", "status": "ready",
+                                                           "missing": [], "context_version": 1}), key))
     for row_id, context_text in db.execute(
             "SELECT id,context_json FROM recipe_candidates WHERE revision_id IS NOT NULL").fetchall():
         context = old_context(json.loads(context_text))
         sha = "0" * 64 if break_context_hash_of == row_id else fingerprint(context)
         db.execute("UPDATE recipe_candidates SET context_json=?,context_sha=? WHERE id=?", (canonical_json(context), sha, row_id))
+    learning_receipts_report_their_context(db)
     db.execute("PRAGMA user_version=1")
     db.commit()
     db.close()
@@ -186,6 +225,7 @@ def to_revisions(path, *, break_hash_of=None, unknown_execution=False):
         db.execute("UPDATE recipe_candidates SET context_json=?,context_sha=?,recipe_json=?,recipe_sha=?,attribution_json=? WHERE id=?",
                    (canonical_json(context), fingerprint(context), canonical_json(recipe) if recipe is not None else None,
                     recipe_sha, canonical_json(attribution) if attribution is not None else None, row_id))
+    learning_receipts_report_their_context(db)
     db.execute("PRAGMA user_version=0")
     db.commit()
     db.close()
@@ -277,6 +317,7 @@ async def test_a_0_6_store_gets_every_upgrade_in_one_open(tmp_path):
     path, _ = await learned_store(tmp_path)
     current, everything = rows(path), state(path)
     to_revisions(path)
+    everything = receipts_kept_by_the_upgrade(everything, state(path))
     with sqlite3.connect(path) as db:  # 0.6 had no remote_version and published to Memory
         db.execute("ALTER TABLE recipe_heads DROP COLUMN remote_version")
         db.execute("UPDATE recipe_candidates SET publish_state='published'")
@@ -301,6 +342,9 @@ async def test_a_version_1_store_upgrades_to_capability_tasks_once(tmp_path):
     assert all('"context":' in row[5] and '"input"' not in row[5] for row in old["executions"])
     assert all("kind" not in json.loads(row[4]) for row in old["idempotency"] if row[1].startswith("start_"))
     assert '"workflow-recipe-context-v2"' in old["recipe_candidates"][1][6]
+    learning_receipts = [row for row in old["idempotency"] if row[1] == "recipe_candidate"]
+    assert learning_receipts and learning_receipts != [row for row in current["idempotency"] if row[1] == "recipe_candidate"]
+    current = receipts_kept_by_the_upgrade(current, old)
 
     LocalStore(path).close()
     assert state(path) == current  # tasks, requests, receipts, instances and learning contexts as the current SDK writes them
@@ -330,9 +374,14 @@ async def test_a_version_1_store_upgrades_to_capability_tasks_once(tmp_path):
     assert state(path) == current
     rsi, _ = make_rsi(tmp_path)
     try:
-        assert (await rsi.get_recipe_candidate(candidate_id)).status == "candidate"  # stored hashes verify
+        view = await rsi.get_recipe_candidate(candidate_id)
+        assert view.status == "candidate"  # stored hashes verify
+        replayed = await rsi.start_recipe_candidate(context["task_id"], revision_id=view.revision_id)
+        assert replayed.recipe_candidate_id == candidate_id and replayed.context_sha256 == view.context_sha256
         [recipe] = (await rsi.get_task(context["task_id"])).recipes
         assert (recipe["current_version"], recipe["latest_version"]) == (2, 2)
+        with pytest.raises(ValueError, match="idempotency key reused with a different request"):
+            await rsi.create_task(key="t1", objective="Do the task")  # a receipt of the old task request
     finally:
         await rsi.aclose()
 
@@ -350,7 +399,8 @@ async def test_a_version_1_upgrade_stops_on_a_recipe_shared_by_two_tasks(tmp_pat
         LocalStore(path)
     message = str(caught.value)
     for part in (str(path), f"Recipes bound to more than one task: {recipe_id} (tasks task_0 {task_id})",
-                 "nothing was changed", "previous cosens-sdk release", "move the file aside"):
+                 "From this release on a Recipe belongs to one task; nothing was changed", "previous cosens-sdk release",
+                 "move the file aside"):
         assert part in message
     assert caught.value.path == str(path)
     assert state(path) == old and user_version(path) == 1
@@ -382,3 +432,25 @@ async def test_a_version_1_upgrade_stops_on_a_revision_chain_it_cannot_follow(tm
     for part in (execution_id, "revision_missing", "nothing was changed"):
         assert part in str(caught.value)
     assert state(path) == old and user_version(path) == 1
+
+
+async def test_a_version_1_upgrade_gives_a_correction_of_a_correction_the_first_execution_as_instance(tmp_path):
+    path, _ = await learned_store(tmp_path)
+    rsi, _ = make_rsi(tmp_path)
+    try:
+        with sqlite3.connect(path) as db:
+            (revision_id,) = db.execute("SELECT r.id FROM revisions r JOIN executions e ON e.id=r.execution_id "
+                                        "WHERE e.kind='revision'").fetchone()
+        await rsi.record_feedback(revision_id, feedback="still wrong", source="human", key="f2")
+        await complete_execution(rsi, await rsi.start_revision(revision_id, key="r2"), key="r2-out")
+    finally:
+        await rsi.aclose()
+    current = state(path)
+    to_version_1(path)
+    current = receipts_kept_by_the_upgrade(current, state(path))
+    LocalStore(path).close()
+    assert state(path) == current
+    with sqlite3.connect(path) as db:
+        executions = db.execute("SELECT id,kind,instance_id FROM executions ORDER BY rowid").fetchall()
+    (original, _, _), *corrections = executions
+    assert [(kind, instance) for _, kind, instance in corrections] == [("revision", original)] * 2

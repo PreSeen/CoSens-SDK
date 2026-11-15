@@ -144,6 +144,14 @@ async def test_revision_carries_base_result_and_feedback(tmp_path):
     again = await complete_execution(rsi, started, key="second")
     assert (await rsi.get_revision(again.revision_id)).trace_origin == "revision"
     assert (await rsi.start_revision(done.revision_id, key="r")).execution_id == started.execution_id
+    # A correction of a correction stays in the instance of the first execution.
+    await rsi.record_feedback(again.revision_id, feedback="still wrong", source="human", key="f2")
+    later = await rsi.start_revision(again.revision_id, key="r2")
+    assert later.request["base_revision_id"] == again.revision_id
+    assert later.instance_id == done.execution_id
+    assert (await rsi.get_execution(later.execution_id)).instance_id == done.execution_id
+    rows = (await rsi.get_task(started.task_id)).executions
+    assert [row["instance_id"] for row in rows] == [done.execution_id] * 3
 
 
 async def test_list_tasks_paginates_newest_first(tmp_path):
