@@ -47,7 +47,7 @@ async def test_context_updates_change_only_the_capability(tmp_path):
 async def test_an_incomplete_execution_input_is_refused_with_what_is_missing(tmp_path):
     rsi, _ = make_rsi(tmp_path)
     task = await rsi.create_task(key="k", objective="A")
-    with pytest.raises(ValueError, match="submitted_output"):
+    with pytest.raises(ValueError, match="^external_artifact requires submitted_output$"):
         await rsi.start_execution(task.task_id, key="e1", source="external_artifact", objective="A")
     produced = await rsi.artifact(name="report.md", content="Week 1 report")
     with pytest.raises(ValueError, match="^the execution input is incomplete: original_input_or_self_contained_task$"):
@@ -57,7 +57,7 @@ async def test_an_incomplete_execution_input_is_refused_with_what_is_missing(tmp
         await rsi.start_execution(task.task_id, key="e3", source="new_task")
     reconstructed = await rsi.start_execution(task.task_id, key="e4", source="external_artifact", objective="A",
                                               artifacts=[produced.artifact_id], self_contained=True)
-    assert reconstructed.request["kind"] == "reconstructed"
+    assert reconstructed.kind == reconstructed.request["kind"] == "reconstructed"
     assert [a["role"] for a in reconstructed.request["input"]["artifacts"]] == ["submitted_output"]
 
 
@@ -79,9 +79,10 @@ async def test_execution_freezes_request_and_replays(tmp_path):
     assert started.request["input"] == {"objective": "Week 1", "self_contained": False, "artifacts": []}
     assert started.request["task_context"] == {"objective": "A", "artifacts": [], "context_version": 1}
     assert started.instance_id == started.execution_id and "context" not in started.request
+    assert started.kind == "original"
     assert "method" not in started.request and "memory" not in started.request
     again = await rsi.start_execution(task.task_id, key="e", source="new_task", objective="Week 1")
-    assert again.execution_id == started.execution_id
+    assert again.execution_id == started.execution_id and again.kind == "original"
     with pytest.raises(ValueError, match="idempotency"):
         await rsi.start_execution(task.task_id, key="e", source="new_task", objective="Week 2")
     execution = await rsi.get_execution(started.execution_id)
@@ -136,7 +137,7 @@ async def test_revision_carries_base_result_and_feedback(tmp_path):
     first = await rsi.get_execution(done.execution_id)
     assert started.request["input"] == first.request["input"]
     assert started.request["task_context"] == first.request["task_context"]
-    assert started.instance_id == done.execution_id
+    assert started.instance_id == done.execution_id and started.kind == "revision"
     assert (await rsi.get_execution(started.execution_id)).instance_id == done.execution_id
     assert started.request["feedback"][0]["message"] == "fix it"
     assert started.request["base_result"]["events"][0]["id"] == "e1"

@@ -505,8 +505,9 @@ async def test_a_recipe_belongs_to_its_task(tmp_path):
 
 
 async def test_a_task_with_several_recipes_needs_a_recipe_choice(tmp_path):
-    rsi, _ = make_rsi(tmp_path, recipe_reply("V1"))
+    rsi, _ = make_rsi(tmp_path, recipe_reply("V1"), attribution_reply(True), recipe_reply("V2"))
     task, _, done = await first_revision(rsi)
+    _, early = await next_revision(rsi, task, "early")  # follows no Recipe: the task has none yet
     job = await generate(rsi, task, done)
     with rsi._store.transaction() as db:  # delivery 1 has no way to add a second Recipe; write one directly
         candidate = db.execute("SELECT * FROM recipe_candidates WHERE id=?", (job.recipe_candidate_id,)).fetchone()
@@ -524,10 +525,28 @@ async def test_a_task_with_several_recipes_needs_a_recipe_choice(tmp_path):
     assert [r["recipe_id"] for r in (await rsi.get_task(task.task_id)).recipes] == sorted([job.recipe_id, "second"])
     [imported] = [r for r in (await rsi.get_task(task.task_id)).recipes if r["recipe_id"] == "second"]
     assert imported["learning"] is None  # its newest version was not learned from an execution
+    # A correction, and a learning from it, stay with the Recipe the execution followed.
+    done = await complete_execution(rsi, chosen, key="e-out")
+    await rsi.record_feedback(done.revision_id, feedback="wrong", source="human", key="f")
+    correction = await rsi.start_revision(done.revision_id, key="r")
+    assert correction.request["method"]["recipe_id"] == "second"
+    again = await complete_execution(rsi, correction, key="r-out")
+    learned = await generate(rsi, task, again)
+    assert (learned.recipe_id, learned.version) == ("second", 2)
+    with pytest.raises(ValueError, match="^the execution followed no Recipe and the task has several$"):
+        await rsi.start_recipe_candidate(task.task_id, revision_id=early.revision_id)
+
+
+def recipe_citing_the_template(payload):
+    """A Recipe whose step cites the task's reference material."""
+    [template] = payload["context"]["task_materials"]
+    return {"title": "Weekly report", "when": "always", "when_not": "never", "lessons": [],
+            "steps": [{"id": "s1", "instruction": "follow the template",
+                       "evidence_refs": [{"artifact_id": template["artifact_id"]}]}]}
 
 
 async def test_learning_freezes_the_task_context_and_each_input(tmp_path):
-    rsi, model = make_rsi(tmp_path, attribution_reply(True), recipe_reply("V1"))
+    rsi, model = make_rsi(tmp_path, attribution_reply(True), recipe_citing_the_template)
     template = await rsi.artifact(name="template.md", content="## Risks")
     task = await rsi.create_task(key="t", objective="Write the weekly report", artifacts=[template.artifact_id])
     started = await rsi.start_execution(task.task_id, key="w1", source="new_task", objective="Week 1")
@@ -535,7 +554,10 @@ async def test_learning_freezes_the_task_context_and_each_input(tmp_path):
     await rsi.record_feedback(done.revision_id, feedback="Add risks", source="human", key="f")
     correction = await rsi.start_revision(done.revision_id, key="r")
     again = await complete_execution(rsi, correction, key="r-out")
-    await generate(rsi, task, again)
+    learned = await generate(rsi, task, again)
+    # Evidence may cite the task's reference material as well as the history.
+    assert learned.status == "candidate"
+    assert learned.recipe["steps"][0]["evidence_refs"] == [{"artifact_id": template.artifact_id}]
     context = model.calls[0]["context"]["context"]
     assert context["schema"] == "workflow-recipe-context-v3"
     assert context["task_context"] == {"objective": "Write the weekly report", "context_version": 1,

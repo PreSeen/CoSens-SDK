@@ -201,8 +201,8 @@ def _rebuild(db, table, definition, columns, rows):
 
 def _upgrade_to_capability_tasks(db):
     """Version 2, as migration 015 does in the service: tasks keep only their capability, requests and start receipts
-    freeze "input" and "task_context", every execution names its instance, learning contexts become v3, and a Recipe
-    belongs to one task. Anything it cannot rewrite stops the whole upgrade."""
+    freeze "input" and "task_context", every execution names its instance (and each start receipt its kind), learning
+    contexts become v3, and a Recipe belongs to one task. Anything it cannot rewrite stops the whole upgrade."""
     if "mode" not in {row["name"] for row in db.execute("PRAGMA table_info(tasks)")}:
         return  # created by this release: nothing was written in the earlier shape
     shared = db.execute(
@@ -245,11 +245,12 @@ def _upgrade_to_capability_tasks(db):
                 canonical_json(_capability_request(requests[row["id"]])), row["request_sha"], row["result_json"],
                 instance_of(row["id"]))
                for row in executions]
+    kinds = {row["id"]: row["kind"] for row in executions}
     for row in db.execute("SELECT operation,request_key,response_json FROM idempotency "
                           "WHERE operation LIKE 'start_execution:%' OR operation LIKE 'start_revision:%'").fetchall():
         response = json.loads(row["response_json"])
         response = {**response, "request": _capability_request(response["request"]),
-                    "instance_id": instance_of(response["execution_id"])}
+                    "instance_id": instance_of(response["execution_id"]), "kind": kinds[response["execution_id"]]}
         db.execute("UPDATE idempotency SET response_json=? WHERE operation=? AND request_key=?",
                    (canonical_json(response), row["operation"], row["request_key"]))
     # A task's old artifacts were the instance input, which every execution froze in its request.

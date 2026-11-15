@@ -29,14 +29,12 @@ def _published_recipe(text):
 
 
 def _input_missing(value, kind):
-    """What a new execution's input lacks; a reconstruction also needs what it started from and what it produced."""
+    """What a new execution's input lacks; a reconstruction also needs what it started from (``_input`` already
+    refused one without its submitted output)."""
     missing = [] if value["objective"] else ["objective"]
-    if kind == "reconstructed":
-        roles = {a["role"] for a in value["artifacts"]}
-        if "original_input" not in roles and not value["self_contained"]:
+    if kind == "reconstructed" and not value["self_contained"]:
+        if "original_input" not in {a["role"] for a in value["artifacts"]}:
             missing.append("original_input_or_self_contained_task")
-        if "submitted_output" not in roles:
-            missing.append("submitted_output")
     return missing
 
 
@@ -226,7 +224,7 @@ class LocalTaskWorkflow:
                        (execution_id, task_id, intent["kind"], "awaiting_execution", canonical_json(request), request_sha,
                         execution_id))
             response = {"task_id": task_id, "execution_id": execution_id, "instance_id": execution_id,
-                        "status": "awaiting_execution", "request_sha256": request_sha, "request": request}
+                        "kind": intent["kind"], "status": "awaiting_execution", "request_sha256": request_sha, "request": request}
             self._store.remember(db, intent["operation"], key, intent["intent"], response)
         return result(response)
 
@@ -328,6 +326,6 @@ class LocalTaskWorkflow:
                        (execution_id, row["task_id"], "revision", "awaiting_execution", canonical_json(request), digest,
                         row["instance_id"]))
             response = {"task_id": row["task_id"], "execution_id": execution_id, "instance_id": row["instance_id"],
-                        "status": "awaiting_execution", "request_sha256": digest, "request": request}
+                        "kind": "revision", "status": "awaiting_execution", "request_sha256": digest, "request": request}
             self._store.remember(db, operation, key, digest, response)
         return result(response)

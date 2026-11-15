@@ -8,13 +8,15 @@ from local_rsi_helpers import FakeModel
 
 CONTRACT = Path(__file__).resolve().parents[2] / "contract" / "local-rsi"
 VALIDATION = json.loads((CONTRACT / "validation.json").read_text())
+# The shared fixture's context predates task materials; the service builds its own evidence sets from it.
+CONTRACT_CONTEXT = {**VALIDATION["context"], "task_materials": []}
 EVENT_REF = {"execution_id": "exec1", "event_id": "e1"}
 
 
 def context(feedback=()):
     return {"history": [{"execution_id": "exec1", "materials": [], "outputs": [{"artifact_id": "out1"}],
                          "events": [{"id": "e1"}], "feedback": list(feedback)}],
-            "memory": {"status": "not_requested", "items": []}}
+            "task_materials": [], "memory": {"status": "not_requested", "items": []}}
 
 
 NEW_EVIDENCE = [{"observation": "O", "why_missing": "W", "evidence_refs": [EVENT_REF]}]
@@ -32,7 +34,7 @@ def recipe(**changes):
 
 @pytest.mark.parametrize("case", VALIDATION["cases"], ids=lambda c: c["name"])
 def test_contract_validation(case):
-    assert stages.classify_output(case["stage"], case["output"], VALIDATION["context"]) == case["expected"]
+    assert stages.classify_output(case["stage"], case["output"], CONTRACT_CONTEXT) == case["expected"]
 
 
 def test_contract_rejects_recipe_over_the_text_limit():

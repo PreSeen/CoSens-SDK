@@ -8,7 +8,7 @@ import pytest
 
 from cosens.local import LocalStoreUpgradeError
 from cosens.local.store import STORE_VERSION, LocalStore, canonical_json, fingerprint
-from local_rsi_helpers import complete_execution, first_revision, make_rsi, recipe_reply
+from local_rsi_helpers import complete_execution, make_rsi, recipe_reply
 
 COLUMNS = "id,context_json,context_sha,recipe_json,recipe_sha,attribution_json"
 
@@ -22,9 +22,14 @@ def attribution_citing_an_event(payload):
 
 
 async def learned_store(tmp_path):
-    """V1 learned from an execution, then V2 from its correction after feedback; V2's Recipe and attribution cite events."""
+    """V1 learned from an execution of a brief, then V2 from its correction after feedback; V2's Recipe and attribution
+    cite events."""
     rsi, _ = make_rsi(tmp_path, recipe_reply("V1"), attribution_citing_an_event, recipe_reply("V2"))
-    task, _, done = await first_revision(rsi)
+    task = await rsi.create_task(key="t1", objective="Do the task")
+    brief = await rsi.artifact(name="brief.md", content="The brief")
+    started = await rsi.start_execution(task.task_id, key="t1-e", source="new_task", objective="Do the task",
+                                        artifacts=[brief.artifact_id])
+    done = await complete_execution(rsi, started, key="t1-out")
     first = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
     assert (await rsi.wait_workflow_job("recipe_candidate", first.recipe_candidate_id)).status == "candidate"
     await rsi.record_feedback(done.revision_id, feedback="wrong", source="human", key="f")
@@ -93,7 +98,8 @@ def old_context(context):
 
 def to_version_1(path, *, break_context_hash_of=None):
     """Write the store back as the previous SDK did: a task holds a mode and the instance input, requests freeze it as
-    "context", executions have no instance, a Recipe may serve several tasks, learning contexts are v2."""
+    "context", executions have no instance, start receipts no kind, a Recipe may serve several tasks, learning contexts
+    are v2."""
     db = sqlite3.connect(path)
     db.executescript("""
         CREATE TABLE tasks_v1(
@@ -117,11 +123,17 @@ def to_version_1(path, *, break_context_hash_of=None):
     for execution_id, request_text in db.execute("SELECT id,request_json FROM executions").fetchall():
         db.execute("UPDATE executions SET request_json=? WHERE id=?",
                    (canonical_json(old_request(json.loads(request_text))), execution_id))
+    # The task held the instance input that its first execution froze as "context".
+    for task_id, in db.execute("SELECT id FROM tasks").fetchall():
+        first = db.execute("SELECT request_json FROM executions WHERE task_id=? ORDER BY rowid", (task_id,)).fetchone()
+        if first is not None:
+            db.execute("UPDATE tasks SET context_json=? WHERE id=?",
+                       (canonical_json(json.loads(first[0])["context"]), task_id))
     for operation, key, response_text in db.execute(
             "SELECT operation,request_key,response_json FROM idempotency "
             "WHERE operation LIKE 'start_execution:%' OR operation LIKE 'start_revision:%'").fetchall():
         response = json.loads(response_text)
-        del response["instance_id"]
+        del response["instance_id"], response["kind"]
         response["request"] = old_request(response["request"])
         db.execute("UPDATE idempotency SET response_json=? WHERE operation=? AND request_key=?",
                    (canonical_json(response), operation, key))
@@ -284,7 +296,10 @@ async def test_a_version_1_store_upgrades_to_capability_tasks_once(tmp_path):
     to_version_1(path)
     old = state(path)
     assert "mode" in [name for name, *_ in columns(path, "tasks")]
+    [(_, _, _, old_task, _)] = old["tasks"]
+    assert [a["role"] for a in json.loads(old_task)["artifacts"]] == ["original_input"]
     assert all('"context":' in row[5] and '"input"' not in row[5] for row in old["executions"])
+    assert all("kind" not in json.loads(row[4]) for row in old["idempotency"] if row[1].startswith("start_"))
     assert '"workflow-recipe-context-v2"' in old["recipe_candidates"][1][6]
 
     LocalStore(path).close()
@@ -295,9 +310,18 @@ async def test_a_version_1_store_upgrades_to_capability_tasks_once(tmp_path):
         tasks = [json.loads(text) for (text,) in db.execute("SELECT context_json FROM tasks")]
         executions = db.execute("SELECT id,kind,instance_id,request_json FROM executions ORDER BY rowid").fetchall()
     assert tasks == [{"objective": "Do the task", "artifacts": []}]
-    (original, _, _, _), (correction, kind, instance, request_text) = executions
+    (original, _, _, _), (correction, kind, instance, _) = executions
     assert kind == "revision" and instance == original != correction
-    assert json.loads(request_text)["task_context"] == {"objective": "Do the task", "artifacts": [], "context_version": 1}
+    # The old task artifacts were the instance input: they stay under each request's input, never in its task context.
+    for _, _, _, text in executions:
+        request = json.loads(text)
+        assert request["task_context"] == {"objective": "Do the task", "artifacts": [], "context_version": 1}
+        assert [(a["name"], a["role"]) for a in request["input"]["artifacts"]] == [("brief.md", "original_input")]
+    receipts = {row[1].split(":")[0]: json.loads(row[4]) for row in state(path)["idempotency"] if row[1].startswith("start_")}
+    assert {name: receipt["kind"] for name, receipt in receipts.items()} == {
+        "start_execution": "original", "start_revision": "revision"}
+    assert all(receipt["request"]["input"]["artifacts"] and not receipt["request"]["task_context"]["artifacts"]
+               for receipt in receipts.values())
     context = json.loads([row for row in rows(path) if row[0] == candidate_id][0][1])
     assert context["schema"] == "workflow-recipe-context-v3" and context["task_materials"] == []
     assert all("input" in entry and "context" not in entry for entry in context["history"])
