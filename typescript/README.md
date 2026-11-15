@@ -84,7 +84,7 @@ if (turn?.state === 'completed' && turn.executionId) {
 
 ### Differences from the Python SDK
 
-- **No automatic feedback-to-correction.** The TypeScript wrappers do not classify a follow-up message as feedback on the previous turn. Record feedback with `cosens.feedback(...)`, then start the correction with a `CoSensClient`'s `start({ task_id, execution_id }, { phase: 'correct', requestKey })` or its `atoms.startExecution(taskId, { key, previousExecutionId })`.
+- **No automatic feedback-to-correction.** The TypeScript wrappers do not classify a follow-up message as feedback on the previous turn. Record feedback with `cosens.feedback(...)`, then start the correction with a `CoSensClient`'s `start({ task_id, execution_id }, { phase: 'correct', requestKey })` or its `atoms.startExecution(undefined, { key, previousExecutionId })`.
 - **No `waitLearning` / `resumeLearning` on the wrappers.** Use a `CoSensClient`'s `atoms.waitLearning(executionId)` and `atoms.resumeLearning(executionId)`; the agent runner also exposes them as `client.cosens.atoms`. The turn's `executionId` and its stored `learning` are on `getTurn(turnId)`.
 - **The feedback key option is the other way round.** The transparent wrapper's `cosens.feedback(message, { source, turnId, requestKey })` accepts a `requestKey` and the agent runner's `cosens.feedback(message, source, turnId)` does not; in Python the agent runner's `feedback` takes `request_key` and the transparent wrapper's does not.
 
@@ -105,18 +105,21 @@ const result = await runner.run(agent, 'Produce a report');
 
 Use `CoSensClient.atoms` for Task, Execution, feedback, learning, Recipe and Memory operations. Each call sends one request. Keep the same key when retrying an uncertain response.
 
+A task is a capability that many executions reuse: `createTask` takes its `objective` and reference `artifacts` (bare ids or `{ artifact_id, role: 'reference' }`), and each `startExecution` takes `source` and that execution's own input (`objective`, `artifacts`, `selfContained`).
+
 ```ts
 import { CoSensClient } from 'cosens-sdk';
 
 const client = new CoSensClient();
-const execution = await client.atoms.startExecution(taskId, { key: 'run-1', model: '<public-model-id>' });
+const task = await client.atoms.createTask({ key: 'weekly-report', objective: 'Write the weekly management report' });
+const execution = await client.atoms.startExecution(task.task_id, { key: 'run-1', model: '<public-model-id>', source: 'new_task', objective: 'Report for week 46', artifacts: [notesArtifactId] });
 const result = await client.atoms.submitExecution(execution.execution_id, { requestSha256: execution.request_sha256, outcome: 'completed', artifacts });
 if (result.status !== 'completed') throw new Error('The execution result was not confirmed');
 await client.atoms.recordFeedback(result.execution_id, { feedback: 'Use the Q3 numbers', source: 'human', key: 'feedback-1' });
-const correction = await client.atoms.startExecution(taskId, { key: 'correction-1', previousExecutionId: result.execution_id });
+const correction = await client.atoms.startExecution(undefined, { key: 'correction-1', previousExecutionId: result.execution_id });
 ```
 
-A correction (`previousExecutionId`) takes only `model` besides; `recipeId` or `recallMemory: true` with it fails to compile and throws before sending. Treat an execution as done only when the result's `status` is `'completed'`.
+A correction (`previousExecutionId`) takes only `model` besides, and a `taskId` is optional and must be the previous execution's task; `source`, an input field, `recipeId` or `recallMemory: true` with it fails to compile and throws before sending. A 422 `input_incomplete` or `recipe_choice_required` from the start is an `RSIHTTPError` whose `missing` or `recipeIds` names what the input lacks or the task's Recipes. Treat an execution as done only when the result's `status` is `'completed'`.
 
 Learning is explicit and once per execution:
 
@@ -137,7 +140,7 @@ try {
 
 The Recipe store: `uploadRecipe(recipeId, { version, recipe, previousVersion })`, `getRecipe(recipeId, { version })`, `listRecipes({ limit, cursor, origin })` and `searchRecipes(query, { limit })`. Only `generated` Recipes can be applied to an execution with `recipeId`, so the transparent wrapper's lookup offers only those.
 
-A `CoSensClient`'s `start(snapshot, { phase })` takes `prepare` (a task execution; needs `requestKey`), `correct` (a correction of `snapshot.execution_id`; needs `requestKey`) or `learn` (learns from `snapshot.execution_id`; no key). Returned objects have a non-enumerable `requestId` holding the response's `x-request-id`.
+A `CoSensClient`'s `start(snapshot, { phase })` takes `prepare` (an execution of `snapshot.task`, `{ source, objective, artifacts, self_contained }`, in `snapshot.task_id`, the task of a `recipeId`, or a new task named by its objective; needs `requestKey`), `correct` (a correction of `snapshot.execution_id`; needs `requestKey`) or `learn` (learns from `snapshot.execution_id`; no key). Returned objects have a non-enumerable `requestId` holding the response's `x-request-id`.
 
 ## More
 

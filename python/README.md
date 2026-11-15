@@ -114,8 +114,8 @@ rsi = LocalRSI(client=CoSensClient(), model=ChatCompletionsModel(AsyncOpenAI(bas
 # Or use your Codex login: LocalRSI(client=CoSensClient(), model=CodexCLIModel())
 ```
 
-`LocalRSI` keeps its earlier in-process workflow names and does not yet follow the execution API; its methods, its
-evidence references and the one-time store upgrade are described in
+`LocalRSI` takes the same task and new-execution shapes as `client.atoms` and keeps its earlier in-process names for
+corrections and learning; its methods, its evidence references and the one-time store upgrade are described in
 [Local RSI](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/local-rsi.md). Each new version is uploaded
 without its evidence references. To continue a Recipe on another machine, find it with `search_recipes` or
 `list_recipes`, read it with `get_recipe` and pass it as `create_task(..., recipe=...)`. See `examples/04_local_rsi.py`.
@@ -124,14 +124,20 @@ without its evidence references. To continue a Recipe on another machine, find i
 
 `CoSensClient().atoms` (async) and `.sync_atoms` (sync) expose Task, Execution, feedback, learning, Recipe and Memory operations directly; see [the API reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/api-reference.md). Keep stable idempotency keys across retries.
 
+A task is a capability that many executions reuse: `create_task` takes its `objective` and reference `artifacts`, and each `start_execution` takes `source` and that execution's own input (`objective`, `artifacts`, `self_contained`).
+
 ```python
-execution = await atoms.start_execution(task_id, key="run-1", model="<public-model-id>")
+task = await atoms.create_task(key="weekly-report", objective="Write the weekly management report")
+execution = await atoms.start_execution(task["task_id"], key="run-1", model="<public-model-id>", source="new_task",
+                                        objective="Report for week 46", artifacts=[notes_artifact_id])
 result = await atoms.submit_execution(execution["execution_id"], request_sha256=execution["request_sha256"],
                                       outcome="completed", artifacts=[{"artifact_id": artifact_id, "role": "submitted_output"}])
 if result["status"] == "completed":
     await atoms.learn(execution["execution_id"])
     learning = await atoms.wait_learning(execution["execution_id"])
 ```
+
+A correction names only the execution it corrects: `start_execution(key="correction-1", previous_execution_id=execution_id)`.
 
 Returned JSON objects are dicts with a `request_id` attribute holding the response's `x-request-id`, for support requests.
 
