@@ -196,6 +196,7 @@ async def test_a_resumed_child_waits_for_its_failed_parent(tmp_path):
     with pytest.raises(RSICandidateFailed):
         await rsi.wait_workflow_job("recipe_candidate", middle.recipe_candidate_id)
     assert (await rsi.resume_recipe_candidate(last.recipe_candidate_id)).status == "awaiting_parent"
+    assert (await rsi.get_task(task.task_id)).recipes[0]["learning"]["status"] == "awaiting_previous_version"
     with pytest.raises(TimeoutError):
         await rsi.wait_workflow_job("recipe_candidate", last.recipe_candidate_id, timeout=0.3)
     await rsi.resume_recipe_candidate(middle.recipe_candidate_id)
@@ -502,6 +503,19 @@ async def test_a_recipe_belongs_to_its_task(tmp_path):
     with pytest.raises(LookupError, match="not found in this task"):
         await rsi.start_execution(other.task_id, key="o", source="new_task", objective="Q4", recipe_id=job.recipe_id)
     assert (await rsi.get_task(other.task_id)).recipes == []
+
+
+async def test_a_named_recipe_without_a_usable_version_is_refused(tmp_path):
+    rsi, _ = make_rsi(tmp_path, ModelUnavailable("down"))
+    task, _, done = await first_revision(rsi)
+    candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
+    with pytest.raises(RSICandidateFailed):
+        await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    with pytest.raises(ValueError, match="^Recipe has no usable version yet$"):
+        await rsi.start_execution(task.task_id, key="named", source="new_task", objective="Again",
+                                  recipe_id=candidate.recipe_id)
+    unnamed = await rsi.start_execution(task.task_id, key="unnamed", source="new_task", objective="Again")
+    assert "method" not in unnamed.request
 
 
 async def test_a_task_with_several_recipes_needs_a_recipe_choice(tmp_path):

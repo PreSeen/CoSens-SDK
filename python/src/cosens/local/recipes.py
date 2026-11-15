@@ -96,8 +96,11 @@ class LocalRecipeLifecycle:
         """The method a new execution freezes: the named Recipe of this task, else the task's only usable Recipe."""
         heads = self._task_heads(db, task_id)
         if recipe_id is not None:
-            if recipe_id not in {head["recipe_id"] for head in heads}:
+            head = next((head for head in heads if head["recipe_id"] == recipe_id), None)
+            if head is None:
                 raise LookupError("Recipe not found in this task")
+            if not head["current_candidate_id"]:
+                raise ValueError("Recipe has no usable version yet")
             return self._method(db, recipe_id)
         if len(heads) > 1:
             raise ValueError("the task has several Recipes; name one with recipe_id")
@@ -208,6 +211,8 @@ class LocalRecipeLifecycle:
         if owner is not None:
             raise ValueError(f"Recipe {recipe_id} is already on this machine, in task {owner['task_id']}; "
                              "start an execution of that task with its recipe_id")
+        # An imported version keeps its own context shape: it was learned elsewhere, so it has no history or task
+        # materials, and no learning stage reads it; only its memory status and "initial" reach the candidate view.
         context = {"schema": "workflow-recipe-context-v2", "task_id": task_id, "history": [],
                    "memory": {"status": "not_requested", "items": []}, "initial": True,
                    "imported_from": {k: view[k] for k in ("recipe_id", "origin", "version")}}

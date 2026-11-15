@@ -1,7 +1,7 @@
 import pytest
 
 from cosens.local import LocalRSI
-from local_rsi_helpers import FakeModel, complete_execution, first_revision, make_rsi
+from local_rsi_helpers import FakeModel, complete_execution, first_revision, make_rsi, recipe_reply
 
 
 async def test_create_task_replays_and_rejects_changed_request(tmp_path):
@@ -191,16 +191,43 @@ async def test_unknown_ids_raise_lookup_error(tmp_path):
             await call
 
 
-async def test_recipe_recall_uses_the_8000_token_budget(tmp_path):
-    rsi = LocalRSI(client=None, model=FakeModel(), state_path=tmp_path / "s.sqlite3")
-    task = await rsi.create_task(key="k", objective="A")
-    budgets = []
+async def test_recall_asks_for_the_execution_input_with_the_8000_token_budget(tmp_path):
+    rsi = LocalRSI(client=None, model=FakeModel(recipe_reply()), state_path=tmp_path / "s.sqlite3")
+    task = await rsi.create_task(key="k", objective="Write the weekly report")
+    calls = []
 
     class Atoms:
         async def memory_recall(self, *, query, token_budget):
-            budgets.append(token_budget)
+            calls.append((query, token_budget))
             return {"items": []}
 
+        async def upload_recipe(self, recipe_id, **_):
+            return {}
+
     rsi._atoms = Atoms()
-    await rsi.start_execution(task.task_id, key="e", source="new_task", objective="A", recall_memory=True)
-    assert budgets == [8000]
+    started = await rsi.start_execution(task.task_id, key="e", source="new_task", objective="Week 3", recall_memory=True)
+    assert calls == [("Week 3", 8000)]
+    done = await complete_execution(rsi, started)
+    candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
+    await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    assert calls == [("Week 3", 8000)] * 2  # the learning recalls for this instance, not the capability
+
+
+async def test_a_start_key_belongs_to_one_execution_start(tmp_path):
+    rsi, _ = make_rsi(tmp_path)
+    task, started, done = await first_revision(rsi)
+    other = await rsi.create_task(key="other", objective="B")
+    with pytest.raises(ValueError, match="^idempotency key reused with different execution$"):
+        await rsi.start_execution(other.task_id, key="t1-e", source="new_task", objective="Do the task")
+    with pytest.raises(ValueError, match="^idempotency key reused with different execution$"):
+        await rsi.start_revision(done.revision_id, key="t1-e")
+    correction = await rsi.start_revision(done.revision_id, key="r")
+    assert (await rsi.start_revision(done.revision_id, key="r")).execution_id == correction.execution_id
+    with pytest.raises(ValueError, match="^idempotency key reused with different execution$"):
+        await rsi.start_execution(other.task_id, key="r", source="new_task", objective="B")
+    again = await complete_execution(rsi, correction, key="r-out")
+    with pytest.raises(ValueError, match="^idempotency key reused with different execution$"):
+        await rsi.start_revision(again.revision_id, key="r")
+    assert [e["execution_id"] for e in (await rsi.get_task(task.task_id)).executions] == [
+        started.execution_id, correction.execution_id]
+    assert (await rsi.get_task(other.task_id)).executions == []

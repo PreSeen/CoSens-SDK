@@ -114,19 +114,19 @@ def receipts_kept_by_the_upgrade(current, old):
     before = {(row[1], row[2]): row for row in old["idempotency"]}
     kept = []
     for row in current["idempotency"]:
-        old_row = before[(row[1], row[2])]
-        if row[1] == "create_task":
-            row = old_row
-        elif row[1].startswith("start_execution:"):
-            row = (*row[:3], old_row[3], row[4])
+        if row[1] == "start_execution":
+            row = (*row[:3], before[(f"start_execution:{json.loads(row[4])['task_id']}", row[2])][3], row[4])
+        elif row[1] == "create_task":
+            row = before[(row[1], row[2])]
         kept.append(row)
     return {**current, "idempotency": kept}
 
 
 def to_version_1(path, *, break_context_hash_of=None):
     """Write the store back as the previous SDK did: a task holds a mode and the instance input, requests freeze it as
-    "context", executions have no instance, start receipts no kind and the hash of that request, create_task receipts
-    the old task request and response, a Recipe may serve several tasks, learning contexts are v2."""
+    "context", executions have no instance, start receipts no kind and the hash of that request under an operation of
+    their task, create_task receipts the old task request and response, a Recipe may serve several tasks, learning
+    contexts are v2."""
     db = sqlite3.connect(path)
     db.executescript("""
         CREATE TABLE tasks_v1(
@@ -156,6 +156,10 @@ def to_version_1(path, *, break_context_hash_of=None):
         if first is not None:
             db.execute("UPDATE tasks SET context_json=? WHERE id=?",
                        (canonical_json(json.loads(first[0])["context"]), task_id))
+    for key, response_text in db.execute(
+            "SELECT request_key,response_json FROM idempotency WHERE operation='start_execution'").fetchall():
+        db.execute("UPDATE idempotency SET operation=? WHERE operation='start_execution' AND request_key=?",
+                   ("start_execution:" + json.loads(response_text)["task_id"], key))
     for operation, key, response_text in db.execute(
             "SELECT operation,request_key,response_json FROM idempotency "
             "WHERE operation LIKE 'start_execution:%' OR operation LIKE 'start_revision:%'").fetchall():
@@ -382,8 +386,24 @@ async def test_a_version_1_store_upgrades_to_capability_tasks_once(tmp_path):
         assert (recipe["current_version"], recipe["latest_version"]) == (2, 2)
         with pytest.raises(ValueError, match="idempotency key reused with a different request"):
             await rsi.create_task(key="t1", objective="Do the task")  # a receipt of the old task request
+        other = await rsi.create_task(key="t2", objective="Another task")
+        with pytest.raises(ValueError, match="idempotency key reused with different execution"):
+            await rsi.start_execution(other.task_id, key="t1-e", source="new_task", objective="Do the task")
     finally:
         await rsi.aclose()
+
+
+async def test_a_version_1_key_that_started_executions_of_two_tasks_keeps_its_first_receipt(tmp_path):
+    path, _ = await learned_store(tmp_path)
+    to_version_1(path)
+    with sqlite3.connect(path) as db:
+        first, request_hash, response_text = db.execute(
+            "SELECT rowid,request_hash,response_json FROM idempotency WHERE operation LIKE 'start_execution:%'").fetchone()
+        db.execute("INSERT INTO idempotency VALUES('start_execution:task_0','t1-e','later',?)", (response_text,))
+    LocalStore(path).close()
+    with sqlite3.connect(path) as db:
+        receipts = db.execute("SELECT rowid,operation,request_hash FROM idempotency WHERE request_key='t1-e'").fetchall()
+    assert receipts == [(first, "start_execution", request_hash)]
 
 
 async def test_a_version_1_upgrade_stops_on_a_recipe_shared_by_two_tasks(tmp_path):

@@ -170,6 +170,23 @@ class LocalTaskWorkflow:
         # A published Recipe is a method, not evidence about the task.
         return memory_snapshot([item for item in items if not _published_recipe(item.get("text"))])
 
+    @staticmethod
+    def _start_record(db, key, operation):
+        """The receipt ``key`` left under ``operation``; a key that another execution start took is refused.
+
+        New executions record under "start_execution"; a revision records under its revision, as the service's
+        corrections do.
+        """
+        rows = db.execute("SELECT operation,request_hash,response_json FROM idempotency WHERE request_key=? "
+                          "AND (operation='start_execution' OR operation LIKE 'start_revision:%') ORDER BY rowid",
+                          (key,)).fetchall()
+        for row in rows:
+            if row["operation"] == operation:
+                return row
+        if rows:
+            raise ValueError("idempotency key reused with different execution")
+        return None
+
     def _execution_intent(self, db, task_id, key, source, body, recipe_id, recall_memory):
         """Return the replayed response, or the frozen request to create; refuses an incomplete input."""
         row = db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -187,11 +204,14 @@ class LocalTaskWorkflow:
                    "input": value}
         intent = fingerprint({**request, **({"requested_recipe_id": recipe_id} if recipe_id else {}),
                               **({"recall_memory": True} if recall_memory else {})})
-        operation = "start_execution:" + task_id
-        saved = self._store.replay(db, operation, key, intent)
+        # One operation for every new execution: the intent covers the task, source and input, so a key resent with any
+        # of them changed is refused instead of starting a second execution.
+        saved = self._start_record(db, key, "start_execution")
         if saved is not None:
-            return {"response": saved}
-        return {"request": request, "intent": intent, "operation": operation, "kind": kind}
+            if saved["request_hash"] != intent:
+                raise ValueError("idempotency key reused with different execution")
+            return {"response": json.loads(saved["response_json"])}
+        return {"request": request, "intent": intent, "kind": kind}
 
     async def start_execution(self, task_id, *, key, source, objective=None, artifacts=None, self_contained=None,
                               recipe_id=None, recall_memory=False):
@@ -225,7 +245,7 @@ class LocalTaskWorkflow:
                         execution_id))
             response = {"task_id": task_id, "execution_id": execution_id, "instance_id": execution_id,
                         "kind": intent["kind"], "status": "awaiting_execution", "request_sha256": request_sha, "request": request}
-            self._store.remember(db, intent["operation"], key, intent["intent"], response)
+            self._store.remember(db, "start_execution", key, intent["intent"], response)
         return result(response)
 
     async def get_execution(self, execution_id):
@@ -311,7 +331,7 @@ class LocalTaskWorkflow:
             if row is None:
                 raise LookupError("revision not found")
             # Resolve replay before reading mutable feedback or the current Recipe.
-            old = db.execute("SELECT response_json FROM idempotency WHERE operation=? AND request_key=?", (operation, key)).fetchone()
+            old = self._start_record(db, key, operation)
             if old is not None:
                 return result(json.loads(old["response_json"]))
             previous = json.loads(row["request_json"])

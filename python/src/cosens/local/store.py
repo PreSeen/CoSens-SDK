@@ -253,6 +253,11 @@ def _upgrade_to_capability_tasks(db):
                     "instance_id": instance_of(response["execution_id"]), "kind": kinds[response["execution_id"]]}
         db.execute("UPDATE idempotency SET response_json=? WHERE operation=? AND request_key=?",
                    (canonical_json(response), row["operation"], row["request_key"]))
+    # New executions record under one operation, so a key resent for another task is refused; a key that started
+    # executions of two tasks keeps its first receipt, since no request now matches either one.
+    db.execute("DELETE FROM idempotency WHERE operation LIKE 'start_execution:%' AND rowid NOT IN "
+               "(SELECT min(rowid) FROM idempotency WHERE operation LIKE 'start_execution:%' GROUP BY request_key)")
+    db.execute("UPDATE idempotency SET operation='start_execution' WHERE operation LIKE 'start_execution:%'")
     # A task's old artifacts were the instance input, which every execution froze in its request.
     tasks = [(row["position"], row["id"],
               canonical_json({"objective": json.loads(row["context_json"])["objective"], "artifacts": []}),
