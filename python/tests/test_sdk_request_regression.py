@@ -85,11 +85,13 @@ async def test_r05_memory_request_key_stays_in_json_and_preserves_false_and_zero
 async def test_r06_key_does_not_leak_into_following_read_request():
     for mode in MODES:
         async with sdk(mode) as (call, seen):
-            await call("start_execution", "task-1", key="execution-key", source="new_task")
+            await call("start_execution", "task-1", key="execution-key", source="new_task", objective="整理资料")
             await call("get_task", "task-1")
             await call("get_execution", "execution-1")
             assert len(seen) == 3
             assert seen[0].headers["idempotency-key"] == "execution-key"
+            assert json.loads(seen[0].content) == {"task_id": "task-1", "source": "new_task",
+                                                   "input": {"objective": "整理资料", "artifacts": []}}
             assert all("idempotency-key" not in r.headers for r in seen[1:])
             assert all(r.headers["authorization"] == f"Bearer {API_KEY}" and r.headers["x-auth-type"] == "api_key" for r in seen)
 
@@ -98,7 +100,7 @@ async def test_r07_conflict_preserves_diagnostics_and_is_not_retried():
     for mode in MODES:
         async with sdk(mode, status=409, payload={"error": {"code": "idempotency_conflict", "message": "request body changed"}}, headers={"x-request-id": "request-409"}) as (call, seen):
             with pytest.raises(RSIHTTPError) as caught:
-                await call("start_execution", "task-1", key="conflict-key", source="new_task")
+                await call("start_execution", "task-1", key="conflict-key", source="new_task", objective="整理资料")
             error = caught.value
             assert (error.status_code, error.code, error.request_id, str(error)) == (409, "idempotency_conflict", "request-409", "request body changed")
             assert len(seen) == 1
@@ -120,7 +122,7 @@ async def test_r08_rate_limit_does_not_trigger_automatic_mutation_retry():
     for mode in MODES:
         async with sdk(mode, status=429, payload={"detail": "rate limited"}, headers={"retry-after": "0"}) as (call, seen):
             with pytest.raises(RSIHTTPError) as caught:
-                await call("start_execution", "task-1", key="rate-key", source="new_task")
+                await call("start_execution", "task-1", key="rate-key", source="new_task", objective="整理资料")
             assert caught.value.status_code == 429
             assert len(seen) == 1
 

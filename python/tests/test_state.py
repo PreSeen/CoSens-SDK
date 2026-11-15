@@ -43,6 +43,18 @@ def test_workflow_native_dispatch_claim_is_atomic_across_store_instances(tmp_pat
     second.close()
 
 
+def test_a_pending_turn_replaces_its_task_spec_only_from_the_stored_one(tmp_path):
+    store = TurnStore(tmp_path / "state.sqlite3", principal="key", service_id="service")
+    pending = {"turn_id": "turn-1", "state": "pre_execution_pending", "task_spec": {"source": "new_task"}, "mode": "auto"}
+    assert store.insert_if_absent("turn-1", pending)
+    corrected = {**pending, "task_spec": {"source": "new_task", "self_contained": True}}
+    assert not store.update_pending("turn-1", corrected)
+    assert not store.update_pending("turn-1", corrected, previous_task_spec={"source": "external_artifact"})
+    assert store.update_pending("turn-1", corrected, previous_task_spec=pending["task_spec"])
+    assert store.get("turn-1")["task_spec"] == corrected["task_spec"]
+    store.close()
+
+
 def test_every_documented_error_class_is_importable_from_the_package():
     import cosens
 

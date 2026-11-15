@@ -116,6 +116,26 @@ async def test_gateway_error_text_redacts_the_api_key():
     assert "secret-key" not in str(exc.value)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload,missing,recipe_ids", [
+    ({"error": {"code": "input_incomplete", "message": "m", "missing": ["objective", "submitted_output"]}},
+     ["objective", "submitted_output"], None),
+    ({"error": {"code": "recipe_choice_required", "message": "m", "recipe_ids": ["r1", "r2"]}}, None, ["r1", "r2"]),
+    ({"detail": {"code": "input_incomplete", "message": "m", "missing": ["objective"]}}, ["objective"], None),
+    ({"error": {"code": "input_incomplete", "message": "m", "missing": ["objective", 3]}}, None, None),
+    ({"error": {"code": "input_incomplete", "message": "m", "missing": "objective"}}, None, None),
+    ({"error": {"code": "recipe_choice_required", "message": "m", "recipe_ids": ["secret-key-recipe"]}}, None,
+     ["[REDACTED]-recipe"]),
+])
+async def test_structured_error_detail_keeps_lists_of_names(payload, missing, recipe_ids):
+    async with CoSensClient(api_key="secret-key", _http_transport=httpx.MockTransport(
+        lambda r: httpx.Response(422, json=payload)
+    )) as client:
+        with pytest.raises(RSIHTTPError) as exc:
+            await client.atoms.get_task("r1")
+    assert (exc.value.missing, exc.value.recipe_ids) == (missing, recipe_ids)
+
+
 @pytest.mark.parametrize("key", ["", "Bearer test-key", " key", "key\n"])
 def test_invalid_key_is_rejected_without_network_or_secret_in_error(key):
     requests = []

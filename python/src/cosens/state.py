@@ -81,15 +81,19 @@ class TurnStore:
                                       (self._namespace + turn_id, json.dumps(value, default=str, ensure_ascii=False)))
             return cursor.rowcount == 1
 
-    def update_pending(self, turn_id, value):
-        """Update pre-execution metadata without rolling back a native dispatch."""
+    def update_pending(self, turn_id, value, *, previous_task_spec=None):
+        """Update pre-execution metadata without rolling back a native dispatch.
+
+        The stored task spec must equal the new one, or ``previous_task_spec`` when the update replaces it.
+        """
+        expected_spec = value.get("task_spec") if previous_task_spec is None else previous_task_spec
         with self._lock:
             self._db.execute("BEGIN IMMEDIATE")
             try:
                 row = self._db.execute("SELECT value FROM turns WHERE turn_id=?", (self._namespace + turn_id,)).fetchone()
                 current = json.loads(row[0]) if row else None
                 if (not current or current.get("state") != "pre_execution_pending" or
-                        current.get("task_spec") != value.get("task_spec") or current.get("mode") != value.get("mode") or
+                        current.get("task_spec") != expected_spec or current.get("mode") != value.get("mode") or
                         (current.get("task_id") and current["task_id"] != value.get("task_id")) or
                         (current.get("execution_id") and current["execution_id"] != value.get("execution_id")) or
                         (current.get("request_sha256") and current["request_sha256"] != value.get("request_sha256"))):

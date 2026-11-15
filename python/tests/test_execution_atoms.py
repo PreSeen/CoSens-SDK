@@ -76,7 +76,7 @@ async def test_a_correction_may_name_its_task(asynchronous):
 
 @pytest.mark.parametrize('asynchronous', MODES)
 @pytest.mark.parametrize('extra', [{'recipe_id': 'r'}, {'recall_memory': True}, {'source': 'new_task'},
-                                   {'objective': 'w1'}])
+                                   {'objective': 'w1'}, {'artifacts': []}, {'self_contained': False}])
 async def test_a_correction_rejects_new_execution_fields_before_sending(asynchronous, extra):
     server = Server()
     with pytest.raises(ValueError, match='a correction takes only previous_execution_id, task_id and model'):
@@ -116,6 +116,54 @@ async def test_an_external_artifact_execution_needs_a_submitted_output(asynchron
         await _run(asynchronous, server, 'start_execution', 't1', key='k', source='external_artifact',
                    artifacts=[{'artifact_id': 'a1', 'role': 'original_input'}])
     assert server.seen == []
+
+
+@pytest.mark.parametrize('asynchronous', MODES)
+async def test_start_execution_checks_the_key_before_the_body(asynchronous):
+    server = Server()
+    with pytest.raises(ValueError, match='key must be'):
+        await _run(asynchronous, server, 'start_execution', 't1', key='', source='bogus')
+    assert server.seen == []
+
+
+@pytest.mark.parametrize('asynchronous', MODES)
+async def test_create_task_sends_the_capability(asynchronous):
+    server = Server()
+    await _run(asynchronous, server, 'create_task', key='k', objective='Weekly report',
+               artifacts=['a1', {'artifact_id': 'a2', 'role': 'reference'}])
+    assert server.seen == [('POST', '/api/tasks', {'objective': 'Weekly report',
+                            'artifacts': ['a1', {'artifact_id': 'a2', 'role': 'reference'}]}, 'k')]
+
+
+@pytest.mark.parametrize('asynchronous', MODES)
+@pytest.mark.parametrize('kwargs,error,message', [
+    ({'objective': 'w', 'artifacts': [{'artifact_id': 'a1', 'role': 'original_input'}]}, ValueError,
+     "a task's artifacts are ids or references with role reference"),
+    ({'objective': ''}, ValueError, 'objective must be nonempty'),
+    ({'objective': '   '}, ValueError, 'objective must be nonempty'),
+    ({'objective': 'w', 'self_contained': True}, TypeError, 'self_contained'),
+])
+async def test_create_task_rejects_input_fields_before_sending(asynchronous, kwargs, error, message):
+    server = Server()
+    with pytest.raises(error, match=message):
+        await _run(asynchronous, server, 'create_task', key='k', **kwargs)
+    assert server.seen == []
+
+
+@pytest.mark.parametrize('asynchronous', MODES)
+async def test_supplement_task_context_sends_only_what_changes(asynchronous):
+    server = Server()
+    await _run(asynchronous, server, 'supplement_task_context', 't1', expected_context_version=2,
+               objective='Weekly report v2', artifacts=['a1'])
+    await _run(asynchronous, server, 'supplement_task_context', 't1', expected_context_version=3, artifacts=[])
+    assert server.seen == [
+        ('POST', '/api/tasks/t1/context', {'expected_context_version': 2, 'objective': 'Weekly report v2',
+                                           'artifacts': ['a1']}, None),
+        ('POST', '/api/tasks/t1/context', {'expected_context_version': 3, 'artifacts': []}, None)]
+    with pytest.raises(ValueError, match='role reference'):
+        await _run(asynchronous, server, 'supplement_task_context', 't1', expected_context_version=3,
+                   artifacts=[{'artifact_id': 'a1', 'role': 'submitted_output'}])
+    assert len(server.seen) == 2
 
 
 @pytest.mark.parametrize('asynchronous', MODES)

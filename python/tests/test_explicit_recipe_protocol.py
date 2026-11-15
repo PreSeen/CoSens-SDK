@@ -27,7 +27,8 @@ def not_found(message):
 
 
 class Backend:
-    """The execution API as cosens-rsi serves it: fresh execution IDs per key, one learning per execution.
+    """The execution API as cosens-rsi serves it: a task is created once per key, each Recipe belongs to one
+    task, fresh execution IDs per key, one learning per execution.
 
     ``seen`` holds (method, path, body); ``headers`` holds each request's headers in the same order.
     """
@@ -36,15 +37,62 @@ class Backend:
 
     def __init__(self):
         self.seen=[];self.headers=[];self.count=0;self.generations=0;self.learnings={};self.executions={};self.keys={}
-        self.feedback_keys={}
-        # The task's current Recipe method; the service binds it to every new execution.
-        self.head=None
-        # Recipe version views {recipe_id, origin, version, recipe, ...} served by GET /recipes and /recipes/{id}.
+        self.feedback_keys={};self.tasks={};self.task_keys={}
+        # Recipe version views {recipe_id, origin, version, task_id, recipe, ...} served by GET /recipes and
+        # /recipes/{id}; a generated Recipe's task_id names the one task that owns it.
         self.recipes=[]
         self.task_models={}
 
     def learning(self,execution_id):
         return self.learnings[execution_id]
+
+    def add_task(self,objective,artifacts=()):
+        """A task as POST /tasks stores it; tests also call it for a task made before the test, such as a Recipe's."""
+        task_id=f'task_{len(self.tasks)+1}'
+        self.tasks[task_id]={'task_id':task_id,'objective':objective,'context_version':1,
+                             'artifacts':[{'artifact_id':a,'role':'reference'} if isinstance(a,str) else a for a in artifacts]}
+        return task_id
+
+    def _create_task(self,body,key):
+        """POST /tasks: one task per idempotency key; the same key with another body is refused."""
+        if set(body)-{'objective','artifacts'} or not body.get('objective'):
+            return invalid('unknown task fields')
+        if key in self.task_keys:
+            if self.task_keys[key][0]!=body:
+                return invalid('idempotency key reused with different task')
+            return self.tasks[self.task_keys[key][1]]
+        task_id=self.add_task(body['objective'],body.get('artifacts',[]))
+        self.task_keys[key]=(body,task_id)
+        return self.tasks[task_id]
+
+    def _method(self,recipe_id):
+        recipe=next(r for r in self._current_recipes() if r['recipe_id']==recipe_id)
+        return {'recipe_id':recipe_id,'version':recipe['version'],'recipe_sha256':'f'*64,'recipe':recipe['recipe']}
+
+    def _task_method(self,task_id,recipe_id):
+        """The method a new execution freezes: the named Recipe of this task, else the task's only Recipe."""
+        owned=sorted({r['recipe_id'] for r in self.recipes if r.get('task_id')==task_id})
+        if recipe_id is not None:
+            return self._method(recipe_id) if recipe_id in owned else not_found('Recipe not found in this task')
+        if len(owned)>1:
+            return httpx.Response(422,json={'error':{'code':'recipe_choice_required','recipe_ids':owned,
+                                                     'message':'the task has several Recipes; name one with recipe_id'}})
+        return self._method(owned[0]) if owned else None
+
+    @staticmethod
+    def _input(source,request_input):
+        """The frozen input and what it lacks; a reconstruction also needs what it started from and what it produced."""
+        default='original_input' if source=='new_task' else 'submitted_output'
+        artifacts=[{'artifact_id':a,'role':default} if isinstance(a,str) else a for a in request_input.get('artifacts',[])]
+        value={'objective':request_input.get('objective'),'artifacts':artifacts,'self_contained':bool(request_input.get('self_contained'))}
+        missing=[] if value['objective'] else ['objective']
+        if source=='external_artifact':
+            roles={a['role'] for a in artifacts}
+            if 'original_input' not in roles and not value['self_contained']:
+                missing.append('original_input_or_self_contained_task')
+            if 'submitted_output' not in roles:
+                missing.append('submitted_output')
+        return value,missing
 
     def _start(self,body,key):
         """POST /executions: a new execution names task_id, source and input; a correction names previous_execution_id."""
@@ -62,16 +110,22 @@ class Backend:
                 return invalid('previous execution belongs to another task')
             task_id,request_input,instance_id=before['task_id'],before['input'],before['instance_id']
             scope,intent=('correction',previous,key),None
+            # A correction follows the current version of the Recipe the previous execution followed.
+            method=self._method(before['method']['recipe_id']) if before['method'] else self._task_method(task_id,None)
         else:
             task_id,source,request_input=body.get('task_id'),body.get('source'),body.get('input')
             if not task_id or source not in {'new_task','external_artifact'} or not isinstance(request_input,dict):
                 return invalid('a new execution needs task_id, source and input')
-            if not request_input.get('objective'):
-                return httpx.Response(422,json={'error':{'code':'input_incomplete','message':'the execution input is incomplete','missing':['objective']}})
-            request_input={'objective':request_input['objective'],'artifacts':request_input.get('artifacts',[]),
-                           'self_contained':bool(request_input.get('self_contained'))}
+            if task_id not in self.tasks:
+                return not_found('task not found')
+            request_input,missing=self._input(source,request_input)
+            if missing:
+                return httpx.Response(422,json={'error':{'code':'input_incomplete','message':'the execution input is incomplete','missing':missing}})
             instance_id=None
             scope,intent=('original',task_id,key),(source,json.dumps(request_input,sort_keys=True),body.get('recipe_id'),bool(body.get('recall_memory')))
+            method=self._task_method(task_id,body.get('recipe_id'))
+        if isinstance(method,httpx.Response):
+            return method
         frozen=self._freeze_model(task_id,body.get('model'))
         if frozen is not None:
             return frozen
@@ -83,8 +137,11 @@ class Backend:
         kind='correction' if previous else 'original'
         instance_id=instance_id or execution_id
         self.executions[execution_id]={'task_id':task_id,'kind':kind,'status':'awaiting_execution','previous_execution_id':previous,
-                                       'request_sha256':'sha-'+execution_id,'input':request_input,'instance_id':instance_id}
-        request={'task_context':{'objective':'task','artifacts':[],'context_version':1},'input':request_input,'method':self.method(body)}
+                                       'request_sha256':'sha-'+execution_id,'input':request_input,'instance_id':instance_id,
+                                       'method':method}
+        task=self.tasks[task_id]
+        request={'task_context':{'objective':task['objective'],'artifacts':task['artifacts'],'context_version':task['context_version']},
+                 'input':request_input,'method':method}
         receipt={'task_id':task_id,'execution_id':execution_id,'instance_id':instance_id,'kind':kind,
                  'request_sha256':'sha-'+execution_id,'status':'awaiting_execution','request':request}
         self.keys[scope]=(intent,receipt)
@@ -106,7 +163,7 @@ class Backend:
         return list(latest.values())
 
     def _recipe_lookup(self,path,params):
-        summary=lambda r:{'recipe_id':r['recipe_id'],'origin':r['origin'],'version':r['version'],'title':r['recipe'].get('title'),'task_id':'task_0','updated_at':'t'}
+        summary=lambda r:{'recipe_id':r['recipe_id'],'origin':r['origin'],'version':r['version'],'title':r['recipe'].get('title'),'task_id':r.get('task_id'),'updated_at':'t'}
         if path=='/recipes':
             if 'q' in params:
                 if 'cursor' in params or 'origin' in params:
@@ -121,11 +178,7 @@ class Backend:
             found=[r for r in self.recipes if r['recipe_id']==recipe_id and r['version']==int(params['version'])]
         else:
             found=[r for r in self._current_recipes() if r['recipe_id']==recipe_id]
-        return httpx.Response(200,json=found[0]) if found else not_found('Recipe not found')
-
-    def method(self,body):
-        """The Recipe the service binds to a new execution: the task's head, when the task has one."""
-        return self.head
+        return httpx.Response(200,json={'task_id':None,**found[0]}) if found else not_found('Recipe not found')
 
     def _learn(self,execution_id,body):
         budget=(body or {}).get('max_completion_tokens')
@@ -178,8 +231,18 @@ class Backend:
         if path=='/v1/memory/recall':return httpx.Response(200,json={'items':[]})
         if path=='/artifacts':
             self.count+=1;return httpx.Response(200,json={'artifact_id':f'artifact_{self.count}','content_hash':'sha256:test'})
+        if path.startswith('/tasks/') and r.method=='GET':
+            task=self.tasks.get(path.split('/')[2])
+            if task is None:
+                return not_found('task not found')
+            executions=[{'execution_id':key,'instance_id':e['instance_id'],'kind':e['kind'],'status':e['status'],
+                         'request_sha256':e['request_sha256']} for key,e in self.executions.items() if e['task_id']==task['task_id']]
+            recipes=[{'recipe_id':r['recipe_id'],'current_version':r['version'],'latest_version':r['version'],'learning':None}
+                     for r in self._current_recipes() if r.get('task_id')==task['task_id']]
+            return httpx.Response(200,json={**task,'executions':executions,'recipes':recipes})
         if path=='/tasks' and r.method=='POST':
-            return httpx.Response(200,json={'task_id':'task_1','objective':body['objective'],'artifacts':[],'context_version':1})
+            answer=self._create_task(body,r.headers.get('idempotency-key'))
+            return answer if isinstance(answer,httpx.Response) else httpx.Response(200,json=answer)
         if path=='/executions' and r.method=='POST':
             answer=self._start(body,r.headers.get('idempotency-key'))
             return answer if isinstance(answer,httpx.Response) else httpx.Response(200,json=answer)
@@ -392,13 +455,125 @@ async def test_start_phases_correct_and_learn(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('mode',['auto','approval'])
 @pytest.mark.parametrize('extra',[{'recipe_id':'recipe_1'},{'recall_memory':True}])
-async def test_start_correct_rejects_recipe_and_memory_before_sending(tmp_path,extra):
+async def test_start_correct_rejects_recipe_and_memory_before_asking_or_sending(tmp_path,extra,mode):
+    backend=Backend();asked=[]
+    async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(backend)) as sdk:
+        with pytest.raises(ValueError, match='a correction takes only previous_execution_id, task_id and model'):
+            await sdk.start({'task_id':'task_1','execution_id':'execution_1'},phase='correct',request_key='fix-1',
+                            mode=mode,authorize=lambda *args:asked.append(args) or True,**extra)
+    assert backend.seen==[] and asked==[]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('spec,message',[
+    ({'objective':'Produce output'},'task.source is required'),
+    ({'source':'external_artifact','objective':'Produce output'},'external_artifact requires submitted_output'),
+    ({'source':'new_task','objective':'Produce output','self_contained':'yes'},'self_contained must be a boolean'),
+    ({'source':'new_task'},'objective must be nonempty')])
+async def test_start_prepare_validates_the_spec_before_asking_or_creating_a_task(tmp_path,spec,message):
+    backend=Backend();asked=[]
+    async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(backend)) as sdk:
+        with pytest.raises(ValueError, match=message):
+            await sdk.start({'task':spec},request_key='prepare-1',mode='approval',authorize=lambda *args:asked.append(args) or True)
+    assert backend.seen==[] and asked==[] and backend.tasks=={}
+
+
+def _recipe_view(recipe_id,task_id,version=1,title='Quarterly report',steps=('Use the Q3 numbers',)):
+    return {'recipe_id':recipe_id,'origin':'generated','version':version,'task_id':task_id,
+            'recipe':{'title':title,'when':'Writing a report','when_not':'Chat','lessons':[],
+                      'steps':[{'id':f's{n}','instruction':text} for n,text in enumerate(steps,1)]}}
+
+
+@pytest.mark.asyncio
+async def test_start_runs_a_named_recipe_in_the_task_that_owns_it(tmp_path):
+    backend=Backend()
+    owner=backend.add_task('Write the quarterly report')
+    backend.recipes=[_recipe_view('recipe_1',owner)]
+    async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(backend)) as sdk:
+        prepared=await sdk.start('Produce a report',request_key='prepare-1',recipe_id='recipe_1')
+        assert prepared['task_id']==owner and prepared['execution_request']['method']['recipe_id']=='recipe_1'
+        assert prepared['execution_request']['task_context']['objective']=='Write the quarterly report'
+        assert [entry[:2] for entry in backend.seen]==[('GET','/recipes/recipe_1'),('GET',f'/tasks/{owner}'),('POST','/executions')]
+        assert backend.seen[-1][2]['task_id']==owner and backend.seen[-1][2]['recipe_id']=='recipe_1'
+        other=backend.add_task('Write the monthly report')
+        before=len(backend.seen)
+        with pytest.raises(ValueError, match=f'Recipe recipe_1 belongs to task {owner}, not {other}'):
+            await sdk.start({'task':{'source':'new_task','objective':'Produce a report'},'task_id':other},
+                            request_key='prepare-2',recipe_id='recipe_1')
+        assert [entry[:2] for entry in backend.seen[before:]]==[('GET','/recipes/recipe_1')]
+        backend.recipes.append({'recipe_id':'team','origin':'uploaded','version':1,'recipe':{'title':'Team'}})
+        with pytest.raises(ValueError, match='Recipe team belongs to no task'):
+            await sdk.start('Produce a report',request_key='prepare-3',recipe_id='team')
+    assert len(backend.tasks)==2 and not [path for _,path,_ in backend.seen if path=='/tasks']
+
+
+def _policy(match):
+    """A decision model that activates every turn and answers the Recipe matcher with ``match``."""
+    def native(r):
+        if r.url.path.endswith('/chat/completions'):
+            schema=json.loads(r.content)['response_format']['json_schema']
+            answer={'recipe_id':match} if schema['name']=='cosens_recipe_match' else {'activate':True,'reason':'task'}
+            return httpx.Response(200,json={'id':'decision','object':'chat.completion','created':0,'model':'model','choices':[{'index':0,'message':{'role':'assistant','content':json.dumps(answer)},'finish_reason':'stop'}]})
+        return native_response(r)
+    return native
+
+
+def test_auto_runs_a_matched_recipe_in_the_task_that_owns_it(tmp_path):
+    """Reusing a Recipe creates no task: the execution goes to the Recipe's task and keeps that task's model."""
+    backend=Backend()
+    owner=backend.add_task('Write the quarterly report')
+    backend.task_models[owner]='owner-model'
+    backend.recipes=[_recipe_view('recipe_1',owner)]
+    client=OpenAI(api_key='model-key',http_client=httpx.Client(transport=httpx.MockTransport(_policy('recipe_1'))))
+    wrapped=cosens(client,mode='auto',api_key='service-key',state_path=tmp_path/'s.sqlite',_http_transport=httpx.MockTransport(backend))
+    try:
+        wrapped.responses.create(model='model',input='Produce a report')
+        assert not [path for _,path,_ in backend.seen if path=='/tasks'] and list(backend.tasks)==[owner]
+        execution=next(body for _,path,body in backend.seen if path=='/executions')
+        assert execution['task_id']==owner and execution['recipe_id']=='recipe_1' and 'model' not in execution
+        turn=wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
+        assert turn['state']=='completed' and turn['task_id']==owner
+        assert (turn['used_recipe_id'],turn['used_recipe_version'])==('recipe_1',1)
+        assert turn['execution_request']['task_context']['objective']=='Write the quarterly report'
+        # A turn that matches nothing makes its own task and names the model.
+        backend.recipes=[]
+        wrapped.responses.create(model='model',input='Produce another report')
+        assert [body for _,path,body in backend.seen if path=='/tasks']==[{'objective':'Produce another report','artifacts':[]}]
+        assert [body for _,path,body in backend.seen if path=='/executions'][-1]['model']=='model'
+    finally:
+        wrapped.close();client.close()
+
+
+@pytest.mark.asyncio
+async def test_the_fake_keeps_recipes_in_their_task_and_says_what_is_missing(tmp_path):
+    from cosens.errors import RSIHTTPError
     backend=Backend()
     async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(backend)) as sdk:
-        with pytest.raises(ValueError, match='previous_execution_id'):
-            await sdk.start({'task_id':'task_1','execution_id':'execution_1'},phase='correct',request_key='fix-1',**extra)
-    assert backend.seen==[]
+        a=sdk.atoms
+        weekly=await a.create_task(objective='Weekly report',key='weekly')
+        assert await a.create_task(objective='Weekly report',key='weekly')==weekly
+        with pytest.raises(RSIHTTPError, match='different task') as caught:
+            await a.create_task(objective='Monthly report',key='weekly')
+        assert caught.value.status_code==422
+        monthly=await a.create_task(objective='Monthly report',key='monthly')
+        assert monthly['task_id']!=weekly['task_id'] and len(backend.tasks)==2
+        backend.recipes=[_recipe_view('weekly_recipe',weekly['task_id']),_recipe_view('monthly_recipe',monthly['task_id'])]
+        with pytest.raises(RSIHTTPError) as caught:
+            await a.start_execution(weekly['task_id'],key='e1',recipe_id='monthly_recipe',**NEW)
+        assert caught.value.status_code==404
+        started=await a.start_execution(weekly['task_id'],key='e1',**NEW)
+        assert started['request']['method']['recipe_id']=='weekly_recipe'
+        assert started['request']['task_context']=={'objective':'Weekly report','artifacts':[],'context_version':1}
+        backend.recipes.append(_recipe_view('weekly_short',weekly['task_id']))
+        with pytest.raises(RSIHTTPError) as caught:
+            await a.start_execution(weekly['task_id'],key='e2',**NEW)
+        assert caught.value.code=='recipe_choice_required' and caught.value.recipe_ids==['weekly_recipe','weekly_short']
+        with pytest.raises(RSIHTTPError) as caught:
+            await a.start_execution(weekly['task_id'],key='e3',source='external_artifact',artifacts=['output'])
+        assert caught.value.code=='input_incomplete' and caught.value.missing==['objective','original_input_or_self_contained_task']
+    assert Backend._input('external_artifact',{'objective':'x'})[1]==['original_input_or_self_contained_task','submitted_output']
 
 
 @pytest.mark.asyncio
@@ -448,8 +623,9 @@ def test_a_correction_uses_the_recipe_the_service_binds_from_the_task(tmp_path):
     stale={'title':'Old report','when':'Writing a report','when_not':'Chat','steps':[{'id':'s1','instruction':'Old step'}],'lessons':[]}
     head={'title':'Quarterly report','when':'Writing a report','when_not':'Chat','steps':[{'id':'s1','instruction':'Use the Q3 numbers'}],'lessons':[]}
     backend=Backend();responses=[]
-    backend.head={'recipe_id':'recipe_1','version':2,'recipe_sha256':'f'*64,'recipe':head}
-    backend.recipes=[{'recipe_id':'recipe_1','origin':'generated','version':1,'recipe':stale}]
+    # The turn's own task (task_1, the first one created) owns both versions; the matcher declines both.
+    backend.recipes=[{'recipe_id':'recipe_1','origin':'generated','version':1,'task_id':'task_1','recipe':stale},
+                     {'recipe_id':'recipe_1','origin':'generated','version':2,'task_id':'task_1','recipe':head}]
     def native(r):
         data=json.loads(r.content)
         if r.url.path.endswith('/chat/completions'):
@@ -480,7 +656,8 @@ def test_a_correction_uses_the_recipe_the_service_binds_from_the_task(tmp_path):
 async def test_execution_keys_feedback_keys_and_request_hashes_follow_the_service(tmp_path):
     from cosens.errors import RSIHTTPError
     backend=Backend()
-    backend.head={'recipe_id':'recipe_1','version':3,'recipe_sha256':'f'*64,'recipe':{'title':'Head','steps':[]}}
+    backend.add_task('Produce output')
+    backend.recipes=[{'recipe_id':'recipe_1','origin':'generated','version':3,'task_id':'task_1','recipe':{'title':'Head','steps':[]}}]
     async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(backend)) as sdk:
         a=sdk.atoms
         first=await a.start_execution('task_1',key='same',**NEW)
@@ -517,6 +694,7 @@ async def test_the_fake_freezes_the_task_model_and_looks_recipes_up_like_the_ser
     backend=Backend()
     view=lambda version,origin='generated',recipe_id='recipe_1':{'recipe_id':recipe_id,'origin':origin,'version':version,'recipe':{'title':f'Report v{version}'}}
     backend.recipes=[view(1),view(2),view(1,'uploaded','team')]
+    backend.add_task('Produce output')
     async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(backend)) as sdk:
         a=sdk.atoms
         first=await a.start_execution('task_1',key='e1',model='m1',**NEW)

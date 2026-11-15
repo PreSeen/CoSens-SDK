@@ -38,12 +38,20 @@ def _decode(response, api_key, sensitive_values=()):
             message = str(detail or payload)
         code = (error.get("code") if isinstance(error, dict) else None) or structured_detail.get("code")
         current_version = (error.get("current_version") if isinstance(error, dict) else None) or structured_detail.get("current_version")
+
+        def names(field):
+            value = (error.get(field) if isinstance(error, dict) else None) or structured_detail.get(field)
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                return None
+            return [redact(item) for item in value]
         raise RSIHTTPError(
             response.status_code,
             redact(message),
             code=redact(code) if code is not None else None,
             request_id=request_id,
             current_version=current_version if type(current_version) is int else None,
+            missing=names("missing"),
+            recipe_ids=names("recipe_ids"),
         )
     value = result(payload)
     if isinstance(value, Result):

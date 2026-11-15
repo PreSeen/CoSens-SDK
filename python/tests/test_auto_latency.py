@@ -19,19 +19,42 @@ DECLINE = {'activate': False, 'reason': 'routine'}
 
 
 class Algorithm:
-    """Minimal service: optional Recipes, Memory, task and execution."""
+    """Minimal service: optional Recipes, Memory, tasks and executions.
+
+    A task is created once per idempotency key; each Recipe belongs to the task named by its ``task_id``, and a
+    new execution may follow only a Recipe of its own task.
+    """
 
     def __init__(self, recipes=()):
         self.paths = []
+        self.posts = []
         self.recipes = {r['recipe_id']: r for r in recipes}
+        self.tasks = {r['task_id']: 'Quarterly report' for r in recipes}
+        self.task_keys = {}
+
+    def _create_task(self, body, key):
+        if key in self.task_keys:
+            if self.task_keys[key][0] != body:
+                return httpx.Response(422, json={'error': {'code': 'invalid_request',
+                                                           'message': 'idempotency key reused with different task'}})
+            task_id = self.task_keys[key][1]
+        else:
+            task_id = f'task_{len(self.tasks) + 1}'
+            self.tasks[task_id] = body['objective']
+            self.task_keys[key] = (body, task_id)
+        return httpx.Response(200, json={'task_id': task_id, 'objective': self.tasks[task_id], 'artifacts': [],
+                                         'context_version': 1})
 
     def __call__(self, request):
         path = request.url.path.removeprefix('/api')
         self.paths.append(path)
+        body = json.loads(request.content) if request.content else None
+        if request.method == 'POST':
+            self.posts.append((path, body))
         if path == '/recipes':
             assert dict(request.url.params) == {'limit': '100', 'origin': 'generated'}
             items = [{'recipe_id': key, 'origin': r['origin'], 'version': r['version'], 'title': r['recipe']['title'],
-                      'task_id': 'task_0', 'updated_at': 't'} for key, r in self.recipes.items()
+                      'task_id': r['task_id'], 'updated_at': 't'} for key, r in self.recipes.items()
                      if r['origin'] == request.url.params['origin']]
             return httpx.Response(200, json={'items': items, 'has_more': False, 'next_cursor': None})
         if path.startswith('/recipes/'):
@@ -42,19 +65,20 @@ class Algorithm:
         if path == '/artifacts':
             return httpx.Response(200, json={'artifact_id': 'artifact_1', 'content_hash': 'sha256:x'})
         if path == '/tasks':
-            body = json.loads(request.content)
-            return httpx.Response(200, json={'task_id': 'task_1', 'objective': body['objective'], 'artifacts': [],
-                                             'context_version': 1})
+            return self._create_task(body, request.headers.get('idempotency-key'))
         if path == '/executions':
-            body = json.loads(request.content)
-            assert body['task_id'] == 'task_1' and body['source'] == 'new_task' and body['input']['objective']
+            assert body['task_id'] in self.tasks and body['source'] == 'new_task' and body['input']['objective']
             method = None
             if body.get('recipe_id'):
-                chosen = self.recipes[body['recipe_id']]
+                chosen = self.recipes.get(body['recipe_id'])
+                if chosen is None or chosen['task_id'] != body['task_id']:
+                    return httpx.Response(404, json={'error': {'code': 'resource_not_found',
+                                                               'message': 'Recipe not found in this task'}})
                 method = {'recipe_id': chosen['recipe_id'], 'version': chosen['version'], 'recipe_sha256': 'f' * 64,
                           'recipe': chosen['recipe']}
-            return httpx.Response(200, json={'execution_id': 'execution_1', 'status': 'awaiting_execution',
-                                             'request_sha256': 'sha', 'request': {'method': method}})
+            return httpx.Response(200, json={'task_id': body['task_id'], 'execution_id': 'execution_1',
+                                             'status': 'awaiting_execution', 'request_sha256': 'sha',
+                                             'request': {'method': method}})
         if path.endswith('/result'):
             return httpx.Response(200, json={'task_id': 'task_1', 'execution_id': 'execution_1', 'status': 'completed',
                                              'trace_origin': 'original'})
@@ -123,7 +147,12 @@ def test_decision_client_and_extra_body_cover_decision_and_match(tmp_path):
         # The matcher sees applicability only, never the steps or evidence.
         match_input = decision_bodies[1]['messages'][0]['content']
         assert 'Writing a report' in match_input and 'Do step 1' not in match_input and 'evidence_refs' not in match_input
-        assert wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)['used_recipe_id'] == 'recipe_1'
+        turn = wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
+        assert turn['used_recipe_id'] == 'recipe_1' and turn['state'] == 'completed'
+        # The matched Recipe runs in the task that owns it; the turn creates no task.
+        assert [path for path, _ in algorithm.posts if path == '/tasks'] == []
+        execution = next(body for path, body in algorithm.posts if path == '/executions')
+        assert execution['task_id'] == 'task_0' and execution['recipe_id'] == 'recipe_1' and 'model' not in execution
     finally:
         wrapped.close(); native.close(); decision_client.close()
 

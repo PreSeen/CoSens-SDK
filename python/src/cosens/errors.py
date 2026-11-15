@@ -7,12 +7,15 @@ class RSIError(Exception):
 
 class RSIHTTPError(RSIError):
     def __init__(self, status_code: int, message: str, *, code: str | None = None, request_id: str | None = None,
-                 current_version: int | None = None):
+                 current_version: int | None = None, missing: list[str] | None = None,
+                 recipe_ids: list[str] | None = None):
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.request_id = request_id
         self.current_version = current_version  # a Recipe version conflict reports the chain's current version
+        self.missing = missing  # input_incomplete: what the execution input lacks
+        self.recipe_ids = recipe_ids  # recipe_choice_required: the task's Recipes, one of which to name
 
 
 class RSITransportError(RSIError):

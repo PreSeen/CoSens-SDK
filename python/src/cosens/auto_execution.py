@@ -106,8 +106,11 @@ class AutoExecution:
                 match_error = {'type': type(error).__name__, 'message': str(error)[:500]}
         recipe = {'status': 'not_found'}
         if selected:
+            # A Recipe belongs to one task; reusing it means running in that task.
+            if not isinstance(selected.get('task_id'), str) or not selected['task_id']:
+                raise RSIRecoveryRequired('Matched Recipe has no task')
             recipe = {'status': 'matched', 'recipe_id': selected['recipe_id'], 'version': selected['version'],
-                      'bundle': selected['recipe'], 'provisional': True}
+                      'task_id': selected['task_id'], 'bundle': selected['recipe'], 'provisional': True}
         memory = atoms.memory_recall(query=state['objective'], token_budget=1000)
         lookup = {'source': 'workflow_recipe_lookup', 'lookup_complete': complete}
         if match_error:
@@ -143,7 +146,7 @@ class AutoExecution:
             # A declined turn must not recall or inject context without an
             # execution that records the method actually used by the host.
             # Also discard context left by older SDKs on a continued noop turn.
-            for field in ('frozen_context', 'used_recipe_id', 'used_recipe_version'):
+            for field in ('frozen_context', 'used_recipe_id', 'used_recipe_version', 'task_id'):
                 state.pop(field, None)
             state['state'] = 'native_running'
             self._save(state)
@@ -164,7 +167,8 @@ class AutoExecution:
                 state['recipe_match_error'] = dict(context['context']['recipe_match_error'])
             recipe = context['recipe']
             if recipe.get('status') == 'matched':
-                state.update(used_recipe_id=recipe['recipe_id'], used_recipe_version=recipe['version'])
+                state.update(used_recipe_id=recipe['recipe_id'], used_recipe_version=recipe['version'],
+                             task_id=recipe['task_id'])
             self._save(state)
         if 'agent_context' not in state:
             snapshot = self._snapshot_sync()
@@ -184,10 +188,12 @@ class AutoExecution:
                 task = atoms.create_task(objective=state['objective'], key='auto-task:' + state['turn_id'])
                 state['task_id'] = task['task_id']
                 self._save(state)
-            options = {}
+            # A matched Recipe runs in its own task, which keeps the model its versions were learned with;
+            # only a task this turn created takes the turn's model.
             if state.get('used_recipe_id'):
-                options['recipe_id'] = state['used_recipe_id']
-            options['model'] = kwargs.get('model')
+                options = {'recipe_id': state['used_recipe_id']}
+            else:
+                options = {'model': kwargs.get('model')}
             if correction is None:
                 # The turn's own request is the execution's input; the artifact is keyed on the turn, so a retry reuses it.
                 ref = self._auto_artifact(state, 'input_artifact', json.dumps({
