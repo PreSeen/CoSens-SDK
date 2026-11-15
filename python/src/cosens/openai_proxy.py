@@ -759,7 +759,8 @@ class _Runtime(AutoExecution):
         entries.append((state["turn_id"], state))
         entries.extend((request_key, state) for request_key in state.get("request_keys", []))
         self.turns.put_many(entries)
-        if state.get('state') == 'completed':
+        if state.get('state') == 'completed' and state.get('execution_id'):
+            # Only a turn that recorded an execution has something to learn from.
             try:
                 self.learning().attach(state)
             except Exception as error:

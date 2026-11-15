@@ -42,7 +42,7 @@ def assert_noop(wrapped, body, requests, algorithm_calls):
     turn = wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
     assert turn['decision']['activate'] is False
     assert turn['capture'] == 'skipped' and turn['state'] == 'completed'
-    for field in ('used_recipe_id', 'execution_id', 'frozen_context'):
+    for field in ('used_recipe_id', 'execution_id', 'frozen_context', 'learning'):
         assert not turn.get(field)
 
 

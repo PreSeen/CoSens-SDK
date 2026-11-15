@@ -62,7 +62,7 @@ async def test_three_entries_against_local_algorithm(tmp_path,entry):
         else:await sdk.atoms.learn(execution_id)
         v1=await sdk.atoms.wait_learning(execution_id,timeout=10)
         assert v1['status']=='completed' and v1['version']==1 and v1['previous_version'] is None
-        assert v1['memory_context']=='captured'
+        assert v1['memory_context']=='not_requested'  # no execution asked for recall_memory
         await sdk.atoms.record_feedback(execution_id,feedback='Use bare JSON without code fences',source='human',key='feedback')
         correction=await sdk.atoms.start_execution(turn['task_id'],key='correction',previous_execution_id=execution_id)
         artifact=await sdk.atoms.artifact(name='corrected.json',content='{"answer":42}')
