@@ -44,6 +44,7 @@ def assert_noop(wrapped, body, requests, algorithm_calls):
     assert turn['capture'] == 'skipped' and turn['state'] == 'completed'
     for field in ('used_recipe_id', 'execution_id', 'frozen_context', 'learning'):
         assert not turn.get(field)
+    assert wrapped.cosens.get_auto()['status'] == 'declined'
 
 
 @pytest.mark.parametrize('api', ['responses', 'chat'])

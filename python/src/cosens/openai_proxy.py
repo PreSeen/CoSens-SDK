@@ -86,7 +86,7 @@ class _Status:
                 'job_id': learning['execution_id'] if learning.get('learning') else None, **outcome}
         return {'action': 'noop', 'reason': turn.get('state'), 'turn_id': request_turn,
                 'used_recipe_id': turn.get('used_recipe_id'), 'used_recipe_version': turn.get('used_recipe_version'),
-                'status': 'blocked' if turn.get('state') == 'completion_pending' else 'pending',
+                'status': 'blocked' if turn.get('state') == 'completion_pending' else 'declined' if turn.get('capture') == 'skipped' else 'pending',
                 'error_type': turn.get('last_error_type') or turn.get('learning_error_type'), **outcome}
 
     def _learning_call(self, method, *args):
