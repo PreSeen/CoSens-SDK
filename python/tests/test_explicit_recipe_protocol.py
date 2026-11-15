@@ -509,6 +509,24 @@ async def test_start_runs_a_named_recipe_in_the_task_that_owns_it(tmp_path):
     assert len(backend.tasks)==2 and not [path for _,path,_ in backend.seen if path=='/tasks']
 
 
+@pytest.mark.asyncio
+async def test_start_approval_names_the_recipe_task_and_refuses_a_foreign_one_before_asking(tmp_path):
+    backend=Backend();asked=[]
+    owner=backend.add_task('Write the quarterly report')
+    other=backend.add_task('Write the monthly report')
+    backend.recipes=[_recipe_view('recipe_1',owner)]
+    spec={'source':'new_task','objective':'Produce a report'}
+    authorize=lambda *args:asked.append(args) or True
+    async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(backend)) as sdk:
+        with pytest.raises(ValueError, match=f'Recipe recipe_1 belongs to task {owner}, not {other}'):
+            await sdk.start({'task':spec,'task_id':other},request_key='prepare-1',recipe_id='recipe_1',
+                            mode='approval',authorize=authorize)
+        assert asked==[] and [entry[:2] for entry in backend.seen]==[('GET','/recipes/recipe_1')]
+        prepared=await sdk.start({'task':spec},request_key='prepare-2',recipe_id='recipe_1',mode='approval',authorize=authorize)
+    # The host approves the snapshot with the task the execution runs in.
+    assert asked==[('prepare',{'task':spec,'task_id':owner})] and prepared['task_id']==owner
+
+
 def _policy(match):
     """A decision model that activates every turn and answers the Recipe matcher with ``match``."""
     def native(r):

@@ -165,26 +165,47 @@ async def test_task_runner_submits_once_and_reconciles_lost_result_receipt(tmp_p
     await wrapper.aclose()
 
 
-INCOMPLETE = {"error": {"code": "input_incomplete", "message": "the execution input is incomplete", "missing": ["objective"]}}
-
-
 class IncompleteServer:
-    """Answers POST /executions with input_incomplete while ``incomplete`` holds; one task per idempotency key."""
+    """Refuses POST /executions as input_incomplete while ``incomplete`` holds, naming what the input lacks as the
+    service does, or answers ``execution_error`` instead; one task body per idempotency key."""
 
     def __init__(self):
         self.seen = []
         self.keys = {}
+        self.task_bodies = {}
         self.incomplete = True
+        self.execution_error = None
+
+    @staticmethod
+    def _missing(body):
+        value = body["input"]
+        roles = [("original_input" if body["source"] == "new_task" else "submitted_output") if isinstance(a, str) else a["role"]
+                 for a in value["artifacts"]]
+        missing = [] if value.get("objective") else ["objective"]
+        if body["source"] == "external_artifact":
+            if "original_input" not in roles and not value.get("self_contained"):
+                missing.append("original_input_or_self_contained_task")
+            if "submitted_output" not in roles:
+                missing.append("submitted_output")
+        return missing
 
     def __call__(self, request):
         body = json.loads(request.content) if request.content else None
+        key = request.headers.get("idempotency-key")
         self.seen.append((request.method, request.url.path, body))
-        self.keys.setdefault(request.url.path, []).append(request.headers.get("idempotency-key"))
-        if request.url.path in {"/api/tasks", "/api/tasks/t1"}:
+        self.keys.setdefault(request.url.path, []).append(key)
+        if request.url.path == "/api/tasks":
+            if self.task_bodies.setdefault(key, body) != body:
+                return httpx.Response(422, json={"error": {"code": "invalid_request", "message": "idempotency key reused with different task"}})
+            return httpx.Response(200, json={"task_id": "t1", "objective": body["objective"], "artifacts": [], "context_version": 1})
+        if request.url.path == "/api/tasks/t1":
             return httpx.Response(200, json={"task_id": "t1", "objective": "work", "artifacts": [], "context_version": 1})
         if request.url.path == "/api/executions":
+            if self.execution_error:
+                return self.execution_error(request)
             if self.incomplete:
-                return httpx.Response(422, json=INCOMPLETE)
+                return httpx.Response(422, json={"error": {"code": "input_incomplete", "message": "the execution input is incomplete",
+                                                           "missing": self._missing(body)}})
             return httpx.Response(200, json={"execution_id": "e1", "status": "awaiting_execution", "request_sha256": "h1", "request": {"kind": "reconstructed"}})
         if request.url.path == "/api/artifacts":
             return httpx.Response(200, json={"artifact_id": "a1", "content_hash": "server-hash"})
@@ -221,7 +242,7 @@ async def test_task_runner_raises_incomplete_input_unchanged_and_binds_the_retry
     with pytest.raises(RSIHTTPError) as caught:
         await run("work", rsi, session_1)
     assert caught.value.status_code == 422 and caught.value.code == "input_incomplete"
-    assert caught.value.missing == ["objective"] and caught.value.recipe_ids is None
+    assert caught.value.missing == ["original_input_or_self_contained_task"] and caught.value.recipe_ids is None
     assert native.calls == [] and wrapper.cosens.get_turn("turn-1")["state"] == "pre_execution_pending"
     for user_input, session in (("different input", session_1), ("work", SimpleNamespace(session_id="s1", session_incarnation="second"))):
         with pytest.raises(RSIRecoveryRequired, match="input or Session"):
@@ -264,6 +285,82 @@ async def test_task_runner_retries_an_incomplete_turn_with_a_corrected_spec(tmp_
     with pytest.raises(RSIRecoveryRequired, match="may have executed"):
         await run("work", {"turn_id": "turn-1", "task": incomplete})
     await wrapper.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("synchronous", [False, True])
+async def test_task_runner_keeps_the_objective_when_correcting_an_incomplete_spec(tmp_path, synchronous):
+    server = IncompleteServer()
+    native = SyncCapableRunner()
+    wrapper = TaskWorkflowRunner(native, mode="auto", api_key="key", state_path=tmp_path / "objective.sqlite3",
+                                 _http_transport=httpx.MockTransport(server))
+    run = _runner_call(wrapper, synchronous)
+    incomplete = {"source": "external_artifact", "objective": "work", "artifacts": ["external-output"]}
+    with pytest.raises(RSIHTTPError, match="incomplete"):
+        await run("work", {"turn_id": "turn-1", "task": incomplete})
+    sent = len(server.seen)
+    # The task was created and keyed from the objective, so a correction may complete only the execution input.
+    with pytest.raises(RSIRecoveryRequired, match="objective changed"):
+        await run("work", {"turn_id": "turn-1", "task": {**incomplete, "objective": "other work", "self_contained": True}})
+    assert len(server.seen) == sent and wrapper.cosens.get_turn("turn-1")["task_spec"] == incomplete
+    server.incomplete = False
+    corrected = {**incomplete, "artifacts": ["external-output", {"artifact_id": "brief", "role": "original_input"}]}
+    await run("work", {"turn_id": "turn-1", "task": corrected})
+    assert wrapper.cosens.get_turn("turn-1")["execution_id"] == "e1" and len(native.calls) == 1
+    assert {json.dumps(body, sort_keys=True) for _, path, body in server.seen if path == "/api/tasks"} == {
+        json.dumps({"objective": "work", "artifacts": []}, sort_keys=True)}
+    await wrapper.aclose()
+
+
+def _transport_error(request):
+    raise httpx.ReadTimeout("receipt lost", request=request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("synchronous", [False, True])
+@pytest.mark.parametrize("failure", [
+    lambda request: httpx.Response(422, json={"error": {"code": "invalid_request", "message": "bad execution"}}),
+    _transport_error], ids=["refused", "receipt_lost"])
+async def test_task_runner_locks_the_spec_after_a_start_that_was_not_input_incomplete(tmp_path, synchronous, failure):
+    server = IncompleteServer()
+    native = SyncCapableRunner()
+    wrapper = TaskWorkflowRunner(native, mode="auto", api_key="key", state_path=tmp_path / "locked.sqlite3",
+                                 _http_transport=httpx.MockTransport(server))
+    run = _runner_call(wrapper, synchronous)
+    incomplete = {"source": "external_artifact", "objective": "work", "artifacts": ["external-output"]}
+    with pytest.raises(RSIHTTPError, match="incomplete"):
+        await run("work", {"turn_id": "turn-1", "task": incomplete})
+    # The next start of the same spec fails some other way, so it may have started an execution.
+    server.execution_error = failure
+    with pytest.raises(Exception):
+        await run("work", {"turn_id": "turn-1", "task": incomplete})
+    assert "task_spec_incomplete" not in wrapper.cosens.get_turn("turn-1")
+    sent = len(server.seen)
+    with pytest.raises(RSIRecoveryRequired, match="Workflow task changed"):
+        await run("work", {"turn_id": "turn-1", "task": {**incomplete, "self_contained": True}})
+    assert len(server.seen) == sent and native.calls == []
+    await wrapper.aclose()
+
+
+@pytest.mark.asyncio
+async def test_task_runner_refuses_a_corrected_spec_from_another_mode_without_recording_it(tmp_path):
+    server = IncompleteServer()
+    native = SyncCapableRunner()
+    path = tmp_path / "mode.sqlite3"
+    auto = TaskWorkflowRunner(native, mode="auto", api_key="key", state_path=path, _http_transport=httpx.MockTransport(server))
+    incomplete = {"source": "external_artifact", "objective": "work", "artifacts": ["external-output"]}
+    with pytest.raises(RSIHTTPError, match="incomplete"):
+        await auto.run(FakeAgent(), "work", rsi={"turn_id": "turn-1", "task": incomplete})
+    await auto.aclose()
+    approval = TaskWorkflowRunner(native, mode="approval", api_key="key", state_path=path, _http_transport=httpx.MockTransport(server))
+    with pytest.raises(RSIRecoveryRequired, match="different mode"):
+        await approval.run(FakeAgent(), "work", rsi={"turn_id": "turn-1", "task": {**incomplete, "self_contained": True},
+                                                     "authorize": lambda *args: True})
+    await approval.aclose()
+    auto = TaskWorkflowRunner(native, mode="auto", api_key="key", state_path=path, _http_transport=httpx.MockTransport(server))
+    turn = auto.cosens.get_turn("turn-1")
+    assert turn["task_spec"] == incomplete and turn["task_spec_incomplete"] is True
+    await auto.aclose()
 
 
 @pytest.mark.asyncio

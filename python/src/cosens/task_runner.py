@@ -246,9 +246,14 @@ class TaskWorkflowRunner:
             raise RSIRecoveryRequired(f"Workflow turn {turn_id} may have executed; reconcile without rerunning Agent")
         if state and (state.get("session_id") != session_id or state.get("session_incarnation") != session_incarnation or state.get("input_hash") != input_hash):
             raise RSIRecoveryRequired("Workflow turn input or Session identity changed during recovery")
+        if state and state.get("mode") != self.mode:
+            raise RSIRecoveryRequired("Workflow turn originated in a different mode")
         if state and state.get("task_spec") != rsi.get("task"):
             if not state.get("task_spec_incomplete"):
                 raise RSIRecoveryRequired("Workflow task changed while recovering the same turn")
+            # The task is created and keyed from the objective, so a correction completes only the execution input.
+            if rsi["task"].get("objective") != state["task_spec"].get("objective"):
+                raise RSIRecoveryRequired("Workflow task objective changed; start a new turn")
             # The service refused the previous spec as incomplete and started nothing: take the corrected one.
             previous = state["task_spec"]
             state["task_spec"] = rsi["task"]
@@ -268,11 +273,13 @@ class TaskWorkflowRunner:
         self.cosens.last_turn_id = turn_id
         return state
 
-    def _release_incomplete_spec(self, state, error):
-        """An input_incomplete refusal started no execution, so the caller may retry the turn with a corrected spec."""
-        if 400 <= error.status_code < 500 and error.code == "input_incomplete":
+    def _settle_incomplete_spec(self, state, error):
+        """Only an input_incomplete refusal of the latest start lets the caller correct the spec; any other failure may have started an execution."""
+        if isinstance(error, RSIHTTPError) and 400 <= error.status_code < 500 and error.code == "input_incomplete":
             state["task_spec_incomplete"] = True
-            self._save_pending(state)
+        elif not state.pop("task_spec_incomplete", False):
+            return
+        self._save_pending(state)
 
     @staticmethod
     def _prepare_snapshot(state):
@@ -289,9 +296,13 @@ class TaskWorkflowRunner:
             try:
                 started = await self._client.start(self._prepare_snapshot(state), phase="prepare", mode=self.mode,
                                                    request_key=turn_id, authorize=rsi.get("authorize"), **({"model": agent.model} if isinstance(getattr(agent,"model",None),str) and agent.model.strip() else {}))
-            except RSIHTTPError as error:
-                self._release_incomplete_spec(state, error)
+            except (RSIApprovalRequired, RSIApprovalUnavailable):
+                # The host refused before anything was sent, so an earlier refusal still stands.
                 raise
+            except BaseException as error:
+                self._settle_incomplete_spec(state, error)
+                raise
+            state.pop("task_spec_incomplete", None)
             if started.get("task_id") or started.get("task", {}).get("task_id"):
                 state["task_id"] = started.get("task_id") or started["task"]["task_id"]
                 self._save_pending(state)
@@ -331,9 +342,11 @@ class TaskWorkflowRunner:
             try:
                 execution = atoms.start_execution(state["task_id"], key=_derived_key(state["turn_id"], "execution"),
                                                   **options)
-            except RSIHTTPError as error:
-                self._release_incomplete_spec(state, error)
+            except BaseException as error:
+                self._settle_incomplete_spec(state, error)
                 raise
+            if state.pop("task_spec_incomplete", None):
+                self._save_pending(state)
             if (execution.get("status") != "awaiting_execution" or not execution.get("execution_id") or
                     not execution.get("request_sha256") or not isinstance(execution.get("request"), dict)):
                 raise RSIRecoveryRequired(f"Workflow execution is {execution.get('status')}; reconcile before executing")

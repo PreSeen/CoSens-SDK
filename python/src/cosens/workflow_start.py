@@ -66,6 +66,10 @@ async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto"
         task_data = session_context.get("task")
         options = _execution_options(task_data, creates_task=session_context.get("task_id") is None and recipe_id is None,
                                      recipe_id=recipe_id, model=model, recall_memory=recall_memory)
+        if recipe_id is not None:
+            # The host approves the task the Recipe's execution actually runs in.
+            session_context = {**session_context,
+                               "task_id": await _recipe_task(atoms, recipe_id, session_context.get("task_id"))}
     elif phase == 'correct':
         # A correction of a completed execution takes only the execution it corrects and a model.
         if recipe_id is not None or recall_memory:
@@ -84,8 +88,6 @@ async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto"
 
     if phase == "prepare":
         task_id = session_context.get("task_id")
-        if recipe_id is not None:
-            task_id = await _recipe_task(atoms, recipe_id, task_id)
         if task_id is None:
             task = await atoms.create_task(objective=task_data["objective"], key=_derived_key(request_key, "task"))
             task_id = task.get("task_id")

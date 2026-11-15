@@ -29,7 +29,7 @@ class Algorithm:
         self.paths = []
         self.posts = []
         self.recipes = {r['recipe_id']: r for r in recipes}
-        self.tasks = {r['task_id']: 'Quarterly report' for r in recipes}
+        self.tasks = {r['task_id']: 'Quarterly report' for r in recipes if r.get('task_id')}
         self.task_keys = {}
 
     def _create_task(self, body, key):
@@ -54,7 +54,7 @@ class Algorithm:
         if path == '/recipes':
             assert dict(request.url.params) == {'limit': '100', 'origin': 'generated'}
             items = [{'recipe_id': key, 'origin': r['origin'], 'version': r['version'], 'title': r['recipe']['title'],
-                      'task_id': r['task_id'], 'updated_at': 't'} for key, r in self.recipes.items()
+                      'task_id': r.get('task_id'), 'updated_at': 't'} for key, r in self.recipes.items()
                      if r['origin'] == request.url.params['origin']]
             return httpx.Response(200, json={'items': items, 'has_more': False, 'next_cursor': None})
         if path.startswith('/recipes/'):
@@ -327,5 +327,28 @@ def test_uploaded_recipes_are_not_offered_to_the_matcher(tmp_path):
         assert decision_names == ['cosens_decision']
         assert not [path for path in algorithm.paths if path.startswith('/recipes/')]
         assert not wrapped.cosens.get_turn(wrapped.cosens.last_turn_id).get('used_recipe_id')
+    finally:
+        wrapped.close(); native.close()
+
+
+def test_matched_recipe_without_a_task_passes_the_turn_through(tmp_path):
+    def model(request):
+        if request.url.path.endswith('/chat/completions'):
+            name = json.loads(request.content)['response_format']['json_schema']['name']
+            return _chat({'recipe_id': 'recipe_1'} if name == 'cosens_recipe_match' else ACTIVATE)
+        return native_response(request)
+
+    recipe = _recipe()
+    del recipe['task_id']
+    algorithm = Algorithm([recipe])
+    native = OpenAI(api_key='model-key', http_client=httpx.Client(transport=httpx.MockTransport(model)))
+    wrapped = cosens(native, mode='auto', api_key='service-key', state_path=tmp_path / 's.sqlite',
+                     _http_transport=httpx.MockTransport(algorithm))
+    try:
+        assert wrapped.responses.create(model='model', input='Produce a report').output_text == 'final artifact'
+        turn = wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
+        assert turn['capture'] == 'policy_failed' and turn['policy_error_type'] == 'RSIRecoveryRequired'
+        assert not turn.get('used_recipe_id') and not turn.get('task_id')
+        assert not [path for path, _ in algorithm.posts if path in {'/tasks', '/executions'}]
     finally:
         wrapped.close(); native.close()
