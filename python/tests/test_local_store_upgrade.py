@@ -389,6 +389,15 @@ async def test_a_version_1_store_upgrades_to_capability_tasks_once(tmp_path):
         other = await rsi.create_task(key="t2", objective="Another task")
         with pytest.raises(ValueError, match="idempotency key reused with different execution"):
             await rsi.start_execution(other.task_id, key="t1-e", source="new_task", objective="Do the task")
+        # A start key resent as it was first sent is refused too, not replayed: its receipt holds the old intent.
+        first, revised = (json.loads(text) for *_, text in executions)
+        with pytest.raises(ValueError, match="idempotency key reused with different execution"):
+            await rsi.start_execution(context["task_id"], key="t1-e", source="new_task", objective="Do the task",
+                                      artifacts=[a["artifact_id"] for a in first["input"]["artifacts"]])
+        assert [e["execution_id"] for e in (await rsi.get_task(context["task_id"])).executions] == [original, correction]
+        # A correction's key still replays.
+        replayed = await rsi.start_revision(revised["base_revision_id"], key="r")
+        assert replayed.execution_id == correction
     finally:
         await rsi.aclose()
 

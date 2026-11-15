@@ -549,6 +549,9 @@ async def test_a_task_with_several_recipes_needs_a_recipe_choice(tmp_path):
     assert (learned.recipe_id, learned.version) == ("second", 2)
     with pytest.raises(ValueError, match="^the execution followed no Recipe and the task has several$"):
         await rsi.start_recipe_candidate(task.task_id, revision_id=early.revision_id)
+    # A correction cannot name a Recipe, so the refusal does not ask for a recipe_id.
+    with pytest.raises(ValueError, match="^the previous execution followed no Recipe and the task has several$"):
+        await rsi.start_revision(early.revision_id, key="early-r")
 
 
 def recipe_citing_the_template(payload):

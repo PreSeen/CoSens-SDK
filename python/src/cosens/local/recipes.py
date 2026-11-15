@@ -109,10 +109,15 @@ class LocalRecipeLifecycle:
         return None
 
     def _correction_method(self, db, task_id, previous_request):
-        """A revision follows the current version of the Recipe the previous execution followed."""
+        """A revision follows the current version of the Recipe the previous execution followed, else the task's only one.
+
+        A revision cannot name a Recipe, so with several the refusal does not ask for a recipe_id.
+        """
         used = previous_request.get("method")
         if used:
             return self._method(db, used["recipe_id"])
+        if len(self._task_heads(db, task_id)) > 1:
+            raise ValueError("the previous execution followed no Recipe and the task has several")
         return self._execution_method(db, task_id)
 
     def _learning_head(self, db, task_id, request):
