@@ -46,22 +46,32 @@ class Backend:
     def learning(self,execution_id):
         return self.learnings[execution_id]
 
-    def _start(self,task_id,body,key):
+    def _start(self,body,key):
+        """POST /executions: a new execution names task_id, source and input; a correction names previous_execution_id."""
         body=body or {}
         previous=body.get('previous_execution_id')
         if previous is not None:
-            if body.get('recipe_id') is not None or body.get('recall_memory'):
-                return invalid('a correction takes only previous_execution_id and model')
+            if set(body)-{'previous_execution_id','task_id','model'}:
+                return invalid('a correction takes only previous_execution_id, task_id and model')
             before=self.executions.get(previous)
             if before is None:
                 return not_found('execution not found')
             if before['status']!='completed':
                 return invalid('execution has no completed output')
-            if before['task_id']!=task_id:
-                return not_found('previous execution not found in this task')
+            if body.get('task_id') not in (None,before['task_id']):
+                return invalid('previous execution belongs to another task')
+            task_id,request_input,instance_id=before['task_id'],before['input'],before['instance_id']
             scope,intent=('correction',previous,key),None
         else:
-            scope,intent=('original',task_id,key),(body.get('recipe_id'),bool(body.get('recall_memory')))
+            task_id,source,request_input=body.get('task_id'),body.get('source'),body.get('input')
+            if not task_id or source not in {'new_task','external_artifact'} or not isinstance(request_input,dict):
+                return invalid('a new execution needs task_id, source and input')
+            if not request_input.get('objective'):
+                return httpx.Response(422,json={'error':{'code':'input_incomplete','message':'the execution input is incomplete','missing':['objective']}})
+            request_input={'objective':request_input['objective'],'artifacts':request_input.get('artifacts',[]),
+                           'self_contained':bool(request_input.get('self_contained'))}
+            instance_id=None
+            scope,intent=('original',task_id,key),(source,json.dumps(request_input,sort_keys=True),body.get('recipe_id'),bool(body.get('recall_memory')))
         frozen=self._freeze_model(task_id,body.get('model'))
         if frozen is not None:
             return frozen
@@ -71,11 +81,13 @@ class Backend:
             return self.keys[scope][1]
         execution_id=f'execution_{len(self.executions)+1}'
         kind='correction' if previous else 'original'
+        instance_id=instance_id or execution_id
         self.executions[execution_id]={'task_id':task_id,'kind':kind,'status':'awaiting_execution','previous_execution_id':previous,
-                                       'request_sha256':'sha-'+execution_id}
-        receipt={'task_id':task_id,'execution_id':execution_id,'kind':kind,'request_sha256':'sha-'+execution_id,
-                 'status':'awaiting_execution','request':{'context':{'objective':'task'},'method':self.method(body)}}
-        self.keys[scope]=(None if previous else intent,receipt)
+                                       'request_sha256':'sha-'+execution_id,'input':request_input,'instance_id':instance_id}
+        request={'task_context':{'objective':'task','artifacts':[],'context_version':1},'input':request_input,'method':self.method(body)}
+        receipt={'task_id':task_id,'execution_id':execution_id,'instance_id':instance_id,'kind':kind,
+                 'request_sha256':'sha-'+execution_id,'status':'awaiting_execution','request':request}
+        self.keys[scope]=(intent,receipt)
         return receipt
 
     def _freeze_model(self,task_id,model):
@@ -166,9 +178,10 @@ class Backend:
         if path=='/v1/memory/recall':return httpx.Response(200,json={'items':[]})
         if path=='/artifacts':
             self.count+=1;return httpx.Response(200,json={'artifact_id':f'artifact_{self.count}','content_hash':'sha256:test'})
-        if path=='/tasks' and r.method=='POST':return httpx.Response(200,json={'task_id':'task_1','status':'ready'})
-        if path.endswith('/executions') and r.method=='POST':
-            answer=self._start(path.split('/')[2],body,r.headers.get('idempotency-key'))
+        if path=='/tasks' and r.method=='POST':
+            return httpx.Response(200,json={'task_id':'task_1','objective':body['objective'],'artifacts':[],'context_version':1})
+        if path=='/executions' and r.method=='POST':
+            answer=self._start(body,r.headers.get('idempotency-key'))
             return answer if isinstance(answer,httpx.Response) else httpx.Response(200,json=answer)
         execution_id=path.split('/')[2] if path.startswith('/executions/') else None
         execution=self.executions.get(execution_id)
@@ -193,9 +206,12 @@ class Backend:
             learning=self.learnings.get(execution_id)
             if learning and learning['status'] in {'queued','running'}:
                 learning=self.learnings[execution_id]=dict(learning,status='completed',current=True,recipe={'steps':[]})
-            return httpx.Response(200,json={'execution_id':execution_id,'task_id':execution['task_id'],'kind':execution['kind'],'status':execution['status'],
+            return httpx.Response(200,json={'execution_id':execution_id,'task_id':execution['task_id'],'instance_id':execution['instance_id'],'kind':execution['kind'],'status':execution['status'],
                                             'previous_execution_id':execution['previous_execution_id'],'learning':learning})
         raise AssertionError((r.method,path,body))
+
+
+NEW=dict(source='new_task',objective='Produce output',self_contained=True)
 
 
 def native_response(r):
@@ -216,6 +232,12 @@ def test_transparent_sync_waits_for_explicit_generation(tmp_path):
     response=wrapped.responses.create(model='model',input='Produce a report')
     assert response.output_text=='final artifact'
     assert backend.generations==0
+    task_body=next(body for method,path,body in backend.seen if path=='/tasks')
+    execution_body=next(body for method,path,body in backend.seen if path=='/executions')
+    assert set(task_body)=={'objective','artifacts'} and task_body['artifacts']==[]
+    assert execution_body['task_id']=='task_1' and execution_body['source']=='new_task'
+    assert execution_body['input']['objective']==task_body['objective']
+    assert execution_body['input']['artifacts']==[{'artifact_id':'artifact_1','role':'original_input'}]
     assert wrapped.cosens.wait_learning(timeout=0)['state']=='awaiting_confirmation'
     wrapped.cosens.feedback('Check the format', source='human')
     assert backend.generations==0
@@ -271,15 +293,22 @@ async def test_atomic_feedback_correction_and_learning(tmp_path):
     backend=Backend()
     async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(backend)) as sdk:
         a=sdk.atoms
-        task=await a.create_task(source='new_task',objective='Produce output',self_contained=True,key='task')
-        execution=await a.start_execution(task['task_id'],key='execution')
+        task=await a.create_task(objective='Produce output',key='task')
+        assert task=={'task_id':'task_1','objective':'Produce output','artifacts':[],'context_version':1}
+        assert backend.seen[-1]==('POST','/tasks',{'objective':'Produce output','artifacts':[]})
+        execution=await a.start_execution(task['task_id'],key='execution',**NEW)
+        assert backend.seen[-1]==('POST','/executions',{'task_id':'task_1','source':'new_task',
+            'input':{'objective':'Produce output','artifacts':[],'self_contained':True}})
+        assert execution['instance_id']==execution['execution_id']
+        assert execution['request']['input']=={'objective':'Produce output','artifacts':[],'self_contained':True}
         artifact=await a.artifact(name='output.txt',content='final')
         result=await a.submit_execution(execution['execution_id'],request_sha256=execution['request_sha256'],outcome='completed',artifacts=[{'artifact_id':artifact['artifact_id'],'role':'submitted_output'}])
         assert result['status']=='completed' and 'revision_id' not in result
         await a.record_feedback(result['execution_id'],feedback='Check the format',source='human',key='feedback')
         correction=await a.start_execution(task['task_id'],key='correction',previous_execution_id=result['execution_id'])
         assert correction['kind']=='correction' and correction['execution_id']!=result['execution_id']
-        assert backend.seen[-1]==('POST','/tasks/task_1/executions',{'previous_execution_id':'execution_1'})
+        assert correction['instance_id']==execution['execution_id']
+        assert backend.seen[-1]==('POST','/executions',{'task_id':'task_1','previous_execution_id':'execution_1'})
         corrected=await a.artifact(name='corrected.txt',content='fixed')
         done=await a.submit_execution(correction['execution_id'],request_sha256=correction['request_sha256'],outcome='completed',artifacts=[{'artifact_id':corrected['artifact_id'],'role':'submitted_output'}])
         assert done['trace_origin']=='correction'
@@ -299,13 +328,14 @@ async def test_recall_memory_and_feedback_source_reach_the_service(tmp_path):
             return httpx.Response(200,json={'execution_id':'execution_1','request_sha256':'h','status':'awaiting_execution'})
         return httpx.Response(200,json={'feedback_id':'feedback_1','source':body.get('source')})
     async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(handler)) as sdk:
-        await sdk.atoms.start_execution('task_1',key='execution',recall_memory=True)
+        await sdk.atoms.start_execution('task_1',key='execution',source='new_task',objective='Produce output',recall_memory=True)
         await sdk.atoms.record_feedback('execution_1',feedback='score=1.0',source='evaluator',key='feedback')
         with pytest.raises(ValueError, match='source must be one of'):
             await sdk.atoms.record_feedback('execution_1',feedback='x',source='judge',key='bad')
         with pytest.raises(TypeError):
-            await sdk.atoms.start_execution('task_1',key='old',include_memory=True)
-    assert bodies['executions']=={'recall_memory':True}
+            await sdk.atoms.start_execution('task_1',key='old',source='new_task',objective='Produce output',include_memory=True)
+    assert bodies['executions']=={'task_id':'task_1','source':'new_task','input':{'objective':'Produce output','artifacts':[]},
+                                  'recall_memory':True}
     assert bodies['feedback']=={'feedback':'score=1.0','source':'evaluator'}
 
 
@@ -325,8 +355,8 @@ def test_feedback_on_a_previous_turn_starts_a_correction_of_its_execution(tmp_pa
         before=len(backend.seen)
         wrapped.responses.create(model='model',input='The totals are wrong; use the Q3 numbers',previous_response_id=first.id)
         calls=[(i,m,p,b) for i,(m,p,b) in enumerate(backend.seen) if i>=before and (p.endswith('/feedback') or p.endswith('/executions'))]
-        assert [call[1:3] for call in calls]==[('POST','/executions/execution_1/feedback'),('POST','/tasks/task_1/executions')]
-        assert calls[1][3]=={'previous_execution_id':'execution_1'}
+        assert [call[1:3] for call in calls]==[('POST','/executions/execution_1/feedback'),('POST','/executions')]
+        assert calls[1][3]=={'task_id':'task_1','previous_execution_id':'execution_1'}
         turn=wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
         assert backend.headers[calls[1][0]]['idempotency-key']=='auto-correction:'+turn['turn_id']
         assert turn['execution_id']=='execution_2' and turn['execution_id']!='execution_1' and turn['state']=='completed'
@@ -352,7 +382,7 @@ async def test_start_phases_correct_and_learn(tmp_path):
         snapshot={'task_id':prepared['task_id'],'execution_id':prepared['execution_id']}
         corrected=await sdk.start(snapshot,phase='correct',request_key='fix-1')
         assert corrected['kind']=='correction' and corrected['execution_id']!=prepared['execution_id']
-        assert backend.seen[-1]==('POST','/tasks/task_1/executions',{'previous_execution_id':prepared['execution_id']})
+        assert backend.seen[-1]==('POST','/executions',{'task_id':'task_1','previous_execution_id':prepared['execution_id']})
         assert backend.headers[-1]['idempotency-key']=='fix-1'
         learning=await sdk.start(snapshot,phase='learn',model='public-model')
         assert learning['execution_id']==prepared['execution_id'] and learning['status']=='queued'
@@ -453,26 +483,27 @@ async def test_execution_keys_feedback_keys_and_request_hashes_follow_the_servic
     backend.head={'recipe_id':'recipe_1','version':3,'recipe_sha256':'f'*64,'recipe':{'title':'Head','steps':[]}}
     async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(backend)) as sdk:
         a=sdk.atoms
-        first=await a.start_execution('task_1',key='same')
+        first=await a.start_execution('task_1',key='same',**NEW)
         assert first['request']['method']['version']==3
-        assert (await a.start_execution('task_1',key='same'))['execution_id']==first['execution_id']
-        with pytest.raises(RSIHTTPError, match='different context') as caught:
-            await a.start_execution('task_1',key='same',recall_memory=True)
-        assert caught.value.status_code==422
+        assert (await a.start_execution('task_1',key='same',**NEW))['execution_id']==first['execution_id']
+        for changed in ({'recall_memory':True},{'objective':'Another week'}):
+            with pytest.raises(RSIHTTPError, match='different context') as caught:
+                await a.start_execution('task_1',key='same',**{**NEW,**changed})
+            assert caught.value.status_code==422
         with pytest.raises(RSIHTTPError, match='request hash mismatch'):
             await a.submit_execution(first['execution_id'],request_sha256='stale',outcome='completed',artifacts=[{'artifact_id':'a1','role':'submitted_output'}])
         await a.submit_execution(first['execution_id'],request_sha256=first['request_sha256'],outcome='completed',artifacts=[{'artifact_id':'a1','role':'submitted_output'}])
-        second=await a.start_execution('task_1',key='other')
+        second=await a.start_execution('task_1',key='other',**NEW)
         await a.submit_execution(second['execution_id'],request_sha256=second['request_sha256'],outcome='completed',artifacts=[{'artifact_id':'a2','role':'submitted_output'}])
         # A correction key is scoped to the execution it corrects.
         fix_first=await a.start_execution('task_1',key='fix',previous_execution_id=first['execution_id'])
         fix_second=await a.start_execution('task_1',key='fix',previous_execution_id=second['execution_id'])
         assert len({fix_first['execution_id'],fix_second['execution_id'],first['execution_id'],second['execution_id']})==4
         assert fix_first['request']['method']['version']==3
-        for task_id,previous in (('task_1','execution_99'),('task_2',first['execution_id'])):
+        for task_id,previous,status in (('task_1','execution_99',404),('task_2',first['execution_id'],422)):
             with pytest.raises(RSIHTTPError) as caught:
                 await a.start_execution(task_id,key='fix',previous_execution_id=previous)
-            assert caught.value.status_code==404
+            assert caught.value.status_code==status
         await a.record_feedback(first['execution_id'],feedback='Too long',source='human',key='fb')
         assert (await a.record_feedback(first['execution_id'],feedback='Too long',source='human',key='fb'))['message']=='Too long'
         with pytest.raises(RSIHTTPError, match='different feedback') as caught:
@@ -488,9 +519,9 @@ async def test_the_fake_freezes_the_task_model_and_looks_recipes_up_like_the_ser
     backend.recipes=[view(1),view(2),view(1,'uploaded','team')]
     async with CoSensClient(api_key='service-key',state_path=tmp_path/'atoms.sqlite',_http_transport=httpx.MockTransport(backend)) as sdk:
         a=sdk.atoms
-        first=await a.start_execution('task_1',key='e1',model='m1')
+        first=await a.start_execution('task_1',key='e1',model='m1',**NEW)
         with pytest.raises(RSIHTTPError, match='frozen') as caught:
-            await a.start_execution('task_1',key='e2',model='m2')
+            await a.start_execution('task_1',key='e2',model='m2',**NEW)
         assert caught.value.status_code==422
         await a.submit_execution(first['execution_id'],request_sha256=first['request_sha256'],outcome='completed',artifacts=[{'artifact_id':'a1','role':'submitted_output'}])
         with pytest.raises(RSIHTTPError, match='frozen'):

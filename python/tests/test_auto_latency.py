@@ -42,9 +42,12 @@ class Algorithm:
         if path == '/artifacts':
             return httpx.Response(200, json={'artifact_id': 'artifact_1', 'content_hash': 'sha256:x'})
         if path == '/tasks':
-            return httpx.Response(200, json={'task_id': 'task_1', 'status': 'ready'})
-        if path.endswith('/executions'):
             body = json.loads(request.content)
+            return httpx.Response(200, json={'task_id': 'task_1', 'objective': body['objective'], 'artifacts': [],
+                                             'context_version': 1})
+        if path == '/executions':
+            body = json.loads(request.content)
+            assert body['task_id'] == 'task_1' and body['source'] == 'new_task' and body['input']['objective']
             method = None
             if body.get('recipe_id'):
                 chosen = self.recipes[body['recipe_id']]

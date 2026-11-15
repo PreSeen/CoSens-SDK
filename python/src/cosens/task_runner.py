@@ -259,17 +259,25 @@ class TaskWorkflowRunner:
         self.cosens.last_turn_id = turn_id
         return state
 
+    @staticmethod
+    def _prepare_snapshot(state):
+        """What a prepare sends: the task spec (the execution's input) and the task once one exists."""
+        snapshot = {"task": state["task_spec"]}
+        if state.get("task_id"):
+            snapshot["task_id"] = state["task_id"]
+        return snapshot
+
     async def _prepare(self, rsi, *, agent, user_input, session):
         state = self._pending_state(rsi, agent=agent, user_input=user_input, session=session)
         turn_id = state["turn_id"]
         if not state.get("execution_id"):
-            started = await self._client.start({"task_id": state["task_id"]} if state.get("task_id") else {"task": state["task_spec"]}, phase="prepare", mode=self.mode,
+            started = await self._client.start(self._prepare_snapshot(state), phase="prepare", mode=self.mode,
                                                request_key=turn_id, authorize=rsi.get("authorize"), **({"model": agent.model} if isinstance(getattr(agent,"model",None),str) and agent.model.strip() else {}))
             if started.get("task_id") or started.get("task", {}).get("task_id"):
                 state["task_id"] = started.get("task_id") or started["task"]["task_id"]
                 self._save_pending(state)
             if started.get("status") != "awaiting_execution" or not started.get("execution_id") or not started.get("request_sha256") or not isinstance(started.get("execution_request"), dict):
-                raise RSIRecoveryRequired(f"Workflow task is {started.get('status')}; provide context before executing")
+                raise RSIRecoveryRequired(f"Workflow execution is {started.get('status')}; reconcile before executing")
             state.update(task_id=started["task_id"], execution_id=started["execution_id"],
                          request_sha256=started["request_sha256"], request=started["execution_request"])
             self._save_pending(state)
@@ -283,8 +291,7 @@ class TaskWorkflowRunner:
                 authorize = rsi.get("authorize")
                 if authorize is None:
                     raise RSIApprovalUnavailable("approval mode requires a host authorization callback")
-                snapshot = {"task_id": state["task_id"]} if state.get("task_id") else {"task": state["task_spec"]}
-                allowed = authorize("prepare", snapshot)
+                allowed = authorize("prepare", self._prepare_snapshot(state))
                 if inspect.isawaitable(allowed):
                     if inspect.iscoroutine(allowed):
                         allowed.close()
@@ -292,20 +299,19 @@ class TaskWorkflowRunner:
                 if allowed is not True:
                     raise RSIApprovalRequired("host authorization was not granted")
             atoms = self._client.sync_atoms
-            if state.get("task_id"):
-                task = atoms.get_task(state["task_id"])
-            else:
-                data = state["task_spec"]
-                task = atoms.create_task(source=data["source"], objective=data.get("objective"),
-                                         artifacts=data.get("artifacts"), self_contained=data.get("self_contained"),
-                                         key=_derived_key(state["turn_id"], "task"))
-            task_id = task.get("task_id")
-            if task_id:
-                state["task_id"] = task_id
+            data = state["task_spec"]
+            if not state.get("task_id"):
+                task = atoms.create_task(objective=data.get("objective"), key=_derived_key(state["turn_id"], "task"))
+                if not task.get("task_id"):
+                    raise RSIRecoveryRequired("Task receipt has no task_id")
+                state["task_id"] = task["task_id"]
                 self._save_pending(state)
-            if task.get("status") != "ready" or not task_id:
-                raise RSIRecoveryRequired(f"Workflow task is {task.get('status')}; provide context before executing")
-            execution = atoms.start_execution(task_id, key=_derived_key(state["turn_id"], "execution"), **({"model": agent.model} if isinstance(getattr(agent,"model",None),str) and agent.model.strip() else {}))
+            # The task spec is the execution's input; the task itself carries only the objective.
+            execution = atoms.start_execution(
+                state["task_id"], key=_derived_key(state["turn_id"], "execution"), source=data.get("source"),
+                objective=data.get("objective"), artifacts=data.get("artifacts"),
+                self_contained=data.get("self_contained"),
+                **({"model": agent.model} if isinstance(getattr(agent, "model", None), str) and agent.model.strip() else {}))
             if (execution.get("status") != "awaiting_execution" or not execution.get("execution_id") or
                     not execution.get("request_sha256") or not isinstance(execution.get("request"), dict)):
                 raise RSIRecoveryRequired(f"Workflow execution is {execution.get('status')}; reconcile before executing")

@@ -40,23 +40,17 @@ async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto"
 
     if phase == "prepare":
         stable_key(request_key)
+        task_data = session_context.get("task")
+        if not isinstance(task_data, dict):
+            raise ValueError("prepare requires task: the execution's source, objective and artifacts")
         task_id = session_context.get("task_id")
         if task_id is None:
-            task_data = session_context.get("task")
-            if not isinstance(task_data, dict):
-                raise ValueError("prepare requires task or task_id")
-            task = await atoms.create_task(source=task_data["source"], objective=task_data.get("objective"),
-                                           artifacts=task_data.get("artifacts"), self_contained=task_data.get("self_contained"),
-                                           key=_derived_key(request_key, "task"))
+            task = await atoms.create_task(objective=task_data.get("objective"), key=_derived_key(request_key, "task"))
             task_id = task.get("task_id")
-            if task.get("status") == "ready" and not task_id:
-                raise RSIRecoveryRequired("Ready task receipt has no task_id")
-            if task.get("status") != "ready":
-                return result({"phase": phase, "task": task, "status": task.get("status")})
+            if not task_id:
+                raise RSIRecoveryRequired("Task receipt has no task_id")
         else:
             task = await atoms.get_task(task_id)
-            if task.get("status") != "ready":
-                return result({"phase": phase, "task": task, "status": task.get("status")})
         options = {}
         if recipe_id is not None:
             options['recipe_id'] = recipe_id
@@ -64,17 +58,22 @@ async def start_workflow(atoms, session_context, *, phase="prepare", mode="auto"
             options['model'] = model
         if recall_memory:
             options['recall_memory'] = True
-        execution = await atoms.start_execution(task_id, key=_derived_key(request_key, "execution"), **options)
+        execution = await atoms.start_execution(
+            task_id, key=_derived_key(request_key, "execution"), source=task_data.get("source"),
+            objective=task_data.get("objective"), artifacts=task_data.get("artifacts"),
+            self_contained=task_data.get("self_contained"), **options)
         return result({"phase": phase, "status": execution.get("status"), "task_id": task_id,
                        "task": task, "execution_id": execution.get("execution_id"),
                        "request_sha256": execution.get("request_sha256"), "execution_request": execution.get("request"),
                        "execution": execution})
 
     if phase == 'correct':
-        # A correction of a completed execution; the atom rejects recipe_id and recall_memory before sending.
-        return await atoms.start_execution(session_context['task_id'], key=stable_key(request_key),
+        # A correction of a completed execution takes only the execution it corrects and a model.
+        if recipe_id is not None or recall_memory:
+            raise ValueError("a correction takes only previous_execution_id, task_id and model")
+        return await atoms.start_execution(session_context.get('task_id'), key=stable_key(request_key),
                                            previous_execution_id=session_context['execution_id'],
-                                           recipe_id=recipe_id, model=model, recall_memory=recall_memory)
+                                           **({'model': model} if model is not None else {}))
     if phase == 'learn':
         return await atoms.learn(session_context['execution_id'], **({'model': model} if model is not None else {}))
     raise ValueError('phase must be prepare, correct or learn')

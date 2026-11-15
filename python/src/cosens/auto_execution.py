@@ -181,20 +181,24 @@ class AutoExecution:
             self._save(state)
         if (decision['activate'] or feedback_target) and not state.get('execution_id'):
             if not state.get('task_id'):
-                ref = self._auto_artifact(state, 'input_artifact', json.dumps({
-                    'objective': state['objective'], 'messages': state['agent_context'],
-                    'instructions': kwargs.get('instructions'), 'tools': kwargs.get('tools', [])}, ensure_ascii=False))
-                task = atoms.create_task(source='new_task', objective=state['objective'],
-                    artifacts=[{'artifact_id': ref['artifact_id'], 'role': 'original_input'}], key='auto-task:' + state['turn_id'])
+                task = atoms.create_task(objective=state['objective'], key='auto-task:' + state['turn_id'])
                 state['task_id'] = task['task_id']
                 self._save(state)
-                if task.get('status') != 'ready':
-                    raise RSIRecoveryRequired('Auto task needs more context before execution')
             options = {}
             if state.get('used_recipe_id'):
                 options['recipe_id'] = state['used_recipe_id']
             options['model'] = kwargs.get('model')
-            execution = correction or atoms.start_execution(state['task_id'], key='auto-execution:' + state['turn_id'], **options)
+            if correction is None:
+                # The turn's own request is the execution's input; the artifact is keyed on the turn, so a retry reuses it.
+                ref = self._auto_artifact(state, 'input_artifact', json.dumps({
+                    'objective': state['objective'], 'messages': state['agent_context'],
+                    'instructions': kwargs.get('instructions'), 'tools': kwargs.get('tools', [])}, ensure_ascii=False))
+                execution = atoms.start_execution(
+                    state['task_id'], key='auto-execution:' + state['turn_id'], source='new_task',
+                    objective=state['objective'],
+                    artifacts=[{'artifact_id': ref['artifact_id'], 'role': 'original_input'}], **options)
+            else:
+                execution = correction
             if execution.get('status') != 'awaiting_execution' or not execution.get('execution_id') or not execution.get('request_sha256'):
                 raise RSIRecoveryRequired('Auto execution is not ready')
             method = (execution.get('request') or {}).get('method')

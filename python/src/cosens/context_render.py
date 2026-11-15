@@ -110,13 +110,19 @@ def _feedback_lines(feedback):
 def render_execution_request(request, *, max_chars=DEFAULT_MAX_CONTEXT_CHARS):
     """Agent instruction text for a frozen task execution request."""
     request = request if isinstance(request, dict) else {}
-    context = request.get("context") if isinstance(request.get("context"), dict) else {}
+    task_context = request.get("task_context") if isinstance(request.get("task_context"), dict) else {}
+    execution_input = request.get("input") if isinstance(request.get("input"), dict) else {}
     lines = []
     if request.get("task_id"):
         lines.append(f"Task: {request['task_id']}" + (f" ({request['kind']})" if request.get("kind") else ""))
-    if _text(context.get("objective")):
-        lines.append("Objective: " + _text(context["objective"]))
-    artifacts = [artifact for artifact in context.get("artifacts") or [] if isinstance(artifact, dict)]
+    if _text(task_context.get("objective")):
+        lines.append("Task objective: " + _text(task_context["objective"]))
+    references = [artifact for artifact in task_context.get("artifacts") or [] if isinstance(artifact, dict)]
+    if references:
+        lines.append("Reference artifacts: " + ", ".join(str(artifact.get("artifact_id")) for artifact in references))
+    if _text(execution_input.get("objective")):
+        lines.append("Objective: " + _text(execution_input["objective"]))
+    artifacts = [artifact for artifact in execution_input.get("artifacts") or [] if isinstance(artifact, dict)]
     if artifacts:
         lines.append("Input artifacts: " + ", ".join(
             f"{artifact.get('artifact_id')} ({artifact.get('role')})" for artifact in artifacts))

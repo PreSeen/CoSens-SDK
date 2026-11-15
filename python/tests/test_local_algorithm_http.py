@@ -46,8 +46,9 @@ async def test_three_entries_against_local_algorithm(tmp_path,entry):
             await wrapped.run(agent,'Produce a structured report')
             turn=wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
         else:
-            task=await sdk.atoms.create_task(source='new_task',objective='Produce a structured report',self_contained=True,key='task')
-            execution=await sdk.atoms.start_execution(task['task_id'],key='execution',model='model')
+            task=await sdk.atoms.create_task(objective='Produce a structured report',key='task')
+            execution=await sdk.atoms.start_execution(task['task_id'],key='execution',model='model',source='new_task',
+                                                      objective='Produce a structured report',self_contained=True)
             artifact=await sdk.atoms.artifact(name='report.txt',content='report')
             submitted=await sdk.atoms.submit_execution(execution['execution_id'],request_sha256=execution['request_sha256'],outcome='completed',artifacts=[{'artifact_id':artifact['artifact_id'],'role':'submitted_output'}])
             turn={'task_id':task['task_id'],'execution_id':submitted['execution_id'],'state':submitted['status']}
