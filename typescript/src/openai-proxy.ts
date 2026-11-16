@@ -50,7 +50,7 @@ export interface CoSensProxyStatus {
   reconcile(id: string): Promise<Turn>;
   feedback(message:string,options:{source:FeedbackSource;turnId?:string;requestKey?:string}):Promise<any>;
   /** Learn from the turn's confirmed execution; repeat calls return the same learning. */
-  generateRecipe(options?:{turnId?:string;maxCompletionTokens?:number;webSearch?:boolean;webSearchBlockedDomains?:string[]}):Promise<any>;
+  generateRecipe(options?:{turnId?:string;maxCompletionTokens?:number;webSearch?:boolean|null;webSearchBlockedDomains?:string[]|null}):Promise<any>;
   scope<T>(ids: { sessionId?: string; turnId?: string }, fn: () => T): T;
 }
 export interface CoSensProxyExtras<T> { native: T; cosens: CoSensProxyStatus; close(): Promise<void> }

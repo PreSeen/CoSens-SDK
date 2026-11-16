@@ -3,7 +3,8 @@ import { test } from 'node:test';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CoSensClient, cosens } from '../src/index.ts';
+import { Agent } from '@openai/agents';
+import { CoSensAgentRunner, CoSensClient, cosens } from '../src/index.ts';
 import { ServiceFake } from './service-fake.ts';
 
 function fixture() {
@@ -24,6 +25,15 @@ test('learn sends the web search fields in the POST /executions/{id}/learn body 
     await c.atoms.learn('execution',{webSearch:true,webSearchBlockedDomains:['github.com']});
     assert.deepEqual(f.requests.map(r=>[r.method,r.path]),new Array(3).fill(['POST','/executions/execution/learn']));
     assert.deepEqual(f.requests.map(r=>r.body),[{},{web_search:false},{web_search:true,web_search_blocked_domains:['github.com']}]);
+  } finally {await c.close();}
+});
+
+test('null web search options are omitted, as in Python',async()=>{
+  const f=fixture(); const c=new CoSensClient({apiKey:'key',fetch:f.fetcher});
+  try {
+    await c.atoms.learn('execution',{webSearch:null,webSearchBlockedDomains:null});
+    await c.atoms.learn('execution',{webSearch:false,webSearchBlockedDomains:null});
+    assert.deepEqual(f.requests.map(r=>r.body),[{},{web_search:false}]);
   } finally {await c.close();}
 });
 
@@ -55,4 +65,18 @@ test('auto generateRecipe passes the web search fields to learn',async()=>{
     await wrapped.cosens.generateRecipe({webSearch:true,webSearchBlockedDomains:['github.com']});
     assert.deepEqual(service.requests.filter(r=>r.path.endsWith('/learn')).map(r=>r.body),[{web_search:true,web_search_blocked_domains:['github.com']}]);
   } finally {await wrapped.close();}
+});
+
+test('the task runner generateRecipe passes the web search fields to learn only when given',async()=>{
+  const service=new ServiceFake();
+  const agent=new Agent({name:'reporter',instructions:'Produce output',model:'model'});
+  const wrapper=new CoSensAgentRunner(agent,{apiKey:'key',mode:'disable',fetch:service.fetch,statePath:join(mkdtempSync(join(tmpdir(),'recipe-web-')),'state.sqlite'),
+    runner:{run:async()=>({finalOutput:'final output',newItems:[],interruptions:[]})}});
+  try {
+    await wrapper.run(agent,'Produce output');
+    await wrapper.cosens.generateRecipe(undefined,{webSearch:true,webSearchBlockedDomains:['github.com']});
+    await wrapper.run(agent,'Produce another output');
+    await wrapper.cosens.generateRecipe();
+    assert.deepEqual(service.requests.filter(r=>r.path.endsWith('/learn')).map(r=>r.body),[{web_search:true,web_search_blocked_domains:['github.com']},{}]);
+  } finally {await wrapper.close();}
 });

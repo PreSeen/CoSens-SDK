@@ -271,18 +271,23 @@ class LocalRecipeLifecycle:
             current = execution.get("base_revision_id")
         return list(reversed(history))
 
-    def _existing_candidate(self, db, task_id, revision_id, key, request_hash):
-        """Return the replayed or in-flight response; a second request for the same revision reuses that candidate."""
+    def _existing_candidate(self, db, task_id, revision_id, key, request_hash, web):
+        """Return the replayed or in-flight response; a second request for the same revision reuses that candidate.
+
+        ``web`` is the request's frozen web search setting (None when it does not search); an in-flight candidate frozen
+        with a different one is refused, as the service refuses a learning with a different setting."""
         saved = self._store.replay(db, "recipe_candidate", key, request_hash)
         if saved is not None:
             return saved
         if db.execute("SELECT id FROM revisions WHERE id=? AND task_id=?", (revision_id, task_id)).fetchone() is None:
             raise LookupError("task revision not found")
         placeholders = ",".join("?" * len(_IN_FLIGHT))
-        row = db.execute(f"SELECT id,state,context_sha FROM recipe_candidates WHERE task_id=? AND revision_id=? "
+        row = db.execute(f"SELECT id,state,context_json,context_sha FROM recipe_candidates WHERE task_id=? AND revision_id=? "
                          f"AND state IN ({placeholders}) ORDER BY rowid DESC LIMIT 1", (task_id, revision_id, *_IN_FLIGHT)).fetchone()
         if row is None:
             return None
+        if json.loads(row["context_json"]).get("model_settings", {}).get("web_search") != web:
+            raise ValueError("a Recipe candidate for this revision is in flight with a different web search setting")
         lineage = self._lineage(db, row["id"])
         response = {"recipe_candidate_id": row["id"], "revision_id": revision_id, "status": row["state"],
                     "context_sha256": row["context_sha"],
@@ -293,17 +298,20 @@ class LocalRecipeLifecycle:
     async def start_recipe_candidate(self, task_id, *, revision_id, key=None, web_search=None, web_search_blocked_domains=()):
         """``web_search`` None searches when the ``LocalRSI`` has a ``web_search``; False never searches; True without
         one fails the candidate with ``web_search_unavailable``."""
-        blocked = list(dict.fromkeys(self._web_blocked + validate_blocked_domains(web_search_blocked_domains)))
-        if blocked and web_search is False:
+        requested = validate_blocked_domains(web_search_blocked_domains)
+        if requested and web_search is False:
             raise ValueError("web_search_blocked_domains needs web search")
+        # The instance blocklist joins after the check, so an instance with one can still opt a candidate out of search.
+        blocked = list(dict.fromkeys(self._web_blocked + requested))
         key = stable_key(recipe_request_key(task_id, revision_id, web_search=web_search, web_search_blocked_domains=blocked)
                          if key is None else key)
         request_hash = fingerprint({"task_id": task_id, "revision_id": revision_id,
                                     **({"web_search": web_search} if web_search is not None else {}),
                                     **({"web_search_blocked_domains": blocked} if blocked else {})})
         searching = web_search if web_search is not None else self._web_search is not None
+        web = {"blocked_domains": blocked} if searching else None
         with self._store.transaction() as db:
-            found = self._existing_candidate(db, task_id, revision_id, key, request_hash)
+            found = self._existing_candidate(db, task_id, revision_id, key, request_hash, web)
             if found is not None:
                 return result(found)
             source = json.loads(db.execute("SELECT e.request_json FROM revisions r JOIN executions e ON e.id=r.execution_id "
@@ -312,7 +320,7 @@ class LocalRecipeLifecycle:
         memory = await self._recall_snapshot(source["input"]["objective"]) if "memory" in source else {
             "status": "not_requested", "items": []}
         with self._store.transaction() as db:
-            found = self._existing_candidate(db, task_id, revision_id, key, request_hash)
+            found = self._existing_candidate(db, task_id, revision_id, key, request_hash, web)
             if found is not None:
                 return result(found)
             history = self._history(db, task_id, revision_id)
@@ -321,7 +329,7 @@ class LocalRecipeLifecycle:
                        "task_materials": [self._material(db, ref) for ref in source["task_context"]["artifacts"]],
                        "history": history, "memory": memory, "confirmation_source": "explicit_generation_request"}
             if searching:
-                context["model_settings"] = {"web_search": {"blocked_domains": blocked}}
+                context["model_settings"] = {"web_search": web}
             if len(canonical_json(context).encode()) > MAX_CONTEXT_BYTES:
                 raise ValueError("recipe history exceeds 4 MB; narrow the context")
             candidate_id = "recipe_candidate_" + uuid4().hex

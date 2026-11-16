@@ -126,7 +126,8 @@ without its evidence references. To continue a Recipe on another machine, find i
 `POST /executions/{id}/learn` body, only when given. Omitted means the service default: on when the service has a search
 provider. `web_search=False` opts out, `web_search_blocked_domains` (at most 50 bare hostnames) adds hosts whose pages are
 dropped, and `web_search=True` on a service without a provider fails the learning with `web_search_unavailable` (not
-retryable). The task runner's `generate_recipe(..., web_search=..., web_search_blocked_domains=[...])` passes them on.
+retryable). The task runner's `generate_recipe(..., web_search=..., web_search_blocked_domains=[...])` passes them on;
+the OpenAI wrapper's `generate_recipe` takes no web fields, so call `atoms.learn` for those turns.
 
 - The setting is frozen on the learning. `resume_learning` takes no web fields and uses the frozen one; learning again on
   an execution whose learning is active or `completed` with a different setting gets a 422, like a different budget.
@@ -141,7 +142,10 @@ searches the web while its Recipe is written; the SDK ships no search client, an
 learning call, `start_recipe_candidate(..., web_search=..., web_search_blocked_domains=[...])`, takes the same settings, and
 `web_search=True` with no `WebSearch` fails the candidate with `web_search_unavailable`.
 
-- `LocalRSI(web_search_blocked_domains=[...])` blocks hosts for every candidate, as the service's own blocklist does.
+- `LocalRSI(web_search_blocked_domains=[...])` blocks hosts for every candidate, as the service's own blocklist does;
+  `web_search=False` still opts one candidate out, and only blocked domains passed with it raise `ValueError`.
+- A second `start_recipe_candidate` for a revision whose candidate is still in flight with a different web search
+  setting raises `ValueError` instead of reusing that candidate.
 - The model writes at most 3 general queries from the task objective and the attribution, never from execution outputs,
   reference answers or web text. **Queries leave this machine to whatever provider your `WebSearch` calls**, so keep
   names, ids and secrets out of the task objective.

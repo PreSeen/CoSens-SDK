@@ -181,3 +181,53 @@ async def test_the_instance_blocklist_applies_to_every_candidate(tmp_path):
     assert search.calls == [("q", ["github.com", "example.net"])]
     assert job.web_search["dropped"] == [{"url": "https://github.com/x/answers", "reason": "blocked_host"}]
     assert [s["url"] for s in job.web_search["sources"]] == ["https://example.org/rule"]
+
+
+async def test_an_instance_blocklist_still_lets_one_candidate_opt_out_of_search(tmp_path):
+    search, model = FakeSearch(), FakeModel(recipe_reply())
+    rsi = LocalRSI(model=model, state_path=tmp_path / "s.sqlite3", web_search=search, web_search_blocked_domains=["github.com"])
+    task, _, done = await first_revision(rsi)
+    _, job = await run(rsi, task, done, web_search=False)
+    assert job.status == "candidate" and job.web_search is None and search.calls == []
+    with pytest.raises(ValueError, match="needs web search"):
+        await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search=False,
+                                         web_search_blocked_domains=["example.net"])
+
+
+async def test_an_in_flight_candidate_is_not_reused_for_a_different_web_search_setting(tmp_path):
+    search = FakeSearch(PAGE)
+    rsi, model = rsi_with(tmp_path, search, queries_reply("q"), with_web_ref(recipe_reply()))
+    task, _, done = await first_revision(rsi)
+    first = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
+    for options in [{"web_search": False}, {"web_search_blocked_domains": ["example.net"]}]:
+        with pytest.raises(ValueError, match="different web search setting"):
+            await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, **options)
+    same = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search=True)
+    assert same.recipe_candidate_id == first.recipe_candidate_id
+    job = await rsi.wait_workflow_job("recipe_candidate", first.recipe_candidate_id)
+    assert job.status == "candidate" and len(search.calls) == 1
+
+
+async def test_the_task_runner_generate_recipe_passes_the_web_search_fields_to_learn_only_when_given(tmp_path):
+    from types import SimpleNamespace
+    from agents import Agent
+    from cosens import cosens
+    from test_explicit_recipe_protocol import Backend
+    backend = Backend()
+
+    class Runner:
+        @staticmethod
+        async def run(*args, **kwargs):
+            return SimpleNamespace(final_output="final output", new_items=[], interruptions=[])
+    agent = Agent(name="writer", instructions="Write output")
+    wrapped = cosens(agent, mode="disable", api_key="test-key", state_path=tmp_path / "agent-state",
+                     _http_transport=httpx.MockTransport(backend), _runner=Runner)
+    try:
+        await wrapped.run(agent, "Produce output")
+        await wrapped.cosens.generate_recipe(web_search=True, web_search_blocked_domains=["github.com"])
+        await wrapped.run(agent, "Produce another output")
+        await wrapped.cosens.generate_recipe()
+        assert [b for _, p, b in backend.seen if p.endswith("/learn")] == [
+            {"web_search": True, "web_search_blocked_domains": ["github.com"]}, {}]
+    finally:
+        await wrapped.aclose()

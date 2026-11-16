@@ -62,7 +62,7 @@ function observedNativeItems(result: any): { events: Array<{ id: string; kind: s
 
 export class TaskWorkflowRunner {
   readonly native: Runner;
-  readonly cosens: { mode: CoSensMode; lastTurnId: string | null; atoms?: CoSensClient['atoms']; generateRecipe:(id?:string,options?:{model?:string;maxCompletionTokens?:number;webSearch?:boolean;webSearchBlockedDomains?:string[]})=>Promise<any>; feedback:(message:string,source:FeedbackSource,id?:string)=>Promise<any>; getTurn: (id: string) => TaskTurn | undefined; reconcile: (id: string, options?: { session?: any }) => Promise<TaskTurn> };
+  readonly cosens: { mode: CoSensMode; lastTurnId: string | null; atoms?: CoSensClient['atoms']; generateRecipe:(id?:string,options?:{model?:string;maxCompletionTokens?:number;webSearch?:boolean|null;webSearchBlockedDomains?:string[]|null})=>Promise<any>; feedback:(message:string,source:FeedbackSource,id?:string)=>Promise<any>; getTurn: (id: string) => TaskTurn | undefined; reconcile: (id: string, options?: { session?: any }) => Promise<TaskTurn> };
   private readonly client?: CoSensClient;
   private readonly turns?: TurnStore;
   constructor(nativeRunner: Runner | typeof Runner, private readonly options: TaskRunnerOptions = {}) {
