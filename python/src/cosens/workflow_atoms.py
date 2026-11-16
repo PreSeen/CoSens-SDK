@@ -306,8 +306,11 @@ class AsyncWorkflowAtoms:
 
         ``web_search`` omitted takes the service default (on when the service has a search provider);
         ``False`` opts out. ``web_search_blocked_domains`` adds hostnames whose pages are dropped from the
-        results. The setting is frozen on the learning: resume reuses it, and asking a learning that is
-        active or ``completed`` for a different setting gets a 422.
+        results; the service freezes them lowercased, deduplicated and sorted. The setting is frozen on the
+        learning and resume reuses it. A repeat call compares only the web fields it gives, blocked hosts as a
+        set: a different setting gets a 422 while the learning is active, ``completed`` or ``awaiting_material``,
+        and runs a ``failed``, ``interrupted`` or ``awaiting_runner`` learning again on the same version with the
+        new setting, dropping the sources frozen under the old one.
         """
         return await self._http.request("POST", f"/executions/{path_part(execution_id)}/learn",
                                         body=_recipe_data(model, max_completion_tokens, web_search,

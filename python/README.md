@@ -129,8 +129,13 @@ dropped, and `web_search=True` on a service without a provider fails the learnin
 retryable). The task runner's `generate_recipe(..., web_search=..., web_search_blocked_domains=[...])` passes them on;
 the OpenAI wrapper's `generate_recipe` takes no web fields, so call `atoms.learn` for those turns.
 
-- The setting is frozen on the learning. `resume_learning` takes no web fields and uses the frozen one; learning again on
-  an execution whose learning is active or `completed` with a different setting gets a 422, like a different budget.
+- The setting is frozen on the learning, blocked hosts lowercased, deduplicated and sorted. `resume_learning` takes no
+  web fields and uses the frozen one.
+- Learning again compares only the web fields that call gives, blocked hosts as a set; giving none returns the learning.
+  A different setting gets a 422 while the learning is active, `completed` or `awaiting_material`. On a `failed`,
+  `interrupted` or `awaiting_runner` learning it runs the same version again with the new setting and drops the sources
+  frozen under the old one, so `learn(..., web_search=False)` recovers a learning that failed with a non-retryable
+  `web_search_unavailable`.
 - Retries and resumes reuse the frozen sources and never search again; a provider failure fails the learning as
   `web_search_unavailable` (retryable), and the resume searches again.
 - The learning's `web_search` lists the queries, the sources used (URL, title, excerpt, `retrieved_at`, `text_sha256`) and
@@ -144,8 +149,12 @@ learning call, `start_recipe_candidate(..., web_search=..., web_search_blocked_d
 
 - `LocalRSI(web_search_blocked_domains=[...])` blocks hosts for every candidate, as the service's own blocklist does;
   `web_search=False` still opts one candidate out, and only blocked domains passed with it raise `ValueError`.
-- A second `start_recipe_candidate` for a revision whose candidate is still in flight with a different web search
-  setting raises `ValueError` instead of reusing that candidate.
+- A revision has one candidate, as an execution has one learning, and its blocked hosts (with the instance blocklist)
+  are frozen lowercased, deduplicated and sorted. A second `start_recipe_candidate` for the revision compares only the
+  web fields it gives, blocked hosts as a set with the instance blocklist: the same setting or none returns the
+  candidate; a different one raises `ValueError` while the candidate is in flight, finished or `awaiting_material`, and
+  runs a `failed` or `interrupted` candidate again on the same version with the new setting, dropping the sources frozen
+  under the old one. `resume_recipe_candidate` takes no web fields and keeps the frozen setting.
 - The model writes at most 3 general queries from the task objective and the attribution, never from execution outputs,
   reference answers or web text. **Queries leave this machine to whatever provider your `WebSearch` calls**, so keep
   names, ids and secrets out of the task objective.

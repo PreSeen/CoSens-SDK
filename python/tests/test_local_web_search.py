@@ -143,6 +143,9 @@ def test_remote_request_fields_and_local_key():
     assert recipe_request_key("t", "r", web_search=False) != plain
     assert recipe_request_key("t", "r", web_search_blocked_domains=["a.com"]) != recipe_request_key("t", "r", web_search_blocked_domains=["b.com"])
     assert recipe_request_key("t", "r") == plain
+    assert recipe_request_key("t", "r", web_search_blocked_domains=["B.com", "a.com", "a.com"]) == recipe_request_key(
+        "t", "r", web_search_blocked_domains=["a.com", "b.com"])
+    assert validate_blocked_domains(["GitHub.com", "example.net", "github.com"]) == ["example.net", "github.com"]
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
@@ -177,8 +180,8 @@ async def test_the_instance_blocklist_applies_to_every_candidate(tmp_path):
     model = FakeModel(queries_reply("q"), with_web_ref(recipe_reply()))
     rsi = LocalRSI(model=model, state_path=tmp_path / "s.sqlite3", web_search=search, web_search_blocked_domains=["github.com"])
     task, _, done = await first_revision(rsi)
-    _, job = await run(rsi, task, done, web_search_blocked_domains=["example.net"])
-    assert search.calls == [("q", ["github.com", "example.net"])]
+    _, job = await run(rsi, task, done, web_search_blocked_domains=["Example.net", "github.com", "example.net"])
+    assert search.calls == [("q", ["example.net", "github.com"])]
     assert job.web_search["dropped"] == [{"url": "https://github.com/x/answers", "reason": "blocked_host"}]
     assert [s["url"] for s in job.web_search["sources"]] == ["https://example.org/rule"]
 
@@ -200,12 +203,159 @@ async def test_an_in_flight_candidate_is_not_reused_for_a_different_web_search_s
     task, _, done = await first_revision(rsi)
     first = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
     for options in [{"web_search": False}, {"web_search_blocked_domains": ["example.net"]}]:
-        with pytest.raises(ValueError, match="different web search setting"):
+        with pytest.raises(ValueError, match="this revision already learned with a different web search setting"):
             await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, **options)
     same = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search=True)
     assert same.recipe_candidate_id == first.recipe_candidate_id
     job = await rsi.wait_workflow_job("recipe_candidate", first.recipe_candidate_id)
     assert job.status == "candidate" and len(search.calls) == 1
+
+
+def replies_for(options):
+    """Model replies for one successful candidate started with ``options`` on an instance with a search."""
+    if options.get("web_search") is False:
+        return [recipe_reply()]
+    return [queries_reply("q"), with_web_ref(recipe_reply())]
+
+
+async def candidates_of(rsi, task):
+    return (await rsi.list_recipe_candidates(task_id=task.task_id))["items"]
+
+
+@pytest.mark.parametrize("first, second", [
+    ({"web_search": False}, {"web_search": True}),
+    ({"web_search": False}, {"web_search_blocked_domains": ["github.com"]}),
+    ({}, {"web_search": False}),
+    ({"web_search_blocked_domains": ["github.com"]}, {"web_search_blocked_domains": ["example.net"]}),
+    ({"web_search_blocked_domains": ["github.com"]}, {"web_search_blocked_domains": ["github.com", "example.net"]}),
+])
+async def test_a_second_start_with_a_different_web_search_setting_is_refused_once_finished(tmp_path, first, second):
+    rsi, _ = rsi_with(tmp_path, FakeSearch(PAGE), *replies_for(first))
+    task, _, done = await first_revision(rsi)
+    candidate, job = await run(rsi, task, done, **first)
+    assert job.status == "candidate"
+    with pytest.raises(ValueError, match="this revision already learned with a different web search setting"):
+        await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, **second)
+    # The same setting, or none at all, returns the same candidate, even under another key.
+    for options, key in [(first, None), (first, "again"), ({}, "plain")]:
+        same = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, key=key, **options)
+        assert (same.recipe_candidate_id, same.status) == (candidate.recipe_candidate_id, "candidate")
+    assert len(await candidates_of(rsi, task)) == 1
+
+
+@pytest.mark.parametrize("second", [
+    {"web_search_blocked_domains": ["huggingface.co", "github.com"]},
+    {"web_search_blocked_domains": ["GitHub.com", "github.com", "huggingface.co"]},
+    {"web_search": True},
+    {"web_search": True, "web_search_blocked_domains": ["huggingface.co", "github.com"]},
+])
+async def test_a_second_start_compares_only_the_given_fields_and_the_set_of_blocked_hosts(tmp_path, second):
+    search = FakeSearch(PAGE)
+    rsi, _ = rsi_with(tmp_path, search, queries_reply("q"), with_web_ref(recipe_reply()))
+    task, _, done = await first_revision(rsi)
+    candidate, job = await run(rsi, task, done, web_search_blocked_domains=["github.com", "huggingface.co", "github.com"])
+    assert job.status == "candidate" and search.calls == [("q", ["github.com", "huggingface.co"])]
+    same = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, **second)
+    assert same.recipe_candidate_id == candidate.recipe_candidate_id and len(search.calls) == 1
+
+
+async def test_blocked_hosts_compare_with_the_instance_blocklist_they_were_frozen_with(tmp_path):
+    search = FakeSearch(PAGE)
+    model = FakeModel(queries_reply("q"), with_web_ref(recipe_reply()))
+    rsi = LocalRSI(model=model, state_path=tmp_path / "s.sqlite3", web_search=search, web_search_blocked_domains=["GitHub.com"])
+    task, _, done = await first_revision(rsi)
+    candidate, _ = await run(rsi, task, done)
+    assert search.calls == [("q", ["github.com"])]
+    same = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search_blocked_domains=["github.com"])
+    assert same.recipe_candidate_id == candidate.recipe_candidate_id
+    with pytest.raises(ValueError, match="different web search setting"):
+        await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search_blocked_domains=["example.net"])
+
+
+async def test_start_with_search_off_recovers_a_candidate_that_failed_because_no_search_is_configured(tmp_path):
+    rsi, model = make_local(tmp_path, recipe_reply())
+    task, _, done = await first_revision(rsi)
+    candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search=True)
+    with pytest.raises(RSICandidateFailed) as caught:
+        await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    assert caught.value.code == "web_search_unavailable" and caught.value.retryable is False
+    # The same setting returns the failed candidate; resume cannot change the frozen setting.
+    failed = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search=True)
+    assert (failed.recipe_candidate_id, failed.status) == (candidate.recipe_candidate_id, "failed")
+    with pytest.raises(TypeError):
+        await rsi.resume_recipe_candidate(candidate.recipe_candidate_id, web_search=False)
+    recovered = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search=False)
+    assert (recovered.recipe_candidate_id, recovered.version, recovered.status) == (
+        candidate.recipe_candidate_id, candidate.version, "queued")
+    job = await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    assert job.status == "candidate" and job.web_search is None and job.version == candidate.version
+    assert len(model.calls) == 1 and model.calls[0]["context"].get("role") != "workflow_recipe_web_queries"
+    assert len(await candidates_of(rsi, task)) == 1
+    # Once finished, the setting is fixed again.
+    with pytest.raises(ValueError, match="different web search setting"):
+        await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search=True)
+
+
+async def test_start_with_new_blocked_hosts_searches_again_on_a_failed_candidate(tmp_path):
+    other = [{"url": "https://example.com/other", "title": "Other", "text": "A reorder point is a stock level."}]
+    search = FakeSearch(PAGE, other)
+    rsi, model = rsi_with(tmp_path, search, queries_reply("q"), RuntimeError("generation broke"), queries_reply("q"),
+                          with_web_ref(recipe_reply()))
+    task, _, done = await first_revision(rsi)
+    candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
+    with pytest.raises(RSICandidateFailed):
+        await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    assert (await rsi.get_recipe_candidate(candidate.recipe_candidate_id)).web_search["sources"][0]["url"] == PAGE[0]["url"]
+    again = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search_blocked_domains=["example.org"])
+    assert (again.recipe_candidate_id, again.status) == (candidate.recipe_candidate_id, "queued")
+    # The sources frozen without the block are dropped; the new search is asked to block example.org.
+    assert (await rsi.get_recipe_candidate(candidate.recipe_candidate_id)).web_search is None
+    job = await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    assert search.calls == [("q", []), ("q", ["example.org"])]
+    assert job.status == "candidate" and job.version == candidate.version
+    assert [s["url"] for s in job.web_search["sources"]] == ["https://example.com/other"]
+    assert len([c for c in model.calls if c["context"].get("role") == "workflow_recipe_web_queries"]) == 2
+
+
+async def test_start_with_a_new_setting_runs_an_interrupted_candidate_again(tmp_path):
+    search = FakeSearch(PAGE)
+    rsi, _ = rsi_with(tmp_path, search, queries_reply("q"), with_web_ref(recipe_reply()))
+    task, _, done = await first_revision(rsi)
+    candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search=False)
+    with rsi._store.transaction() as db:
+        db.execute("UPDATE recipe_candidates SET state='interrupted' WHERE id=?", (candidate.recipe_candidate_id,))
+    again = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search=True)
+    assert (again.recipe_candidate_id, again.status) == (candidate.recipe_candidate_id, "queued")
+    job = await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    assert job.status == "candidate" and len(search.calls) == 1 and job.web_search["sources"][0]["id"] == "web_1"
+
+
+async def test_resume_takes_no_web_search_fields_and_keeps_the_frozen_setting(tmp_path):
+    search = FakeSearch()
+    rsi, model = rsi_with(tmp_path, search, RuntimeError("provider unavailable"), recipe_reply())
+    task, _, done = await first_revision(rsi)
+    candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search=False)
+    with pytest.raises(RSICandidateFailed):
+        await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    for options in [{"web_search": False}, {"web_search": True}, {"web_search_blocked_domains": ["github.com"]}]:
+        with pytest.raises(TypeError):
+            await rsi.resume_recipe_candidate(candidate.recipe_candidate_id, **options)
+    assert (await rsi.get_recipe_candidate(candidate.recipe_candidate_id)).status == "failed"
+    await rsi.resume_recipe_candidate(candidate.recipe_candidate_id)
+    job = await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    assert job.status == "candidate" and job.web_search is None and search.calls == [] and len(model.calls) == 2
+
+
+async def test_an_explicit_key_matches_the_same_request_in_its_normalised_form(tmp_path):
+    rsi, _ = rsi_with(tmp_path, FakeSearch(PAGE), queries_reply("q"), with_web_ref(recipe_reply()))
+    task, _, done = await first_revision(rsi)
+    first = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, key="k",
+                                             web_search_blocked_domains=["b.com", "A.com"])
+    same = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, key="k",
+                                            web_search_blocked_domains=["a.com", "b.com", "a.com"])
+    assert same.recipe_candidate_id == first.recipe_candidate_id
+    with pytest.raises(ValueError, match="idempotency key reused"):
+        await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, key="k", web_search_blocked_domains=["a.com"])
 
 
 async def test_the_task_runner_generate_recipe_passes_the_web_search_fields_to_learn_only_when_given(tmp_path):
