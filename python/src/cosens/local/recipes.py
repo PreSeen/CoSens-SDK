@@ -393,8 +393,11 @@ class LocalRecipeLifecycle:
         returns it, raises ``ValueError`` when it asks for a different web search setting while that candidate
         is in flight, finished or awaiting material, and runs a failed or interrupted one again with the new setting
         through the resume path, which may rebase it onto a newer version with a new number.
-        ``resume_recipe_candidate`` keeps the frozen setting."""
-        requested = validate_blocked_domains(web_search_blocked_domains)
+        ``resume_recipe_candidate`` keeps the frozen setting. ``web_search_blocked_domains`` None is the same as
+        omitting it."""
+        if web_search is not None and type(web_search) is not bool:
+            raise ValueError("web_search must be a boolean")
+        requested = validate_blocked_domains(web_search_blocked_domains or ())
         if requested and web_search is False:
             raise ValueError("web_search_blocked_domains needs web search")
         key = stable_key(recipe_request_key(task_id, revision_id, web_search=web_search, web_search_blocked_domains=requested)

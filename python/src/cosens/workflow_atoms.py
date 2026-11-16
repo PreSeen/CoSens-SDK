@@ -308,7 +308,8 @@ class AsyncWorkflowAtoms:
         ``False`` opts out. ``web_search_blocked_domains`` adds hostnames whose pages are dropped from the
         results; the service freezes them lowercased, deduplicated and sorted. The setting is frozen on the
         learning and resume reuses it. A repeat call compares only the web fields it gives, blocked hosts as a
-        set: a different setting gets a 422 while the learning is active, ``completed`` or ``awaiting_material``,
+        set; an empty list counts as not given, and blocked hosts count only when the request would search (on a
+        service with no provider a repeat with the same hosts returns the same learning). A different setting gets a 422 while the learning is active, ``completed`` or ``awaiting_material``,
         and re-queues a ``failed``, ``interrupted`` or ``awaiting_runner`` learning with the new setting, dropping
         the sources frozen under the old one; like ``resume_learning``, it may move behind a newer version and take
         a new version number.
@@ -407,7 +408,11 @@ class SyncWorkflowAtoms:
 
     def learn(self, execution_id, *, model=None, max_completion_tokens=None, web_search=None,
               web_search_blocked_domains=()):
-        """Learn a Recipe version from a confirmed execution; see the async form for web search."""
+        """Learn a Recipe version from a confirmed execution; see the async form for web search.
+
+        Blocked hosts count only when the request would search (on a service with no provider a repeat with the same
+        hosts returns the same learning); an empty list counts as not given.
+        """
         return self._http.request("POST", f"/executions/{path_part(execution_id)}/learn",
                                   body=_recipe_data(model, max_completion_tokens, web_search,
                                                     web_search_blocked_domains) or {})

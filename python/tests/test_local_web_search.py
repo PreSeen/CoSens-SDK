@@ -455,3 +455,23 @@ async def test_blocked_hosts_without_a_search_do_not_requeue_the_same_failed_can
                                             web_search_blocked_domains=["github.com"])
     assert (same.recipe_candidate_id, same.status) == (candidate.recipe_candidate_id, "failed")
     assert before[0] == "failed" and stored() == before and len(model.calls) == 1
+
+
+@pytest.mark.parametrize("value", ["false", 0, 1])
+async def test_a_non_boolean_web_search_is_rejected_before_anything_is_stored(tmp_path, value):
+    rsi, model = make_local(tmp_path, recipe_reply())
+    task, _, done = await first_revision(rsi)
+    with pytest.raises(ValueError, match="web_search must be a boolean"):
+        await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search=value)
+    assert await candidates_of(rsi, task) == [] and model.calls == []
+
+
+async def test_none_blocked_hosts_are_the_same_as_omitting_them(tmp_path):
+    rsi, model = make_local(tmp_path, recipe_reply())
+    task, _, done = await first_revision(rsi)
+    candidate, job = await run(rsi, task, done, web_search_blocked_domains=None)
+    assert job.status == "candidate" and job.web_search is None
+    for options in [{}, {"web_search_blocked_domains": None}, {"web_search": False, "web_search_blocked_domains": None}]:
+        same = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, **options)
+        assert same.recipe_candidate_id == candidate.recipe_candidate_id
+    assert len(model.calls) == 1 and len(await candidates_of(rsi, task)) == 1
