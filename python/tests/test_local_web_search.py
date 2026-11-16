@@ -416,3 +416,42 @@ async def test_the_task_runner_generate_recipe_passes_the_web_search_fields_to_l
             {"web_search": True, "web_search_blocked_domains": ["github.com"]}, {}]
     finally:
         await wrapped.aclose()
+
+
+async def test_blocked_hosts_without_a_search_repeat_as_the_same_completed_candidate(tmp_path):
+    rsi, model = make_local(tmp_path, recipe_reply())
+    task, _, done = await first_revision(rsi)
+    candidate, job = await run(rsi, task, done, web_search_blocked_domains=["github.com"])
+    assert job.status == "candidate" and job.web_search is None
+    # Without a WebSearch the request froze search off, so its hosts ask for nothing new.
+    for options, key in [({"web_search_blocked_domains": ["github.com"]}, None),
+                         ({"web_search_blocked_domains": ["GitHub.com"]}, "again"),
+                         ({"web_search_blocked_domains": ["example.net"]}, "other")]:
+        same = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, key=key, **options)
+        assert (same.recipe_candidate_id, same.status) == (candidate.recipe_candidate_id, "candidate")
+    # A request that would search still asks for something new.
+    with pytest.raises(ValueError, match="different web search setting"):
+        await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search=True,
+                                         web_search_blocked_domains=["github.com"])
+    assert len(model.calls) == 1 and len(await candidates_of(rsi, task)) == 1
+
+
+async def test_blocked_hosts_without_a_search_do_not_requeue_the_same_failed_candidate(tmp_path):
+    rsi, model = make_local(tmp_path, RuntimeError("generation broke"))
+    task, _, done = await first_revision(rsi)
+    candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id,
+                                                 web_search_blocked_domains=["github.com"])
+    with pytest.raises(RSICandidateFailed):
+        await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+
+    def stored():
+        with rsi._store.reading() as db:
+            row = db.execute("SELECT state,generation FROM recipe_candidates WHERE id=?",
+                             (candidate.recipe_candidate_id,)).fetchone()
+        return row["state"], row["generation"]
+
+    before = stored()
+    same = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id,
+                                            web_search_blocked_domains=["github.com"])
+    assert (same.recipe_candidate_id, same.status) == (candidate.recipe_candidate_id, "failed")
+    assert before[0] == "failed" and stored() == before and len(model.calls) == 1

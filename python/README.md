@@ -132,6 +132,8 @@ the OpenAI wrapper's `generate_recipe` takes no web fields, so call `atoms.learn
 - The setting is frozen on the learning, blocked hosts lowercased, deduplicated and sorted. `resume_learning` takes no
   web fields and uses the frozen one.
 - Learning again compares only the web fields that call gives, blocked hosts as a set; giving none returns the learning.
+  Blocked hosts count only when searching: against a learning frozen with search off they differ only when the request
+  itself would search, so on a service without a provider the same request returns the same learning.
   A different setting gets a 422 while the learning is active, `completed` or `awaiting_material`. On a `failed`,
   `interrupted` or `awaiting_runner` learning it re-queues that learning with the new setting and drops the sources
   frozen under the old one, so `learn(..., web_search=False)` recovers a learning that failed with a non-retryable
@@ -152,7 +154,10 @@ learning call, `start_recipe_candidate(..., web_search=..., web_search_blocked_d
   candidate out, and only blocked domains passed with it raise `ValueError`.
 - A revision has one candidate, as an execution has one learning, and the blocked hosts its request gives are frozen
   lowercased, deduplicated and sorted. A second `start_recipe_candidate` for the revision compares only the web fields
-  it gives, blocked hosts as a set: the same setting or none returns the candidate; a different one raises `ValueError`
+  it gives, blocked hosts as a set: the same setting or none returns the candidate. Blocked hosts count only when
+  searching, so against a candidate frozen with search off they differ only when the request itself would search (its
+  `web_search`, else whether the `LocalRSI` has a `WebSearch`); without one an identical repeat returns the candidate
+  and never re-queues it. A different setting raises `ValueError`
   while the candidate is in flight, finished or `awaiting_material`, and re-queues a `failed` or `interrupted` candidate
   with the new setting, dropping the sources frozen under the old one. `resume_recipe_candidate` takes no web fields and
   keeps the frozen setting. Both move the candidate behind the newest version it can build on, renumbered above it, as

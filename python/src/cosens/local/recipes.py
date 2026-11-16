@@ -43,13 +43,20 @@ def recipe_request_key(task_id, revision_id, max_completion_tokens=None, *, web_
     return "recipe-" + digest
 
 
-def same_web_search(frozen, web_search, blocked_domains):
+def same_web_search(frozen, web_search, blocked_domains, *, searching):
     """Whether a repeated start asks for the frozen web search setting; a field the request leaves out is not compared.
 
-    ``blocked_domains`` is the normalised list the request would freeze, or empty when the request gives none."""
+    ``blocked_domains`` is the normalised list the request would freeze, or empty when the request gives none, and
+    ``searching`` is whether the request would search: its ``web_search``, else whether the ``LocalRSI`` has a
+    ``WebSearch``. Blocked hosts only matter while searching, so against a setting frozen with search off they ask for
+    something new only when the request itself would search, as on the service."""
     if web_search is not None and web_search != (frozen is not None):
         return False
-    return not blocked_domains or list(blocked_domains) == sorted(set((frozen or {}).get("blocked_domains", [])))
+    if not blocked_domains:
+        return True
+    if frozen is None:
+        return not searching
+    return list(blocked_domains) == sorted(set(frozen.get("blocked_domains", [])))
 
 
 class RSICandidateFailed(RSIError):
@@ -299,7 +306,8 @@ class LocalRecipeLifecycle:
         if row is None:
             return saved
         context = json.loads(row["context_json"])
-        if not same_web_search(context.get("model_settings", {}).get("web_search"), web_search, blocked):
+        if not same_web_search(context.get("model_settings", {}).get("web_search"), web_search, blocked,
+                               searching=web is not None):
             if row["state"] not in _RESUMABLE:
                 raise ValueError("this revision already learned with a different web search setting")
             self._relearn(db, row, context, web)
@@ -379,8 +387,10 @@ class LocalRecipeLifecycle:
         one fails the candidate with ``web_search_unavailable``.
 
         The request's blocked domains are frozen lowercased, deduplicated and sorted; the instance blocklist is applied
-        when searching and is neither frozen nor compared, as the service's own blocklist. A revision has one candidate:
-        a repeat returns it, raises ``ValueError`` when it asks for a different web search setting while that candidate
+        when searching and is neither frozen nor compared, as the service's own blocklist. Blocked hosts count only
+        when searching: against a candidate frozen with search off they differ only when this request would search, so
+        without a ``WebSearch`` an identical repeat returns the candidate. A revision has one candidate: a repeat
+        returns it, raises ``ValueError`` when it asks for a different web search setting while that candidate
         is in flight, finished or awaiting material, and runs a failed or interrupted one again with the new setting
         through the resume path, which may rebase it onto a newer version with a new number.
         ``resume_recipe_candidate`` keeps the frozen setting."""
