@@ -8,7 +8,7 @@ from cosens.local import LocalRSI, WebSearchUnavailable
 from cosens.local.recipes import RSICandidateFailed, recipe_request_key
 from cosens.local.web_search import freeze_sources, host_matches, validate_blocked_domains
 from cosens.workflow_atoms import _recipe_data
-from local_rsi_helpers import FakeModel, first_revision, recipe_reply
+from local_rsi_helpers import FakeModel, complete_execution, first_revision, recipe_reply
 
 
 class FakeSearch:
@@ -259,17 +259,28 @@ async def test_a_second_start_compares_only_the_given_fields_and_the_set_of_bloc
     assert same.recipe_candidate_id == candidate.recipe_candidate_id and len(search.calls) == 1
 
 
-async def test_blocked_hosts_compare_with_the_instance_blocklist_they_were_frozen_with(tmp_path):
+async def test_only_the_request_hosts_freeze_and_compare_and_the_instance_blocklist_applies_at_search(tmp_path):
     search = FakeSearch(PAGE)
+    state = tmp_path / "s.sqlite3"
     model = FakeModel(queries_reply("q"), with_web_ref(recipe_reply()))
-    rsi = LocalRSI(model=model, state_path=tmp_path / "s.sqlite3", web_search=search, web_search_blocked_domains=["GitHub.com"])
+    rsi = LocalRSI(model=model, state_path=state, web_search=search, web_search_blocked_domains=["GitHub.com"])
     task, _, done = await first_revision(rsi)
-    candidate, _ = await run(rsi, task, done)
-    assert search.calls == [("q", ["github.com"])]
-    same = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search_blocked_domains=["github.com"])
-    assert same.recipe_candidate_id == candidate.recipe_candidate_id
-    with pytest.raises(ValueError, match="different web search setting"):
-        await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search_blocked_domains=["example.net"])
+    candidate, _ = await run(rsi, task, done, web_search_blocked_domains=["bench.org"])
+    assert search.calls == [("q", ["bench.org", "github.com"])]
+    with rsi._store.reading() as db:
+        context = json.loads(db.execute("SELECT context_json FROM recipe_candidates WHERE id=?",
+                                        (candidate.recipe_candidate_id,)).fetchone()["context_json"])
+    assert context["model_settings"]["web_search"] == {"blocked_domains": ["bench.org"]}
+    # The service compares the request's hosts with the frozen ones, never with its own blocklist.
+    for hosts in (["github.com"], ["bench.org", "github.com"]):
+        with pytest.raises(ValueError, match="different web search setting"):
+            await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search_blocked_domains=hosts)
+    await rsi.aclose()
+    # A new instance blocklist does not change what an identical repeat returns.
+    rsi = LocalRSI(model=model, state_path=state, web_search=search, web_search_blocked_domains=["github.com", "other.com"])
+    same = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id, web_search_blocked_domains=["BENCH.org"])
+    assert (same.recipe_candidate_id, same.status) == (candidate.recipe_candidate_id, "candidate")
+    await rsi.aclose()
 
 
 async def test_start_with_search_off_recovers_a_candidate_that_failed_because_no_search_is_configured(tmp_path):
@@ -328,6 +339,30 @@ async def test_start_with_a_new_setting_runs_an_interrupted_candidate_again(tmp_
     assert (again.recipe_candidate_id, again.status) == (candidate.recipe_candidate_id, "queued")
     job = await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
     assert job.status == "candidate" and len(search.calls) == 1 and job.web_search["sources"][0]["id"] == "web_1"
+
+
+async def test_a_new_setting_on_a_failed_candidate_rebases_it_onto_a_newer_version(tmp_path):
+    rsi, model = make_local(tmp_path, recipe_reply("V1"), recipe_reply("V3"), recipe_reply("V4"))
+    task, _, done = await first_revision(rsi)
+    v1 = await rsi.wait_workflow_job("recipe_candidate", (await rsi.start_recipe_candidate(
+        task.task_id, revision_id=done.revision_id)).recipe_candidate_id)
+    revisions = []
+    for key in ("two", "three"):
+        started = await rsi.start_execution(task.task_id, source="new_task", objective="Do the task", key=key)
+        revisions.append(await complete_execution(rsi, started, key=key + "-out"))
+    failed = await rsi.start_recipe_candidate(task.task_id, revision_id=revisions[0].revision_id, web_search=True)
+    with pytest.raises(RSICandidateFailed):
+        await rsi.wait_workflow_job("recipe_candidate", failed.recipe_candidate_id)
+    v3 = await rsi.wait_workflow_job("recipe_candidate", (await rsi.start_recipe_candidate(
+        task.task_id, revision_id=revisions[1].revision_id)).recipe_candidate_id)
+    assert (v3.version, v3.parent_candidate_id) == (3, v1.recipe_candidate_id)
+    # The relearn goes through the resume path, which moves it behind the current version with a new number.
+    again = await rsi.start_recipe_candidate(task.task_id, revision_id=revisions[0].revision_id, web_search=False)
+    assert (again.recipe_candidate_id, again.status, again.version, again.parent_candidate_id) == (
+        failed.recipe_candidate_id, "queued", 4, v3.recipe_candidate_id)
+    job = await rsi.wait_workflow_job("recipe_candidate", failed.recipe_candidate_id)
+    assert (job.version, job.current, job.web_search) == (4, True, None)
+    assert model.calls[-1]["context"]["base_recipe"]["recipe"]["title"] == "V3"
 
 
 async def test_resume_takes_no_web_search_fields_and_keeps_the_frozen_setting(tmp_path):

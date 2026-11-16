@@ -133,9 +133,9 @@ the OpenAI wrapper's `generate_recipe` takes no web fields, so call `atoms.learn
   web fields and uses the frozen one.
 - Learning again compares only the web fields that call gives, blocked hosts as a set; giving none returns the learning.
   A different setting gets a 422 while the learning is active, `completed` or `awaiting_material`. On a `failed`,
-  `interrupted` or `awaiting_runner` learning it runs the same version again with the new setting and drops the sources
+  `interrupted` or `awaiting_runner` learning it re-queues that learning with the new setting and drops the sources
   frozen under the old one, so `learn(..., web_search=False)` recovers a learning that failed with a non-retryable
-  `web_search_unavailable`.
+  `web_search_unavailable`. Like `resume_learning`, it may move behind a newer version and take a new version number.
 - Retries and resumes reuse the frozen sources and never search again; a provider failure fails the learning as
   `web_search_unavailable` (retryable), and the resume searches again.
 - The learning's `web_search` lists the queries, the sources used (URL, title, excerpt, `retrieved_at`, `text_sha256`) and
@@ -147,14 +147,16 @@ searches the web while its Recipe is written; the SDK ships no search client, an
 learning call, `start_recipe_candidate(..., web_search=..., web_search_blocked_domains=[...])`, takes the same settings, and
 `web_search=True` with no `WebSearch` fails the candidate with `web_search_unavailable`.
 
-- `LocalRSI(web_search_blocked_domains=[...])` blocks hosts for every candidate, as the service's own blocklist does;
-  `web_search=False` still opts one candidate out, and only blocked domains passed with it raise `ValueError`.
-- A revision has one candidate, as an execution has one learning, and its blocked hosts (with the instance blocklist)
-  are frozen lowercased, deduplicated and sorted. A second `start_recipe_candidate` for the revision compares only the
-  web fields it gives, blocked hosts as a set with the instance blocklist: the same setting or none returns the
-  candidate; a different one raises `ValueError` while the candidate is in flight, finished or `awaiting_material`, and
-  runs a `failed` or `interrupted` candidate again on the same version with the new setting, dropping the sources frozen
-  under the old one. `resume_recipe_candidate` takes no web fields and keeps the frozen setting.
+- `LocalRSI(web_search_blocked_domains=[...])` blocks hosts for every candidate when searching, as the service's own
+  blocklist does; like that one, it is neither frozen with a candidate nor compared. `web_search=False` still opts one
+  candidate out, and only blocked domains passed with it raise `ValueError`.
+- A revision has one candidate, as an execution has one learning, and the blocked hosts its request gives are frozen
+  lowercased, deduplicated and sorted. A second `start_recipe_candidate` for the revision compares only the web fields
+  it gives, blocked hosts as a set: the same setting or none returns the candidate; a different one raises `ValueError`
+  while the candidate is in flight, finished or `awaiting_material`, and re-queues a `failed` or `interrupted` candidate
+  with the new setting, dropping the sources frozen under the old one. `resume_recipe_candidate` takes no web fields and
+  keeps the frozen setting. Both move the candidate behind the newest version it can build on, renumbered above it, as
+  the service does.
 - The model writes at most 3 general queries from the task objective and the attribution, never from execution outputs,
   reference answers or web text. **Queries leave this machine to whatever provider your `WebSearch` calls**, so keep
   names, ids and secrets out of the task objective.

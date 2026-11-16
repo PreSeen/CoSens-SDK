@@ -103,8 +103,8 @@ def _failure_detail(exc, phase):
         return {"code": "model_output_invalid", "retryable": True, **detail,
                 "message": f"Model output failed validation after {MODEL_OUTPUT_ATTEMPTS} attempts."}
     if isinstance(exc, ParentChanged):
-        return {"code": "parent_changed", "retryable": False, **detail,
-                "message": "The parent Recipe changed; generate a new candidate."}
+        return {"code": "parent_changed", "retryable": True, **detail,
+                "message": "The parent Recipe changed; resume to learn on the current version."}
     return {"code": "internal_error", "retryable": True, **detail, "message": "Recipe generation failed unexpectedly."}
 
 
@@ -328,8 +328,45 @@ class LocalRecipeLifecycle:
                     canonical_json(attribution) if attribution is not None else None, row["id"]))
         self._requeue_stopped(db, row["id"])
 
+    def _rebase_for_resume(self, db, candidate_id):
+        """Put a resuming candidate behind the newest version it can build on, numbered above that version, as the
+        service rebases a resumed learning.
+
+        Its frozen context holds only its own revision history and Memory; the parent is read when generation runs, so
+        moving the lineage is enough. It stays behind an in-flight parent, is left alone while one of its descendants is
+        in flight, and with no current or in-flight version keeps its lineage."""
+        lineage = self._lineage(db, candidate_id)
+        parent, latest = lineage["parent_candidate_id"], lineage["latest_candidate_id"]
+
+        def in_flight(other):
+            return other is not None and self._candidate(db, other)["state"] in _IN_FLIGHT
+
+        placeholders = ",".join("?" * len(_IN_FLIGHT))
+        if db.execute("WITH RECURSIVE descendants AS (SELECT candidate_id FROM recipe_versions WHERE parent_candidate_id=? "
+                      "UNION ALL SELECT v.candidate_id FROM recipe_versions v JOIN descendants d ON v.parent_candidate_id=d.candidate_id) "
+                      f"SELECT 1 FROM descendants d JOIN recipe_candidates c ON c.id=d.candidate_id WHERE c.state IN ({placeholders}) "
+                      "LIMIT 1", (candidate_id, *_IN_FLIGHT)).fetchone():
+            return
+        if in_flight(parent):
+            base = parent
+        elif latest != candidate_id and in_flight(latest):
+            base = latest
+        else:
+            base = lineage["current_candidate_id"]
+        if base is None:
+            return
+        base_version = db.execute("SELECT version FROM recipe_versions WHERE candidate_id=?", (base,)).fetchone()["version"]
+        if base == parent and lineage["version"] > base_version:
+            return
+        db.execute("UPDATE recipe_versions SET parent_candidate_id=?,"
+                   "version=(SELECT MAX(version)+1 FROM recipe_versions WHERE recipe_id=?) WHERE candidate_id=?",
+                   (base, lineage["recipe_id"], candidate_id))
+        db.execute("UPDATE recipe_heads SET latest_candidate_id=? WHERE recipe_id=?", (candidate_id, lineage["recipe_id"]))
+
     def _requeue_stopped(self, db, candidate_id):
-        """Queue a failed or interrupted candidate again, behind its parent when that is not finished; returns its state."""
+        """Queue a failed or interrupted candidate again, rebased onto the newest version it can build on and behind its
+        parent when that is not finished; returns its state."""
+        self._rebase_for_resume(db, candidate_id)
         parent_id = self._lineage(db, candidate_id)["parent_candidate_id"]
         ready = parent_id is None or self._candidate(db, parent_id)["state"] == "candidate"
         state = "queued" if ready else "awaiting_parent"
@@ -341,26 +378,25 @@ class LocalRecipeLifecycle:
         """``web_search`` None searches when the ``LocalRSI`` has a ``web_search``; False never searches; True without
         one fails the candidate with ``web_search_unavailable``.
 
-        Blocked domains, with the instance blocklist, are frozen lowercased, deduplicated and sorted. A revision has one
-        candidate: a repeat returns it, raises ``ValueError`` when it asks for a different web search setting while that
-        candidate is in flight, finished or awaiting material, and runs a failed or interrupted one again, on the same
-        version, with the new setting. ``resume_recipe_candidate`` keeps the frozen setting."""
+        The request's blocked domains are frozen lowercased, deduplicated and sorted; the instance blocklist is applied
+        when searching and is neither frozen nor compared, as the service's own blocklist. A revision has one candidate:
+        a repeat returns it, raises ``ValueError`` when it asks for a different web search setting while that candidate
+        is in flight, finished or awaiting material, and runs a failed or interrupted one again with the new setting
+        through the resume path, which may rebase it onto a newer version with a new number.
+        ``resume_recipe_candidate`` keeps the frozen setting."""
         requested = validate_blocked_domains(web_search_blocked_domains)
         if requested and web_search is False:
             raise ValueError("web_search_blocked_domains needs web search")
-        # The instance blocklist joins after the check, so an instance with one can still opt a candidate out of search.
-        blocked = sorted(set(self._web_blocked + requested))
         key = stable_key(recipe_request_key(task_id, revision_id, web_search=web_search, web_search_blocked_domains=requested)
                          if key is None else key)
         request_hash = fingerprint({"task_id": task_id, "revision_id": revision_id,
                                     **({"web_search": web_search} if web_search is not None else {}),
                                     **({"web_search_blocked_domains": requested} if requested else {})})
         searching = web_search if web_search is not None else self._web_search is not None
-        web = {"blocked_domains": blocked} if searching else None
-        # Blocked domains are compared only when the request gives some, and then with the instance blocklist they freeze with.
-        compared = blocked if requested else []
+        # Only the request's hosts freeze, as on the service; the instance blocklist applies at search time.
+        web = {"blocked_domains": requested} if searching else None
         with self._store.transaction() as db:
-            found = self._existing_candidate(db, task_id, revision_id, key, request_hash, web_search, compared, web)
+            found = self._existing_candidate(db, task_id, revision_id, key, request_hash, web_search, requested, web)
             if found is not None:
                 return result(found)
             source = json.loads(db.execute("SELECT e.request_json FROM revisions r JOIN executions e ON e.id=r.execution_id "
@@ -369,7 +405,7 @@ class LocalRecipeLifecycle:
         memory = await self._recall_snapshot(source["input"]["objective"]) if "memory" in source else {
             "status": "not_requested", "items": []}
         with self._store.transaction() as db:
-            found = self._existing_candidate(db, task_id, revision_id, key, request_hash, web_search, compared, web)
+            found = self._existing_candidate(db, task_id, revision_id, key, request_hash, web_search, requested, web)
             if found is not None:
                 return result(found)
             history = self._history(db, task_id, revision_id)
@@ -491,7 +527,8 @@ class LocalRecipeLifecycle:
             settings = context.get("model_settings", {}).get("web_search")
             if settings is not None:
                 saved = json.loads(row["attribution_json"]) if row["attribution_json"] else {}
-                web = WebPlan(self._web_search, tuple(settings["blocked_domains"]), saved.get("web"))
+                blocked = tuple(sorted(set(self._web_blocked) | set(settings["blocked_domains"])))
+                web = WebPlan(self._web_search, blocked, saved.get("web"))
             stages = await run_recipe_stages(
                 self._model, context, parent, on_phase=on_phase, web=web,
                 on_attribution=lambda analysis, models: self._save_attribution(row, analysis, models),
@@ -586,7 +623,9 @@ class LocalRecipeLifecycle:
         return result({"items": items, "has_more": has_more, "next_cursor": items[-1]["recipe_candidate_id"] if has_more else None})
 
     async def resume_recipe_candidate(self, recipe_id):
-        """Retry a failed or interrupted candidate with its frozen web search setting and sources; it takes no web fields."""
+        """Retry a failed or interrupted candidate with its frozen web search setting and sources; it takes no web fields.
+
+        Like the service's resume, it moves the candidate behind the newest version it can build on, renumbered above it."""
         with self._store.transaction() as db:
             row = self._candidate(db, recipe_id)
             if row["state"] in ("queued", "awaiting_parent", "running", "candidate"):

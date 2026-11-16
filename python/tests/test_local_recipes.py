@@ -185,7 +185,7 @@ async def test_later_candidates_fail_with_parent_failed(tmp_path):
     assert caught.value.code == "parent_failed"
 
 
-async def test_a_resumed_child_waits_for_its_failed_parent(tmp_path):
+async def test_a_resumed_child_waits_for_a_parent_resumed_first(tmp_path):
     rsi, _ = make_rsi(tmp_path, recipe_reply("V1"), ModelUnavailable("down"), recipe_reply("V2"), recipe_reply("V3"))
     task, _, done = await first_revision(rsi)
     await generate(rsi, task, done)
@@ -195,13 +195,55 @@ async def test_a_resumed_child_waits_for_its_failed_parent(tmp_path):
     last = await rsi.start_recipe_candidate(task.task_id, revision_id=third.revision_id)
     with pytest.raises(RSICandidateFailed):
         await rsi.wait_workflow_job("recipe_candidate", middle.recipe_candidate_id)
+    assert (await rsi.resume_recipe_candidate(middle.recipe_candidate_id)).status == "queued"
+    # Its parent is in flight again, so the child stays behind it with its number.
     assert (await rsi.resume_recipe_candidate(last.recipe_candidate_id)).status == "awaiting_parent"
     assert (await rsi.get_task(task.task_id)).recipes[0]["learning"]["status"] == "awaiting_previous_version"
-    with pytest.raises(TimeoutError):
-        await rsi.wait_workflow_job("recipe_candidate", last.recipe_candidate_id, timeout=0.3)
-    await rsi.resume_recipe_candidate(middle.recipe_candidate_id)
+    view = await rsi.get_recipe_candidate(last.recipe_candidate_id)
+    assert (view.version, view.parent_candidate_id) == (3, middle.recipe_candidate_id)
     job = await rsi.wait_workflow_job("recipe_candidate", last.recipe_candidate_id)
-    assert job.status == "candidate" and job.version == 3
+    assert job.status == "candidate" and job.version == 3 and job.recipe["title"] == "V3"
+
+
+async def test_a_child_resumed_while_its_parent_is_failed_builds_on_the_current_version(tmp_path):
+    rsi, model = make_rsi(tmp_path, recipe_reply("V1"), ModelUnavailable("down"), recipe_reply("V2"), recipe_reply("V3"))
+    task, _, done = await first_revision(rsi)
+    v1 = await generate(rsi, task, done)
+    _, second = await next_revision(rsi, task, "two")
+    _, third = await next_revision(rsi, task, "three")
+    middle = await rsi.start_recipe_candidate(task.task_id, revision_id=second.revision_id)
+    last = await rsi.start_recipe_candidate(task.task_id, revision_id=third.revision_id)
+    with pytest.raises(RSICandidateFailed):
+        await rsi.wait_workflow_job("recipe_candidate", middle.recipe_candidate_id)
+    # As on the service, a resume never waits on a failed parent: it moves behind the current version, numbered above it.
+    assert (await rsi.resume_recipe_candidate(last.recipe_candidate_id)).status == "queued"
+    job = await rsi.wait_workflow_job("recipe_candidate", last.recipe_candidate_id)
+    assert (job.version, job.parent_candidate_id, job.current) == (4, v1.recipe_candidate_id, True)
+    assert model.calls[-1]["context"]["base_recipe"]["recipe"]["title"] == "V1"
+    await rsi.resume_recipe_candidate(middle.recipe_candidate_id)
+    job = await rsi.wait_workflow_job("recipe_candidate", middle.recipe_candidate_id)
+    assert (job.version, job.parent_candidate_id, job.current) == (5, last.recipe_candidate_id, True)
+    versions = await rsi.get_recipe_versions(job.recipe_id)
+    assert [(v.version, v.status) for v in versions.versions] == [(1, "candidate"), (4, "candidate"), (5, "candidate")]
+
+
+async def test_a_transient_failure_resumes_once_on_the_version_that_became_current(tmp_path):
+    rsi, model = make_rsi(tmp_path, recipe_reply("V1"), ModelUnavailable("down"), recipe_reply("V3"), recipe_reply("V4"))
+    task, _, done = await first_revision(rsi)
+    v1 = await generate(rsi, task, done)
+    _, second = await next_revision(rsi, task, "two")
+    _, third = await next_revision(rsi, task, "three")
+    failed = await rsi.start_recipe_candidate(task.task_id, revision_id=second.revision_id)
+    with pytest.raises(RSICandidateFailed):
+        await rsi.wait_workflow_job("recipe_candidate", failed.recipe_candidate_id)
+    v3 = await generate(rsi, task, third)
+    assert (v3.version, v3.parent_candidate_id) == (3, v1.recipe_candidate_id)
+    calls = len(model.calls)
+    resumed = await rsi.resume_recipe_candidate(failed.recipe_candidate_id)
+    assert resumed.status == "queued"
+    job = await rsi.wait_workflow_job("recipe_candidate", failed.recipe_candidate_id)
+    assert (job.version, job.parent_candidate_id, job.current) == (4, v3.recipe_candidate_id, True)
+    assert len(model.calls) == calls + 1 and model.calls[-1]["context"]["base_recipe"]["recipe"]["title"] == "V3"
 
 
 async def test_waiting_on_a_later_candidate_generates_its_parent_first(tmp_path):
@@ -227,7 +269,7 @@ async def test_commit_refuses_when_the_parent_is_no_longer_current(tmp_path):
     candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
     with pytest.raises(RSICandidateFailed) as caught:
         await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
-    assert caught.value.code == "parent_changed" and caught.value.retryable is False
+    assert caught.value.code == "parent_changed" and caught.value.retryable is True
 
 
 async def test_wait_timeout_leaves_generation_running(tmp_path):

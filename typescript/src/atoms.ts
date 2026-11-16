@@ -195,8 +195,9 @@ export class Atoms {
    * `webSearchBlockedDomains` adds hostnames whose pages are dropped from the results; the service freezes them
    * lowercased, deduplicated and sorted. The setting is frozen on the learning and resume reuses it. A repeat call
    * compares only the web fields it gives, blocked hosts as a set: a different setting gets a 422 while the learning is
-   * active, `completed` or `awaiting_material`, and runs a `failed`, `interrupted` or `awaiting_runner` learning again
-   * on the same version with the new setting, dropping the sources frozen under the old one.
+   * active, `completed` or `awaiting_material`, and re-queues a `failed`, `interrupted` or `awaiting_runner` learning
+   * with the new setting, dropping the sources frozen under the old one; like `resumeLearning`, it may move behind a
+   * newer version and take a new version number.
    * `null` for either option is the same as omitting it.
    */
   learn(executionId: string, { model, maxCompletionTokens, webSearch, webSearchBlockedDomains }: { model?: string; maxCompletionTokens?: number; webSearch?: boolean | null; webSearchBlockedDomains?: string[] | null } = {}) {
