@@ -120,6 +120,42 @@ corrections and learning; its methods, its evidence references and the one-time 
 without its evidence references. To continue a Recipe on another machine, find it with `search_recipes` or
 `list_recipes`, read it with `get_recipe` and pass it as `create_task(..., recipe=...)`. See `examples/04_local_rsi.py`.
 
+### Web search while learning a Recipe
+
+`atoms.learn(execution_id, web_search=..., web_search_blocked_domains=["example.com"])` sends both fields in the
+`POST /executions/{id}/learn` body, only when given. Omitted means the service default: on when the service has a search
+provider. `web_search=False` opts out, `web_search_blocked_domains` (at most 50 bare hostnames) adds hosts whose pages are
+dropped, and `web_search=True` on a service without a provider fails the learning with `web_search_unavailable` (not
+retryable). The task runner's `generate_recipe(..., web_search=..., web_search_blocked_domains=[...])` passes them on.
+
+- The setting is frozen on the learning. `resume_learning` takes no web fields and uses the frozen one; learning again on
+  an execution whose learning is active or `completed` with a different setting gets a 422, like a different budget.
+- Retries and resumes reuse the frozen sources and never search again; a provider failure fails the learning as
+  `web_search_unavailable` (retryable), and the resume searches again.
+- The learning's `web_search` lists the queries, the sources used (URL, title, excerpt, `retrieved_at`, `text_sha256`) and
+  the dropped results.
+
+`LocalRSI` searches the same way through a search you supply. Pass `LocalRSI(..., web_search=<a WebSearch>)`
+(`cosens.local.WebSearch`: `async search(query, *, blocked_domains) -> list of {url, title, text}`) and each local learning
+searches the web while its Recipe is written; the SDK ships no search client, and without one nothing is searched. Its
+learning call, `start_recipe_candidate(..., web_search=..., web_search_blocked_domains=[...])`, takes the same settings, and
+`web_search=True` with no `WebSearch` fails the candidate with `web_search_unavailable`.
+
+- `LocalRSI(web_search_blocked_domains=[...])` blocks hosts for every candidate, as the service's own blocklist does.
+- The model writes at most 3 general queries from the task objective and the attribution, never from execution outputs,
+  reference answers or web text. **Queries leave this machine to whatever provider your `WebSearch` calls**, so keep
+  names, ids and secrets out of the task objective.
+- Results are cut to 5 per query, 1,500 characters each and 24,000 in total, and dropped when the parsed URL host is a
+  blocked host or one of its subdomains. Blocking lowers but does not remove the chance of copied or leaked content, so pass
+  the hosts of any benchmark or private source a Recipe must not read.
+- The candidate's `web_search` has the same shape as the service's. Retries and `resume_recipe_candidate` reuse frozen
+  sources; a provider failure raises `WebSearchUnavailable` from your `WebSearch` and fails the candidate as
+  `web_search_unavailable` (retryable).
+- Web text is untrusted data, never instructions. A step or lesson that cites only web sources is rejected, so a page can
+  refine a step that recorded evidence supports but cannot add one. The uploaded Recipe carries no evidence references,
+  so the web provenance stays on the local candidate.
+- `CodexCLIModel` runs `codex exec` with native `web_search` disabled, so only the search you supply is used.
+
 ## Atomic operations
 
 `CoSensClient().atoms` (async) and `.sync_atoms` (sync) expose Task, Execution, feedback, learning, Recipe and Memory operations directly; see [the API reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/api-reference.md). Keep stable idempotency keys across retries.

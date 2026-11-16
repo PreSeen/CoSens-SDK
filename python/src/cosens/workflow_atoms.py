@@ -39,10 +39,19 @@ def _completion_tokens(value):
     return value
 
 
-def _recipe_data(model, max_completion_tokens):
+def _recipe_data(model, max_completion_tokens, web_search=None, web_search_blocked_domains=()):
     data = _model_data(model)
     if _completion_tokens(max_completion_tokens) is not None:
         data['max_completion_tokens'] = max_completion_tokens
+    if web_search is not None:
+        if type(web_search) is not bool:
+            raise ValueError('web_search must be a boolean')
+        data['web_search'] = web_search
+    if web_search_blocked_domains:
+        domains = list(web_search_blocked_domains)
+        if len(domains) > 50 or any(not isinstance(d, str) or not d.strip() for d in domains):
+            raise ValueError('web_search_blocked_domains must be at most 50 hostnames')
+        data['web_search_blocked_domains'] = domains
     return data
 
 
@@ -291,10 +300,18 @@ class AsyncWorkflowAtoms:
         return await self._http.request('POST', f'/executions/{path_part(execution_id)}/feedback',
                                         body={'feedback':feedback, 'source':feedback_source(source)}, key=stable_key(key))
 
-    async def learn(self, execution_id, *, model=None, max_completion_tokens=None):
-        """Learn a Recipe version from a confirmed execution; repeat calls return the same learning."""
+    async def learn(self, execution_id, *, model=None, max_completion_tokens=None, web_search=None,
+                    web_search_blocked_domains=()):
+        """Learn a Recipe version from a confirmed execution; repeat calls return the same learning.
+
+        ``web_search`` omitted takes the service default (on when the service has a search provider);
+        ``False`` opts out. ``web_search_blocked_domains`` adds hostnames whose pages are dropped from the
+        results. The setting is frozen on the learning: resume reuses it, and asking a learning that is
+        active or ``completed`` for a different setting gets a 422.
+        """
         return await self._http.request("POST", f"/executions/{path_part(execution_id)}/learn",
-                                        body=_recipe_data(model, max_completion_tokens) or {})
+                                        body=_recipe_data(model, max_completion_tokens, web_search,
+                                                          web_search_blocked_domains) or {})
 
     async def resume_learning(self, execution_id, *, model=None, max_completion_tokens=None):
         """Retry a ``failed``, ``interrupted`` or ``awaiting_runner`` learning, optionally with a new budget.
@@ -384,10 +401,12 @@ class SyncWorkflowAtoms:
         return self._http.request('POST', f'/executions/{path_part(execution_id)}/feedback',
                                   body={'feedback':feedback, 'source':feedback_source(source)}, key=stable_key(key))
 
-    def learn(self, execution_id, *, model=None, max_completion_tokens=None):
-        """Learn a Recipe version from a confirmed execution; repeat calls return the same learning."""
+    def learn(self, execution_id, *, model=None, max_completion_tokens=None, web_search=None,
+              web_search_blocked_domains=()):
+        """Learn a Recipe version from a confirmed execution; see the async form for web search."""
         return self._http.request("POST", f"/executions/{path_part(execution_id)}/learn",
-                                  body=_recipe_data(model, max_completion_tokens) or {})
+                                  body=_recipe_data(model, max_completion_tokens, web_search,
+                                                    web_search_blocked_domains) or {})
 
     def resume_learning(self, execution_id, *, model=None, max_completion_tokens=None):
         """Retry a failed, interrupted or awaiting_runner learning; see the async form for the 422 cases."""

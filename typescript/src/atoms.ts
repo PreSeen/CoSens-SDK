@@ -189,9 +189,20 @@ export class Atoms {
   recordFeedback(executionId: string, { feedback, source, key }: { feedback: string; source: FeedbackSource; key: string }) {
     return this.http.request('POST', `/executions/${pathPart(executionId)}/feedback`, { feedback, source: feedbackSource(source) }, stableKey(key));
   }
-  /** Learn a Recipe version from a confirmed execution; repeat calls return the same learning. */
-  learn(executionId: string, { model, maxCompletionTokens }: { model?: string; maxCompletionTokens?: number } = {}) {
-    return this.http.request('POST', `/executions/${pathPart(executionId)}/learn`, learningData(model, maxCompletionTokens));
+  /**
+   * Learn a Recipe version from a confirmed execution; repeat calls return the same learning.
+   * `webSearch` omitted takes the service default (on when the service has a search provider); `false` opts out.
+   * `webSearchBlockedDomains` adds hostnames whose pages are dropped from the results. The setting is frozen on the
+   * learning: resume reuses it, and asking a learning that is active or `completed` for a different setting gets a 422.
+   */
+  learn(executionId: string, { model, maxCompletionTokens, webSearch, webSearchBlockedDomains = [] }: { model?: string; maxCompletionTokens?: number; webSearch?: boolean; webSearchBlockedDomains?: string[] } = {}) {
+    if (webSearch !== undefined && typeof webSearch !== 'boolean') throw new TypeError('webSearch must be a boolean');
+    if (webSearchBlockedDomains.length > 50 || webSearchBlockedDomains.some(d => typeof d !== 'string' || !d.trim())) throw new TypeError('webSearchBlockedDomains must be at most 50 hostnames');
+    return this.http.request('POST', `/executions/${pathPart(executionId)}/learn`, {
+      ...learningData(model, maxCompletionTokens),
+      ...(webSearch === undefined ? {} : { web_search: webSearch }),
+      ...(webSearchBlockedDomains.length ? { web_search_blocked_domains: webSearchBlockedDomains } : {}),
+    });
   }
   /**
    * Retry a `failed`, `interrupted` or `awaiting_runner` learning, optionally with a new budget.

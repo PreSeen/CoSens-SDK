@@ -11,7 +11,7 @@
 | Read an execution (its output, feedback and learning) | `get_execution` |
 | Submit a result | `submit_execution` |
 | Feedback on an execution | `record_feedback(execution_id, feedback=..., source=..., key=...)` |
-| Learn a Recipe version from an execution | `learn(execution_id, model=None, max_completion_tokens=None)` |
+| Learn a Recipe version from an execution | `learn(execution_id, model=None, max_completion_tokens=None, web_search=None, web_search_blocked_domains=())` |
 | Retry a learning | `resume_learning(execution_id, model=None, max_completion_tokens=None)` |
 | Wait for a learning | `wait_learning(execution_id, timeout=300)` |
 | Recipe versions | `get_recipe_versions` |
@@ -52,6 +52,10 @@ Current HTTP and MCP schemas are supplied by the algorithm service. Old Run, Rev
 `learn(..., max_completion_tokens=200000)` and `resume_learning(..., max_completion_tokens=300000)` accept an optional integer from 1 through 1,000,000. Omitting it leaves the budget to the service (32,000 by default). The budget is frozen with the learning: a resume keeps it unless explicitly overridden. The same budget applies to both feedback attribution and Recipe creation/update. Model/gateway limits still apply; an accepted SDK value is not a promise that every upstream model supports it.
 
 The wrappers expose the same option on `client.cosens.generate_recipe(turn_id, max_completion_tokens=200000)`; the transparent wrapper also has `client.cosens.resume_learning(turn_id, max_completion_tokens=300000)`. It does not change business response limits or `decision_max_output_tokens`. Asking a turn that already learned for a different budget is rejected; resume a failed, interrupted or awaiting_runner learning to change it.
+
+### Web search while learning
+
+`learn(..., web_search=False)` opts out of web search while the Recipe is written and `web_search_blocked_domains=["example.com"]` (at most 50 bare hostnames) adds hosts whose pages are dropped; each is sent only when given, and omitted means the service default (on when the service has a search provider). Blocked domains with `web_search=False` get a 422, and `web_search=True` on a service without a provider fails the learning with `web_search_unavailable` (not retryable). The setting is frozen with the learning: `resume_learning` takes no web fields, retries and resumes reuse the frozen sources, a provider failure is `web_search_unavailable` (retryable, and the resume searches again), and learning again with a different setting while the learning is active or `completed` gets a 422. The learning's `web_search` lists the queries, the sources used and the dropped results. `client.cosens.generate_recipe(turn_id, web_search=..., web_search_blocked_domains=[...])` on the task runner passes them on.
 
 ## Local RSI
 

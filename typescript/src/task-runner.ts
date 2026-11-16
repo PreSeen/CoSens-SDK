@@ -62,7 +62,7 @@ function observedNativeItems(result: any): { events: Array<{ id: string; kind: s
 
 export class TaskWorkflowRunner {
   readonly native: Runner;
-  readonly cosens: { mode: CoSensMode; lastTurnId: string | null; atoms?: CoSensClient['atoms']; generateRecipe:(id?:string,options?:{model?:string;maxCompletionTokens?:number})=>Promise<any>; feedback:(message:string,source:FeedbackSource,id?:string)=>Promise<any>; getTurn: (id: string) => TaskTurn | undefined; reconcile: (id: string, options?: { session?: any }) => Promise<TaskTurn> };
+  readonly cosens: { mode: CoSensMode; lastTurnId: string | null; atoms?: CoSensClient['atoms']; generateRecipe:(id?:string,options?:{model?:string;maxCompletionTokens?:number;webSearch?:boolean;webSearchBlockedDomains?:string[]})=>Promise<any>; feedback:(message:string,source:FeedbackSource,id?:string)=>Promise<any>; getTurn: (id: string) => TaskTurn | undefined; reconcile: (id: string, options?: { session?: any }) => Promise<TaskTurn> };
   private readonly client?: CoSensClient;
   private readonly turns?: TurnStore;
   constructor(nativeRunner: Runner | typeof Runner, private readonly options: TaskRunnerOptions = {}) {
@@ -76,7 +76,7 @@ export class TaskWorkflowRunner {
       // Learn from the turn's confirmed execution; repeat calls return the same learning.
       generateRecipe: async (id, opts = {}) => {
         const turn = this.completedTurn(id);
-        const learning = await this.client!.atoms.learn(turn.executionId!, { model: opts.model, maxCompletionTokens: opts.maxCompletionTokens });
+        const learning = await this.client!.atoms.learn(turn.executionId!, { model: opts.model, maxCompletionTokens: opts.maxCompletionTokens, webSearch: opts.webSearch, webSearchBlockedDomains: opts.webSearchBlockedDomains });
         turn.learning = { ...learning }; this.save(turn);
         return learning;
       },

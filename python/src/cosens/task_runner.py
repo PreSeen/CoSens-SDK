@@ -89,12 +89,17 @@ class _WorkflowStatus:
         key = request_key or 'feedback:'+hashlib.sha256((state['turn_id']+'\0'+message).encode()).hexdigest()
         return await self._owner._client.atoms.record_feedback(state['execution_id'], feedback=message, source=source, key=key)
 
-    async def generate_recipe(self, turn_id=None, *, model=None, max_completion_tokens=None):
+    async def generate_recipe(self, turn_id=None, *, model=None, max_completion_tokens=None, web_search=None,
+                              web_search_blocked_domains=()):
         """Learn a Recipe version from the turn's confirmed execution; repeat calls return the same learning."""
         state = self._completed_turn(turn_id)
         options = {'model': model} if model is not None else {}
         if max_completion_tokens is not None:
             options['max_completion_tokens'] = max_completion_tokens
+        if web_search is not None:
+            options['web_search'] = web_search
+        if web_search_blocked_domains:
+            options['web_search_blocked_domains'] = web_search_blocked_domains
         learning = await self._owner._client.atoms.learn(state['execution_id'], **options)
         state['learning'] = dict(learning)
         self._owner._save(state)
