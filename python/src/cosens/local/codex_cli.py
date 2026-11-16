@@ -52,7 +52,7 @@ class CodexCLIModel:
     def _command(self, workdir, schema_path, output_path):
         command = [self._executable, "exec", "--ephemeral", "--skip-git-repo-check", "--json", "-s", "read-only",
                    "-C", str(workdir), "--disable", "hooks", "-c", "mcp_servers={}",
-                   "-c", f'model_reasoning_effort="{self._reasoning_effort}"',
+                   "-c", f'model_reasoning_effort="{self._reasoning_effort}"', "-c", 'web_search="disabled"',
                    "--output-schema", str(schema_path), "-o", str(output_path)]
         if self._model:
             command += ["-m", self._model]

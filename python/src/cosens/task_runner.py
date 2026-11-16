@@ -80,7 +80,8 @@ class _WorkflowStatus:
         key = request_key or 'feedback:'+hashlib.sha256((turn_id+'\0'+message).encode()).hexdigest()
         return await self._owner._client.atoms.record_feedback(state['revision_id'], feedback=message, source=source, key=key)
 
-    async def generate_recipe(self, turn_id=None, *, request_key=None, model=None, max_completion_tokens=None):
+    async def generate_recipe(self, turn_id=None, *, request_key=None, model=None, max_completion_tokens=None,
+                              web_search=None, web_search_blocked_domains=()):
         turn_id = turn_id or self.last_turn_id
         state = self.get_turn(turn_id)
         if not state or not state.get('revision_id'):
@@ -88,6 +89,10 @@ class _WorkflowStatus:
         options = {'model': model} if model is not None else {}
         if max_completion_tokens is not None:
             options['max_completion_tokens'] = max_completion_tokens
+        if web_search is not None:
+            options['web_search'] = web_search
+        if web_search_blocked_domains:
+            options['web_search_blocked_domains'] = web_search_blocked_domains
         receipt = await self._owner._client.atoms.start_recipe_candidate(state['task_id'], revision_id=state['revision_id'], key=request_key or 'explicit-generation:'+turn_id, **options)
         state['recipe_candidate_id'] = receipt['recipe_candidate_id']
         self._owner._save(state)

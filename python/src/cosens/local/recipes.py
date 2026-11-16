@@ -12,12 +12,14 @@ from ..models import result
 from ..workflow_atoms import _RECIPE_ID, _job_timeout
 from .models import ModelUnavailable
 from .publish import check_upload, upload_form, without_evidence
-from .recipe_stages import MAX_CONTEXT_BYTES, MAX_HISTORY_REVISIONS, MODEL_OUTPUT_ATTEMPTS, ModelOutputInvalid, run_recipe_stages
+from .recipe_stages import (MAX_CONTEXT_BYTES, MAX_HISTORY_REVISIONS, MODEL_OUTPUT_ATTEMPTS, ModelOutputInvalid, WebPlan,
+                            run_recipe_stages)
 from .store import canonical_json, fingerprint
+from .web_search import WebSearchUnavailable, validate_blocked_domains
 
 _IN_FLIGHT = ("queued", "awaiting_parent", "running")
 _LIST_STATES = {"queued", "awaiting_parent", "running", "awaiting_material", "candidate", "failed", "interrupted"}
-_STAGES = 2
+_STAGES = 3  # attribution, web research, generation
 _LOG = logging.getLogger("cosens.local")
 PARENT_FAILED = {"code": "parent_failed", "message": "The Recipe this candidate builds on failed; resume it first.",
                  "retryable": True, "phase": None, "upstream_status": None, "upstream_code": None}
@@ -34,6 +36,10 @@ def _failure_detail(exc, phase):
     if isinstance(exc, ModelUnavailable):
         return {"code": exc.code, "message": str(exc), "retryable": exc.retryable, **detail,
                 "upstream_status": exc.upstream_status, "upstream_code": exc.upstream_code}
+    if isinstance(exc, WebSearchUnavailable):
+        return {"code": "web_search_unavailable", "retryable": exc.retryable, **detail,
+                "message": "Web search did not answer; resume to retry." if exc.retryable
+                else "Web search was requested but none is configured."}
     if isinstance(exc, ModelOutputInvalid):
         return {"code": "model_output_invalid", "retryable": True, **detail,
                 "message": f"Model output failed validation after {MODEL_OUTPUT_ATTEMPTS} attempts."}
@@ -70,6 +76,7 @@ class LocalRecipeLifecycle:
         lineage = self._lineage(db, row["id"])
         attribution = json.loads(row["attribution_json"]) if row["attribution_json"] else None
         models = attribution.pop("models", None) if attribution else None
+        web = attribution.pop("web", None) if attribution else None
         detail = json.loads(row["error"]) if row["error"] else None
         return {"recipe_candidate_id": row["id"], "recipe_id": lineage["recipe_id"], "version": lineage["version"],
                 "parent_candidate_id": lineage["parent_candidate_id"], "current": lineage["current_candidate_id"] == row["id"],
@@ -77,7 +84,7 @@ class LocalRecipeLifecycle:
                 "context_sha256": row["context_sha"], "recipe_sha256": row["recipe_sha"], "phase": row["phase"],
                 "attribution": attribution, "recipe": json.loads(row["recipe_json"]) if row["recipe_json"] else None,
                 "error": detail["code"] if detail else None, "error_detail": detail, "models": models,
-                "memory_context": context["memory"]["status"], "initial": bool(context.get("initial", False)),
+                "web_search": web, "memory_context": context["memory"]["status"], "initial": bool(context.get("initial", False)),
                 "material_gap": context.get("material_gap"), "publish_state": row["publish_state"]}
 
     def _candidate(self, db, candidate_id):
@@ -187,9 +194,18 @@ class LocalRecipeLifecycle:
         self._store.remember(db, "recipe_candidate", key, request_hash, response)
         return response
 
-    async def start_recipe_candidate(self, task_id, *, revision_id, key=None):
-        key = stable_key(recipe_request_key(task_id, revision_id) if key is None else key)
-        request_hash = fingerprint({"task_id": task_id, "revision_id": revision_id})
+    async def start_recipe_candidate(self, task_id, *, revision_id, key=None, web_search=None, web_search_blocked_domains=()):
+        """``web_search`` None searches when the ``LocalRSI`` has a ``web_search``; False never searches; True without
+        one fails the candidate with ``web_search_unavailable``."""
+        blocked = list(dict.fromkeys(self._web_blocked + validate_blocked_domains(web_search_blocked_domains)))
+        if blocked and web_search is False:
+            raise ValueError("web_search_blocked_domains needs web search")
+        key = stable_key(recipe_request_key(task_id, revision_id, web_search=web_search, web_search_blocked_domains=blocked)
+                         if key is None else key)
+        request_hash = fingerprint({"task_id": task_id, "revision_id": revision_id,
+                                    **({"web_search": web_search} if web_search is not None else {}),
+                                    **({"web_search_blocked_domains": blocked} if blocked else {})})
+        searching = web_search if web_search is not None else self._web_search is not None
         with self._store.transaction() as db:
             found = self._existing_candidate(db, task_id, revision_id, key, request_hash)
             if found is not None:
@@ -206,6 +222,8 @@ class LocalRecipeLifecycle:
             context = {"schema": "workflow-recipe-context-v2", "task_id": task_id, "source_revision_id": revision_id,
                        "history": self._history(db, task_id, revision_id), "memory": memory,
                        "confirmation_source": "explicit_generation_request"}
+            if searching:
+                context["model_settings"] = {"web_search": {"blocked_domains": blocked}}
             if len(canonical_json(context).encode()) > MAX_CONTEXT_BYTES:
                 raise ValueError("recipe history exceeds 4 MB; narrow the context")
             candidate_id = "recipe_candidate_" + uuid4().hex
@@ -241,10 +259,11 @@ class LocalRecipeLifecycle:
             db.execute("UPDATE recipe_candidates SET state='running',lease_expires_at=? WHERE id=?", (lease, candidate_id))
             return {"action": "generate", "row": dict(row), "parent_id": parent_id}
 
-    def _save_attribution(self, row, analysis, models):
+    def _save_attribution(self, row, analysis, models, web=None):
         with self._store.transaction() as db:
             db.execute("UPDATE recipe_candidates SET attribution_json=? WHERE id=? AND state='running' AND generation=?",
-                       (canonical_json({**analysis, "models": models}), row["id"], row["generation"]))
+                       (canonical_json({**analysis, "models": models, **({"web": web} if web else {})}),
+                        row["id"], row["generation"]))
 
     def _set_phase(self, candidate_id, generation, phase):
         with self._store.transaction() as db:
@@ -252,7 +271,8 @@ class LocalRecipeLifecycle:
                        (phase, candidate_id, generation))
 
     def _commit_recipe(self, row, parent, stages):
-        recipe, record = stages.recipe, canonical_json({**stages.analysis, "models": stages.models})
+        recipe = stages.recipe
+        record = canonical_json({**stages.analysis, "models": stages.models, **({"web": stages.web} if stages.web else {})})
         with self._store.transaction() as db:
             lineage = self._lineage(db, row["id"])
             if lineage["current_candidate_id"] != lineage["parent_candidate_id"]:
@@ -311,8 +331,15 @@ class LocalRecipeLifecycle:
                 raise ValueError("recipe context changed")
             with self._store.reading() as db:
                 parent = self._checked_view(db, self._candidate(db, parent_id)) if parent_id else None
-            stages = await run_recipe_stages(self._model, context, parent, on_phase=on_phase,
-                                             on_attribution=lambda analysis, models: self._save_attribution(row, analysis, models))
+            web = None
+            settings = context.get("model_settings", {}).get("web_search")
+            if settings is not None:
+                saved = json.loads(row["attribution_json"]) if row["attribution_json"] else {}
+                web = WebPlan(self._web_search, tuple(settings["blocked_domains"]), saved.get("web"))
+            stages = await run_recipe_stages(
+                self._model, context, parent, on_phase=on_phase, web=web,
+                on_attribution=lambda analysis, models: self._save_attribution(row, analysis, models),
+                on_web=lambda analysis, models, frozen: self._save_attribution(row, analysis, models, frozen))
             if stages.recipe is None:
                 self._keep_previous(row, stages)
                 return

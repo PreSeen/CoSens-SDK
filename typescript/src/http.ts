@@ -85,7 +85,8 @@ export function requestKey(key: string): string {
  * Deterministic generation key: one candidate per revision and completion budget.
  * The Python SDK computes the same key.
  */
-export function recipeRequestKey(taskId: string, revisionId: string, maxCompletionTokens?: number): string {
+export function recipeRequestKey(taskId: string, revisionId: string, maxCompletionTokens?: number, webSearch?: boolean, webSearchBlockedDomains: string[] = []): string {
   const budget = maxCompletionTokens === undefined ? '' : String(maxCompletionTokens);
-  return 'recipe-' + createHash('sha256').update(`recipe:${taskId}:${revisionId}:${budget}`, 'utf8').digest('hex');
+  const web = webSearch === undefined && webSearchBlockedDomains.length === 0 ? '' : ':web=' + JSON.stringify([webSearch ?? null, webSearchBlockedDomains]);
+  return 'recipe-' + createHash('sha256').update(`recipe:${taskId}:${revisionId}:${budget}${web}`, 'utf8').digest('hex');
 }
