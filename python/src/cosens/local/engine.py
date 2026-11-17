@@ -16,11 +16,11 @@ class LocalRSI(LocalTaskWorkflow, LocalRecipeLifecycle):
     """The workflow methods of ``client.atoms``, backed by local storage and ``model``.
 
     ``client`` is a ``CoSensClient`` used only for Memory recall (``/v1/memory/*``) and the Recipe store
-    (``/v1/recipes``); with ``None`` nothing is recalled or uploaded. ``memory`` is its deprecated name.
+    (``/recipes``); with ``None`` nothing is recalled or uploaded. ``memory`` is its deprecated name.
     Generation runs inside ``wait_workflow_job``. ``web_search`` is a ``cosens.local.web_search.WebSearch`` the Recipe
     stages may use; the SDK ships no search client, and without one nothing is searched. Queries leave this machine to
-    whatever provider it calls; ``web_search_blocked_domains`` are hosts dropped for every candidate, like the service's own
-    blocklist. Web text is untrusted data: it cannot add a step without recorded execution evidence.
+    whatever provider it calls; ``web_search_blocked_domains`` are hosts dropped for every candidate when searching, like the
+    service's own blocklist, which is neither frozen with a candidate nor compared. Web text is untrusted data: it cannot add a step without recorded execution evidence.
     """
 
     def __init__(self, *, client=None, model, state_path=None, memory=_UNSET, web_search=None,

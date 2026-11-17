@@ -9,4 +9,4 @@ export async function runTask(task:string,model:string){
  const result=await client.run(agent,task);
  return {client,result,turnId:client.cosens.lastTurnId};
 }
-export function onArtifactConfirmed(client:CoSensAgentRunner,turnId:string,requestKey:string){return client.cosens.generateRecipe(turnId,{requestKey});}
+export function onArtifactConfirmed(client:CoSensAgentRunner,turnId:string){return client.cosens.generateRecipe(turnId);}

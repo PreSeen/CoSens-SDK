@@ -43,19 +43,22 @@ def test_inject_skips_empty_context_and_uses_matched_bundle_only():
 
 
 def test_execution_request_rendering_is_compact():
-    request = {'task_id': 'task_1', 'kind': 'revision', 'context_version': 3, 'trace_origin': 'revision',
-               'context': {'objective': 'Write the Q3 report',
-                           'artifacts': [{'artifact_id': 'a1', 'role': 'original_input', 'content_hash': 'sha256:abc'}]},
+    request = {'task_id': 'task_1', 'kind': 'correction', 'trace_origin': 'correction',
+               'task_context': {'objective': 'Write the quarterly report', 'context_version': 3,
+                                'artifacts': [{'artifact_id': 'template', 'role': 'reference', 'content_hash': 'sha256:def'}]},
+               'input': {'objective': 'Write the Q3 report', 'self_contained': False,
+                         'artifacts': [{'artifact_id': 'a1', 'role': 'original_input', 'content_hash': 'sha256:abc'}]},
                'feedback': [{'feedback': 'Use euros'}],
-               'method': {'recipe_id': 'r1', 'recipe_candidate_id': 'c1', 'version': 2, 'recipe_sha256': 'f' * 64,
+               'method': {'recipe_id': 'r1', 'version': 2, 'recipe_sha256': 'f' * 64,
                           'recipe': RECIPE},
                'memory': {'status': 'captured', 'scope': 'u', 'items': MEMORY}}
     text = render_execution_request(request)
     assert text.splitlines() == [
-        '[CoSens frozen task execution request]', 'Task: task_1 (revision)', 'Objective: Write the Q3 report',
+        '[CoSens frozen task execution request]', 'Task: task_1 (correction)',
+        'Task objective: Write the quarterly report', 'Reference artifacts: template', 'Objective: Write the Q3 report',
         'Input artifacts: a1 (original_input)', 'Feedback on the previous result:', '- Use euros',
         'Recipe (provisional): Quarterly report', 'Use when: Writing a report', 'Do not use when: Casual chat',
         'Steps:', '1. Collect figures', '2. Fill the template', 'Related Memory:', '- Use the Q3 template.',
         'Lessons:', '- Cite each figure']
-    long_request = dict(request, context={'objective': 'o ' * 5000})
+    long_request = dict(request, input={'objective': 'o ' * 5000})
     assert len(render_execution_request(long_request, max_chars=500)) <= 500

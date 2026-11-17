@@ -1,4 +1,4 @@
-"""HTTP atoms for the task / revision / Recipe candidate workflow.
+"""HTTP atoms for the task / execution / Recipe workflow.
 
 These methods send exactly one request. Agent execution, consent and retries belong
 to the caller; in particular a lost artifact receipt must not trigger re-upload.
@@ -11,8 +11,8 @@ import re
 import time
 from urllib.parse import urlencode
 
-from .atoms_helpers import path_part, recipe_request_key, stable_key
-from .errors import RSICandidateFailed, RSIRecoveryRequired
+from .atoms_helpers import path_part, stable_key
+from .errors import RSILearningFailed, RSILearningStopped, RSIRecoveryRequired
 
 
 # Where a feedback text comes from; the service weighs feedback by its source.
@@ -55,23 +55,18 @@ def _recipe_data(model, max_completion_tokens, web_search=None, web_search_block
     return data
 
 
-_ROLES = {"original_input", "submitted_output", "acceptance", "external_trace"}
-_JOB_STATES = {
-    "recipe_candidate": {"queued", "running", "awaiting_runner", "awaiting_parent", "awaiting_material", "candidate", "failed", "interrupted"},
-}
+_INPUT_ROLES = {"original_input", "submitted_output", "acceptance", "external_trace"}
+# Learning states the service moves on by itself, and states only the caller can change.
+_LEARNING_IN_FLIGHT = {"queued", "running", "awaiting_previous_version"}
+_LEARNING_STOPPED = {"interrupted", "awaiting_runner", "awaiting_material"}
+# States resume_learning continues.
+_LEARNING_RESUMABLE = {"failed", "interrupted", "awaiting_runner"}
 
 
 def _job_timeout(timeout):
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout < 0:
         raise ValueError("timeout must be a finite nonnegative number")
     return timeout
-
-
-def _job_getter(owner, kind):
-    names = {"recipe_candidate": "get_recipe_candidate"}
-    if kind not in names:
-        raise ValueError("job kind must be recipe_candidate")
-    return getattr(owner, names[kind])
 
 
 def validate_artifact(name, content):
@@ -81,11 +76,44 @@ def validate_artifact(name, content):
         raise ValueError("artifact content must be nonempty UTF-8 text of at most 1,000,000 bytes")
 
 
-def _task(source, objective, artifacts, self_contained):
+def _objective(objective):
+    if not isinstance(objective, str) or not objective.strip() or len(objective) > 20_000:
+        raise ValueError("objective must be nonempty text of at most 20,000 characters")
+    return objective
+
+
+def _references(artifacts):
+    artifacts = artifacts if artifacts is not None else []
+    if not isinstance(artifacts, list) or len(artifacts) > 100:
+        raise ValueError("artifacts must contain at most 100 references")
+    for artifact in artifacts:
+        if not (isinstance(artifact, str) and artifact) and not (
+                isinstance(artifact, dict) and isinstance(artifact.get("artifact_id"), str) and artifact["artifact_id"]
+                and artifact.get("role") == "reference"):
+            raise ValueError("a task's artifacts are ids or references with role reference")
+    return artifacts
+
+
+def _task(objective, artifacts):
+    return {"objective": _objective(objective), "artifacts": _references(artifacts)}
+
+
+def _context(expected_context_version, objective, artifacts):
+    if not isinstance(expected_context_version, int) or isinstance(expected_context_version, bool) or expected_context_version < 1:
+        raise ValueError("expected_context_version must be a positive integer")
+    body = {"expected_context_version": expected_context_version}
+    if objective is not None:
+        body["objective"] = _objective(objective)
+    if artifacts is not None:
+        body["artifacts"] = _references(artifacts)
+    return body
+
+
+def _input(source, objective, artifacts, self_contained):
     if source not in {"new_task", "external_artifact"}:
         raise ValueError("source must be new_task or external_artifact")
-    if objective is not None and (not isinstance(objective, str) or not objective.strip() or len(objective) > 20_000):
-        raise ValueError("objective must be nonempty text of at most 20,000 characters")
+    if objective is not None:
+        _objective(objective)
     artifacts = artifacts if artifacts is not None else []
     if not isinstance(artifacts, list) or len(artifacts) > 100:
         raise ValueError("artifacts must contain at most 100 references")
@@ -93,7 +121,7 @@ def _task(source, objective, artifacts, self_contained):
     for artifact in artifacts:
         if isinstance(artifact, str) and artifact:
             roles.append("original_input" if source == "new_task" else "submitted_output")
-        elif isinstance(artifact, dict) and isinstance(artifact.get("artifact_id"), str) and artifact["artifact_id"] and artifact.get("role") in _ROLES:
+        elif isinstance(artifact, dict) and isinstance(artifact.get("artifact_id"), str) and artifact["artifact_id"] and artifact.get("role") in _INPUT_ROLES:
             roles.append(artifact["role"])
         else:
             raise ValueError("invalid artifact reference or role")
@@ -107,21 +135,11 @@ def _task(source, objective, artifacts, self_contained):
         raise ValueError("one artifact cannot be both original_input and submitted_output")
     if self_contained is not None and not isinstance(self_contained, bool):
         raise ValueError("self_contained must be a boolean")
-    body = {"source": source, "artifacts": artifacts}
+    body = {"artifacts": artifacts}
     if objective is not None:
         body["objective"] = objective
     if self_contained is not None:
         body["self_contained"] = self_contained
-    return body
-
-
-def _context(expected_context_version, objective, artifacts, self_contained):
-    if not isinstance(expected_context_version, int) or isinstance(expected_context_version, bool) or expected_context_version < 1:
-        raise ValueError("expected_context_version must be a positive integer")
-    body = {"expected_context_version": expected_context_version}
-    for field, value in (("objective", objective), ("artifacts", artifacts), ("self_contained", self_contained)):
-        if value is not None:
-            body[field] = value
     return body
 
 
@@ -134,21 +152,22 @@ def _positive(value, name):
     return value
 
 
-def _recipe_upload(recipe_id, version, recipe, base_version):
+def _recipe_upload(recipe_id, version, recipe, previous_version):
     if not isinstance(recipe_id, str) or not _RECIPE_ID.fullmatch(recipe_id):
         raise ValueError("recipe_id must be 1-128 letters, digits, '_' or '-'")
     if not isinstance(recipe, dict):
         raise ValueError("recipe must be an object")
-    body = {"version": _positive(version, "version")}
-    if base_version is not None:
-        body["base_version"] = _positive(base_version, "base_version")
+    _positive(version, "version")
+    body = {}
+    if previous_version is not None:
+        body["previous_version"] = _positive(previous_version, "previous_version")
     body["recipe"] = recipe
     return body
 
 
 def _recipe_path(recipe_id, version):
     suffix = "?" + urlencode({"version": _positive(version, "version")}) if version is not None else ""
-    return f"/v1/recipes/{path_part(recipe_id)}" + suffix
+    return f"/recipes/{path_part(recipe_id)}" + suffix
 
 
 def _recipes_list_path(limit, cursor, origin):
@@ -163,7 +182,7 @@ def _recipes_list_path(limit, cursor, origin):
         if origin not in ("uploaded", "generated"):
             raise ValueError("origin must be uploaded or generated")
         params["origin"] = origin
-    return "/v1/recipes?" + urlencode(params)
+    return "/recipes?" + urlencode(params)
 
 
 def _recipes_search_path(query, limit):
@@ -171,7 +190,7 @@ def _recipes_search_path(query, limit):
         raise ValueError("query must be 1-1000 characters")
     if type(limit) is not int or not 1 <= limit <= 50:
         raise ValueError("limit must be an integer from 1 to 50")
-    return "/v1/recipes?" + urlencode({"q": query, "limit": limit})
+    return "/recipes?" + urlencode({"q": query, "limit": limit})
 
 
 def _result(request_sha256, outcome, artifacts, events, trace_coverage):
@@ -199,67 +218,144 @@ def _result(request_sha256, outcome, artifacts, events, trace_coverage):
     return body
 
 
-class AsyncWorkflowAtoms:
-    async def wait_workflow_job(self, kind, job_id, *, timeout=300):
-        """Bounded polling of an existing job ID; never creates or resumes a job.
+def _execution_start(task_id, source, objective, artifacts, self_contained, recipe_id, model, recall_memory,
+                     previous_execution_id):
+    data = _model_data(model)
+    if type(recall_memory) is not bool:
+        raise ValueError('recall_memory must be boolean')
+    if task_id is not None:
+        path_part(task_id)
+        data['task_id'] = task_id
+    if previous_execution_id is not None:
+        if (source is not None or objective is not None or artifacts is not None or self_contained is not None
+                or recipe_id is not None or recall_memory):
+            raise ValueError("a correction takes only previous_execution_id, task_id and model")
+        path_part(previous_execution_id)
+        data['previous_execution_id'] = previous_execution_id
+        return data
+    if task_id is None or source is None:
+        raise ValueError("a new execution needs task_id and source")
+    data['source'] = source
+    data['input'] = _input(source, objective, artifacts, self_contained)
+    if recall_memory:
+        data['recall_memory'] = True
+    if recipe_id is not None:
+        path_part(recipe_id)
+        data['recipe_id'] = recipe_id
+    return data
 
-        Returns the job once it leaves queued/running/awaiting_parent, and raises
-        ``RSICandidateFailed`` when it ended ``failed``.
+
+def _waited_learning(execution, execution_id):
+    """The learning when waiting is over, None while it is in flight; raises on failure or a stop."""
+    learning = execution.get("learning")
+    if not isinstance(learning, dict):
+        raise RSIRecoveryRequired(f"Execution {execution_id} has no learning; call learn first")
+    status = learning.get("status")
+    request_id = getattr(execution, "request_id", None)
+    if status == "completed":
+        return learning
+    if status == "failed":
+        raise RSILearningFailed.from_learning(learning, request_id=request_id)
+    if status in _LEARNING_STOPPED:
+        raise RSILearningStopped(learning, request_id=request_id)
+    if status not in _LEARNING_IN_FLIGHT:
+        raise RSIRecoveryRequired(f"Unexpected learning status: {status}")
+    return None
+
+
+class AsyncWorkflowAtoms:
+    async def get_artifact(self, artifact_id):
+        return await self._http.request("GET", f"/artifacts/{path_part(artifact_id)}")
+
+    async def create_task(self, *, key, objective, artifacts=None):
+        return await self._http.request("POST", "/tasks", body=_task(objective, artifacts), key=stable_key(key))
+
+    async def get_task(self, task_id):
+        return await self._http.request("GET", f"/tasks/{path_part(task_id)}")
+
+    async def list_tasks(self, *, limit=20, cursor=None):
+        return await self._http.request('GET', '/tasks?'+urlencode({'limit':limit, **({'cursor':cursor} if cursor else {})}))
+
+    async def supplement_task_context(self, task_id, *, expected_context_version, objective=None, artifacts=None):
+        return await self._http.request("POST", f"/tasks/{path_part(task_id)}/context",
+                                        body=_context(expected_context_version, objective, artifacts))
+
+    async def start_execution(self, task_id=None, *, key, source=None, objective=None, artifacts=None,
+                              self_contained=None, recipe_id=None, model=None, recall_memory=False,
+                              previous_execution_id=None):
+        """Start a new execution of a task with its own input; with ``previous_execution_id`` a correction."""
+        key = stable_key(key)
+        body = _execution_start(task_id, source, objective, artifacts, self_contained, recipe_id, model, recall_memory,
+                                previous_execution_id)
+        return await self._http.request("POST", "/executions", body=body, key=key)
+
+    async def get_execution(self, execution_id):
+        return await self._http.request("GET", f"/executions/{path_part(execution_id)}")
+
+    async def submit_execution(self, execution_id, *, request_sha256, outcome, artifacts, events=None, trace_coverage="unknown"):
+        return await self._http.request("POST", f"/executions/{path_part(execution_id)}/result",
+                                        body=_result(request_sha256, outcome, artifacts, events if events is not None else [], trace_coverage))
+
+    async def record_feedback(self, execution_id, *, feedback, source, key):
+        return await self._http.request('POST', f'/executions/{path_part(execution_id)}/feedback',
+                                        body={'feedback':feedback, 'source':feedback_source(source)}, key=stable_key(key))
+
+    async def learn(self, execution_id, *, model=None, max_completion_tokens=None, web_search=None,
+                    web_search_blocked_domains=()):
+        """Learn a Recipe version from a confirmed execution; repeat calls return the same learning.
+
+        ``web_search`` omitted takes the service default (on when the service has a search provider);
+        ``False`` opts out. ``web_search_blocked_domains`` adds hostnames whose pages are dropped from the
+        results; the service freezes them lowercased, deduplicated and sorted. The setting is frozen on the
+        learning and resume reuses it. A repeat call compares only the web fields it gives, blocked hosts as a
+        set; an empty list counts as not given, and against a learning frozen with search off, hosts count only when
+        the request would search (on a service with no provider a repeat that lists hosts returns the same learning). A different setting gets a 422 while the learning is active, ``completed`` or ``awaiting_material``,
+        and re-queues a ``failed``, ``interrupted`` or ``awaiting_runner`` learning with the new setting, dropping
+        the sources frozen under the old one; like ``resume_learning``, it may move behind a newer version and take
+        a new version number.
         """
-        getter = _job_getter(self, kind)
-        deadline = asyncio.get_running_loop().time() + _job_timeout(timeout)
+        return await self._http.request("POST", f"/executions/{path_part(execution_id)}/learn",
+                                        body=_recipe_data(model, max_completion_tokens, web_search,
+                                                          web_search_blocked_domains) or {})
+
+    async def resume_learning(self, execution_id, *, model=None, max_completion_tokens=None):
+        """Retry a ``failed``, ``interrupted`` or ``awaiting_runner`` learning, optionally with a new budget.
+
+        A learning that is active or ``completed`` comes back unchanged; asking it for a
+        different ``max_completion_tokens`` then gets a 422. An execution that has not
+        learned yet, or whose learning is ``awaiting_material``, also gets a 422.
+        """
+        return await self._http.request("POST", f"/executions/{path_part(execution_id)}/resume",
+                                        body=_recipe_data(model, max_completion_tokens) or None)
+
+    async def wait_learning(self, execution_id, *, timeout=300):
+        """Poll the execution until its learning is ``completed`` and return the learning.
+
+        Raises ``RSILearningFailed`` on ``failed``, ``RSILearningStopped`` on
+        ``interrupted``, ``awaiting_runner`` or ``awaiting_material``, and
+        ``TimeoutError`` while it is still in flight; never starts or resumes learning.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _job_timeout(timeout)
         delay = 2.0
         while True:
-            job = await getter(job_id)
-            status = job.get("status")
-            if status not in _JOB_STATES[kind]:
-                raise RSIRecoveryRequired(f"Unexpected workflow {kind} status: {status}")
-            if status == "failed":
-                raise RSICandidateFailed.from_candidate(job)
-            if status not in {"queued", "running", "awaiting_parent"}:
-                return job
-            remaining = deadline - asyncio.get_running_loop().time()
+            execution = await self.get_execution(execution_id)
+            learning = _waited_learning(execution, execution_id)
+            if learning is not None:
+                return learning
+            remaining = deadline - loop.time()
             if remaining <= 0:
-                raise TimeoutError(f"Workflow {kind} {job_id} is still {status}; resume polling the same ID")
+                raise TimeoutError(f"Learning for execution {execution_id} is still {execution['learning']['status']}; call wait_learning again")
             await asyncio.sleep(min(delay, remaining))
             delay = min(delay * 2, 30.0)
 
-    async def get_artifact(self, artifact_id):
-        return await self._http.request("GET", f"/v1/artifacts/{path_part(artifact_id)}")
-
-    async def create_task(self, *, source, key, objective=None, artifacts=None, self_contained=None):
-        return await self._http.request("POST", "/v1/tasks", body=_task(source, objective, artifacts, self_contained), key=stable_key(key))
-
-    async def get_task(self, task_id):
-        return await self._http.request("GET", f"/v1/tasks/{path_part(task_id)}")
-
-    async def supplement_task_context(self, task_id, *, expected_context_version, objective=None, artifacts=None, self_contained=None):
-        return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/context",
-                                        body=_context(expected_context_version, objective, artifacts, self_contained))
-
-
-    async def start_execution(self, task_id, *, key, recipe_id=None, model=None, recall_memory=False):
-        data = _model_data(model)
-        if type(recall_memory) is not bool:
-            raise ValueError('recall_memory must be boolean')
-        if recall_memory:
-            data['recall_memory'] = True
-        if recipe_id is not None:
-            path_part(recipe_id)
-            data['recipe_id'] = recipe_id
-        options = {'body': data} if data else {}
-        return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/executions", key=stable_key(key), **options)
-
-    async def get_task_recipe(self, task_id):
-        return await self._http.request('GET', f'/v1/tasks/{path_part(task_id)}/recipe')
-
     async def get_recipe_versions(self, recipe_id):
-        return await self._http.request('GET', f'/v1/recipe-chains/{path_part(recipe_id)}/versions')
+        return await self._http.request('GET', f'/recipes/{path_part(recipe_id)}/versions')
 
-    async def upload_recipe(self, recipe_id, *, version, recipe, base_version=None):
-        """Store a Recipe version learned outside the service; ``base_version`` is the version it was built on."""
-        body = _recipe_upload(recipe_id, version, recipe, base_version)
-        return await self._http.request("POST", f"/v1/recipes/{path_part(recipe_id)}", body=body)
+    async def upload_recipe(self, recipe_id, *, version, recipe, previous_version=None):
+        """Store a Recipe version learned outside the service; ``previous_version`` is the version it was built on."""
+        body = _recipe_upload(recipe_id, version, recipe, previous_version)
+        return await self._http.request("PUT", f"/recipes/{path_part(recipe_id)}/versions/{version}", body=body)
 
     async def get_recipe(self, recipe_id, *, version=None):
         return await self._http.request("GET", _recipe_path(recipe_id, version))
@@ -271,123 +367,82 @@ class AsyncWorkflowAtoms:
         return await self._http.request("GET", _recipes_search_path(query, limit))
 
 
-    async def get_execution(self, execution_id):
-        return await self._http.request("GET", f"/v1/executions/{path_part(execution_id)}")
-
-    async def submit_execution(self, execution_id, *, request_sha256, outcome, artifacts, events=None, trace_coverage="unknown"):
-        return await self._http.request("POST", f"/v1/executions/{path_part(execution_id)}/result",
-                                        body=_result(request_sha256, outcome, artifacts, events if events is not None else [], trace_coverage))
-
-    async def get_revision(self, revision_id):
-        return await self._http.request("GET", f"/v1/revisions/{path_part(revision_id)}")
-
-
-    async def start_revision(self, revision_id, *, key):
-        return await self._http.request("POST", f"/v1/revisions/{path_part(revision_id)}/revisions",
-                                        body={"data": {}}, key=stable_key(key))
-
-
-    async def start_recipe_candidate(self, task_id, *, revision_id, key=None, model=None, max_completion_tokens=None,
-                                     web_search=None, web_search_blocked_domains=()):
-        """Create or update the Recipe from a confirmed revision.
-
-        Without ``key`` the request key is derived from task, revision, budget and web search setting,
-        so repeated calls for the same revision return the same candidate. ``web_search`` omitted takes the
-        service default (on when the service has a search provider); ``False`` opts out.
-        ``web_search_blocked_domains`` adds hostnames whose pages are dropped from the results.
-        """
-        data = _recipe_data(model, max_completion_tokens, web_search, web_search_blocked_domains)
-        data.update(revision_id=revision_id)
-        key = recipe_request_key(task_id, revision_id, max_completion_tokens, web_search=web_search,
-                                 web_search_blocked_domains=web_search_blocked_domains) if key is None else key
-        return await self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/recipe-candidates",
-                                        body={"data": data}, key=stable_key(key))
-
-    async def get_recipe_candidate(self, recipe_id):
-        return await self._http.request("GET", f"/v1/recipe-candidates/{path_part(recipe_id)}")
-
-    async def resume_recipe_candidate(self, recipe_id, *, model=None, max_completion_tokens=None):
-        data = _recipe_data(model, max_completion_tokens)
-        return await self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/resume", body={"data": data} if data else None)
-
-    async def list_tasks(self, *, limit=20, cursor=None):
-        from urllib.parse import urlencode
-        return await self._http.request('GET', '/v1/tasks?'+urlencode({'limit':limit, **({'cursor':cursor} if cursor else {})}))
-
-    async def record_feedback(self, revision_id, *, feedback, source, key):
-        return await self._http.request('POST', f'/v1/revisions/{path_part(revision_id)}/feedback',
-                                        body={'feedback':feedback, 'source':feedback_source(source)}, key=stable_key(key))
-
-    async def start_session(self, *, session_id=None):
-        return await self._http.request('POST', '/v1/sessions/start', body={'session_id':session_id} if session_id else {})
-
-    async def append_session_events(self, session_id, events):
-        return await self._http.request('POST', f'/v1/sessions/{path_part(session_id)}/events', body={'events':events})
-
-    async def get_session_context(self, session_id, *, after=0):
-        return await self._http.request('GET', f'/v1/sessions/{path_part(session_id)}/context?after={after}')
-
-    async def end_session(self, session_id):
-        return await self._http.request('POST', f'/v1/sessions/{path_part(session_id)}/end')
-
-
 class SyncWorkflowAtoms:
     """Synchronous counterpart for hosts that already own a sync execution loop."""
 
-    def wait_workflow_job(self, kind, job_id, *, timeout=300):
-        getter = _job_getter(self, kind)
+    def get_artifact(self, artifact_id):
+        return self._http.request("GET", f"/artifacts/{path_part(artifact_id)}")
+
+    def create_task(self, *, key, objective, artifacts=None):
+        return self._http.request("POST", "/tasks", body=_task(objective, artifacts), key=stable_key(key))
+
+    def get_task(self, task_id):
+        return self._http.request("GET", f"/tasks/{path_part(task_id)}")
+
+    def list_tasks(self, *, limit=20, cursor=None):
+        return self._http.request('GET', '/tasks?'+urlencode({'limit':limit, **({'cursor':cursor} if cursor else {})}))
+
+    def supplement_task_context(self, task_id, *, expected_context_version, objective=None, artifacts=None):
+        return self._http.request("POST", f"/tasks/{path_part(task_id)}/context",
+                                  body=_context(expected_context_version, objective, artifacts))
+
+    def start_execution(self, task_id=None, *, key, source=None, objective=None, artifacts=None,
+                        self_contained=None, recipe_id=None, model=None, recall_memory=False,
+                        previous_execution_id=None):
+        """Start a new execution of a task with its own input; with ``previous_execution_id`` a correction."""
+        key = stable_key(key)
+        body = _execution_start(task_id, source, objective, artifacts, self_contained, recipe_id, model, recall_memory,
+                                previous_execution_id)
+        return self._http.request("POST", "/executions", body=body, key=key)
+
+    def get_execution(self, execution_id):
+        return self._http.request("GET", f"/executions/{path_part(execution_id)}")
+
+    def submit_execution(self, execution_id, *, request_sha256, outcome, artifacts, events=None, trace_coverage="unknown"):
+        return self._http.request("POST", f"/executions/{path_part(execution_id)}/result",
+                                  body=_result(request_sha256, outcome, artifacts, events if events is not None else [], trace_coverage))
+
+    def record_feedback(self, execution_id, *, feedback, source, key):
+        return self._http.request('POST', f'/executions/{path_part(execution_id)}/feedback',
+                                  body={'feedback':feedback, 'source':feedback_source(source)}, key=stable_key(key))
+
+    def learn(self, execution_id, *, model=None, max_completion_tokens=None, web_search=None,
+              web_search_blocked_domains=()):
+        """Learn a Recipe version from a confirmed execution; see the async form for web search.
+
+        Against a learning frozen with search off, blocked hosts count only when the request would search (on a
+        service with no provider a repeat that lists hosts returns the same learning); an empty list counts as not
+        given.
+        """
+        return self._http.request("POST", f"/executions/{path_part(execution_id)}/learn",
+                                  body=_recipe_data(model, max_completion_tokens, web_search,
+                                                    web_search_blocked_domains) or {})
+
+    def resume_learning(self, execution_id, *, model=None, max_completion_tokens=None):
+        """Retry a failed, interrupted or awaiting_runner learning; see the async form for the 422 cases."""
+        return self._http.request("POST", f"/executions/{path_part(execution_id)}/resume",
+                                  body=_recipe_data(model, max_completion_tokens) or None)
+
+    def wait_learning(self, execution_id, *, timeout=300):
         deadline = time.monotonic() + _job_timeout(timeout)
         delay = 2.0
         while True:
-            job = getter(job_id)
-            status = job.get("status")
-            if status not in _JOB_STATES[kind]:
-                raise RSIRecoveryRequired(f"Unexpected workflow {kind} status: {status}")
-            if status == "failed":
-                raise RSICandidateFailed.from_candidate(job)
-            if status not in {"queued", "running", "awaiting_parent"}:
-                return job
+            execution = self.get_execution(execution_id)
+            learning = _waited_learning(execution, execution_id)
+            if learning is not None:
+                return learning
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(f"Workflow {kind} {job_id} is still {status}; resume polling the same ID")
+                raise TimeoutError(f"Learning for execution {execution_id} is still {execution['learning']['status']}; call wait_learning again")
             time.sleep(min(delay, remaining))
             delay = min(delay * 2, 30.0)
 
-    def get_artifact(self, artifact_id):
-        return self._http.request("GET", f"/v1/artifacts/{path_part(artifact_id)}")
-
-    def create_task(self, *, source, key, objective=None, artifacts=None, self_contained=None):
-        return self._http.request("POST", "/v1/tasks", body=_task(source, objective, artifacts, self_contained), key=stable_key(key))
-
-    def get_task(self, task_id):
-        return self._http.request("GET", f"/v1/tasks/{path_part(task_id)}")
-
-    def supplement_task_context(self, task_id, *, expected_context_version, objective=None, artifacts=None, self_contained=None):
-        return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/context",
-                                  body=_context(expected_context_version, objective, artifacts, self_contained))
-
-
-    def start_execution(self, task_id, *, key, recipe_id=None, model=None, recall_memory=False):
-        data = _model_data(model)
-        if type(recall_memory) is not bool:
-            raise ValueError('recall_memory must be boolean')
-        if recall_memory:
-            data['recall_memory'] = True
-        if recipe_id is not None:
-            path_part(recipe_id)
-            data['recipe_id'] = recipe_id
-        options = {'body': data} if data else {}
-        return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/executions", key=stable_key(key), **options)
-
-    def get_task_recipe(self, task_id):
-        return self._http.request('GET', f'/v1/tasks/{path_part(task_id)}/recipe')
-
     def get_recipe_versions(self, recipe_id):
-        return self._http.request('GET', f'/v1/recipe-chains/{path_part(recipe_id)}/versions')
+        return self._http.request('GET', f'/recipes/{path_part(recipe_id)}/versions')
 
-    def upload_recipe(self, recipe_id, *, version, recipe, base_version=None):
-        body = _recipe_upload(recipe_id, version, recipe, base_version)
-        return self._http.request("POST", f"/v1/recipes/{path_part(recipe_id)}", body=body)
+    def upload_recipe(self, recipe_id, *, version, recipe, previous_version=None):
+        body = _recipe_upload(recipe_id, version, recipe, previous_version)
+        return self._http.request("PUT", f"/recipes/{path_part(recipe_id)}/versions/{version}", body=body)
 
     def get_recipe(self, recipe_id, *, version=None):
         return self._http.request("GET", _recipe_path(recipe_id, version))
@@ -397,56 +452,3 @@ class SyncWorkflowAtoms:
 
     def search_recipes(self, query, *, limit=10):
         return self._http.request("GET", _recipes_search_path(query, limit))
-
-
-    def get_execution(self, execution_id):
-        return self._http.request("GET", f"/v1/executions/{path_part(execution_id)}")
-
-    def submit_execution(self, execution_id, *, request_sha256, outcome, artifacts, events=None, trace_coverage="unknown"):
-        return self._http.request("POST", f"/v1/executions/{path_part(execution_id)}/result",
-                                  body=_result(request_sha256, outcome, artifacts, events if events is not None else [], trace_coverage))
-
-    def get_revision(self, revision_id):
-        return self._http.request("GET", f"/v1/revisions/{path_part(revision_id)}")
-
-
-    def start_revision(self, revision_id, *, key):
-        return self._http.request("POST", f"/v1/revisions/{path_part(revision_id)}/revisions",
-                                  body={"data": {}}, key=stable_key(key))
-
-
-    def start_recipe_candidate(self, task_id, *, revision_id, key=None, model=None, max_completion_tokens=None,
-                               web_search=None, web_search_blocked_domains=()):
-        data = _recipe_data(model, max_completion_tokens, web_search, web_search_blocked_domains)
-        data.update(revision_id=revision_id)
-        key = recipe_request_key(task_id, revision_id, max_completion_tokens, web_search=web_search,
-                                 web_search_blocked_domains=web_search_blocked_domains) if key is None else key
-        return self._http.request("POST", f"/v1/tasks/{path_part(task_id)}/recipe-candidates",
-                                  body={"data": data}, key=stable_key(key))
-
-    def get_recipe_candidate(self, recipe_id):
-        return self._http.request("GET", f"/v1/recipe-candidates/{path_part(recipe_id)}")
-
-    def resume_recipe_candidate(self, recipe_id, *, model=None, max_completion_tokens=None):
-        data = _recipe_data(model, max_completion_tokens)
-        return self._http.request("POST", f"/v1/recipe-candidates/{path_part(recipe_id)}/resume", body={"data": data} if data else None)
-
-    def list_tasks(self, *, limit=20, cursor=None):
-        from urllib.parse import urlencode
-        return self._http.request('GET', '/v1/tasks?'+urlencode({'limit':limit, **({'cursor':cursor} if cursor else {})}))
-
-    def record_feedback(self, revision_id, *, feedback, source, key):
-        return self._http.request('POST', f'/v1/revisions/{path_part(revision_id)}/feedback',
-                                  body={'feedback':feedback, 'source':feedback_source(source)}, key=stable_key(key))
-
-    def start_session(self, *, session_id=None):
-        return self._http.request('POST', '/v1/sessions/start', body={'session_id':session_id} if session_id else {})
-
-    def append_session_events(self, session_id, events):
-        return self._http.request('POST', f'/v1/sessions/{path_part(session_id)}/events', body={'events':events})
-
-    def get_session_context(self, session_id, *, after=0):
-        return self._http.request('GET', f'/v1/sessions/{path_part(session_id)}/context?after={after}')
-
-    def end_session(self, session_id):
-        return self._http.request('POST', f'/v1/sessions/{path_part(session_id)}/end')

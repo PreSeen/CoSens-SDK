@@ -1,4 +1,4 @@
-/** 16 request-boundary regressions. Only the external HTTP peer is replaced. */
+/** 15 request-boundary regressions. Only the external HTTP peer is replaced. */
 import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import { CoSensClient, RSIHTTPError, RSITransportError } from '../src/index.ts';
@@ -18,30 +18,30 @@ function sdk(t: TestContext, options: { status?: number; payload?: unknown; raw?
 
 test('R01 maximum length key and manual replay keep identical requests', async t => {
   const { a, seen } = sdk(t, { payload: { task_id: 'task-1' } });
-  for (let i = 0; i < 2; i++) assert.equal((await a.createTask({ source: 'new_task', objective: '整理资料', key: 'k'.repeat(256) })).task_id, 'task-1');
+  for (let i = 0; i < 2; i++) assert.equal((await a.createTask({ objective: '整理资料', key: 'k'.repeat(256) })).task_id, 'task-1');
   assert.equal(seen.length, 2);
   const bodies = await Promise.all(seen.map(r => r.text()));
   assert.equal(bodies[0], bodies[1]);
-  assert.deepEqual(JSON.parse(bodies[0]!), { source: 'new_task', objective: '整理资料', artifacts: [] });
+  assert.deepEqual(JSON.parse(bodies[0]!), { objective: '整理资料', artifacts: [] });
   assert.ok(seen.every(r => r.headers.get('idempotency-key') === 'k'.repeat(256)));
 });
 
 test('R02 oversized key is rejected before sending', async t => {
   const { a, seen } = sdk(t);
-  await assert.rejects(async () => a.startExecution('task-1', { key: 'k'.repeat(257) }), /key/);
+  await assert.rejects(async () => a.startExecution('task-1', { key: 'k'.repeat(257), source: 'new_task', objective: '整理资料' }), /key/);
   assert.equal(seen.length, 0);
 });
 
-test('R03 empty generation keys are rejected before sending',async t=>{
+test('R03 empty feedback keys are rejected before sending',async t=>{
  const {a,seen}=sdk(t);
- await assert.rejects(async()=>a.startRecipeCandidate('task',{revisionId:'revision',key:''}),/key/);
+ await assert.rejects(async()=>a.recordFeedback('execution-1',{feedback:'f',source:'human',key:''}),/key/);
  assert.equal(seen.length,0);
 });
 
 test('R04 control characters in keys are rejected before sending', async t => {
   const { a, seen } = sdk(t);
   for (const key of ['safe\r\nX-Injected: yes', 'nul\x00key', 'del\x7fkey']) {
-    await assert.rejects(async () => a.startExecution('task-1', { key }), TypeError);
+    await assert.rejects(async () => a.startExecution('task-1', { key, source: 'new_task', objective: '整理资料' }), TypeError);
   }
   assert.equal(seen.length, 0);
 });
@@ -56,9 +56,9 @@ test('R05 memory request key stays in JSON and preserves false and zero', async 
 
 test('R06 key does not leak into following read request', async t => {
   const { a, seen } = sdk(t);
-  await a.startExecution('task-1', { key: 'execution-key' });
+  await a.startExecution('task-1', { key: 'execution-key', source: 'new_task', objective: '整理资料' });
   await a.getTask('task-1');
-  await a.getRevision('revision-1');
+  await a.getExecution('execution-1');
   assert.equal(seen.length, 3);
   assert.equal(seen[0]!.headers.get('idempotency-key'), 'execution-key');
   assert.ok(seen.slice(1).every(r => r.headers.get('idempotency-key') === null));
@@ -67,7 +67,7 @@ test('R06 key does not leak into following read request', async t => {
 
 test('R07 conflict preserves diagnostics and is not retried', async t => {
   const { a, seen } = sdk(t, { status: 409, payload: { error: { code: 'idempotency_conflict', message: 'request body changed' } }, headers: { 'x-request-id': 'request-409' } });
-  await assert.rejects(a.startExecution('task-1', { key: 'conflict-key' }), (error: unknown) => {
+  await assert.rejects(a.startExecution('task-1', { key: 'conflict-key', source: 'new_task', objective: '整理资料' }), (error: unknown) => {
     assert.ok(error instanceof RSIHTTPError);
     assert.deepEqual([error.statusCode, error.code, error.requestId, error.message], [409, 'idempotency_conflict', 'request-409', 'request body changed']);
     return true;
@@ -91,7 +91,7 @@ test('R07 conflict preserves diagnostics and is not retried', async t => {
 
 test('R08 rate limit does not trigger automatic mutation retry', async t => {
   const { a, seen } = sdk(t, { status: 429, payload: { detail: 'rate limited' }, headers: { 'retry-after': '0' } });
-  await assert.rejects(a.startExecution('task-1', { key: 'rate-key' }), (error: unknown) => {
+  await assert.rejects(a.startExecution('task-1', { key: 'rate-key', source: 'new_task', objective: '整理资料' }), (error: unknown) => {
     assert.ok(error instanceof RSIHTTPError); assert.equal(error.statusCode, 429); return true;
   });
   assert.equal(seen.length, 1);
@@ -139,8 +139,8 @@ test('R11 concurrent requests keep their own keys and bodies', { timeout: 3000 }
   } });
   t.after(() => client.close());
   const results = await Promise.all([
-    client.atoms.createTask({ source: 'new_task', objective: 'alpha', key: 'key-alpha' }),
-    client.atoms.createTask({ source: 'new_task', objective: 'beta', key: 'key-beta' }),
+    client.atoms.createTask({ objective: 'alpha', key: 'key-alpha' }),
+    client.atoms.createTask({ objective: 'beta', key: 'key-beta' }),
   ]);
   assert.deepEqual(results.map(r => r.objective), ['alpha', 'beta']);
   assert.deepEqual((await Promise.all(seen.map(async r => [r.headers.get('idempotency-key'), (await r.json()).objective]))).sort(), [['key-alpha', 'alpha'], ['key-beta', 'beta']]);
@@ -168,23 +168,12 @@ test('R14 reserved characters in resource ID remain one encoded segment', async 
   const { a, seen } = sdk(t);
   await a.getTask('a/b?c#d%2F');
   assert.equal(seen.length, 1);
-  assert.equal(new URL(seen[0]!.url).pathname, '/api/v1/tasks/a%2Fb%3Fc%23d%252F');
+  assert.equal(new URL(seen[0]!.url).pathname, '/api/tasks/a%2Fb%3Fc%23d%252F');
   assert.equal(new URL(seen[0]!.url).search, '');
 });
 
 test('R15 upload port zero is not treated as default HTTPS port', async t => {
   const { a, seen } = sdk(t);
   await assert.rejects(a.uploadDocumentToGrant({ ...GRANT, upload_url: 'https://rsi.cosens.ai:0/api/v1/document/uploads/regression_token' }, Buffer.from('x')), /upload target/);
-  assert.equal(seen.length, 0);
-});
-
-test('R16 unsupported workflow job kinds are rejected before sending', async t => {
-  const { a, seen } = sdk(t);
-  for (const kind of ['analysis', 'recipe', '', null, undefined, 1, {}]) {
-    // JavaScript callers and untyped input can bypass the literal TypeScript type.
-    await assert.rejects(a.waitWorkflowJob(kind as 'recipe_candidate', 'job-1'), {
-      name: 'TypeError', message: 'job kind must be recipe_candidate',
-    });
-  }
   assert.equal(seen.length, 0);
 });

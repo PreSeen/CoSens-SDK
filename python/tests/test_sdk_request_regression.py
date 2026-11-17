@@ -40,11 +40,11 @@ async def test_r01_max_length_key_and_manual_replay_keep_identical_request():
     for mode in MODES:
         async with sdk(mode, payload={"task_id": "task-1"}) as (call, seen):
             for _ in range(2):
-                result = await call("create_task", source="new_task", objective="整理资料", key="k" * 256)
+                result = await call("create_task", objective="整理资料", key="k" * 256)
                 assert result["task_id"] == "task-1"
             assert len(seen) == 2
             assert seen[0].content == seen[1].content
-            assert json.loads(seen[0].content) == {"source": "new_task", "objective": "整理资料", "artifacts": []}
+            assert json.loads(seen[0].content) == {"objective": "整理资料", "artifacts": []}
             assert all(r.headers["idempotency-key"] == "k" * 256 for r in seen)
 
 
@@ -56,11 +56,11 @@ async def test_r02_oversized_key_is_rejected_before_sending():
             assert not seen
 
 
-async def test_r03_empty_generation_key_is_rejected_before_sending():
+async def test_r03_empty_feedback_key_is_rejected_before_sending():
     for mode in MODES:
         async with sdk(mode) as (call, seen):
             with pytest.raises(ValueError, match='key'):
-                await call('start_recipe_candidate','task-1',revision_id='revision-1',key='')
+                await call('record_feedback','execution-1',feedback='f',source='human',key='')
             assert not seen
 
 
@@ -85,11 +85,13 @@ async def test_r05_memory_request_key_stays_in_json_and_preserves_false_and_zero
 async def test_r06_key_does_not_leak_into_following_read_request():
     for mode in MODES:
         async with sdk(mode) as (call, seen):
-            await call("start_execution", "task-1", key="execution-key")
+            await call("start_execution", "task-1", key="execution-key", source="new_task", objective="整理资料")
             await call("get_task", "task-1")
-            await call("get_revision", "revision-1")
+            await call("get_execution", "execution-1")
             assert len(seen) == 3
             assert seen[0].headers["idempotency-key"] == "execution-key"
+            assert json.loads(seen[0].content) == {"task_id": "task-1", "source": "new_task",
+                                                   "input": {"objective": "整理资料", "artifacts": []}}
             assert all("idempotency-key" not in r.headers for r in seen[1:])
             assert all(r.headers["authorization"] == f"Bearer {API_KEY}" and r.headers["x-auth-type"] == "api_key" for r in seen)
 
@@ -98,7 +100,7 @@ async def test_r07_conflict_preserves_diagnostics_and_is_not_retried():
     for mode in MODES:
         async with sdk(mode, status=409, payload={"error": {"code": "idempotency_conflict", "message": "request body changed"}}, headers={"x-request-id": "request-409"}) as (call, seen):
             with pytest.raises(RSIHTTPError) as caught:
-                await call("start_execution", "task-1", key="conflict-key")
+                await call("start_execution", "task-1", key="conflict-key", source="new_task", objective="整理资料")
             error = caught.value
             assert (error.status_code, error.code, error.request_id, str(error)) == (409, "idempotency_conflict", "request-409", "request body changed")
             assert len(seen) == 1
@@ -120,7 +122,7 @@ async def test_r08_rate_limit_does_not_trigger_automatic_mutation_retry():
     for mode in MODES:
         async with sdk(mode, status=429, payload={"detail": "rate limited"}, headers={"retry-after": "0"}) as (call, seen):
             with pytest.raises(RSIHTTPError) as caught:
-                await call("start_execution", "task-1", key="rate-key")
+                await call("start_execution", "task-1", key="rate-key", source="new_task", objective="整理资料")
             assert caught.value.status_code == 429
             assert len(seen) == 1
 
@@ -155,8 +157,8 @@ async def test_r11_concurrent_requests_keep_their_own_keys_and_bodies():
 
     async with CoSensClient(api_key=API_KEY, _http_transport=httpx.MockTransport(server)) as client:
         results = await asyncio.gather(
-            client.atoms.create_task(source="new_task", objective="alpha", key="key-alpha"),
-            client.atoms.create_task(source="new_task", objective="beta", key="key-beta"),
+            client.atoms.create_task(objective="alpha", key="key-alpha"),
+            client.atoms.create_task(objective="beta", key="key-beta"),
         )
     assert [r["objective"] for r in results] == ["alpha", "beta"]
     assert sorted((r.headers["idempotency-key"], json.loads(r.content)["objective"]) for r in seen) == [("key-alpha", "alpha"), ("key-beta", "beta")]
@@ -187,7 +189,7 @@ async def test_r14_reserved_characters_in_resource_id_remain_one_encoded_segment
         async with sdk(mode) as (call, seen):
             await call("get_task", "a/b?c#d%2F")
             assert len(seen) == 1
-            assert seen[0].url.raw_path == b"/api/v1/tasks/a%2Fb%3Fc%23d%252F"
+            assert seen[0].url.raw_path == b"/api/tasks/a%2Fb%3Fc%23d%252F"
 
 
 async def test_r15_upload_port_zero_is_not_treated_as_default_https_port():

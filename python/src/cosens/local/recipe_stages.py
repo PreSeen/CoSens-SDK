@@ -12,8 +12,8 @@ from .web_search import MAX_QUERIES, WebSearchUnavailable, freeze_sources
 
 EVIDENCE_REF = {
     "anyOf": [
-        {"type": "object", "additionalProperties": False, "required": ["revision_id", "event_id"],
-         "properties": {"revision_id": {"type": "string"}, "event_id": {"type": "string"}}},
+        {"type": "object", "additionalProperties": False, "required": ["execution_id", "event_id"],
+         "properties": {"execution_id": {"type": "string"}, "event_id": {"type": "string"}}},
         {"type": "object", "additionalProperties": False, "required": ["memory_item_id"],
          "properties": {"memory_item_id": {"type": "string", "minLength": 1}}},
         {"type": "object", "additionalProperties": False, "required": ["artifact_id"],
@@ -229,8 +229,10 @@ class StageResult:
 def evidence_index(context):
     history = context["history"]
     return EvidenceIndex(
-        events=frozenset((h["revision_id"], e["id"]) for h in history for e in h["events"]),
-        artifacts=frozenset(a["artifact_id"] for h in history for a in h["materials"] + h["outputs"]),
+        events=frozenset((h["execution_id"], e["id"]) for h in history for e in h["events"]),
+        # Evidence may also cite the task's reference material.
+        artifacts=frozenset(a["artifact_id"] for h in history for a in h["materials"] + h["outputs"])
+        | frozenset(a["artifact_id"] for a in context["task_materials"]),
         memories=frozenset(item["id"] for item in context["memory"].get("items", [])),
         feedback=frozenset(f["feedback_id"] for h in history for f in h.get("feedback", [])),
     )
@@ -245,7 +247,7 @@ def valid_evidence(ref, index):
         return ref["memory_item_id"] in index.memories
     if "feedback_id" in ref:
         return ref["feedback_id"] in index.feedback
-    return (ref.get("revision_id"), ref.get("event_id")) in index.events
+    return (ref.get("execution_id"), ref.get("event_id")) in index.events
 
 
 def with_parent_evidence(index, parent):
@@ -255,7 +257,7 @@ def with_parent_evidence(index, parent):
     items = parent["recipe"]["steps"] + parent["recipe"]["lessons"]
     refs = [ref for item in items for ref in item.get("evidence_refs", [])]  # an imported Recipe has none
     return EvidenceIndex(
-        events=index.events | {(ref.get("revision_id"), ref["event_id"]) for ref in refs if "event_id" in ref},
+        events=index.events | {(ref.get("execution_id"), ref["event_id"]) for ref in refs if "event_id" in ref},
         artifacts=index.artifacts | {ref["artifact_id"] for ref in refs if "artifact_id" in ref},
         memories=index.memories | {ref["memory_item_id"] for ref in refs if "memory_item_id" in ref},
         feedback=index.feedback | {ref["feedback_id"] for ref in refs if "feedback_id" in ref},
@@ -370,7 +372,7 @@ async def research_web(model, plan, context, parent, analysis):
     scope = {"title": parent["recipe"]["title"], "when": parent["recipe"]["when"]} if parent else None
     written = await validated_output(
         model, WEB_QUERY_INSTRUCTION, WEB_QUERY_SCHEMA,
-        {"role": "workflow_recipe_web_queries", "objective": context["history"][-1]["context"]["objective"],
+        {"role": "workflow_recipe_web_queries", "objective": context["history"][-1]["input"]["objective"],
          "attribution": analysis, "recipe_scope": scope},
         lambda value: None)
     queries = list(dict.fromkeys(q.strip() for q in written["queries"] if q.strip()))[:MAX_QUERIES]

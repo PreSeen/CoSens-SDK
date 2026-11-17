@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { resolveApiKey, resolveService, type Service } from './config.js';
 import { RSIHTTPError, RSITransportError } from './errors.js';
 
@@ -62,7 +61,12 @@ export class Transport {
       const error = typeof payload?.error === 'object' ? payload.error : undefined;
       const detail = typeof payload?.detail === 'object' && payload.detail !== null ? payload.detail : undefined;
       const code = error?.code ?? detail?.code;
-      throw new RSIHTTPError(response.status, redact(error?.message ?? detail?.message ?? payload?.detail ?? response.statusText), code == null ? undefined : redact(code), requestId);
+      const names = (field: string): string[] | undefined => {
+        const value = error?.[field] ?? detail?.[field];
+        return Array.isArray(value) && value.every(item => typeof item === 'string') ? value.map(redact) : undefined;
+      };
+      throw new RSIHTTPError(response.status, redact(error?.message ?? detail?.message ?? payload?.detail ?? response.statusText), code == null ? undefined : redact(code), requestId,
+        names('missing'), names('recipe_ids'));
     }
     // Expose x-request-id without changing the object's enumerable fields or JSON.
     if (payload && typeof payload === 'object' && !Array.isArray(payload) && !Object.hasOwn(payload, 'requestId')) {
@@ -76,17 +80,8 @@ export function pathPart(id: string): string {
   if (typeof id !== 'string' || !id || id === '.' || id === '..') throw new TypeError('resource ID must be a nonempty safe path segment');
   return encodeURIComponent(id);
 }
-export function requestKey(key: string): string {
+export function stableKey(key: string): string {
   if (typeof key !== 'string' || !key.trim() || key.length > 256 || /[\x00-\x1f\x7f]/.test(key)) throw new TypeError('key must be 1–256 characters without control characters');
   return key;
 }
 
-/**
- * Deterministic generation key: one candidate per revision and completion budget.
- * The Python SDK computes the same key.
- */
-export function recipeRequestKey(taskId: string, revisionId: string, maxCompletionTokens?: number, webSearch?: boolean, webSearchBlockedDomains: string[] = []): string {
-  const budget = maxCompletionTokens === undefined ? '' : String(maxCompletionTokens);
-  const web = webSearch === undefined && webSearchBlockedDomains.length === 0 ? '' : ':web=' + JSON.stringify([webSearch ?? null, webSearchBlockedDomains]);
-  return 'recipe-' + createHash('sha256').update(`recipe:${taskId}:${revisionId}:${budget}${web}`, 'utf8').digest('hex');
-}

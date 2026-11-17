@@ -1,13 +1,14 @@
 """Recipe candidates and version chains: creation, generation, failure and publication."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
 from uuid import uuid4
 
-from ..atoms_helpers import recipe_request_key, stable_key
-from ..errors import RSICandidateFailed, RSIError, RSIHTTPError
+from ..atoms_helpers import stable_key
+from ..errors import RSIError, RSIHTTPError
 from ..models import result
 from ..workflow_atoms import _RECIPE_ID, _job_timeout
 from .models import ModelUnavailable
@@ -18,6 +19,8 @@ from .store import canonical_json, fingerprint
 from .web_search import WebSearchUnavailable, validate_blocked_domains
 
 _IN_FLIGHT = ("queued", "awaiting_parent", "running")
+# A stopped candidate: resume retries it, and a start with a new web search setting runs it again with that setting.
+_RESUMABLE = ("failed", "interrupted")
 _LIST_STATES = {"queued", "awaiting_parent", "running", "awaiting_material", "candidate", "failed", "interrupted"}
 _STAGES = 3  # attribution, web research, generation
 _LOG = logging.getLogger("cosens.local")
@@ -25,6 +28,69 @@ PARENT_FAILED = {"code": "parent_failed", "message": "The Recipe this candidate 
                  "retryable": True, "phase": None, "upstream_status": None, "upstream_code": None}
 INTERRUPTED = {"code": "interrupted", "message": "The process generating this candidate stopped; resume to retry.",
                "retryable": True, "phase": None, "upstream_status": None, "upstream_code": None}
+
+
+def recipe_request_key(task_id, revision_id, max_completion_tokens=None, *, web_search=None, web_search_blocked_domains=()):
+    """Deterministic generation key: one candidate per revision, completion budget and web search setting.
+
+    Blocked domains are keyed in their normalised form, so reordered, repeated or upper-case hosts give the same key."""
+    budget = "" if max_completion_tokens is None else str(max_completion_tokens)
+    web = ""
+    if web_search is not None or web_search_blocked_domains:
+        blocked = validate_blocked_domains(web_search_blocked_domains)
+        web = ":web=" + json.dumps([web_search, blocked], separators=(",", ":"))
+    digest = hashlib.sha256(f"recipe:{task_id}:{revision_id}:{budget}{web}".encode("utf-8")).hexdigest()
+    return "recipe-" + digest
+
+
+def same_web_search(frozen, web_search, blocked_domains, *, searching):
+    """Whether a repeated start asks for the frozen web search setting; a field the request leaves out is not compared.
+
+    ``blocked_domains`` is the normalised list the request would freeze, or empty when the request gives none, and
+    ``searching`` is whether the request would search: its ``web_search``, else whether the ``LocalRSI`` has a
+    ``WebSearch``. Blocked hosts only matter while searching, so against a setting frozen with search off they ask for
+    something new only when the request itself would search, as on the service."""
+    if web_search is not None and web_search != (frozen is not None):
+        return False
+    if not blocked_domains:
+        return True
+    if frozen is None:
+        return not searching
+    return list(blocked_domains) == sorted(set(frozen.get("blocked_domains", [])))
+
+
+class RSICandidateFailed(RSIError):
+    """A local Recipe candidate ended in ``failed``.
+
+    ``code`` is the stable failure code; ``retryable`` is True when
+    ``resume_recipe_candidate`` may succeed and False when it will not.
+    """
+
+    def __init__(self, message, *, code, candidate_id=None, phase=None, retryable=None,
+                 upstream_status=None, upstream_code=None, request_id=None):
+        super().__init__(message)
+        self.code = code
+        self.candidate_id = candidate_id
+        self.phase = phase
+        self.retryable = retryable
+        self.upstream_status = upstream_status
+        self.upstream_code = upstream_code
+        self.request_id = request_id
+
+    @classmethod
+    def from_candidate(cls, candidate):
+        candidate_id = candidate.get("recipe_candidate_id")
+        detail = candidate.get("error_detail")
+        if isinstance(detail, dict):
+            code = detail.get("code") or candidate.get("error") or "failed"
+            message = detail.get("message") or code
+            return cls(f"Recipe candidate {candidate_id} failed: {message}", code=code, candidate_id=candidate_id,
+                       phase=detail.get("phase", candidate.get("phase")), retryable=detail.get("retryable"),
+                       upstream_status=detail.get("upstream_status"), upstream_code=detail.get("upstream_code"),
+                       request_id=getattr(candidate, "request_id", None))
+        code = candidate.get("error") or "failed"
+        return cls(f"Recipe candidate {candidate_id} failed: {code}", code=code, candidate_id=candidate_id,
+                   phase=candidate.get("phase"), request_id=getattr(candidate, "request_id", None))
 
 
 class ParentChanged(ValueError):
@@ -44,16 +110,58 @@ def _failure_detail(exc, phase):
         return {"code": "model_output_invalid", "retryable": True, **detail,
                 "message": f"Model output failed validation after {MODEL_OUTPUT_ATTEMPTS} attempts."}
     if isinstance(exc, ParentChanged):
-        return {"code": "parent_changed", "retryable": False, **detail,
-                "message": "The parent Recipe changed; generate a new candidate."}
+        return {"code": "parent_changed", "retryable": True, **detail,
+                "message": "The parent Recipe changed; resume to learn on the current version."}
     return {"code": "internal_error", "retryable": True, **detail, "message": "Recipe generation failed unexpectedly."}
 
 
 class LocalRecipeLifecycle:
     @staticmethod
-    def _head(db, task_id):
-        return db.execute("SELECT h.* FROM task_recipes t JOIN recipe_heads h ON h.recipe_id=t.recipe_id WHERE t.task_id=?",
-                          (task_id,)).fetchone()
+    def _task_heads(db, task_id):
+        """Every Recipe of the task; each Recipe belongs to exactly one task."""
+        return db.execute("SELECT h.* FROM task_recipes t JOIN recipe_heads h ON h.recipe_id=t.recipe_id WHERE t.task_id=? "
+                          "ORDER BY h.recipe_id", (task_id,)).fetchall()
+
+    def _execution_method(self, db, task_id, recipe_id=None):
+        """The method a new execution freezes: the named Recipe of this task, else the task's only usable Recipe."""
+        heads = self._task_heads(db, task_id)
+        if recipe_id is not None:
+            head = next((head for head in heads if head["recipe_id"] == recipe_id), None)
+            if head is None:
+                raise LookupError("Recipe not found in this task")
+            if not head["current_candidate_id"]:
+                raise ValueError("Recipe has no usable version yet")
+            return self._method(db, recipe_id)
+        if len(heads) > 1:
+            raise ValueError("the task has several Recipes; name one with recipe_id")
+        if heads and heads[0]["current_candidate_id"]:
+            return self._method(db, heads[0]["recipe_id"])
+        return None
+
+    def _correction_method(self, db, task_id, previous_request):
+        """A revision follows the current version of the Recipe the previous execution followed, else the task's only one.
+
+        A revision cannot name a Recipe, so with several the refusal does not ask for a recipe_id.
+        """
+        used = previous_request.get("method")
+        if used:
+            return self._method(db, used["recipe_id"])
+        if len(self._task_heads(db, task_id)) > 1:
+            raise ValueError("the previous execution followed no Recipe and the task has several")
+        return self._execution_method(db, task_id)
+
+    def _learning_head(self, db, task_id, request):
+        """The Recipe a learning adds a version to: the one the learned execution followed, else the task's only one."""
+        heads = self._task_heads(db, task_id)
+        used = request.get("method")
+        if used:
+            for head in heads:
+                if head["recipe_id"] == used["recipe_id"]:
+                    return head
+            raise ValueError("the execution followed a Recipe of another task")
+        if len(heads) > 1:
+            raise ValueError("the execution followed no Recipe and the task has several")
+        return heads[0] if heads else None
 
     @staticmethod
     def _lineage(db, candidate_id):
@@ -100,8 +208,7 @@ class LocalRecipeLifecycle:
         view = self._checked_view(db, self._candidate(db, head["current_candidate_id"]))
         return {k: view[k] for k in ("recipe_id", "recipe_candidate_id", "version", "recipe_sha256", "recipe")}
 
-    def _register_version(self, db, candidate_id, task_id):
-        head = self._head(db, task_id)
+    def _register_version(self, db, candidate_id, task_id, head):
         if head is None:
             recipe_id, parent, version = candidate_id, None, 1
             db.execute("INSERT INTO recipe_heads(recipe_id,current_candidate_id,latest_candidate_id) VALUES(?,NULL,?)",
@@ -135,8 +242,13 @@ class LocalRecipeLifecycle:
         recipe = json.loads(json.dumps(check_upload(view["recipe"]) if uploaded else upload_form(view["recipe"])))
         candidate_id = "recipe_candidate_" + uuid4().hex
         recipe_id, version = (view["recipe_id"], view["version"]) if uploaded else (candidate_id, 1)
-        if db.execute("SELECT 1 FROM recipe_heads WHERE recipe_id=?", (recipe_id,)).fetchone() is not None:
-            raise ValueError(f"Recipe {recipe_id} is already on this machine; start an execution with its recipe_id")
+        owner = db.execute("SELECT h.recipe_id,t.task_id FROM recipe_heads h LEFT JOIN task_recipes t ON t.recipe_id=h.recipe_id "
+                           "WHERE h.recipe_id=?", (recipe_id,)).fetchone()
+        if owner is not None:
+            raise ValueError(f"Recipe {recipe_id} is already on this machine, in task {owner['task_id']}; "
+                             "start an execution of that task with its recipe_id")
+        # An imported version keeps its own context shape: it was learned elsewhere, so it has no history or task
+        # materials, and no learning stage reads it; only its memory status and "initial" reach the candidate view.
         context = {"schema": "workflow-recipe-context-v2", "task_id": task_id, "history": [],
                    "memory": {"status": "not_requested", "items": []}, "initial": True,
                    "imported_from": {k: view[k] for k in ("recipe_id", "origin", "version")}}
@@ -149,6 +261,15 @@ class LocalRecipeLifecycle:
         db.execute("INSERT INTO recipe_versions VALUES(?,?,?,NULL)", (candidate_id, recipe_id, version))
         db.execute("INSERT INTO task_recipes VALUES(?,?)", (task_id, recipe_id))
 
+    @staticmethod
+    def _material(db, ref):
+        """An artifact a request froze, with its content; refuses one that is gone or changed."""
+        item = db.execute("SELECT content,content_hash FROM artifacts WHERE id=?", (ref["artifact_id"],)).fetchone()
+        if (item is None or item["content_hash"] != ref["content_hash"]
+                or item["content_hash"] != "sha256:" + fingerprint(item["content"])):
+            raise ValueError("historical artifact unavailable or changed")
+        return {**ref, "content": item["content"]}
+
     def _history(self, db, task_id, revision_id):
         history, current, seen = [], revision_id, set()
         while current:
@@ -160,78 +281,162 @@ class LocalRecipeLifecycle:
             if row is None:
                 raise LookupError("task revision history not found")
             execution, outcome = json.loads(row["request_json"]), json.loads(row["result_json"])
-
-            def material(ref):
-                item = db.execute("SELECT content,content_hash FROM artifacts WHERE id=?", (ref["artifact_id"],)).fetchone()
-                if (item is None or item["content_hash"] != ref["content_hash"]
-                        or item["content_hash"] != "sha256:" + fingerprint(item["content"])):
-                    raise ValueError("historical artifact unavailable or changed")
-                return {**ref, "content": item["content"]}
-
-            history.append({"task_id": task_id, "revision_id": current, "origin": row["kind"], "context": execution["context"],
-                            "materials": [material(ref) for ref in execution["context"]["artifacts"]],
-                            "outputs": [material(ref) for ref in outcome["artifacts"]], "events": outcome["events"],
-                            "trace_coverage": outcome["trace_coverage"], "feedback": self._revision_feedback(db, current)})
+            # The learning context names executions, as the service's does; a revision execution is a correction.
+            feedback = [{**{k: v for k, v in item.items() if k != "revision_id"}, "execution_id": row["execution_id"]}
+                        for item in self._revision_feedback(db, current)]
+            history.append({"task_id": task_id, "execution_id": row["execution_id"],
+                            "origin": "correction" if row["kind"] == "revision" else row["kind"], "input": execution["input"],
+                            "materials": [self._material(db, ref) for ref in execution["input"]["artifacts"]],
+                            "outputs": [self._material(db, ref) for ref in outcome["artifacts"]], "events": outcome["events"],
+                            "trace_coverage": outcome["trace_coverage"], "feedback": feedback})
             current = execution.get("base_revision_id")
         return list(reversed(history))
 
-    def _existing_candidate(self, db, task_id, revision_id, key, request_hash):
-        """Return the replayed or in-flight response; a second request for the same revision reuses that candidate."""
+    def _existing_candidate(self, db, task_id, revision_id, key, request_hash, web_search, blocked, web):
+        """Return the candidate a revision already has, as the service returns an execution's learning; None if none.
+
+        A revision learns once. A repeat compares only the web search fields it gives (see ``same_web_search``): a
+        different setting is refused while the candidate is in flight, finished or awaiting material, and runs a failed
+        or interrupted candidate again with ``web``, the setting this request freezes."""
         saved = self._store.replay(db, "recipe_candidate", key, request_hash)
-        if saved is not None:
-            return saved
         if db.execute("SELECT id FROM revisions WHERE id=? AND task_id=?", (revision_id, task_id)).fetchone() is None:
             raise LookupError("task revision not found")
-        placeholders = ",".join("?" * len(_IN_FLIGHT))
-        row = db.execute(f"SELECT id,state,context_sha FROM recipe_candidates WHERE task_id=? AND revision_id=? "
-                         f"AND state IN ({placeholders}) ORDER BY rowid DESC LIMIT 1", (task_id, revision_id, *_IN_FLIGHT)).fetchone()
+        row = db.execute("SELECT * FROM recipe_candidates WHERE task_id=? AND revision_id=? ORDER BY rowid DESC LIMIT 1",
+                         (task_id, revision_id)).fetchone()
         if row is None:
-            return None
+            return saved
+        context = json.loads(row["context_json"])
+        if not same_web_search(context.get("model_settings", {}).get("web_search"), web_search, blocked,
+                               searching=web is not None):
+            if row["state"] not in _RESUMABLE:
+                raise ValueError("this revision already learned with a different web search setting")
+            self._relearn(db, row, context, web)
+            row = self._candidate(db, row["id"])
         lineage = self._lineage(db, row["id"])
         response = {"recipe_candidate_id": row["id"], "revision_id": revision_id, "status": row["state"],
                     "context_sha256": row["context_sha"],
                     **{k: lineage[k] for k in ("recipe_id", "version", "parent_candidate_id")}}
-        self._store.remember(db, "recipe_candidate", key, request_hash, response)
+        if saved is None:
+            self._store.remember(db, "recipe_candidate", key, request_hash, response)
         return response
+
+    def _relearn(self, db, row, context, web):
+        """Run a stopped candidate again with a new web search setting; the sources frozen under the old one go with it."""
+        settings = context.pop("model_settings", {})
+        settings.pop("web_search", None)
+        if web is not None:
+            settings["web_search"] = web
+        if settings:
+            context["model_settings"] = settings
+        attribution = json.loads(row["attribution_json"]) if row["attribution_json"] else None
+        if attribution is not None:
+            attribution.pop("web", None)
+        db.execute("UPDATE recipe_candidates SET context_json=?,context_sha=?,attribution_json=? WHERE id=?",
+                   (canonical_json(context), fingerprint(context),
+                    canonical_json(attribution) if attribution is not None else None, row["id"]))
+        self._requeue_stopped(db, row["id"])
+
+    def _rebase_for_resume(self, db, candidate_id):
+        """Put a resuming candidate behind the newest version it can build on, numbered above that version, as the
+        service rebases a resumed learning.
+
+        Its frozen context holds only its own revision history and Memory; the parent is read when generation runs, so
+        moving the lineage is enough. It stays behind an in-flight parent, is left alone while one of its descendants is
+        in flight, and with no current or in-flight version keeps its lineage."""
+        lineage = self._lineage(db, candidate_id)
+        parent, latest = lineage["parent_candidate_id"], lineage["latest_candidate_id"]
+
+        def in_flight(other):
+            return other is not None and self._candidate(db, other)["state"] in _IN_FLIGHT
+
+        placeholders = ",".join("?" * len(_IN_FLIGHT))
+        if db.execute("WITH RECURSIVE descendants AS (SELECT candidate_id FROM recipe_versions WHERE parent_candidate_id=? "
+                      "UNION ALL SELECT v.candidate_id FROM recipe_versions v JOIN descendants d ON v.parent_candidate_id=d.candidate_id) "
+                      f"SELECT 1 FROM descendants d JOIN recipe_candidates c ON c.id=d.candidate_id WHERE c.state IN ({placeholders}) "
+                      "LIMIT 1", (candidate_id, *_IN_FLIGHT)).fetchone():
+            return
+        if in_flight(parent):
+            base = parent
+        elif latest != candidate_id and in_flight(latest):
+            base = latest
+        else:
+            base = lineage["current_candidate_id"]
+        if base is None:
+            return
+        base_version = db.execute("SELECT version FROM recipe_versions WHERE candidate_id=?", (base,)).fetchone()["version"]
+        if base == parent and lineage["version"] > base_version:
+            return
+        db.execute("UPDATE recipe_versions SET parent_candidate_id=?,"
+                   "version=(SELECT MAX(version)+1 FROM recipe_versions WHERE recipe_id=?) WHERE candidate_id=?",
+                   (base, lineage["recipe_id"], candidate_id))
+        db.execute("UPDATE recipe_heads SET latest_candidate_id=? WHERE recipe_id=?", (candidate_id, lineage["recipe_id"]))
+
+    def _requeue_stopped(self, db, candidate_id):
+        """Queue a failed or interrupted candidate again, rebased onto the newest version it can build on and behind its
+        parent when that is not finished; returns its state."""
+        self._rebase_for_resume(db, candidate_id)
+        parent_id = self._lineage(db, candidate_id)["parent_candidate_id"]
+        ready = parent_id is None or self._candidate(db, parent_id)["state"] == "candidate"
+        state = "queued" if ready else "awaiting_parent"
+        db.execute("UPDATE recipe_candidates SET state=?,phase='queued',error=NULL,lease_expires_at=NULL,"
+                   "generation=generation+1 WHERE id=?", (state, candidate_id))
+        return state
 
     async def start_recipe_candidate(self, task_id, *, revision_id, key=None, web_search=None, web_search_blocked_domains=()):
         """``web_search`` None searches when the ``LocalRSI`` has a ``web_search``; False never searches; True without
-        one fails the candidate with ``web_search_unavailable``."""
-        blocked = list(dict.fromkeys(self._web_blocked + validate_blocked_domains(web_search_blocked_domains)))
-        if blocked and web_search is False:
+        one fails the candidate with ``web_search_unavailable``.
+
+        The request's blocked domains are frozen lowercased, deduplicated and sorted; the instance blocklist is applied
+        when searching and is neither frozen nor compared, as the service's own blocklist. Blocked hosts count only
+        when searching: against a candidate frozen with search off they differ only when this request would search, so
+        without a ``WebSearch`` an identical repeat returns the candidate. A revision has one candidate: a repeat
+        returns it, raises ``ValueError`` when it asks for a different web search setting while that candidate
+        is in flight, finished or awaiting material, and runs a failed or interrupted one again with the new setting
+        through the resume path, which may rebase it onto a newer version with a new number.
+        ``resume_recipe_candidate`` keeps the frozen setting. ``web_search_blocked_domains`` None is the same as
+        omitting it."""
+        if web_search is not None and type(web_search) is not bool:
+            raise ValueError("web_search must be a boolean")
+        requested = validate_blocked_domains(web_search_blocked_domains or ())
+        if requested and web_search is False:
             raise ValueError("web_search_blocked_domains needs web search")
-        key = stable_key(recipe_request_key(task_id, revision_id, web_search=web_search, web_search_blocked_domains=blocked)
+        key = stable_key(recipe_request_key(task_id, revision_id, web_search=web_search, web_search_blocked_domains=requested)
                          if key is None else key)
         request_hash = fingerprint({"task_id": task_id, "revision_id": revision_id,
                                     **({"web_search": web_search} if web_search is not None else {}),
-                                    **({"web_search_blocked_domains": blocked} if blocked else {})})
+                                    **({"web_search_blocked_domains": requested} if requested else {})})
         searching = web_search if web_search is not None else self._web_search is not None
+        # Only the request's hosts freeze, as on the service; the instance blocklist applies at search time.
+        web = {"blocked_domains": requested} if searching else None
         with self._store.transaction() as db:
-            found = self._existing_candidate(db, task_id, revision_id, key, request_hash)
+            found = self._existing_candidate(db, task_id, revision_id, key, request_hash, web_search, requested, web)
             if found is not None:
                 return result(found)
             source = json.loads(db.execute("SELECT e.request_json FROM revisions r JOIN executions e ON e.id=r.execution_id "
                                            "WHERE r.id=?", (revision_id,)).fetchone()["request_json"])
         # Memory reaches a Recipe only when the execution behind this revision asked for it.
-        memory = await self._recall_snapshot(source["context"]["objective"]) if "memory" in source else {
+        memory = await self._recall_snapshot(source["input"]["objective"]) if "memory" in source else {
             "status": "not_requested", "items": []}
         with self._store.transaction() as db:
-            found = self._existing_candidate(db, task_id, revision_id, key, request_hash)
+            found = self._existing_candidate(db, task_id, revision_id, key, request_hash, web_search, requested, web)
             if found is not None:
                 return result(found)
-            context = {"schema": "workflow-recipe-context-v2", "task_id": task_id, "source_revision_id": revision_id,
-                       "history": self._history(db, task_id, revision_id), "memory": memory,
-                       "confirmation_source": "explicit_generation_request"}
+            history = self._history(db, task_id, revision_id)
+            context = {"schema": "workflow-recipe-context-v3", "task_id": task_id, "source_execution_id": history[-1]["execution_id"],
+                       "task_context": source["task_context"],
+                       "task_materials": [self._material(db, ref) for ref in source["task_context"]["artifacts"]],
+                       "history": history, "memory": memory, "confirmation_source": "explicit_generation_request"}
             if searching:
-                context["model_settings"] = {"web_search": {"blocked_domains": blocked}}
+                context["model_settings"] = {"web_search": web}
             if len(canonical_json(context).encode()) > MAX_CONTEXT_BYTES:
                 raise ValueError("recipe history exceeds 4 MB; narrow the context")
             candidate_id = "recipe_candidate_" + uuid4().hex
-            context["initial"] = self._head(db, task_id) is None
+            head = self._learning_head(db, task_id, source)
+            context["initial"] = head is None
             context_sha = fingerprint(context)
             db.execute("INSERT INTO recipe_candidates(id,task_id,revision_id,state,context_json,context_sha) VALUES(?,?,?,'queued',?,?)",
                        (candidate_id, task_id, revision_id, canonical_json(context), context_sha))
-            lineage = self._register_version(db, candidate_id, task_id)
+            lineage = self._register_version(db, candidate_id, task_id, head)
             response = {"recipe_candidate_id": candidate_id, "revision_id": revision_id, "status": "queued",
                         "context_sha256": context_sha, **lineage}
             self._store.remember(db, "recipe_candidate", key, request_hash, response)
@@ -335,7 +540,8 @@ class LocalRecipeLifecycle:
             settings = context.get("model_settings", {}).get("web_search")
             if settings is not None:
                 saved = json.loads(row["attribution_json"]) if row["attribution_json"] else {}
-                web = WebPlan(self._web_search, tuple(settings["blocked_domains"]), saved.get("web"))
+                blocked = tuple(sorted(set(self._web_blocked) | set(settings["blocked_domains"])))
+                web = WebPlan(self._web_search, blocked, saved.get("web"))
             stages = await run_recipe_stages(
                 self._model, context, parent, on_phase=on_phase, web=web,
                 on_attribution=lambda analysis, models: self._save_attribution(row, analysis, models),
@@ -430,24 +636,26 @@ class LocalRecipeLifecycle:
         return result({"items": items, "has_more": has_more, "next_cursor": items[-1]["recipe_candidate_id"] if has_more else None})
 
     async def resume_recipe_candidate(self, recipe_id):
+        """Retry a failed or interrupted candidate with its frozen web search setting and sources; it takes no web fields.
+
+        Like the service's resume, it moves the candidate behind the newest version it can build on, renumbered above it."""
         with self._store.transaction() as db:
             row = self._candidate(db, recipe_id)
             if row["state"] in ("queued", "awaiting_parent", "running", "candidate"):
                 return result(self._checked_view(db, row))  # a retry of a resume whose response was lost
-            if row["state"] not in ("failed", "interrupted"):
+            if row["state"] not in _RESUMABLE:
                 raise ValueError("only a failed or interrupted candidate can resume")
-            parent_id = self._lineage(db, recipe_id)["parent_candidate_id"]
-            ready = parent_id is None or self._candidate(db, parent_id)["state"] == "candidate"
-            state = "queued" if ready else "awaiting_parent"
-            db.execute("UPDATE recipe_candidates SET state=?,phase='queued',error=NULL,lease_expires_at=NULL,"
-                       "generation=generation+1 WHERE id=?", (state, recipe_id))
+            state = self._requeue_stopped(db, recipe_id)
         return result({"recipe_candidate_id": recipe_id, "status": state})
 
     async def get_task_recipe(self, task_id):
         with self._store.reading() as db:
             if db.execute("SELECT id FROM tasks WHERE id=?", (task_id,)).fetchone() is None:
                 raise LookupError("task not found")
-            head = self._head(db, task_id)
+            heads = self._task_heads(db, task_id)
+            if len(heads) > 1:
+                raise ValueError("the task has several Recipes; read each with get_recipe_versions")
+            head = heads[0] if heads else None
             if head is None:
                 return result({"task_id": task_id, "status": "awaiting_execution", "recipe_id": None, "current": None, "latest": None})
             current = self._checked_view(db, self._candidate(db, head["current_candidate_id"])) if head["current_candidate_id"] else None
@@ -472,15 +680,15 @@ class LocalRecipeLifecycle:
             head = db.execute("SELECT remote_version FROM recipe_heads WHERE recipe_id=?", (lineage["recipe_id"],)).fetchone()
         recipe_id, recipe, remote = lineage["recipe_id"], upload_form(json.loads(row["recipe_json"])), head["remote_version"]
         try:
-            # base_version is the last version the server is known to have, so a version uploaded elsewhere is a conflict.
+            # previous_version is the last version the server is known to have, so a version uploaded elsewhere is a conflict.
             try:
-                await self._atoms.upload_recipe(recipe_id, version=lineage["version"], recipe=recipe, base_version=remote)
+                await self._atoms.upload_recipe(recipe_id, version=lineage["version"], recipe=recipe, previous_version=remote)
             except RSIHTTPError as exc:
                 ours = await self._own_server_version(recipe_id, exc, remote)
                 if ours is None:
                     raise
                 remote = ours
-                await self._atoms.upload_recipe(recipe_id, version=lineage["version"], recipe=recipe, base_version=remote)
+                await self._atoms.upload_recipe(recipe_id, version=lineage["version"], recipe=recipe, previous_version=remote)
             state = "published"
         except RSIHTTPError as exc:
             state = "publish_conflict" if exc.status_code == 409 else "failed"

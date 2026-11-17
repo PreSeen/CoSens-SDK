@@ -44,7 +44,7 @@ def test_foreign_keys_are_enforced(tmp_path):
     store = LocalStore(tmp_path / "s.sqlite3")
     with pytest.raises(sqlite3.IntegrityError):
         with store.transaction() as db:
-            db.execute("INSERT INTO executions VALUES('e','missing','original','awaiting_execution','{}','s',NULL)")
+            db.execute("INSERT INTO executions VALUES('e','missing','original','awaiting_execution','{}','s',NULL,'e')")
 
 
 def test_many_processes_can_create_the_same_new_file(tmp_path):

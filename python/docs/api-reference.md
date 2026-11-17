@@ -1,71 +1,62 @@
 # Current algorithm API
 
-`CoSensClient.atoms` is async; `.sync_atoms` offers the same operations synchronously. Identity comes from authentication.
+`CoSensClient.atoms` is async; `.sync_atoms` offers the same operations synchronously. Identity comes from authentication. Each atom sends one request; the paths are the service's own (`/tasks`, `/executions/{id}`, `/recipes`, …) and carry no `/v1` prefix, while the Memory operations keep theirs.
 
 | Operation | Python method |
 | --- | --- |
 | Artifact upload/read | `artifact`, `get_artifact` |
-| Task create/list/read/context | `create_task`, `list_tasks`, `get_task`, `supplement_task_context` |
-| Prepare/read execution | `start_execution`, `get_execution` |
-| Submit/read revision | `submit_execution`, `get_revision` |
-| Feedback/correction | `record_feedback`, `start_revision` |
-| Explicit Recipe generation/update | `start_recipe_candidate(task_id, revision_id=..., key=None, model=..., max_completion_tokens=...)` |
-| Read/list/resume generation | `get_recipe_candidate`, `list_recipe_candidates`, `resume_recipe_candidate` |
-| Associated Recipe/version chain | `get_task_recipe`, `get_recipe_versions` |
-| Recipe store | `upload_recipe(recipe_id, version=..., recipe=..., base_version=None)`, `get_recipe(recipe_id, version=None)`, `list_recipes(limit=20, cursor=None, origin=None)`, `search_recipes(query, limit=10)` |
-| Poll generation | `wait_workflow_job("recipe_candidate", id)` (raises `RSICandidateFailed` on failure) |
-| Sessions | `start_session`, `append_session_events`, `get_session_context`, `end_session` |
-| Memory | `user_get`, `memory_recall`, `memory_get`, `timeline_get`, `memory_write`, `memory_delete`, `document_upload` |
+| Task create/list/read/context | `create_task(key=..., objective=..., artifacts=None)`, `list_tasks`, `get_task`, `supplement_task_context(task_id, expected_context_version=..., objective=None, artifacts=None)` |
+| Start an execution | `start_execution(task_id, key=..., source=..., objective=None, artifacts=None, self_contained=None, recipe_id=None, model=None, recall_memory=False)` |
+| Start a correction | `start_execution(key=..., previous_execution_id=..., model=None)` |
+| Read an execution (its output, feedback and learning) | `get_execution` |
+| Submit a result | `submit_execution` |
+| Feedback on an execution | `record_feedback(execution_id, feedback=..., source=..., key=...)` |
+| Learn a Recipe version from an execution | `learn(execution_id, model=None, max_completion_tokens=None, web_search=None, web_search_blocked_domains=())` |
+| Retry a learning | `resume_learning(execution_id, model=None, max_completion_tokens=None)` |
+| Wait for a learning | `wait_learning(execution_id, timeout=300)` |
+| Recipe versions | `get_recipe_versions` |
+| Recipe store | `upload_recipe(recipe_id, version=..., recipe=..., previous_version=None)`, `get_recipe(recipe_id, version=None)`, `list_recipes(limit=20, cursor=None, origin=None)`, `search_recipes(query, limit=10)` |
+| Memory | `memory_recall`, `memory_ingest(content=..., request_key=..., ...)`, `get_memory_items`, `get_memory_job`, `get_memory_experience`, `get_memory` |
+| Documents | `upload_document`, `create_document_upload_grant`, `upload_document_to_grant`, `get_document_status` |
 
-Call generation only after external artifact confirmation. It creates V1 if no Recipe exists, otherwise a new version. Related Memory is read only when the execution behind the revision was started with `recall_memory=True`; generation has no Memory parameter. `record_feedback` requires `source`: `human`, `evaluator`, `reference`, `automated_check` or `downstream`. Feedback attribution happens inside generation. A failed candidate does not replace the usable current version. Resume retries the same candidate; polling does not create one.
+An execution follows a task; `submit_execution` returns `{task_id, execution_id, status, trace_origin}`. Treat the execution as done only when `status == "completed"`. Feedback, corrections and learning all name the execution.
 
-`create_task` requires `source="new_task"` or `source="external_artifact"`. `start_revision` takes the previous revision and a request key, without an attribution ID. `submit_execution` takes the exact frozen request SHA, actual outcome, artifacts and optional events. Stable keys and event IDs are required for reliable retries. The public model ID is supplied with `model`. Model calls reuse the existing Authorization API Key, with the gateway URL and auth type determined internally. There is no `model_api` connection object or second credential.
+**Tasks.** A task is a capability, such as writing the weekly management report, that many executions reuse. `create_task` takes the capability (`objective`, reference `artifacts`); `start_execution` takes `source` and this execution's input. A task's artifacts are bare artifact ids or `{"artifact_id": ..., "role": "reference"}`; `create_task` returns `{task_id, objective, artifacts, context_version}`, and `supplement_task_context` changes the objective or the references when `expected_context_version` is still current. `get_task` returns `task_id`, `objective`, `artifacts`, `context_version`, the task's `executions` (each `{execution_id, instance_id, kind, status, request_sha256}`) and its `recipes`, each `{recipe_id, current_version, latest_version, learning}`: `current_version` is the version new executions follow (`None` until the first learning completes), `latest_version` the newest version whatever its learning's status, and `learning` (`{execution_id, version, status, phase, error}`, `None` for an uploaded version) the learning that produced it. A Recipe is being iterated while that learning is `queued`, `running` or `awaiting_previous_version`.
 
-Without `key`, `start_recipe_candidate` uses `"recipe-" + sha256("recipe:<task_id>:<revision_id>:<max_completion_tokens or empty>")`, the same key the TypeScript SDK derives. A failed candidate raises `RSICandidateFailed` from the wait helpers with the service's stable `code`, `phase`, `retryable`, `upstream_status` and `upstream_code` (from `error_detail`; older servers give only `code`). Every returned JSON object exposes the response's `x-request-id` as `.request_id`.
+**Executions.** A new execution needs `task_id` and `source` (`new_task` or `external_artifact`) and carries its own input: `objective`, `artifacts` and `self_contained`. Its artifacts are bare ids, which count as `original_input` for `new_task` and as `submitted_output` for `external_artifact`, or `{"artifact_id": ..., "role": ...}` with the role `original_input`, `submitted_output`, `acceptance` or `external_trace`. `ValueError("a new execution needs task_id and source")` and `ValueError("external_artifact requires submitted_output")` are raised before anything is sent. The service answers an input it cannot run with HTTP 422 `input_incomplete`, whose `RSIHTTPError.missing` names what is lacking: `objective`, and for `external_artifact` also `original_input_or_self_contained_task` or `submitted_output`. `recipe_id` must name a Recipe of that task (HTTP 404 otherwise); a task with several Recipes needs one named, and without one the service answers 422 `recipe_choice_required` with the task's Recipes in `RSIHTTPError.recipe_ids`. The frozen request holds the task as it was (`task_context`: `objective`, `artifacts`, `context_version`) and the execution's `input`. The start receipt is `{task_id, execution_id, instance_id, kind, status, request_sha256, request}`; `instance_id`, also on `get_execution`, names the first draft of the execution's correction chain.
 
-Current HTTP and MCP schemas are supplied by the algorithm service. Old Run, attribution, acceptance, rubric, learning-job and administrative Recipe publication operations are absent.
+**Corrections.** `start_execution(key=..., previous_execution_id=execution_id)` starts a correction of a completed execution. A `task_id` is optional and must be the previous execution's task. It takes only `model` besides; any input field, `recipe_id` or `recall_memory=True` with `previous_execution_id` raises `ValueError("a correction takes only previous_execution_id, task_id and model")` before anything is sent. The correction keeps the previous execution's `task_context`, `input` and `instance_id`, and its request carries the previous output, its feedback and the current version of the Recipe the previous execution followed, or of the task's only Recipe when it followed none (422 `recipe_choice_required` when the task has several).
+
+**Learning.** Call `learn(execution_id)` only after the user confirmed that execution's output. It adds the next version to the Recipe the execution followed, or creates V1 when the task has no Recipe. An execution that followed no Recipe adds to the task's only Recipe; with several, `learn` answers 422 `recipe_choice_required`. An execution learns once: repeating `learn` returns the same learning, and asking it for a different `max_completion_tokens` is rejected with HTTP 422. The next version comes from learning another execution that followed the Recipe: a new execution of the task, or a correction (`previous_execution_id`) of one; learning reads the whole chain of corrections that led to the learned execution. Related Memory is read only when the execution was started with `recall_memory=True`; learning has no Memory parameter. `learn` and `resume_learning` send no idempotency key.
+
+A learning's `status` is `queued`, `running`, `awaiting_previous_version`, `awaiting_runner`, `awaiting_material`, `completed`, `failed` or `interrupted`. `resume_learning` retries a `failed`, `interrupted` or `awaiting_runner` learning and may change its budget; it returns an active or `completed` learning unchanged (a different budget then gets a 422), and answers 422 for an execution that has not learned yet and for an `awaiting_material` learning. A resumed learning moves behind the newest version it can build on, so when another execution's learning finished meanwhile it takes a new version number above that one.
+
+`wait_learning(execution_id, timeout=300)` polls `get_execution`, waiting 2 s and doubling up to 30 s, and never starts or resumes a learning:
+
+- `completed`: returns the learning.
+- `failed`: raises `RSILearningFailed` with `execution_id`, `code`, `message`, `retryable`, `phase`, `upstream_status`, `upstream_code` and `request_id`. `retryable` is `True` when `resume_learning` may succeed, `False` when it will not, and `None` when the learning does not say (a bare code such as `previous_version_failed` has no detail and can still be resumed).
+- `interrupted`, `awaiting_runner` or `awaiting_material`: raises `RSILearningStopped` with `learning`, `execution_id`, `status` and `request_id`. These are not failures: nothing changes until the caller acts. Resume an `interrupted` learning, resume an `awaiting_runner` one with a `model`, and for `awaiting_material` (the service kept the current version; `material_gap` says why) give feedback or evidence in a correction.
+- still `queued`, `running` or `awaiting_previous_version` at the deadline: raises `TimeoutError`; call it again.
+- no learning, or an unknown status: raises `RSIRecoveryRequired`.
+
+`record_feedback` requires `source`: `human`, `evaluator`, `reference`, `automated_check` or `downstream`, and is accepted only for a completed execution. Feedback attribution happens inside learning. A failed learning does not replace the usable current version.
+
+`submit_execution` takes the exact frozen request SHA, actual outcome, artifacts and optional events. Stable keys and event IDs are required for reliable retries. The public model ID is supplied with `model`; a task's model is frozen once set. Model calls reuse the existing Authorization API Key, with the gateway URL and auth type determined internally. There is no `model_api` connection object or second credential. Every returned JSON object exposes the response's `x-request-id` as `.request_id`.
+
+`upload_recipe` stores a Recipe learned elsewhere; `previous_version` is the version it builds on. `list_recipes(origin=...)` filters by `uploaded` or `generated`; only a `generated` Recipe can be applied to an execution with `recipe_id`.
+
+Current HTTP and MCP schemas are supplied by the algorithm service. Old Run, Revision, Recipe candidate, Session, attribution, acceptance, rubric and learning-job operations are absent.
 
 ### Recipe completion budget
 
-`start_recipe_candidate(..., max_completion_tokens=200000)` and
-`resume_recipe_candidate(..., max_completion_tokens=300000)` accept an optional integer
-from 1 through 1,000,000. Omitting it leaves the initial default to the algorithm service
-(200,000 in the updated service); a resumed candidate keeps its stored budget unless
-explicitly overridden. The same budget applies to both feedback attribution and Recipe
-creation/update. Model/gateway limits still apply; an accepted SDK value is not a promise
-that every upstream model supports it.
+`learn(..., max_completion_tokens=200000)` and `resume_learning(..., max_completion_tokens=300000)` accept an optional integer from 1 through 1,000,000. Omitting it leaves the budget to the service (32,000 by default). The budget is frozen with the learning: a resume keeps it unless explicitly overridden. The same budget applies to both feedback attribution and Recipe creation/update. Model/gateway limits still apply; an accepted SDK value is not a promise that every upstream model supports it.
 
-The sync/async auto wrapper exposes the same option on
-`client.cosens.generate_recipe(turn_id, max_completion_tokens=200000)` and
-`client.cosens.resume_learning(turn_id, max_completion_tokens=300000)`. Task/Agent Runner
-wrappers forward it from `generate_recipe` as well. It does not change business response
-limits or `decision_max_output_tokens`. Reusing a generation key with a different explicit
-budget is rejected; use resume to adjust a failed candidate, or a new generation key for
-a new version. The Recipe service must be upgraded before using this field; older servers
-reject unknown request fields. Published packages are not updated by a source checkout.
+The wrappers expose the same option on `client.cosens.generate_recipe(turn_id, max_completion_tokens=200000)`; the transparent wrapper also has `client.cosens.resume_learning(turn_id, max_completion_tokens=300000)`. It does not change business response limits or `decision_max_output_tokens`. Asking a turn that already learned for a different budget is rejected; resume a failed, interrupted or awaiting_runner learning to change it.
+
+### Web search while learning
+
+`learn(..., web_search=False)` opts out of web search while the Recipe is written and `web_search_blocked_domains=["example.com"]` (at most 50 bare hostnames) adds hosts whose pages are dropped; each is sent only when given, and omitted means the service default (on when the service has a search provider). Blocked domains with `web_search=False` get a 422, and `web_search=True` on a service without a provider fails the learning with `web_search_unavailable` (not retryable). The setting is frozen with the learning, blocked hosts lowercased, deduplicated and sorted: `resume_learning` takes no web fields, retries and resumes reuse the frozen sources, and a provider failure is `web_search_unavailable` (retryable, and the resume searches again). Learning again compares only the web fields that call gives, blocked hosts as a set, and giving none returns the learning; blocked hosts count only when searching, so against a learning frozen with search off they differ only when the request itself would search (on a service without a provider the same request returns the same learning); a different setting gets a 422 while the learning is active, `completed` or `awaiting_material`, and re-queues a `failed`, `interrupted` or `awaiting_runner` learning with the new setting, dropping the sources frozen under the old one; like `resume_learning`, it may move behind a newer version and take a new version number. The learning's `web_search` lists the queries, the sources used and the dropped results. On a `TaskWorkflowRunner` (and the Agents wrapper), `runner.cosens.generate_recipe(turn_id, web_search=..., web_search_blocked_domains=[...])` passes them on; the OpenAI wrapper's `client.cosens.generate_recipe` takes no web fields, so use `atoms.learn` for those turns.
 
 ## Local RSI
 
-`from cosens.local import LocalRSI, ChatCompletionsModel, CodexCLIModel`. Requires `cosens-sdk[local]`.
-
-`LocalRSI(*, client=None, model, state_path=None)` stores state in SQLite (default `~/.cosens/local-rsi.sqlite3`). `client` is a `CoSensClient` used only for Memory recall (`/v1/memory/*`) and the Recipe store (`/v1/recipes`), or `None`. `memory=` is a deprecated name for `client=`. Call `await rsi.aclose()` when done; it returns any running generation to the queue.
-
-Same names, parameters and responses as `client.atoms`: `create_task`, `get_task`, `list_tasks`, `supplement_task_context`, `artifact`, `get_artifact`, `start_execution`, `get_execution`, `submit_execution`, `get_revision`, `start_revision`, `record_feedback`, `start_recipe_candidate`, `get_recipe_candidate`, `resume_recipe_candidate`, `list_recipe_candidates`, `wait_workflow_job`, `get_task_recipe`, `get_recipe_versions`.
-
-Differences from `client.atoms`:
-
-- `model` and `max_completion_tokens` are set on the model object, not per call.
-- Each new current version is uploaded to the Recipe store with `upload_recipe`, without evidence references, under the chain's `recipe_id`. `base_version` is the last version the store is known to have, so a version uploaded first from another machine makes the upload a `publish_conflict`; when the store is ahead with this chain's own earlier version, whose response was lost, the upload is retried on top of it. The local version stands either way.
-- `search_recipes(query, limit=10)`, `list_recipes(limit=20, cursor=None, origin=None)` and `get_recipe(recipe_id, version=None)` read the Recipe store, as on `client.atoms`.
-- `create_task(..., recipe=view)` takes a Recipe returned by `get_recipe`. An `uploaded` Recipe continues under its own `recipe_id`: the next local version is its version plus one and is uploaded on top of it; if the chain is already on this machine, pass its `recipe_id` to `start_execution` instead. A `generated` Recipe starts a new local chain at version 1 without its evidence references. Anything that does not match `contract/local-rsi/recipe-upload.schema.json` is rejected.
-- `publish_recipe(recipe_id)` retries uploading the current version.
-- `wait_workflow_job` runs the generation. A candidate nobody waits on is not generated.
-- A `wait_workflow_job` timeout leaves the generation running in this process; wait on the same ID to continue.
-- Candidates do not report `memory_usable`, `memory_validation` or `max_completion_tokens`, and candidate lists do not report `user_id`.
-- Recipe candidates also report `publish_state`: `pending`, `published`, `failed` or `publish_conflict` (`None` without a client, and for a version started from a generated Recipe).
-
-`ChatCompletionsModel(client, model, *, max_completion_tokens=32000, timeout=300, extra_body=None)` takes your `AsyncOpenAI` client.
-
-`CodexCLIModel(*, model=None, reasoning_effort="medium", timeout=300, executable="codex")` runs your installed Codex CLI and uses its logged-in quota (Linux and macOS). Each call is isolated from your Codex hooks, MCP servers and working directory.
-
-Local RSI does not re-check whether Memory cited by a Recipe has since changed.
+See [Local RSI](local-rsi.md). `LocalRSI` takes and returns the task and new-execution shapes above, and keeps its earlier in-process names for corrections and learning (`start_revision`, `start_recipe_candidate`, `wait_workflow_job`, …). Its evidence references now use `execution_id`.

@@ -19,45 +19,76 @@ DECLINE = {'activate': False, 'reason': 'routine'}
 
 
 class Algorithm:
-    """Minimal service: optional Recipe candidates, Memory, task and execution."""
+    """Minimal service: optional Recipes, Memory, tasks and executions.
 
-    def __init__(self, candidates=()):
+    A task is created once per idempotency key; each Recipe belongs to the task named by its ``task_id``, and a
+    new execution may follow only a Recipe of its own task.
+    """
+
+    def __init__(self, recipes=()):
         self.paths = []
-        self.candidates = {c['recipe_candidate_id']: c for c in candidates}
+        self.posts = []
+        self.recipes = {r['recipe_id']: r for r in recipes}
+        self.tasks = {r['task_id']: 'Quarterly report' for r in recipes if r.get('task_id')}
+        self.task_keys = {}
+
+    def _create_task(self, body, key):
+        if key in self.task_keys:
+            if self.task_keys[key][0] != body:
+                return httpx.Response(422, json={'error': {'code': 'invalid_request',
+                                                           'message': 'idempotency key reused with different task'}})
+            task_id = self.task_keys[key][1]
+        else:
+            task_id = f'task_{len(self.tasks) + 1}'
+            self.tasks[task_id] = body['objective']
+            self.task_keys[key] = (body, task_id)
+        return httpx.Response(200, json={'task_id': task_id, 'objective': self.tasks[task_id], 'artifacts': [],
+                                         'context_version': 1})
 
     def __call__(self, request):
         path = request.url.path.removeprefix('/api')
         self.paths.append(path)
-        if path == '/v1/recipe-candidates':
-            items = [{'recipe_candidate_id': key, 'status': 'candidate', 'current': True, 'title': c['recipe']['title']}
-                     for key, c in self.candidates.items()]
-            return httpx.Response(200, json={'items': items, 'has_more': False})
-        if path.startswith('/v1/recipe-candidates/'):
-            return httpx.Response(200, json=self.candidates[path.rsplit('/', 1)[1]])
+        body = json.loads(request.content) if request.content else None
+        if request.method == 'POST':
+            self.posts.append((path, body))
+        if path == '/recipes':
+            assert dict(request.url.params) == {'limit': '100', 'origin': 'generated'}
+            items = [{'recipe_id': key, 'origin': r['origin'], 'version': r['version'], 'title': r['recipe']['title'],
+                      'task_id': r.get('task_id'), 'updated_at': 't'} for key, r in self.recipes.items()
+                     if r['origin'] == request.url.params['origin']]
+            return httpx.Response(200, json={'items': items, 'has_more': False, 'next_cursor': None})
+        if path.startswith('/recipes/'):
+            return httpx.Response(200, json=self.recipes[path.rsplit('/', 1)[1]])
         if path == '/v1/memory/recall':
             return httpx.Response(200, json={'items': [{'id': 'm1', 'kind': 'source', 'text': 'Reports use the Q3 template.',
                                                         'refs': [{'source_id': 's1'}], 'score': 0.9}]})
-        if path == '/v1/artifacts':
+        if path == '/artifacts':
             return httpx.Response(200, json={'artifact_id': 'artifact_1', 'content_hash': 'sha256:x'})
-        if path == '/v1/tasks':
-            return httpx.Response(200, json={'task_id': 'task_1', 'status': 'ready'})
-        if path.endswith('/executions'):
-            body = json.loads(request.content)
+        if path == '/tasks':
+            return self._create_task(body, request.headers.get('idempotency-key'))
+        if path == '/executions':
+            assert body['task_id'] in self.tasks and body['source'] == 'new_task' and body['input']['objective']
             method = None
             if body.get('recipe_id'):
-                chosen = next(c for c in self.candidates.values() if c['recipe_id'] == body['recipe_id'])
-                method = {'recipe_id': chosen['recipe_id'], 'recipe_candidate_id': chosen['recipe_candidate_id'],
-                          'version': chosen['version']}
-            return httpx.Response(200, json={'execution_id': 'execution_1', 'status': 'awaiting_execution',
-                                             'request_sha256': 'sha', 'request': {'method': method}})
+                chosen = self.recipes.get(body['recipe_id'])
+                if chosen is None or chosen['task_id'] != body['task_id']:
+                    return httpx.Response(404, json={'error': {'code': 'resource_not_found',
+                                                               'message': 'Recipe not found in this task'}})
+                method = {'recipe_id': chosen['recipe_id'], 'version': chosen['version'], 'recipe_sha256': 'f' * 64,
+                          'recipe': chosen['recipe']}
+            return httpx.Response(200, json={'task_id': body['task_id'], 'execution_id': 'execution_1',
+                                             'status': 'awaiting_execution', 'request_sha256': 'sha',
+                                             'request': {'method': method}})
         if path.endswith('/result'):
-            return httpx.Response(200, json={'status': 'completed', 'revision_id': 'revision_1'})
+            return httpx.Response(200, json={'task_id': 'task_1', 'execution_id': 'execution_1', 'status': 'completed',
+                                             'trace_origin': 'original'})
         raise AssertionError(path)
 
 
-def _candidate(candidate_id='candidate_1', steps=3):
-    return {'recipe_candidate_id': candidate_id, 'recipe_id': 'recipe_1', 'status': 'candidate', 'current': True,
-            'version': 1, 'recipe': {'title': 'Quarterly report', 'when': 'Writing a report', 'when_not': 'Chat',
+def _recipe(recipe_id='recipe_1', steps=3, origin='generated'):
+    return {'recipe_id': recipe_id, 'origin': origin, 'version': 1, 'previous_version': None, 'current_version': 1,
+            'recipe_sha256': 'f' * 64, 'task_id': 'task_0', 'execution_id': 'execution_0', 'created_at': 't',
+            'recipe': {'title': 'Quarterly report', 'when': 'Writing a report', 'when_not': 'Chat',
             'steps': [{'id': f's{n}', 'instruction': f'Do step {n}', 'evidence_refs': [{'event_id': f'e{n}'}]}
                       for n in range(1, steps + 1)],
             'lessons': [{'when': 'Always', 'do': 'Cite the source', 'why': 'Trust', 'when_not': 'Never',
@@ -98,10 +129,10 @@ def test_decision_client_and_extra_body_cover_decision_and_match(tmp_path):
         body = json.loads(request.content)
         decision_bodies.append(body)
         if body['response_format']['json_schema']['name'] == 'cosens_recipe_match':
-            return _chat({'candidate_id': 'candidate_1'})
+            return _chat({'recipe_id': 'recipe_1'})
         return _chat(ACTIVATE)
 
-    algorithm = Algorithm([_candidate()])
+    algorithm = Algorithm([_recipe()])
     native = OpenAI(api_key='model-key', http_client=httpx.Client(transport=httpx.MockTransport(model)))
     decision_client = OpenAI(api_key='decision-key', http_client=httpx.Client(transport=httpx.MockTransport(decider)))
     wrapped = cosens(native, mode='auto', api_key='service-key', state_path=tmp_path / 's.sqlite',
@@ -116,7 +147,12 @@ def test_decision_client_and_extra_body_cover_decision_and_match(tmp_path):
         # The matcher sees applicability only, never the steps or evidence.
         match_input = decision_bodies[1]['messages'][0]['content']
         assert 'Writing a report' in match_input and 'Do step 1' not in match_input and 'evidence_refs' not in match_input
-        assert wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)['used_recipe_id'] == 'recipe_1'
+        turn = wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
+        assert turn['used_recipe_id'] == 'recipe_1' and turn['state'] == 'completed'
+        # The matched Recipe runs in the task that owns it; the turn creates no task.
+        assert [path for path, _ in algorithm.posts if path == '/tasks'] == []
+        execution = next(body for path, body in algorithm.posts if path == '/executions')
+        assert execution['task_id'] == 'task_0' and execution['recipe_id'] == 'recipe_1' and 'model' not in execution
     finally:
         wrapped.close(); native.close(); decision_client.close()
 
@@ -145,7 +181,7 @@ def test_empty_recipe_list_skips_match_and_is_cached(tmp_path):
         wrapped.responses.create(model='model', input='Produce a report')
         wrapped.responses.create(model='model', input='Produce another report')
         assert decision_names == ['cosens_decision', 'cosens_decision']
-        assert algorithm.paths.count('/v1/recipe-candidates') == 1
+        assert algorithm.paths.count('/recipes') == 1
         assert algorithm.paths.count('/v1/memory/recall') == 2
     finally:
         wrapped.close(); native.close()
@@ -158,11 +194,11 @@ def test_injected_context_is_compact_and_bounded(tmp_path):
         body = json.loads(request.content)
         if request.url.path.endswith('/chat/completions'):
             name = body['response_format']['json_schema']['name']
-            return _chat({'candidate_id': 'candidate_1'} if name == 'cosens_recipe_match' else ACTIVATE)
+            return _chat({'recipe_id': 'recipe_1'} if name == 'cosens_recipe_match' else ACTIVATE)
         sent.append(body)
         return native_response(request)
 
-    algorithm = Algorithm([_candidate(steps=30)])
+    algorithm = Algorithm([_recipe(steps=30)])
     native = OpenAI(api_key='model-key', http_client=httpx.Client(transport=httpx.MockTransport(model)))
     wrapped = cosens(native, mode='auto', api_key='service-key', state_path=tmp_path / 's.sqlite',
                      max_context_chars=400, _http_transport=httpx.MockTransport(algorithm))
@@ -185,7 +221,7 @@ def test_declined_turn_makes_no_lookup(tmp_path):
             return _chat(DECLINE)
         return native_response(request)
 
-    algorithm = Algorithm([_candidate()])
+    algorithm = Algorithm([_recipe()])
     native = OpenAI(api_key='model-key', http_client=httpx.Client(transport=httpx.MockTransport(model)))
     wrapped = cosens(native, mode='auto', api_key='service-key', state_path=tmp_path / 's.sqlite',
                      _http_transport=httpx.MockTransport(algorithm))
@@ -269,5 +305,50 @@ def test_request_without_user_text_makes_no_decision_call(tmp_path):
         wrapped.responses.create(model='m', input=[{'role': 'user', 'content': [{'type': 'input_image', 'image_url': 'data:,'}]}])
         assert calls == ['/v1/responses']
         assert wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)['capture'] == 'no_user_text'
+    finally:
+        wrapped.close(); native.close()
+
+
+def test_uploaded_recipes_are_not_offered_to_the_matcher(tmp_path):
+    decision_names = []
+
+    def model(request):
+        if request.url.path.endswith('/chat/completions'):
+            decision_names.append(json.loads(request.content)['response_format']['json_schema']['name'])
+            return _chat(ACTIVATE)
+        return native_response(request)
+
+    algorithm = Algorithm([_recipe('team_recipe', origin='uploaded')])
+    native = OpenAI(api_key='model-key', http_client=httpx.Client(transport=httpx.MockTransport(model)))
+    wrapped = cosens(native, mode='auto', api_key='service-key', state_path=tmp_path / 's.sqlite',
+                     _http_transport=httpx.MockTransport(algorithm))
+    try:
+        wrapped.responses.create(model='model', input='Produce a report')
+        assert decision_names == ['cosens_decision']
+        assert not [path for path in algorithm.paths if path.startswith('/recipes/')]
+        assert not wrapped.cosens.get_turn(wrapped.cosens.last_turn_id).get('used_recipe_id')
+    finally:
+        wrapped.close(); native.close()
+
+
+def test_matched_recipe_without_a_task_passes_the_turn_through(tmp_path):
+    def model(request):
+        if request.url.path.endswith('/chat/completions'):
+            name = json.loads(request.content)['response_format']['json_schema']['name']
+            return _chat({'recipe_id': 'recipe_1'} if name == 'cosens_recipe_match' else ACTIVATE)
+        return native_response(request)
+
+    recipe = _recipe()
+    del recipe['task_id']
+    algorithm = Algorithm([recipe])
+    native = OpenAI(api_key='model-key', http_client=httpx.Client(transport=httpx.MockTransport(model)))
+    wrapped = cosens(native, mode='auto', api_key='service-key', state_path=tmp_path / 's.sqlite',
+                     _http_transport=httpx.MockTransport(algorithm))
+    try:
+        assert wrapped.responses.create(model='model', input='Produce a report').output_text == 'final artifact'
+        turn = wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
+        assert turn['capture'] == 'policy_failed' and turn['policy_error_type'] == 'RSIRecoveryRequired'
+        assert not turn.get('used_recipe_id') and not turn.get('task_id')
+        assert not [path for path, _ in algorithm.posts if path in {'/tasks', '/executions'}]
     finally:
         wrapped.close(); native.close()

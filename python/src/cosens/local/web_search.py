@@ -28,7 +28,7 @@ class WebSearch(Protocol):
 
 
 def validate_blocked_domains(values):
-    """Bare hostnames only: no scheme, path, port or credentials."""
+    """Bare hostnames only: no scheme, path, port or credentials. Returns them lowercased, deduplicated and sorted."""
     values = list(values)
     if len(values) > MAX_BLOCKED_DOMAINS:
         raise ValueError(f"at most {MAX_BLOCKED_DOMAINS} blocked domains")
@@ -37,7 +37,7 @@ def validate_blocked_domains(values):
         if (parts is None or parts.hostname != value.lower() or parts.port is not None or "." not in value
                 or parts.path or parts.query):
             raise ValueError("blocked domains must be bare hostnames such as example.com")
-    return [value.lower() for value in values]
+    return sorted({value.lower() for value in values})
 
 
 def host_matches(url, domains):

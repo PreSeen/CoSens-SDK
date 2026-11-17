@@ -38,7 +38,7 @@ turn_id = client.cosens.last_turn_id
 
 The response is the native OpenAI result. `AsyncOpenAI` works the same way and exposes async CoSens calls.
 
-In `auto` mode the SDK first makes a short structured decision call through your client (Chat Completions with a JSON schema `response_format`), so the model must support structured output. The model writes only `{"activate": ..., "reason": ...}`; the task objective is your user's text. The call is made once, without retries, with a 5-second timeout and a 1024-token output budget (reasoning included). If the decision or the read-only Recipe lookup fails or times out, your request still runs without CoSens capture, and the turn records why: `client.cosens.get_turn(client.cosens.last_turn_id)` has `capture == "decision_failed"` with `decision["error_type"]` and `decision["error"]` (for example a timeout, a gateway error, or output cut off at the token limit). A request without user text is skipped without a model call (`capture == "no_user_text"`).
+In `auto` mode the SDK first makes a short structured decision call through your client (Chat Completions with a JSON schema `response_format`), so the model must support structured output. The model writes only `{"activate": ..., "reason": ...}`, plus `"feedback": true|false` when the request follows an earlier recorded turn; the task objective is your user's text. The call is made once, without retries, with a 5-second timeout and a 1024-token output budget (reasoning included). If the decision or the read-only Recipe lookup fails or times out, your request still runs without CoSens capture, and the turn records why: `client.cosens.get_turn(client.cosens.last_turn_id)` has `capture == "decision_failed"` with `decision["error_type"]` and `decision["error"]` (for example a timeout, a gateway error, or output cut off at the token limit). A request without user text is skipped without a model call (`capture == "no_user_text"`).
 
 | Option | Default | Effect |
 | --- | --- | --- |
@@ -69,17 +69,16 @@ When a usable Recipe matches, the SDK adds it as plain text: its title, when/whe
 
 ## Generate a Recipe after confirmation
 
-Check that the turn has a submitted Revision before offering Recipe generation. After your application obtains user confirmation of that artifact, call from its confirmation handler:
+A turn has something to learn from only when it recorded a completed execution. After your application obtains user confirmation of that artifact, call from its confirmation handler:
 
 ```python
 turn = client.cosens.get_turn(turn_id) if turn_id else None
-if turn and turn.get("revision_id"):
-    receipt = client.cosens.generate_recipe(turn_id, request_key="confirmed-report-1")
+if turn and turn.get("state") == "completed" and turn.get("execution_id"):
+    client.cosens.generate_recipe(turn_id)
+    record = client.cosens.wait_learning(turn_id)
 ```
 
-This is the only generation action. It creates the first Recipe version or updates the associated Recipe, always reads relevant Memory, and performs feedback attribution internally. `feedback` records feedback; it does not update a Recipe.
-
-`client.cosens.wait_learning(turn_id)` raises `cosens.RSICandidateFailed` when generation fails. The error has `code`, `phase`, `retryable`, `upstream_status`, `upstream_code`, `candidate_id` and `request_id`. When `retryable` is true, `client.cosens.resume_learning(turn_id)` retries the same candidate. Older servers report only `code`; `retryable` is then `None`.
+`generate_recipe` learns the first Recipe version, or the next one, from the turn's execution; an execution learns once. `wait_learning` raises `cosens.RSILearningFailed` when the learning failed and `cosens.RSILearningStopped` when it stopped in a state only you can change; both are raised after the turn's record is stored, so `client.cosens.resume_learning(turn_id)` can continue it. `feedback(message, source=...)` records feedback on the turn's execution. The learning rules, statuses and errors are in [the API reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/api-reference.md); how a follow-up message becomes a correction is in [execution capture](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/unified-auto.md).
 
 ## Run an OpenAI Agents agent
 
@@ -115,42 +114,88 @@ rsi = LocalRSI(client=CoSensClient(), model=ChatCompletionsModel(AsyncOpenAI(bas
 # Or use your Codex login: LocalRSI(client=CoSensClient(), model=CodexCLIModel())
 ```
 
-`LocalRSI` has the workflow methods of `client.atoms`. Generation runs inside `wait_workflow_job`, so always wait for a
-candidate. Each new version is uploaded without its evidence references. To continue a Recipe on another machine, find it
-with `search_recipes` or `list_recipes`, read it with `get_recipe` and pass it as `create_task(..., recipe=...)`. See
-`examples/04_local_rsi.py`.
+`LocalRSI` takes the same task and new-execution shapes as `client.atoms` and keeps its earlier in-process names for
+corrections and learning; its methods, its evidence references and the one-time store upgrade are described in
+[Local RSI](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/local-rsi.md). Each new version is uploaded
+without its evidence references. To continue a Recipe on another machine, find it with `search_recipes` or
+`list_recipes`, read it with `get_recipe` and pass it as `create_task(..., recipe=...)`. See `examples/04_local_rsi.py`.
 
-### Web search in Recipe generation
+### Web search while learning a Recipe
 
-Pass `LocalRSI(..., web_search=<a WebSearch>)` (`cosens.local.WebSearch`: `async search(query, *, blocked_domains) -> list of
-{url, title, text}`) and each candidate searches the web while it is written; the SDK ships no search client. Without one
-nothing is searched. `start_recipe_candidate(..., web_search=False)` opts out, `web_search_blocked_domains=["example.com"]`
-adds hosts whose pages are dropped, and `web_search=True` with no `WebSearch` fails the candidate with `web_search_unavailable`.
+`atoms.learn(execution_id, web_search=..., web_search_blocked_domains=["example.com"])` sends both fields in the
+`POST /executions/{id}/learn` body, only when given. Omitted means the service default: on when the service has a search
+provider. `web_search=False` opts out, `web_search_blocked_domains` (at most 50 bare hostnames) adds hosts whose pages are
+dropped, and `web_search=True` on a service without a provider fails the learning with `web_search_unavailable` (not
+retryable). The task runner's `generate_recipe(..., web_search=..., web_search_blocked_domains=[...])` passes them on;
+the OpenAI wrapper's `generate_recipe` takes no web fields, so call `atoms.learn` for those turns.
 
-- `LocalRSI(web_search_blocked_domains=[...])` blocks hosts for every candidate, as the service's own blocklist does.
+- The setting is frozen on the learning, blocked hosts lowercased, deduplicated and sorted. `resume_learning` takes no
+  web fields and uses the frozen one.
+- Learning again compares only the web fields that call gives, blocked hosts as a set; giving none returns the learning.
+  Blocked hosts count only when searching: against a learning frozen with search off they differ only when the request
+  itself would search, so on a service without a provider the same request returns the same learning.
+  A different setting gets a 422 while the learning is active, `completed` or `awaiting_material`. On a `failed`,
+  `interrupted` or `awaiting_runner` learning it re-queues that learning with the new setting and drops the sources
+  frozen under the old one, so `learn(..., web_search=False)` recovers a learning that failed with a non-retryable
+  `web_search_unavailable`. Like `resume_learning`, it may move behind a newer version and take a new version number.
+- Retries and resumes reuse the frozen sources and never search again; a provider failure fails the learning as
+  `web_search_unavailable` (retryable), and the resume searches again.
+- The learning's `web_search` lists the queries, the sources used (URL, title, excerpt, `retrieved_at`, `text_sha256`) and
+  the dropped results.
+
+`LocalRSI` searches the same way through a search you supply. Pass `LocalRSI(..., web_search=<a WebSearch>)`
+(`cosens.local.WebSearch`: `async search(query, *, blocked_domains) -> list of {url, title, text}`) and each local learning
+searches the web while its Recipe is written; the SDK ships no search client, and without one nothing is searched. Its
+learning call, `start_recipe_candidate(..., web_search=..., web_search_blocked_domains=[...])`, takes the same settings, and
+`web_search=True` with no `WebSearch` fails the candidate with `web_search_unavailable`.
+
+- `LocalRSI(web_search_blocked_domains=[...])` blocks hosts for every candidate when searching, as the service's own
+  blocklist does; like that one, it is neither frozen with a candidate nor compared. `web_search=False` still opts one
+  candidate out, and only blocked domains passed with it raise `ValueError`.
+- A revision has one candidate, as an execution has one learning, and the blocked hosts its request gives are frozen
+  lowercased, deduplicated and sorted. A second `start_recipe_candidate` for the revision compares only the web fields
+  it gives, blocked hosts as a set: the same setting or none returns the candidate. Blocked hosts count only when
+  searching, so against a candidate frozen with search off they differ only when the request itself would search (its
+  `web_search`, else whether the `LocalRSI` has a `WebSearch`); without one an identical repeat returns the candidate
+  and never re-queues it. A different setting raises `ValueError`
+  while the candidate is in flight, finished or `awaiting_material`, and re-queues a `failed` or `interrupted` candidate
+  with the new setting, dropping the sources frozen under the old one. `resume_recipe_candidate` takes no web fields and
+  keeps the frozen setting. Both move the candidate behind the newest version it can build on, renumbered above it, as
+  the service does.
 - The model writes at most 3 general queries from the task objective and the attribution, never from execution outputs,
   reference answers or web text. **Queries leave this machine to whatever provider your `WebSearch` calls**, so keep
   names, ids and secrets out of the task objective.
 - Results are cut to 5 per query, 1,500 characters each and 24,000 in total, and dropped when the parsed URL host is a
   blocked host or one of its subdomains. Blocking lowers but does not remove the chance of copied or leaked content, so pass
   the hosts of any benchmark or private source a Recipe must not read.
-- The candidate's `web_search` lists the queries, the sources used (URL, title, excerpt, `retrieved_at`, `text_sha256`) and
-  the dropped results. Retries and `resume_recipe_candidate` reuse frozen sources; a provider failure raises
-  `WebSearchUnavailable` from your `WebSearch` and fails the candidate as `web_search_unavailable` (retryable).
+- The candidate's `web_search` has the same shape as the service's. Retries and `resume_recipe_candidate` reuse frozen
+  sources; a provider failure raises `WebSearchUnavailable` from your `WebSearch` and fails the candidate as
+  `web_search_unavailable` (retryable).
 - Web text is untrusted data, never instructions. A step or lesson that cites only web sources is rejected, so a page can
   refine a step that recorded evidence supports but cannot add one. The uploaded Recipe carries no evidence references,
   so the web provenance stays on the local candidate.
-- Against the service, `atoms.start_recipe_candidate(..., web_search=..., web_search_blocked_domains=[...])` sends the same
-  fields. Omitted means the service default: on when the service has a search provider.
 - `CodexCLIModel` runs `codex exec` with native `web_search` disabled, so only the search you supply is used.
 
 ## Atomic operations
 
-`CoSensClient().atoms` (async) and `.sync_atoms` (sync) expose Task, Execution, Revision, feedback, Recipe, Session and Memory operations directly. Keep stable idempotency keys across retries.
+`CoSensClient().atoms` (async) and `.sync_atoms` (sync) expose Task, Execution, feedback, learning, Recipe and Memory operations directly; see [the API reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/api-reference.md). Keep stable idempotency keys across retries.
 
-- Returned JSON objects are dicts with a `request_id` attribute holding the response's `x-request-id`, for support requests.
-- `start_recipe_candidate(task_id, revision_id=...)` may omit `key`; the default is derived from the task, revision and `max_completion_tokens`, so repeating the call returns the same candidate.
-- `wait_workflow_job("recipe_candidate", id)` raises `RSICandidateFailed` when the candidate failed.
+A task is a capability that many executions reuse: `create_task` takes its `objective` and reference `artifacts`, and each `start_execution` takes `source` and that execution's own input (`objective`, `artifacts`, `self_contained`).
+
+```python
+task = await atoms.create_task(key="weekly-report", objective="Write the weekly management report")
+execution = await atoms.start_execution(task["task_id"], key="run-1", model="<public-model-id>", source="new_task",
+                                        objective="Report for week 46", artifacts=[notes_artifact_id])
+result = await atoms.submit_execution(execution["execution_id"], request_sha256=execution["request_sha256"],
+                                      outcome="completed", artifacts=[{"artifact_id": artifact_id, "role": "submitted_output"}])
+if result["status"] == "completed":
+    await atoms.learn(execution["execution_id"])
+    learning = await atoms.wait_learning(execution["execution_id"])
+```
+
+A correction names only the execution it corrects: `start_execution(key="correction-1", previous_execution_id=execution_id)`.
+
+Returned JSON objects are dicts with a `request_id` attribute holding the response's `x-request-id`, for support requests.
 
 ## More
 

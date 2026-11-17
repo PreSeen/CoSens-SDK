@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from cosens.errors import RSICandidateFailed
+from cosens.local.recipes import RSICandidateFailed
 from cosens.local import LocalRSI, ModelUnavailable
 from local_rsi_helpers import FakeModel, attribution_reply, complete_execution, first_revision, make_rsi, recipe_reply
 
@@ -18,7 +18,7 @@ async def generate(rsi, task, done):
 
 
 async def next_revision(rsi, task, key):
-    started = await rsi.start_execution(task.task_id, key=key)
+    started = await rsi.start_execution(task.task_id, source="new_task", objective="Do the task", key=key)
     return started, await complete_execution(rsi, started, key=key + "-out")
 
 
@@ -185,7 +185,7 @@ async def test_later_candidates_fail_with_parent_failed(tmp_path):
     assert caught.value.code == "parent_failed"
 
 
-async def test_a_resumed_child_waits_for_its_failed_parent(tmp_path):
+async def test_a_resumed_child_waits_for_a_parent_resumed_first(tmp_path):
     rsi, _ = make_rsi(tmp_path, recipe_reply("V1"), ModelUnavailable("down"), recipe_reply("V2"), recipe_reply("V3"))
     task, _, done = await first_revision(rsi)
     await generate(rsi, task, done)
@@ -195,12 +195,55 @@ async def test_a_resumed_child_waits_for_its_failed_parent(tmp_path):
     last = await rsi.start_recipe_candidate(task.task_id, revision_id=third.revision_id)
     with pytest.raises(RSICandidateFailed):
         await rsi.wait_workflow_job("recipe_candidate", middle.recipe_candidate_id)
+    assert (await rsi.resume_recipe_candidate(middle.recipe_candidate_id)).status == "queued"
+    # Its parent is in flight again, so the child stays behind it with its number.
     assert (await rsi.resume_recipe_candidate(last.recipe_candidate_id)).status == "awaiting_parent"
-    with pytest.raises(TimeoutError):
-        await rsi.wait_workflow_job("recipe_candidate", last.recipe_candidate_id, timeout=0.3)
-    await rsi.resume_recipe_candidate(middle.recipe_candidate_id)
+    assert (await rsi.get_task(task.task_id)).recipes[0]["learning"]["status"] == "awaiting_previous_version"
+    view = await rsi.get_recipe_candidate(last.recipe_candidate_id)
+    assert (view.version, view.parent_candidate_id) == (3, middle.recipe_candidate_id)
     job = await rsi.wait_workflow_job("recipe_candidate", last.recipe_candidate_id)
-    assert job.status == "candidate" and job.version == 3
+    assert job.status == "candidate" and job.version == 3 and job.recipe["title"] == "V3"
+
+
+async def test_a_child_resumed_while_its_parent_is_failed_builds_on_the_current_version(tmp_path):
+    rsi, model = make_rsi(tmp_path, recipe_reply("V1"), ModelUnavailable("down"), recipe_reply("V2"), recipe_reply("V3"))
+    task, _, done = await first_revision(rsi)
+    v1 = await generate(rsi, task, done)
+    _, second = await next_revision(rsi, task, "two")
+    _, third = await next_revision(rsi, task, "three")
+    middle = await rsi.start_recipe_candidate(task.task_id, revision_id=second.revision_id)
+    last = await rsi.start_recipe_candidate(task.task_id, revision_id=third.revision_id)
+    with pytest.raises(RSICandidateFailed):
+        await rsi.wait_workflow_job("recipe_candidate", middle.recipe_candidate_id)
+    # As on the service, a resume never waits on a failed parent: it moves behind the current version, numbered above it.
+    assert (await rsi.resume_recipe_candidate(last.recipe_candidate_id)).status == "queued"
+    job = await rsi.wait_workflow_job("recipe_candidate", last.recipe_candidate_id)
+    assert (job.version, job.parent_candidate_id, job.current) == (4, v1.recipe_candidate_id, True)
+    assert model.calls[-1]["context"]["base_recipe"]["recipe"]["title"] == "V1"
+    await rsi.resume_recipe_candidate(middle.recipe_candidate_id)
+    job = await rsi.wait_workflow_job("recipe_candidate", middle.recipe_candidate_id)
+    assert (job.version, job.parent_candidate_id, job.current) == (5, last.recipe_candidate_id, True)
+    versions = await rsi.get_recipe_versions(job.recipe_id)
+    assert [(v.version, v.status) for v in versions.versions] == [(1, "candidate"), (4, "candidate"), (5, "candidate")]
+
+
+async def test_a_transient_failure_resumes_once_on_the_version_that_became_current(tmp_path):
+    rsi, model = make_rsi(tmp_path, recipe_reply("V1"), ModelUnavailable("down"), recipe_reply("V3"), recipe_reply("V4"))
+    task, _, done = await first_revision(rsi)
+    v1 = await generate(rsi, task, done)
+    _, second = await next_revision(rsi, task, "two")
+    _, third = await next_revision(rsi, task, "three")
+    failed = await rsi.start_recipe_candidate(task.task_id, revision_id=second.revision_id)
+    with pytest.raises(RSICandidateFailed):
+        await rsi.wait_workflow_job("recipe_candidate", failed.recipe_candidate_id)
+    v3 = await generate(rsi, task, third)
+    assert (v3.version, v3.parent_candidate_id) == (3, v1.recipe_candidate_id)
+    calls = len(model.calls)
+    resumed = await rsi.resume_recipe_candidate(failed.recipe_candidate_id)
+    assert resumed.status == "queued"
+    job = await rsi.wait_workflow_job("recipe_candidate", failed.recipe_candidate_id)
+    assert (job.version, job.parent_candidate_id, job.current) == (4, v3.recipe_candidate_id, True)
+    assert len(model.calls) == calls + 1 and model.calls[-1]["context"]["base_recipe"]["recipe"]["title"] == "V3"
 
 
 async def test_waiting_on_a_later_candidate_generates_its_parent_first(tmp_path):
@@ -226,7 +269,7 @@ async def test_commit_refuses_when_the_parent_is_no_longer_current(tmp_path):
     candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
     with pytest.raises(RSICandidateFailed) as caught:
         await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
-    assert caught.value.code == "parent_changed" and caught.value.retryable is False
+    assert caught.value.code == "parent_changed" and caught.value.retryable is True
 
 
 async def test_wait_timeout_leaves_generation_running(tmp_path):
@@ -434,9 +477,14 @@ async def test_history_follows_the_revision_chain_with_feedback(tmp_path):
     started = await rsi.start_revision(done.revision_id, key="r")
     again = await complete_execution(rsi, started, key="r-out")
     await generate(rsi, task, again)
-    history = model.calls[0]["context"]["context"]["history"]
-    assert [h["revision_id"] for h in history] == [done.revision_id, again.revision_id]
+    context = model.calls[0]["context"]["context"]
+    history = context["history"]
+    assert [h["execution_id"] for h in history] == [done.execution_id, again.execution_id]
+    assert [h["origin"] for h in history] == ["original", "correction"]
+    assert context["source_execution_id"] == again.execution_id and "source_revision_id" not in context
     assert history[0]["feedback"][0]["message"] == "wrong"
+    assert history[0]["feedback"][0]["execution_id"] == done.execution_id and "revision_id" not in history[0]["feedback"][0]
+    assert all("revision_id" not in entry for entry in history)
 
 
 async def test_list_recipe_candidates_filters_and_omits_full_recipe(tmp_path):
@@ -458,3 +506,121 @@ async def test_wait_rejects_other_job_kinds_and_bad_timeouts(tmp_path):
         await rsi.wait_workflow_job("recipe_candidate", "x", timeout=float("nan"))
 
 
+
+
+async def test_the_task_shows_which_recipe_is_learning(tmp_path):
+    rsi, _ = make_rsi(tmp_path, ModelUnavailable("down"), recipe_reply("V1"), recipe_reply("V2"))
+    task, _, done = await first_revision(rsi)
+    candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
+    # The first learning creates the Recipe; it has no current version yet and is being iterated.
+    [recipe] = (await rsi.get_task(task.task_id)).recipes
+    assert recipe == {"recipe_id": candidate.recipe_id, "current_version": None, "latest_version": 1,
+                      "learning": {"execution_id": done.execution_id, "version": 1, "status": "queued",
+                                   "phase": "queued", "error": None}}
+    with pytest.raises(RSICandidateFailed):
+        await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    [recipe] = (await rsi.get_task(task.task_id)).recipes
+    assert recipe["learning"]["status"] == "failed" and recipe["learning"]["error"] == "upstream_unavailable"
+    await rsi.resume_recipe_candidate(candidate.recipe_candidate_id)
+    await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    [recipe] = (await rsi.get_task(task.task_id)).recipes
+    assert recipe == {"recipe_id": candidate.recipe_id, "current_version": 1, "latest_version": 1,
+                      "learning": {"execution_id": done.execution_id, "version": 1, "status": "completed",
+                                   "phase": "completed", "error": None}}
+    started, second = await next_revision(rsi, task, "two")
+    assert started.request["method"]["recipe_id"] == candidate.recipe_id
+    await generate(rsi, task, second)
+    [recipe] = (await rsi.get_task(task.task_id)).recipes
+    assert (recipe["current_version"], recipe["latest_version"]) == (2, 2)
+    assert recipe["learning"]["execution_id"] == second.execution_id and recipe["learning"]["version"] == 2
+
+
+async def test_a_recipe_belongs_to_its_task(tmp_path):
+    rsi, _ = make_rsi(tmp_path, recipe_reply("V1"))
+    task, _, done = await first_revision(rsi)
+    job = await generate(rsi, task, done)
+    named = await rsi.start_execution(task.task_id, key="named", source="new_task", objective="Again", recipe_id=job.recipe_id)
+    assert named.request["method"]["recipe_id"] == job.recipe_id
+    other = await rsi.create_task(key="other", objective="Assess quarterly performance")
+    with pytest.raises(LookupError, match="not found in this task"):
+        await rsi.start_execution(other.task_id, key="o", source="new_task", objective="Q4", recipe_id=job.recipe_id)
+    assert (await rsi.get_task(other.task_id)).recipes == []
+
+
+async def test_a_named_recipe_without_a_usable_version_is_refused(tmp_path):
+    rsi, _ = make_rsi(tmp_path, ModelUnavailable("down"))
+    task, _, done = await first_revision(rsi)
+    candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
+    with pytest.raises(RSICandidateFailed):
+        await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    with pytest.raises(ValueError, match="^Recipe has no usable version yet$"):
+        await rsi.start_execution(task.task_id, key="named", source="new_task", objective="Again",
+                                  recipe_id=candidate.recipe_id)
+    unnamed = await rsi.start_execution(task.task_id, key="unnamed", source="new_task", objective="Again")
+    assert "method" not in unnamed.request
+
+
+async def test_a_task_with_several_recipes_needs_a_recipe_choice(tmp_path):
+    rsi, _ = make_rsi(tmp_path, recipe_reply("V1"), attribution_reply(True), recipe_reply("V2"))
+    task, _, done = await first_revision(rsi)
+    _, early = await next_revision(rsi, task, "early")  # follows no Recipe: the task has none yet
+    job = await generate(rsi, task, done)
+    with rsi._store.transaction() as db:  # delivery 1 has no way to add a second Recipe; write one directly
+        candidate = db.execute("SELECT * FROM recipe_candidates WHERE id=?", (job.recipe_candidate_id,)).fetchone()
+        db.execute("INSERT INTO recipe_candidates(id,task_id,revision_id,state,phase,context_json,context_sha,recipe_json,"
+                   "recipe_sha) VALUES('second',?,NULL,'candidate','completed',?,?,?,?)",
+                   (task.task_id, candidate["context_json"], candidate["context_sha"], candidate["recipe_json"],
+                    candidate["recipe_sha"]))
+        db.execute("INSERT INTO recipe_heads(recipe_id,current_candidate_id,latest_candidate_id) VALUES('second','second','second')")
+        db.execute("INSERT INTO recipe_versions VALUES('second','second',1,NULL)")
+        db.execute("INSERT INTO task_recipes VALUES(?,'second')", (task.task_id,))
+    with pytest.raises(ValueError, match="^the task has several Recipes; name one with recipe_id$"):
+        await rsi.start_execution(task.task_id, key="e", source="new_task", objective="Again")
+    chosen = await rsi.start_execution(task.task_id, key="e", source="new_task", objective="Again", recipe_id="second")
+    assert chosen.request["method"]["recipe_id"] == "second"
+    assert [r["recipe_id"] for r in (await rsi.get_task(task.task_id)).recipes] == sorted([job.recipe_id, "second"])
+    [imported] = [r for r in (await rsi.get_task(task.task_id)).recipes if r["recipe_id"] == "second"]
+    assert imported["learning"] is None  # its newest version was not learned from an execution
+    # A correction, and a learning from it, stay with the Recipe the execution followed.
+    done = await complete_execution(rsi, chosen, key="e-out")
+    await rsi.record_feedback(done.revision_id, feedback="wrong", source="human", key="f")
+    correction = await rsi.start_revision(done.revision_id, key="r")
+    assert correction.request["method"]["recipe_id"] == "second"
+    again = await complete_execution(rsi, correction, key="r-out")
+    learned = await generate(rsi, task, again)
+    assert (learned.recipe_id, learned.version) == ("second", 2)
+    with pytest.raises(ValueError, match="^the execution followed no Recipe and the task has several$"):
+        await rsi.start_recipe_candidate(task.task_id, revision_id=early.revision_id)
+    # A correction cannot name a Recipe, so the refusal does not ask for a recipe_id.
+    with pytest.raises(ValueError, match="^the previous execution followed no Recipe and the task has several$"):
+        await rsi.start_revision(early.revision_id, key="early-r")
+
+
+def recipe_citing_the_template(payload):
+    """A Recipe whose step cites the task's reference material."""
+    [template] = payload["context"]["task_materials"]
+    return {"title": "Weekly report", "when": "always", "when_not": "never", "lessons": [],
+            "steps": [{"id": "s1", "instruction": "follow the template",
+                       "evidence_refs": [{"artifact_id": template["artifact_id"]}]}]}
+
+
+async def test_learning_freezes_the_task_context_and_each_input(tmp_path):
+    rsi, model = make_rsi(tmp_path, attribution_reply(True), recipe_citing_the_template)
+    template = await rsi.artifact(name="template.md", content="## Risks")
+    task = await rsi.create_task(key="t", objective="Write the weekly report", artifacts=[template.artifact_id])
+    started = await rsi.start_execution(task.task_id, key="w1", source="new_task", objective="Week 1")
+    done = await complete_execution(rsi, started, key="w1-out")
+    await rsi.record_feedback(done.revision_id, feedback="Add risks", source="human", key="f")
+    correction = await rsi.start_revision(done.revision_id, key="r")
+    again = await complete_execution(rsi, correction, key="r-out")
+    learned = await generate(rsi, task, again)
+    # Evidence may cite the task's reference material as well as the history.
+    assert learned.status == "candidate"
+    assert learned.recipe["steps"][0]["evidence_refs"] == [{"artifact_id": template.artifact_id}]
+    context = model.calls[0]["context"]["context"]
+    assert context["schema"] == "workflow-recipe-context-v3"
+    assert context["task_context"] == {"objective": "Write the weekly report", "context_version": 1,
+                                       "artifacts": [dict(a) for a in task.artifacts]}
+    assert [m["content"] for m in context["task_materials"]] == ["## Risks"]
+    assert [h["input"]["objective"] for h in context["history"]] == ["Week 1", "Week 1"]
+    assert all("context" not in h for h in context["history"])

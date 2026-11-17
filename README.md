@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/cosens-sdk)](https://pypi.org/project/cosens-sdk/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-Python and TypeScript clients for the current CoSens Task/Execution/Revision API. All three entry points record execution without generating a Recipe:
+Python and TypeScript clients for the current CoSens Task → Execution → Recipe API. All three entry points record execution without learning a Recipe:
 
 | Entry | Python | TypeScript |
 | --- | --- | --- |
@@ -24,11 +24,9 @@ const modelClient = new OpenAI({ baseURL: process.env.COSENS_MODEL_BASE_URL, api
 const client = cosens(modelClient, { mode: 'auto' });
 ```
 
-After the host obtains user confirmation of the artifact, call `generate_recipe` / `generateRecipe`, or the atomic Recipe endpoint. That single endpoint creates V1 or updates the associated Recipe. Feedback is recorded separately; attribution happens inside explicit generation. Generation has no Memory option: it recalls related Memory only when the execution behind the revision was started with `recall_memory` / `recallMemory`. Feedback carries a `source` (`human`, `evaluator`, `reference`, `automated_check` or `downstream`).
+A Task is a capability, such as writing the weekly management report, that many executions reuse; each execution carries its own input, and each Recipe belongs to one Task. After the host obtains user confirmation of the artifact, call `generate_recipe` / `generateRecipe` (or the atomic `learn`) to learn V1 or the next version of the Recipe the execution followed, once per execution; a later version comes from learning another execution that followed the Recipe, either a new execution of the task or a correction of one (`previous_execution_id` / `previousExecutionId`). The `auto` mode only records and selects context; it never authorizes learning, and the [Python](python/README.md) and [TypeScript](typescript/README.md) READMEs describe the rest, including where the two SDKs differ.
 
-The `auto` mode selects useful existing context and records the task. It does not authorize Recipe generation. Submission, feedback, Session ACK, polling and recovery do not initiate a new generation request.
-
-See [Python](python/README.md), [TypeScript](typescript/README.md), and the three examples in each package. This is a breaking protocol change: Run, standalone attribution, acceptance and learning-job APIs have been removed.
+See [Python](python/README.md), [TypeScript](typescript/README.md), and the three examples in each package. This is a breaking protocol change: Run, Revision, Recipe candidate, Session, standalone attribution, acceptance and learning-job APIs have been removed.
 
 Tests: `PYTHONPATH=python/src pytest python/tests` and `npm --prefix typescript run check`. Optional real local HTTP integration: set `COSENS_TEST_ALGORITHM_HTTP_URL=http://127.0.0.1:18149` against the algorithm repository's `tests/support/explicit_http_server.py` fixture. It uses PostgreSQL and deterministic model substitutes, not a production model or production data.
 

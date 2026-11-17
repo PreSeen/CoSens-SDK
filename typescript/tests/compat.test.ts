@@ -26,7 +26,7 @@ test('the pinned OpenAI Responses stream keeps event and final-response methods 
   const gatewayCalls: string[] = [];
   const gatewayFetch: typeof fetch = async input => {
     const path = new URL(String(input)).pathname; gatewayCalls.push(path);
-    return new Response(JSON.stringify(path.endsWith('/recipe-candidates') ? { items: [], has_more: false } : { items: [] }));
+    return new Response(JSON.stringify(path.endsWith('/recipes') ? { items: [], has_more: false } : { items: [] }));
   };
   const native = new OpenAI({ apiKey: 'native-key', baseURL: 'https://model.example/v1', fetch: modelFetch });
   const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: gatewayFetch, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
@@ -62,7 +62,7 @@ test('the pinned OpenAI Chat stream keeps content events and finalChatCompletion
     ];
     return new Response(chunks.map(chunk => `data: ${JSON.stringify(chunk)}\n\n`).join('') + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
   };
-  const gatewayFetch: typeof fetch = async input => new Response(JSON.stringify(new URL(String(input)).pathname.endsWith('/recipe-candidates') ? { items: [], has_more: false } : { items: [] }));
+  const gatewayFetch: typeof fetch = async input => new Response(JSON.stringify(new URL(String(input)).pathname.endsWith('/recipes') ? { items: [], has_more: false } : { items: [] }));
   const native = new OpenAI({ apiKey: 'native-key', baseURL: 'https://model.example/v1', fetch: modelFetch });
   const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: gatewayFetch, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const stream = client.chat.completions.stream({ model: 'test-model', messages: [{ role: 'user', content: 'hello' }] });
@@ -96,12 +96,12 @@ test('the pinned OpenAI Chat stream keeps a tool call on the same CoSens executi
   };
   const gatewayFetch: typeof fetch = async (input, init) => {
     const path = new URL(String(input)).pathname;
-    if(path.endsWith('/recipe-candidates'))return new Response(JSON.stringify({items:[],has_more:false}));
+    if(path.endsWith('/recipes'))return new Response(JSON.stringify({items:[],has_more:false}));
     if(path.endsWith('/memory/recall'))return new Response(JSON.stringify({items:[]}));
     if(path.endsWith('/artifacts'))return new Response(JSON.stringify({artifact_id:'artifact-1',content_hash:'sha256:test'}));
-    if(path.endsWith('/tasks'))return new Response(JSON.stringify({task_id:'task-1',status:'ready'}));
+    if(path.endsWith('/tasks'))return new Response(JSON.stringify({task_id:'task-1',objective:'hello',artifacts:[],context_version:1}));
     if(path.endsWith('/executions')){prepares++;return new Response(JSON.stringify({execution_id:'execution-1',status:'awaiting_execution',request_sha256:'hash',request:{}}));}
-    if(path.endsWith('/result')){submits++;events.push(...JSON.parse(String(init?.body)).events);return new Response(JSON.stringify({status:'completed',revision_id:'revision-1'}));}
+    if(path.endsWith('/result')){submits++;events.push(...JSON.parse(String(init?.body)).events);return new Response(JSON.stringify({status:'completed',trace_origin:'original'}));}
     throw Error(path);
   };
   const native = new OpenAI({ apiKey: 'native-key', baseURL: 'https://model.example/v1', fetch: modelFetch });
@@ -127,7 +127,7 @@ test('OpenAI withOptions keeps CoSens on the derived native client', async () =>
   } });
   const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: async input => {
     const path = new URL(String(input)).pathname; gatewayCalls.push(path);
-    return new Response(JSON.stringify(path.endsWith('/recipe-candidates') ? { items: [], has_more: false } : { items: [] }));
+    return new Response(JSON.stringify(path.endsWith('/recipes') ? { items: [], has_more: false } : { items: [] }));
   }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const derived = client.withOptions({ baseURL: 'https://other-model.example/v1' });
   assert.equal(typeof (derived as any).cosens.getTurn, 'function');
@@ -394,7 +394,7 @@ test('pinned OpenAI batches.list keeps native cursor pagination', async () => {
 
 test('pinned OpenAI APIPromise retains withResponse and asResponse behavior', async () => {
   let modelCalls = 0;
-  const gatewayFetch: typeof fetch = async input => new Response(JSON.stringify(new URL(String(input)).pathname.endsWith('/recipe-candidates') ? { items: [], has_more: false } : { items: [] }));
+  const gatewayFetch: typeof fetch = async input => new Response(JSON.stringify(new URL(String(input)).pathname.endsWith('/recipes') ? { items: [], has_more: false } : { items: [] }));
   const native = new OpenAI({ apiKey: 'native-key', baseURL: 'https://model.example/v1', fetch: async () => {
     modelCalls++;
     return new Response(JSON.stringify(response), { headers: { 'content-type': 'application/json', 'x-request-id': `req-${modelCalls}` } });
@@ -436,7 +436,7 @@ test('pinned OpenAI Responses parse and Chat create/parse use the same preflight
   const client = cosens(native, { apiKey: 'test-only-api-key', mode: 'disable', fetch: async input => {
     const path = new URL(String(input)).pathname;
     gatewayPaths.push(path);
-    return new Response(JSON.stringify(path.endsWith('/recipe-candidates') ? { items: [], has_more: false } : { items: [] }));
+    return new Response(JSON.stringify(path.endsWith('/recipes') ? { items: [], has_more: false } : { items: [] }));
   }, statePath: join(mkdtempSync(join(tmpdir(), 'cosens-compat-')), 'state.sqlite3') });
   const responsesParsed = await client.responses.parse({ model: 'test-model', input: 'hello' });
   const chatCreated = await client.chat.completions.create({ model: 'test-model', messages: [{ role: 'user', content: 'hello' }] });

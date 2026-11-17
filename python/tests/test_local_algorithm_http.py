@@ -46,34 +46,36 @@ async def test_three_entries_against_local_algorithm(tmp_path,entry):
             await wrapped.run(agent,'Produce a structured report')
             turn=wrapped.cosens.get_turn(wrapped.cosens.last_turn_id)
         else:
-            task=await sdk.atoms.create_task(source='new_task',objective='Produce a structured report',self_contained=True,key='task')
-            execution=await sdk.atoms.start_execution(task['task_id'],key='execution',model='model')
+            task=await sdk.atoms.create_task(objective='Produce a structured report',key='task')
+            execution=await sdk.atoms.start_execution(task['task_id'],key='execution',model='model',source='new_task',
+                                                      objective='Produce a structured report',self_contained=True)
             artifact=await sdk.atoms.artifact(name='report.txt',content='report')
-            revision=await sdk.atoms.submit_execution(execution['execution_id'],request_sha256=execution['request_sha256'],outcome='completed',artifacts=[{'artifact_id':artifact['artifact_id'],'role':'submitted_output'}])
-            turn={'task_id':task['task_id'],'revision_id':revision['revision_id']}
-        assert turn.get('revision_id'),turn
-        execution_id = turn.get('execution_id') or execution['execution_id']
+            submitted=await sdk.atoms.submit_execution(execution['execution_id'],request_sha256=execution['request_sha256'],outcome='completed',artifacts=[{'artifact_id':artifact['artifact_id'],'role':'submitted_output'}])
+            turn={'task_id':task['task_id'],'execution_id':submitted['execution_id'],'state':submitted['status']}
+        assert turn.get('state')=='completed' and turn.get('execution_id'),turn
+        execution_id = turn['execution_id']
         captured = await sdk.atoms.get_execution(execution_id)
         assert captured['request']['model'] == 'model'
-        assert (await sdk.atoms.list_recipe_candidates())['items']==[]
+        assert (await sdk.atoms.list_recipes())['items']==[]
         if entry=='transparent':
-            request=wrapped.cosens.generate_recipe()
-        elif entry=='agent':request=await wrapped.cosens.generate_recipe()
-        else:request=await sdk.atoms.start_recipe_candidate(turn['task_id'],revision_id=turn['revision_id'],key='confirmed-v1')
-        v1=await sdk.atoms.wait_workflow_job('recipe_candidate',request['recipe_candidate_id'],timeout=10)
-        assert v1['status']=='candidate' and v1['version']==1
-        assert v1['memory_context']=='captured'
-        await sdk.atoms.record_feedback(turn['revision_id'],feedback='Use bare JSON without code fences',source='human',key='feedback')
-        correction=await sdk.atoms.start_revision(turn['revision_id'],key='correction')
+            wrapped.cosens.generate_recipe()
+        elif entry=='agent':await wrapped.cosens.generate_recipe()
+        else:await sdk.atoms.learn(execution_id)
+        v1=await sdk.atoms.wait_learning(execution_id,timeout=10)
+        assert v1['status']=='completed' and v1['version']==1 and v1['previous_version'] is None
+        assert v1['memory_context']=='not_requested'  # no execution asked for recall_memory
+        await sdk.atoms.record_feedback(execution_id,feedback='Use bare JSON without code fences',source='human',key='feedback')
+        correction=await sdk.atoms.start_execution(turn['task_id'],key='correction',previous_execution_id=execution_id)
         artifact=await sdk.atoms.artifact(name='corrected.json',content='{"answer":42}')
         result=await sdk.atoms.submit_execution(correction['execution_id'],request_sha256=correction['request_sha256'],outcome='completed',artifacts=[{'artifact_id':artifact['artifact_id'],'role':'submitted_output'}])
-        assert len((await sdk.atoms.list_recipe_candidates())['items'])==1
-        second=await sdk.atoms.start_recipe_candidate(turn['task_id'],revision_id=result['revision_id'],key='confirmed-v2')
-        v2=await sdk.atoms.wait_workflow_job('recipe_candidate',second['recipe_candidate_id'],timeout=10)
-        assert v2['status']=='candidate' and v2['version']==2
-        assert v2['recipe_id']==v1['recipe_id'] and v2['parent_candidate_id']==v1['recipe_candidate_id']
+        assert result['status']=='completed' and result['trace_origin']=='correction'
+        assert len((await sdk.atoms.list_recipes())['items'])==1
+        await sdk.atoms.learn(correction['execution_id'])
+        v2=await sdk.atoms.wait_learning(correction['execution_id'],timeout=10)
+        assert v2['status']=='completed' and v2['version']==2
+        assert v2['recipe_id']==v1['recipe_id'] and v2['previous_version']==1
         assert v2['attribution']['possible_causes']
-        assert all('/runs' not in path and '/attributions' not in path for path in observed)
+        assert all('/runs' not in path and '/attributions' not in path and '/revisions' not in path for path in observed)
     finally:
         if entry=='agent' and wrapped:await wrapped.aclose()
         elif wrapped:wrapped.close()

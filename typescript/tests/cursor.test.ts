@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { pathToFileURL } from 'node:url';
-import { CursorStore, TurnStore, SessionHistoryChanged, RSIRecoveryRequired } from '../src/index.ts';
+import { CursorStore, TurnStore, SessionHistoryChanged } from '../src/index.ts';
 import { canonical } from '../src/state.ts';
 
 const session = (items: any[]) => ({ sessionId: 's1', getItems: async () => items });
@@ -17,44 +17,6 @@ test('state canonicalization uses stable UTF-8 byte key ordering', () => {
   assert.equal(canonical({ '2': 'two', '10': 'ten' }), '{"10":"ten","2":"two"}');
 });
 
-test('cursor persists ACKs across runs and restart, and rejects rewritten history', async () => {
-  const path = file();
-  const first = new CursorStore(path, 'principal', 'service');
-  const snap = await first.snapshot(session([{ id: 'u1', role: 'user', content: 'first' }]));
-  const events = first.pending(snap);
-  assert.equal(events[0]!.id, 'chat:u1');
-  first.beginBatch('run-1', snap, events);
-  assert.equal(first.ack(snap, { durable_ack: ['chat:u1'] }), 1);
-  first.close();
-  const next = new CursorStore(path, 'principal', 'service');
-  const snap2 = await next.snapshot(session([{ id: 'u1', role: 'user', content: 'first' }, { id: 'a1', role: 'assistant', content: 'reply' }]));
-  assert.deepEqual(next.pending(snap2).map(x => x.id), ['chat:a1']);
-  const edited = await next.snapshot(session([{ id: 'u1', role: 'user', content: 'edited' }]));
-  assert.throws(() => next.pending(edited), SessionHistoryChanged);
-  next.close();
-});
-
-test('partial ACK keeps the suffix tied to the original Run', async () => {
-  const store = new CursorStore(file(), 'principal', 'service');
-  const snap = await store.snapshot(session([{ id: 'a', role: 'user', content: 'a' }, { id: 'b', role: 'assistant', content: 'b' }]));
-  store.beginBatch('run-1', snap, store.pending(snap));
-  assert.equal(store.ack(snap, { durable_ack: ['chat:a'] }), 1);
-  assert.deepEqual(store.recoverBatch(snap)?.events.map(x => x.id), ['chat:b']);
-  assert.throws(() => store.beginBatch('run-2', snap, store.pending(snap)), RSIRecoveryRequired);
-  store.close();
-});
-
-test('Session cursor rejects an ACK for unsent or duplicate IDs without advancing', async () => {
-  const store = new CursorStore(file(), 'principal', 'service');
-  const snap = await store.snapshot(session([{ id: 'a', role: 'user', content: 'a' }]));
-  store.beginBatch('run-1', snap, store.pending(snap));
-  assert.throws(() => store.ack(snap, { durable_ack: ['chat:a', 'chat:future'] }), RSIRecoveryRequired);
-  assert.throws(() => store.ack(snap, { durable_ack: ['chat:a', 'chat:a'] }), RSIRecoveryRequired);
-  assert.deepEqual(store.recoverBatch(snap)?.events.map(event => event.id), ['chat:a']);
-  assert.equal(store.ack(snap, { durable_ack: ['chat:a'] }), 1);
-  store.close();
-});
-
 test('duplicate Session message IDs are rejected before a batch can be sent', async () => {
   const store = new CursorStore(file(), 'principal', 'service');
   await assert.rejects(store.snapshot(session([
@@ -62,18 +24,6 @@ test('duplicate Session message IDs are rejected before a batch can be sent', as
     { id: 'same', role: 'assistant', content: 'second' },
   ])), SessionHistoryChanged);
   store.close();
-});
-
-test('two SQLite cursor handles cannot assign one pending Session batch to different Runs', async () => {
-  const path = file();
-  const first = new CursorStore(path, 'principal', 'service');
-  const second = new CursorStore(path, 'principal', 'service');
-  const history = session([{ id: 'u1', role: 'user', content: 'first' }]);
-  const snap1 = await first.snapshot(history);
-  const snap2 = await second.snapshot(history);
-  first.beginBatch('run-1', snap1, first.pending(snap1));
-  assert.throws(() => second.beginBatch('run-2', snap2, second.pending(snap2)), RSIRecoveryRequired);
-  first.close(); second.close();
 });
 
 test('turn records persist without storing the principal literal', () => {

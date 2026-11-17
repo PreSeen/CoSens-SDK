@@ -2,7 +2,7 @@
   "context": {
     "history": [
       {
-        "revision_id": "rev1",
+        "execution_id": "exec1",
         "materials": [
           {
             "artifact_id": "input1"
@@ -25,6 +25,7 @@
         ]
       }
     ],
+    "task_materials": [],
     "memory": {
       "status": "captured",
       "items": [
@@ -49,7 +50,7 @@
             "instruction": "I",
             "evidence_refs": [
               {
-                "revision_id": "rev1",
+                "execution_id": "exec1",
                 "event_id": "e1"
               }
             ]
@@ -125,7 +126,7 @@
             "instruction": "I",
             "evidence_refs": [
               {
-                "revision_id": "rev1",
+                "execution_id": "exec1",
                 "event_id": "nope"
               }
             ]
@@ -244,7 +245,7 @@
             "why_missing": "W",
             "evidence_refs": [
               {
-                "revision_id": "rev1",
+                "execution_id": "exec1",
                 "event_id": "e1"
               }
             ]

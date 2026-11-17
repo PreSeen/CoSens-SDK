@@ -8,15 +8,21 @@ import json
 
 from .atoms import CoSensClient
 from .context_render import DEFAULT_MAX_CONTEXT_CHARS, render_execution_request, validate_max_context_chars
-from .errors import RSIApprovalRequired, RSIApprovalUnavailable, RSIRecoveryRequired
+from .errors import RSIApprovalRequired, RSIApprovalUnavailable, RSIHTTPError, RSIRecoveryRequired
 from .state import TurnStore
-from .workflow_start import _derived_key
+from .workflow_start import _derived_key, _execution_options
 
 
 def _text_output(value):
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _agent_model(agent):
+    """The Agent's model when it names one; a model object is the host's own and is not sent."""
+    model = getattr(agent, "model", None)
+    return model if isinstance(model, str) and model.strip() else None
 
 
 def _observed_native_items(result):
@@ -72,20 +78,21 @@ class _WorkflowStatus:
     def get_turn(self, turn_id):
         return self._owner._store.get(turn_id)
 
-    async def feedback(self, message, *, source, turn_id=None, request_key=None):
-        turn_id = turn_id or self.last_turn_id
-        state = self.get_turn(turn_id)
-        if not state or not state.get('revision_id'):
-            raise RSIRecoveryRequired('Turn has no recorded revision')
-        key = request_key or 'feedback:'+hashlib.sha256((turn_id+'\0'+message).encode()).hexdigest()
-        return await self._owner._client.atoms.record_feedback(state['revision_id'], feedback=message, source=source, key=key)
+    def _completed_turn(self, turn_id):
+        state = self.get_turn(turn_id or self.last_turn_id)
+        if not state or state.get('state') != 'completed' or not state.get('execution_id'):
+            raise RSIRecoveryRequired('Turn has no completed execution')
+        return state
 
-    async def generate_recipe(self, turn_id=None, *, request_key=None, model=None, max_completion_tokens=None,
-                              web_search=None, web_search_blocked_domains=()):
-        turn_id = turn_id or self.last_turn_id
-        state = self.get_turn(turn_id)
-        if not state or not state.get('revision_id'):
-            raise RSIRecoveryRequired('Turn has no recorded revision')
+    async def feedback(self, message, *, source, turn_id=None, request_key=None):
+        state = self._completed_turn(turn_id)
+        key = request_key or 'feedback:'+hashlib.sha256((state['turn_id']+'\0'+message).encode()).hexdigest()
+        return await self._owner._client.atoms.record_feedback(state['execution_id'], feedback=message, source=source, key=key)
+
+    async def generate_recipe(self, turn_id=None, *, model=None, max_completion_tokens=None, web_search=None,
+                              web_search_blocked_domains=()):
+        """Learn a Recipe version from the turn's confirmed execution; repeat calls return the same learning."""
+        state = self._completed_turn(turn_id)
         options = {'model': model} if model is not None else {}
         if max_completion_tokens is not None:
             options['max_completion_tokens'] = max_completion_tokens
@@ -93,10 +100,10 @@ class _WorkflowStatus:
             options['web_search'] = web_search
         if web_search_blocked_domains:
             options['web_search_blocked_domains'] = web_search_blocked_domains
-        receipt = await self._owner._client.atoms.start_recipe_candidate(state['task_id'], revision_id=state['revision_id'], key=request_key or 'explicit-generation:'+turn_id, **options)
-        state['recipe_candidate_id'] = receipt['recipe_candidate_id']
+        learning = await self._owner._client.atoms.learn(state['execution_id'], **options)
+        state['learning'] = dict(learning)
         self._owner._save(state)
-        return receipt
+        return learning
 
     async def reconcile(self, turn_id, *, session=None):
         return await self._owner.reconcile(turn_id, session=session)
@@ -240,16 +247,30 @@ class TaskWorkflowRunner:
             raise ValueError("rsi.turn_id is required for a recoverable workflow turn")
         if not isinstance(rsi.get("task"), dict):
             raise ValueError("rsi.task is required for a workflow turn")
+        # A turn always creates its task, so the spec and the model are checked before anything is recorded or sent.
+        _execution_options(rsi["task"], creates_task=True, model=_agent_model(agent))
         session_id, session_incarnation = self._session_identity(session)
         input_hash = self._input_hash(agent, user_input)
         turn_id = rsi["turn_id"]
         state = self._store.get(turn_id)
         if state and state.get("state") != "pre_execution_pending":
             raise RSIRecoveryRequired(f"Workflow turn {turn_id} may have executed; reconcile without rerunning Agent")
-        if state and state.get("task_spec") != rsi.get("task"):
-            raise RSIRecoveryRequired("Workflow task changed while recovering the same turn")
         if state and (state.get("session_id") != session_id or state.get("session_incarnation") != session_incarnation or state.get("input_hash") != input_hash):
             raise RSIRecoveryRequired("Workflow turn input or Session identity changed during recovery")
+        if state and state.get("mode") != self.mode:
+            raise RSIRecoveryRequired("Workflow turn originated in a different mode")
+        if state and state.get("task_spec") != rsi.get("task"):
+            if not state.get("task_spec_incomplete"):
+                raise RSIRecoveryRequired("Workflow task changed while recovering the same turn")
+            # The task is created and keyed from the objective, so a correction completes only the execution input.
+            if rsi["task"].get("objective") != state["task_spec"].get("objective"):
+                raise RSIRecoveryRequired("Workflow task objective changed; start a new turn")
+            # The service refused the previous spec as incomplete and started nothing: take the corrected one.
+            # The flag stays until a start is attempted, so a host refusal of this spec leaves it correctable.
+            previous = state["task_spec"]
+            state["task_spec"] = rsi["task"]
+            if not self._store.update_pending(turn_id, state, previous_task_spec=previous):
+                raise RSIRecoveryRequired("Workflow turn changed during preparation; reconcile before retrying")
         if not state:
             state = {"turn_id": turn_id, "task_spec": rsi.get("task"), "state": "pre_execution_pending", "mode": self.mode,
                      "session_id": session_id, "session_incarnation": session_incarnation, "input_hash": input_hash}
@@ -263,17 +284,42 @@ class TaskWorkflowRunner:
         self.cosens.last_turn_id = turn_id
         return state
 
+    def _settle_incomplete_spec(self, state, error):
+        """Only an input_incomplete refusal of the latest start lets the caller correct the spec; any other failure may have started an execution."""
+        if isinstance(error, RSIHTTPError) and 400 <= error.status_code < 500 and error.code == "input_incomplete":
+            state["task_spec_incomplete"] = True
+        elif not state.pop("task_spec_incomplete", False):
+            return
+        self._save_pending(state)
+
+    @staticmethod
+    def _prepare_snapshot(state):
+        """What a prepare sends: the task spec (the execution's input) and the task once one exists."""
+        snapshot = {"task": state["task_spec"]}
+        if state.get("task_id"):
+            snapshot["task_id"] = state["task_id"]
+        return snapshot
+
     async def _prepare(self, rsi, *, agent, user_input, session):
         state = self._pending_state(rsi, agent=agent, user_input=user_input, session=session)
         turn_id = state["turn_id"]
         if not state.get("execution_id"):
-            started = await self._client.start({"task_id": state["task_id"]} if state.get("task_id") else {"task": state["task_spec"]}, phase="prepare", mode=self.mode,
-                                               request_key=turn_id, authorize=rsi.get("authorize"), **({"model": agent.model} if isinstance(getattr(agent,"model",None),str) and agent.model.strip() else {}))
+            try:
+                started = await self._client.start(self._prepare_snapshot(state), phase="prepare", mode=self.mode,
+                                                   request_key=turn_id, authorize=rsi.get("authorize"),
+                                                   **({"model": _agent_model(agent)} if _agent_model(agent) else {}))
+            except (RSIApprovalRequired, RSIApprovalUnavailable):
+                # The host refused before anything was sent, so an earlier refusal still stands.
+                raise
+            except BaseException as error:
+                self._settle_incomplete_spec(state, error)
+                raise
+            state.pop("task_spec_incomplete", None)
             if started.get("task_id") or started.get("task", {}).get("task_id"):
                 state["task_id"] = started.get("task_id") or started["task"]["task_id"]
-                self._save_pending(state)
+            self._save_pending(state)
             if started.get("status") != "awaiting_execution" or not started.get("execution_id") or not started.get("request_sha256") or not isinstance(started.get("execution_request"), dict):
-                raise RSIRecoveryRequired(f"Workflow task is {started.get('status')}; provide context before executing")
+                raise RSIRecoveryRequired(f"Workflow execution is {started.get('status')}; reconcile before executing")
             state.update(task_id=started["task_id"], execution_id=started["execution_id"],
                          request_sha256=started["request_sha256"], request=started["execution_request"])
             self._save_pending(state)
@@ -283,12 +329,14 @@ class TaskWorkflowRunner:
     def _prepare_sync(self, rsi, *, agent, user_input, session):
         state = self._pending_state(rsi, agent=agent, user_input=user_input, session=session)
         if not state.get("execution_id"):
+            data = state["task_spec"]
+            # The task spec is the execution's input; the task itself carries only the objective.
+            options = _execution_options(data, creates_task=True, model=_agent_model(agent))
             if self.mode == "approval":
                 authorize = rsi.get("authorize")
                 if authorize is None:
                     raise RSIApprovalUnavailable("approval mode requires a host authorization callback")
-                snapshot = {"task_id": state["task_id"]} if state.get("task_id") else {"task": state["task_spec"]}
-                allowed = authorize("prepare", snapshot)
+                allowed = authorize("prepare", self._prepare_snapshot(state))
                 if inspect.isawaitable(allowed):
                     if inspect.iscoroutine(allowed):
                         allowed.close()
@@ -296,20 +344,20 @@ class TaskWorkflowRunner:
                 if allowed is not True:
                     raise RSIApprovalRequired("host authorization was not granted")
             atoms = self._client.sync_atoms
-            if state.get("task_id"):
-                task = atoms.get_task(state["task_id"])
-            else:
-                data = state["task_spec"]
-                task = atoms.create_task(source=data["source"], objective=data.get("objective"),
-                                         artifacts=data.get("artifacts"), self_contained=data.get("self_contained"),
-                                         key=_derived_key(state["turn_id"], "task"))
-            task_id = task.get("task_id")
-            if task_id:
-                state["task_id"] = task_id
+            if not state.get("task_id"):
+                task = atoms.create_task(objective=data["objective"], key=_derived_key(state["turn_id"], "task"))
+                if not task.get("task_id"):
+                    raise RSIRecoveryRequired("Task receipt has no task_id")
+                state["task_id"] = task["task_id"]
                 self._save_pending(state)
-            if task.get("status") != "ready" or not task_id:
-                raise RSIRecoveryRequired(f"Workflow task is {task.get('status')}; provide context before executing")
-            execution = atoms.start_execution(task_id, key=_derived_key(state["turn_id"], "execution"), **({"model": agent.model} if isinstance(getattr(agent,"model",None),str) and agent.model.strip() else {}))
+            try:
+                execution = atoms.start_execution(state["task_id"], key=_derived_key(state["turn_id"], "execution"),
+                                                  **options)
+            except BaseException as error:
+                self._settle_incomplete_spec(state, error)
+                raise
+            if state.pop("task_spec_incomplete", None):
+                self._save_pending(state)
             if (execution.get("status") != "awaiting_execution" or not execution.get("execution_id") or
                     not execution.get("request_sha256") or not isinstance(execution.get("request"), dict)):
                 raise RSIRecoveryRequired(f"Workflow execution is {execution.get('status')}; reconcile before executing")
@@ -355,9 +403,8 @@ class TaskWorkflowRunner:
                                     "events": state.get("events", []), "trace_coverage": state.get("trace_coverage", "unknown")}
             self._save(state)
         receipt = await self._client.atoms.submit_execution(state["execution_id"], **state["result_body"])
-        if receipt.get("status") in {"failed", "cancelled"} or not isinstance(receipt.get("revision_id"), str) or not receipt["revision_id"]:
+        if receipt.get("status") != "completed":
             raise RSIRecoveryRequired("Workflow result was not confirmed as completed")
-        state["revision_id"] = receipt.get("revision_id")
         state["state"] = "completed"
         state.pop("last_error", None)
         self._save(state)
@@ -403,9 +450,8 @@ class TaskWorkflowRunner:
                                     "events": state.get("events", []), "trace_coverage": state.get("trace_coverage", "unknown")}
             self._save(state)
         receipt = self._client.sync_atoms.submit_execution(state["execution_id"], **state["result_body"])
-        if receipt.get("status") in {"failed", "cancelled"} or not isinstance(receipt.get("revision_id"), str) or not receipt["revision_id"]:
+        if receipt.get("status") != "completed":
             raise RSIRecoveryRequired("Workflow result was not confirmed as completed")
-        state["revision_id"] = receipt["revision_id"]
         state["state"] = "completed"
         state.pop("last_error", None)
         self._save(state)

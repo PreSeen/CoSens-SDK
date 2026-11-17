@@ -25,7 +25,7 @@ test('auto wrapper defaults to a 5 second, unretried decision call capped at 102
   };
   const fetcher: typeof fetch = async input => {
     const path = new URL(String(input)).pathname;
-    const value = path.endsWith('/recipe-candidates') ? { items: [], has_more: false } : { items: [] };
+    const value = path.endsWith('/recipes') ? { items: [], has_more: false } : { items: [] };
     return new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } });
   };
   const wrapped = cosens(native, { apiKey: 'test-key', mode: 'auto', fetch: fetcher,
@@ -88,15 +88,15 @@ test('auto recipe match timeout still captures the turn without a Recipe', async
   };
   const fetcher: typeof fetch = async input => {
     const path = new URL(String(input)).pathname.replace(/^\/api/, '');
-    const value = path === '/v1/recipe-candidates'
-      ? { items: [{ recipe_candidate_id: 'candidate', status: 'candidate', current: true, title: 'Test' }], has_more: false }
-      : path === '/v1/recipe-candidates/candidate'
-        ? { recipe_candidate_id: 'candidate', recipe_id: 'recipe', version: 1, status: 'candidate', current: true,
+    const value = path === '/recipes'
+      ? { items: [{ recipe_id: 'recipe', origin: 'generated', version: 1, title: 'Test' }], has_more: false }
+      : path === '/recipes/recipe'
+        ? { recipe_id: 'recipe', origin: 'generated', version: 1,
             recipe: { title: 'Test', when: 'tests', when_not: 'never', steps: [] } }
-        : path === '/v1/artifacts' ? { artifact_id: 'artifact', content_hash: 'sha256:x' }
-        : path === '/v1/tasks' ? { task_id: 'task', status: 'ready' }
-        : path.endsWith('/executions') ? { execution_id: 'execution', status: 'awaiting_execution', request_sha256: 'sha', request: {} }
-        : path.endsWith('/result') ? { status: 'completed', revision_id: 'revision' }
+        : path === '/artifacts' ? { artifact_id: 'artifact', content_hash: 'sha256:x' }
+        : path === '/tasks' ? { task_id: 'task', objective: 'task', artifacts: [], context_version: 1 }
+        : path === '/executions' ? { execution_id: 'execution', status: 'awaiting_execution', request_sha256: 'sha', request: {} }
+        : path.endsWith('/result') ? { task_id: 'task', execution_id: 'execution', status: 'completed', trace_origin: 'original' }
         : { items: [] };
     return new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } });
   };
@@ -107,7 +107,7 @@ test('auto recipe match timeout still captures the turn without a Recipe', async
     assert.equal(response.output_text, 'answer');
     assert.equal(wrapped.cosens.rsiCapture, 'active');
     const turn = wrapped.cosens.getTurn(wrapped.cosens.lastTurnId);
-    assert.equal(turn?.revisionId, 'revision');
+    assert.equal(turn?.state, 'completed'); assert.equal(turn?.executionId, 'execution');
     assert.equal(turn?.frozenContext.recipe.status, 'not_found');
     assert.deepEqual(turn?.frozenContext.context.recipe_match_error, { type: 'Error', message: 'match timed out' });
   } finally { await wrapped.close(); }

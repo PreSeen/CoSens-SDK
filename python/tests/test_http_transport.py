@@ -19,18 +19,18 @@ async def test_gateway_retains_service_paths_queries_and_headers_for_both_transp
     sync = SyncTransport(api_key="test-gateway", transport=httpx.MockTransport(server))
     async_transport = AsyncTransport(api_key="test-gateway", transport=httpx.MockTransport(server))
     try:
-        sync.request("GET", "/v1/tasks/r1?include_context=true")
-        await async_transport.request("POST", "/v1/tasks", body={"objective": "task"}, key="turn-key")
+        sync.request("GET", "/tasks/r1?include_context=true")
+        await async_transport.request("POST", "/tasks", body={"objective": "task"}, key="turn-key")
         async with CoSensClient(api_key="test-gateway", _http_transport=httpx.MockTransport(server)) as client:
-            await client.atoms.get_recipe_candidate("candidate1")
+            await client.atoms.get_execution("execution1")
     finally:
         sync.close()
         await async_transport.aclose()
 
     assert [str(r.url) for r in requests] == [
-        "https://rsi.cosens.ai/api/v1/tasks/r1?include_context=true",
-        "https://rsi.cosens.ai/api/v1/tasks",
-        "https://rsi.cosens.ai/api/v1/recipe-candidates/candidate1",
+        "https://rsi.cosens.ai/api/tasks/r1?include_context=true",
+        "https://rsi.cosens.ai/api/tasks",
+        "https://rsi.cosens.ai/api/executions/execution1",
     ]
     assert [r.headers["authorization"] for r in requests] == ["Bearer test-gateway"] * 3
     assert [r.headers["x-auth-type"] for r in requests] == ["api_key"] * 3
@@ -46,7 +46,7 @@ async def test_gateway_key_is_the_only_caller_credential(monkeypatch):
         requests.append(request)
         return httpx.Response(200, json={"run_id": "r1", "status": "ready"})
     async with CoSensClient(api_key="test-gateway", _http_transport=httpx.MockTransport(server)) as client:
-        await client.atoms.create_task(source="new_task", objective="task", key="key")
+        await client.atoms.create_task(objective="task", key="key")
         client.sync_atoms.get_task("r1")
     assert len(requests) == 2
     assert all(r.headers["authorization"] == "Bearer test-gateway" and r.headers["x-auth-type"] == "api_key" and "api-key" not in r.headers for r in requests)
@@ -116,13 +116,33 @@ async def test_gateway_error_text_redacts_the_api_key():
     assert "secret-key" not in str(exc.value)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload,missing,recipe_ids", [
+    ({"error": {"code": "input_incomplete", "message": "m", "missing": ["objective", "submitted_output"]}},
+     ["objective", "submitted_output"], None),
+    ({"error": {"code": "recipe_choice_required", "message": "m", "recipe_ids": ["r1", "r2"]}}, None, ["r1", "r2"]),
+    ({"detail": {"code": "input_incomplete", "message": "m", "missing": ["objective"]}}, ["objective"], None),
+    ({"error": {"code": "input_incomplete", "message": "m", "missing": ["objective", 3]}}, None, None),
+    ({"error": {"code": "input_incomplete", "message": "m", "missing": "objective"}}, None, None),
+    ({"error": {"code": "recipe_choice_required", "message": "m", "recipe_ids": ["secret-key-recipe"]}}, None,
+     ["[REDACTED]-recipe"]),
+])
+async def test_structured_error_detail_keeps_lists_of_names(payload, missing, recipe_ids):
+    async with CoSensClient(api_key="secret-key", _http_transport=httpx.MockTransport(
+        lambda r: httpx.Response(422, json=payload)
+    )) as client:
+        with pytest.raises(RSIHTTPError) as exc:
+            await client.atoms.get_task("r1")
+    assert (exc.value.missing, exc.value.recipe_ids) == (missing, recipe_ids)
+
+
 @pytest.mark.parametrize("key", ["", "Bearer test-key", " key", "key\n"])
 def test_invalid_key_is_rejected_without_network_or_secret_in_error(key):
     requests = []
     transport = SyncTransport(api_key=key, transport=httpx.MockTransport(lambda r: (requests.append(r), httpx.Response(200, json={}))[1]))
     try:
         with pytest.raises(ValueError, match="api_key"):
-            transport.request("GET", "/v1/tasks/r1")
+            transport.request("GET", "/tasks/r1")
         assert requests == []
     finally:
         transport.close()
@@ -162,9 +182,9 @@ async def test_gateway_rejects_redirect_without_forwarding_key(asynchronous):
     try:
         with pytest.raises(RSIHTTPError) as exc:
             if asynchronous:
-                await transport.request("GET", "/v1/tasks/r1")
+                await transport.request("GET", "/tasks/r1")
             else:
-                transport.request("GET", "/v1/tasks/r1")
+                transport.request("GET", "/tasks/r1")
         assert exc.value.status_code == 307
         assert len(requests) == 1
         assert requests[0].url.scheme == "https"
@@ -177,7 +197,7 @@ async def test_gateway_rejects_redirect_without_forwarding_key(asynchronous):
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("path", ["http://rsi.cosens.ai/api/v1/tasks/r1", "https://other.example/collect", "//other.example/collect", "/api/v1/tasks/r1", "/api?debug=1", "/v1\\runs\\r1"])
+@pytest.mark.parametrize("path", ["http://rsi.cosens.ai/api/tasks/r1", "https://other.example/collect", "//other.example/collect", "/api/tasks/r1", "/api?debug=1", "/v1\\runs\\r1"])
 @pytest.mark.asyncio
 async def test_gateway_never_sends_key_to_absolute_or_external_paths(asynchronous, path):
     requests = []

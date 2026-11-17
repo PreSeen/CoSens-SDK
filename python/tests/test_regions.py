@@ -2,7 +2,6 @@ import httpx
 import pytest
 
 from cosens import CoSensClient
-from cosens.session_cursor import CursorStore
 from cosens.state import TurnStore
 
 
@@ -17,10 +16,10 @@ async def test_us_routes_all_transports_and_freezes_at_client_creation(monkeypat
         monkeypatch.delenv('COSENS_REGION')
         client.sync_atoms.get_task('t1')
         await client.atoms.get_task('t1')
-        await client.atoms.get_revision('revision1')
+        await client.atoms.get_execution('execution1')
     assert [str(r.url) for r in requests]==[
-        'https://rsi.cosens.ai/api/v1/tasks/t1','https://rsi.cosens.ai/api/v1/tasks/t1',
-        'https://rsi.cosens.ai/api/v1/revisions/revision1']
+        'https://rsi.cosens.ai/api/tasks/t1','https://rsi.cosens.ai/api/tasks/t1',
+        'https://rsi.cosens.ai/api/executions/execution1']
     assert all(r.headers['authorization']=='Bearer regional-key' for r in requests)
     assert all(not any(k.lower().replace('_','-')=='x-user-id' for k in r.headers) for r in requests)
 
@@ -56,25 +55,14 @@ def test_client_falls_back_to_generic_key_and_explicit_key_wins(monkeypatch):
         explicit.close()
 
 
-@pytest.mark.asyncio
-async def test_service_identities_do_not_share_turns_or_message_ack_with_same_key_and_session(tmp_path):
-    class Session:
-        session_id='same-session'
-        def get_items(self):
-            return [{'id':'m1','role':'user','content':'hello'}]
-    path=tmp_path/'shared.sqlite3'; session=Session()
-    old_turns=TurnStore(path,principal='same-key',service_id='old-service'); old_cursor=CursorStore(path,principal='same-key',service_id='old-service')
-    us_turns=TurnStore(path,principal='same-key'); us_cursor=CursorStore(path,principal='same-key')
+def test_service_identities_do_not_share_turns_with_the_same_key(tmp_path):
+    path=tmp_path/'shared.sqlite3'
+    old_turns=TurnStore(path,principal='same-key',service_id='old-service'); us_turns=TurnStore(path,principal='same-key')
     try:
         old_turns.put('turn-1',{'run_id':'old-run'})
-        old_snapshot=await old_cursor.snapshot(session)
-        old_cursor.begin_batch('old-run',old_snapshot,old_cursor.pending(old_snapshot))
-        old_cursor.ack(old_snapshot,{'durable_ack':['chat:m1']})
         assert us_turns.get('turn-1') is None
-        assert [e['id'] for e in us_cursor.pending(await us_cursor.snapshot(session))]==['chat:m1']
-        assert old_cursor.pending(await old_cursor.snapshot(session))==[]
         us_turns.put('turn-1',{'run_id':'us-run'})
         assert old_turns.get('turn-1')=={'run_id':'old-run'}
         assert us_turns.get('turn-1')=={'run_id':'us-run'}
     finally:
-        for store in [old_turns,us_turns,old_cursor,us_cursor]: store.close()
+        old_turns.close(); us_turns.close()

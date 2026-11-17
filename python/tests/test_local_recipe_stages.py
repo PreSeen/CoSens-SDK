@@ -8,13 +8,13 @@ from local_rsi_helpers import FakeModel
 
 CONTRACT = Path(__file__).resolve().parents[2] / "contract" / "local-rsi"
 VALIDATION = json.loads((CONTRACT / "validation.json").read_text())
-EVENT_REF = {"revision_id": "rev1", "event_id": "e1"}
+EVENT_REF = {"execution_id": "exec1", "event_id": "e1"}
 
 
 def context(feedback=()):
-    return {"history": [{"revision_id": "rev1", "materials": [], "outputs": [{"artifact_id": "out1"}],
+    return {"history": [{"execution_id": "exec1", "materials": [], "outputs": [{"artifact_id": "out1"}],
                          "events": [{"id": "e1"}], "feedback": list(feedback)}],
-            "memory": {"status": "not_requested", "items": []}}
+            "task_materials": [], "memory": {"status": "not_requested", "items": []}}
 
 
 NEW_EVIDENCE = [{"observation": "O", "why_missing": "W", "evidence_refs": [EVENT_REF]}]
@@ -95,7 +95,7 @@ async def test_new_evidence_is_kept_out_unless_verified(source, verified, eviden
 
 
 async def test_only_the_latest_revisions_feedback_can_verify():
-    older = {"revision_id": "rev0", "materials": [], "outputs": [], "events": [], "feedback": [{"feedback_id": "fb0", "source": "evaluator"}]}
+    older = {"execution_id": "exec0", "materials": [], "outputs": [], "events": [], "feedback": [{"feedback_id": "fb0", "source": "evaluator"}]}
     latest = context([{"feedback_id": "fb1", "source": "human"}])
     latest["history"].insert(0, older)
     model = FakeModel(attribution(verified_success=True, new_evidence=NEW_EVIDENCE))
@@ -127,12 +127,12 @@ async def test_parent_uses_the_improvement_role():
 
 
 async def test_a_new_version_may_keep_the_previous_versions_evidence():
-    kept = {"revision_id": "old-rev", "event_id": "old-event"}
+    kept = {"execution_id": "old-exec", "event_id": "old-event"}
     parent = {"recipe": recipe(steps=[{"id": "s1", "instruction": "kept", "evidence_refs": [kept]}])}
     index = stages.with_parent_evidence(stages.evidence_index(context()), parent)
     new = recipe(steps=[{"id": "s1", "instruction": "kept", "evidence_refs": [kept]}])
     assert stages.recipe_rejection(new, index) is None
-    other = recipe(steps=[{"id": "s1", "instruction": "x", "evidence_refs": [{"revision_id": "old-rev", "event_id": "never-cited"}]}])
+    other = recipe(steps=[{"id": "s1", "instruction": "x", "evidence_refs": [{"execution_id": "old-exec", "event_id": "never-cited"}]}])
     assert stages.recipe_rejection(other, index).kind == "evidence"
     assert stages.with_parent_evidence(stages.evidence_index(context()), None) == stages.evidence_index(context())
     imported = {"recipe": {"steps": [{"id": "s1", "instruction": "kept"}], "lessons": []}}  # imported without evidence
@@ -173,3 +173,9 @@ def test_memory_snapshot_freezes_the_recalled_sources_up_to_the_item_limit():
         stages.memory_snapshot([{"text": "no id"}])
 
 
+def test_an_evidence_reference_names_an_execution_not_a_revision():
+    index = stages.evidence_index(context())
+    assert stages.valid_evidence({"execution_id": "exec1", "event_id": "e1"}, index)
+    assert not stages.valid_evidence({"revision_id": "exec1", "event_id": "e1"}, index)
+    old = recipe(steps=[{"id": "s1", "instruction": "I", "evidence_refs": [{"revision_id": "exec1", "event_id": "e1"}]}])
+    assert stages.recipe_rejection(old, index) is not None

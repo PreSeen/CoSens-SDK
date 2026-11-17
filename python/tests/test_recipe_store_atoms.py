@@ -16,7 +16,7 @@ async def test_recipe_store_requests_sync_and_async():
         return httpx.Response(200, json={"items": []})
 
     async with CoSensClient(api_key="test-key", _http_transport=httpx.MockTransport(server)) as client:
-        await client.atoms.upload_recipe("team_recipe-1", version=4, recipe=RECIPE, base_version=3)
+        await client.atoms.upload_recipe("team_recipe-1", version=4, recipe=RECIPE, previous_version=3)
         client.sync_atoms.upload_recipe("team_recipe-1", version=1, recipe=RECIPE)
         await client.atoms.get_recipe("g1", version=2)
         client.sync_atoms.get_recipe("r1")
@@ -26,17 +26,17 @@ async def test_recipe_store_requests_sync_and_async():
         client.sync_atoms.search_recipes("sort words")
 
     assert [(r.method, r.url.path, dict(r.url.params)) for r in requests] == [
-        ("POST", "/api/v1/recipes/team_recipe-1", {}),
-        ("POST", "/api/v1/recipes/team_recipe-1", {}),
-        ("GET", "/api/v1/recipes/g1", {"version": "2"}),
-        ("GET", "/api/v1/recipes/r1", {}),
-        ("GET", "/api/v1/recipes", {"limit": "5", "cursor": "c1", "origin": "uploaded"}),
-        ("GET", "/api/v1/recipes", {"limit": "20"}),
-        ("GET", "/api/v1/recipes", {"q": "sort words", "limit": "3"}),
-        ("GET", "/api/v1/recipes", {"q": "sort words", "limit": "10"}),
+        ("PUT", "/api/recipes/team_recipe-1/versions/4", {}),
+        ("PUT", "/api/recipes/team_recipe-1/versions/1", {}),
+        ("GET", "/api/recipes/g1", {"version": "2"}),
+        ("GET", "/api/recipes/r1", {}),
+        ("GET", "/api/recipes", {"limit": "5", "cursor": "c1", "origin": "uploaded"}),
+        ("GET", "/api/recipes", {"limit": "20"}),
+        ("GET", "/api/recipes", {"q": "sort words", "limit": "3"}),
+        ("GET", "/api/recipes", {"q": "sort words", "limit": "10"}),
     ]
-    assert json.loads(requests[0].content) == {"version": 4, "base_version": 3, "recipe": RECIPE}
-    assert json.loads(requests[1].content) == {"version": 1, "recipe": RECIPE}
+    assert json.loads(requests[0].content) == {"previous_version": 3, "recipe": RECIPE}
+    assert json.loads(requests[1].content) == {"recipe": RECIPE}
 
 
 @pytest.mark.parametrize("call", [
@@ -44,7 +44,7 @@ async def test_recipe_store_requests_sync_and_async():
     lambda a: a.upload_recipe("x" * 129, version=1, recipe=RECIPE),
     lambda a: a.upload_recipe("r", version=0, recipe=RECIPE),
     lambda a: a.upload_recipe("r", version=True, recipe=RECIPE),
-    lambda a: a.upload_recipe("r", version=2, recipe=RECIPE, base_version=0),
+    lambda a: a.upload_recipe("r", version=2, recipe=RECIPE, previous_version=0),
     lambda a: a.upload_recipe("r", version=1, recipe=[]),
     lambda a: a.get_recipe("r", version=0),
     lambda a: a.list_recipes(limit=0),
