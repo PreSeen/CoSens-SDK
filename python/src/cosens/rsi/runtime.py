@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .materials import atomic_json, digest, read_snapshot
-from .models import Analysis, Assessment, InvalidState, RecipeContent
+from .models import Analysis, Assessment, InvalidState, ModelOutputError, RecipeContent
 
 
 class Runtime(Protocol):
@@ -59,6 +59,7 @@ class LangChainRuntime:
 
         from langchain.agents import create_agent
         from langchain.agents.structured_output import ToolStrategy
+        from langchain_core.messages import HumanMessage, ToolMessage
         from langchain_core.tools import tool
         from langchain_openai import ChatOpenAI
 
@@ -147,21 +148,43 @@ class LangChainRuntime:
             system_prompt=prompt,
             response_format=ToolStrategy(schema) if schema is not None else None,
         )
+        messages = [
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {"context": context, "evidence_catalog": catalog},
+                    ensure_ascii=False,
+                ),
+            }
+        ]
         with self.model_slot():
-            result = agent.invoke(
-                {
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": json.dumps(
-                                {"context": context, "evidence_catalog": catalog},
-                                ensure_ascii=False,
-                            ),
-                        }
-                    ]
-                },
-                {"recursion_limit": self.client.config.recursion_limit},
-            )
+            for attempt in range(3):
+                self.check_alive()
+                result = agent.invoke(
+                    {"messages": messages},
+                    {"recursion_limit": self.client.config.recursion_limit},
+                )
+                if schema is None or result.get("structured_response") is not None:
+                    break
+                # Some compatible gateways end the tool loop on malformed JSON
+                # instead of producing a structured response. Keep the evidence
+                # already read and let the model correct its call, at most twice.
+                messages = list(result["messages"])
+                for call in getattr(messages[-1], "invalid_tool_calls", []):
+                    if call.get("id"):
+                        messages.append(
+                            ToolMessage(
+                                tool_call_id=call["id"],
+                                name=call.get("name"),
+                                content="Invalid tool arguments: return valid JSON matching the tool schema.",
+                            )
+                        )
+                messages.append(
+                    HumanMessage(
+                        content=f"Return the final result by calling {schema.__name__} with valid JSON arguments matching its schema. "
+                        "Do not return prose or malformed JSON. Use null for absent optional values; quote all string values."
+                    )
+                )
         self.check_alive()
         atomic_json(
             trace_path,
@@ -169,10 +192,15 @@ class LangChainRuntime:
                 "stage": stage,
                 "model": settings.model,
                 "reads": reads,
+                "structured_output_attempts": attempt + 1,
                 "messages": [m.model_dump(mode="json") for m in result["messages"]],
             },
         )
         if schema is not None:
+            if result.get("structured_response") is None:
+                raise ModelOutputError(
+                    "model did not produce schema-validated output after bounded correction"
+                )
             return schema.model_validate(result["structured_response"]).model_dump()
         last = result["messages"][-1].content
         return {
@@ -190,6 +218,8 @@ class LangChainRuntime:
             trace_path=trace_path,
             schema=Analysis,
             instruction="Decide whether NECESSARY recipe information is missing. Only then form a hypothesis and 2-3 selectable options per question. "
+            "If information is sufficient: sufficient_information=true, hypothesis=null, questions=[]. A hypothesis is not a recipe summary. "
+            "Do not ask about hypothetical edge cases outside the task's necessary scope. "
             "Do not pause: state a provisional assumption. Initialize rubrics from task requirements; refine from explicit user feedback and actual trajectory. "
             "Keep explicit evidence separate from agent inference. If fixed rubrics are supplied, preserve their standard.",
         )

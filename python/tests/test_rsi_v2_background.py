@@ -26,6 +26,8 @@ def gateway():
         active = 0
         peak = 0
         requests = 0
+        structured_budget = 0
+        bad_output = "malformed"
         lock = threading.Lock()
 
     class Handler(BaseHTTPRequestHandler):
@@ -110,6 +112,12 @@ def gateway():
                     )
                 else:
                     name, arguments = None, None
+                if called and name == "Analysis" and server.structured_budget:
+                    server.structured_budget -= 1
+                    if server.bad_output == "prose":
+                        name, arguments = None, None
+                    else:
+                        arguments = '{"sufficient_information": true, "hypothesis": invalid-json}'
                 message = {
                     "role": "assistant",
                     "content": None if name else "Deliverable written",
@@ -121,7 +129,9 @@ def gateway():
                             "type": "function",
                             "function": {
                                 "name": name,
-                                "arguments": json.dumps(arguments),
+                                "arguments": arguments
+                                if isinstance(arguments, str)
+                                else json.dumps(arguments),
                             },
                         }
                     ]
@@ -254,3 +264,48 @@ print(json.dumps({'id': run['id']}))
                 "cancelled",
             }:
                 client.execution_cancel(execution_id)
+
+
+@pytest.mark.parametrize(
+    "bad_output,budget", [("malformed", 1), ("prose", 1), ("malformed", 10)]
+)
+def test_structured_output_correction_is_bounded(
+    tmp_path, gateway, monkeypatch, bad_output, budget
+):
+    monkeypatch.setenv("RSI_MODEL_API_KEY", "fixture-not-a-live-secret")
+    gateway.bad_output = bad_output
+    gateway.structured_budget = budget
+    client = RSIClient(
+        data_dir=tmp_path / "rsi",
+        config={
+            "model": {
+                "model": "local-test",
+                "base_url": f"http://127.0.0.1:{gateway.server_port}/v1",
+            }
+        },
+        auto_start=False,
+    )
+    context = tmp_path / "context.md"
+    context.write_text("Write 42 into answer.txt")
+    material = client.material_create(manifest={"context_path": str(context)})
+    execution = client.execution_create(
+        material_ids=[material["id"]],
+        policy={
+            "artifact_confirmed": True,
+            "confirmation_ref": "fixture",
+            "test_task": {"instruction": "Write 42 into answer.txt"},
+        },
+    )
+    client.run_pending()
+    result = client.execution_get(execution["id"])
+    if budget > 3:
+        assert result["status"] == "failed"
+        assert result["error"]["code"] == "invalid_model_output"
+        assert client.recipe_list() == []
+        assert gateway.requests == 4  # one read + three malformed output attempts
+    else:
+        assert result["status"] == "completed", result
+        assert result["result"]["test_status"] == "passed"
+        traces = list(client.data_dir.glob("executions/*/input-*/analysis.json"))
+        trace = json.loads(traces[0].read_text())
+        assert trace["structured_output_attempts"] == 2

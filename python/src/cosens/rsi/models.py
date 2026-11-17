@@ -34,6 +34,10 @@ class InputChanged(RSIError):
     code = "input_changed"
 
 
+class ModelOutputError(RSIError):
+    code = "invalid_model_output"
+
+
 class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

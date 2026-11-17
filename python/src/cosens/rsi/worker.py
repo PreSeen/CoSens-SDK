@@ -11,6 +11,29 @@ from .models import LeaseLost, RSIError
 from .store import uid
 
 
+def failure_details(exc, stage):
+    """Keep actionable status metadata, never upstream bodies, headers or prompts."""
+    from openai import APIStatusError
+
+    details = {
+        "code": exc.code if isinstance(exc, RSIError) else "execution_failed",
+        "type": type(exc).__name__,
+        "stage": stage,
+    }
+    if isinstance(exc, APIStatusError):
+        details["upstream_status"] = exc.status_code
+        details["code"] = (
+            "model_payment_required"
+            if exc.status_code == 402
+            else "model_rate_limited"
+            if exc.status_code == 429
+            else "model_unavailable"
+            if exc.status_code >= 500
+            else "model_request_rejected"
+        )
+    return details
+
+
 def drain(client, *, runtime=None, owner=None, slot=None):
     from .engine import Engine
     from .runtime import LangChainRuntime
@@ -87,13 +110,9 @@ def drain(client, *, runtime=None, owner=None, slot=None):
                         None,
                         status="failed",
                         stage="failed",
-                        error={
-                            "code": exc.code
-                            if isinstance(exc, RSIError)
-                            else "execution_failed",
-                            "type": type(exc).__name__,
-                            "stage": store.get(execution_id, "execution")["stage"],
-                        },
+                        error=failure_details(
+                            exc, store.get(execution_id, "execution")["stage"]
+                        ),
                     )
                 except LeaseLost:
                     pass

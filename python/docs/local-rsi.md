@@ -197,6 +197,8 @@ result = rsi.wait(execution_id, timeout=300)  # 可选轮询助手，超时不�
 
 `RSIError` 子类 `NotFound/Conflict/InvalidState` 提供稳定 `code`。异步运行错误保存在 `Execution.error`，仅记录错误类型与通用错误码，避免把上游含凭据的异常字符串落盘。原始模型和工具消息保存在本地阶段轨迹中，供宿主检查。
 
+模型未产生结构化结果（例如工具参数不是合法 JSON）时，SDK 保留已读取的上下文，最多请求两次纠正；仍不符合 Schema 时返回 `invalid_model_output`，不创建虚假的 Recipe。HTTP 402/429/5xx 分别记录 `model_payment_required/model_rate_limited/model_unavailable` 和 `upstream_status`，不保存上游响应正文或凭据。
+
 ## 代码组织与验证
 
 `client.py` 是 SDK 入口；`engine.py` 是学习图；`runtime.py` 是 LangChain Agent 与文件工具能力；`store.py` 是本地 SQLite 队列和业务存储适配；`worker.py` 是按需进程入口。云端尚未实现；未来保留同一学习图，替换进程派发为 Arq、存储为云端适配器，SDK 增加远端传输入口，不分叉本地/云端业务代码。

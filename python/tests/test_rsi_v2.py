@@ -538,3 +538,27 @@ def test_clarification_retry_repairs_dispatch_without_duplicate_child(
     assert result["continuation_execution_id"]
     assert len(calls) == 2
     assert len(client.execution_list()) == 2
+
+
+def test_model_payment_error_is_actionable_without_persisting_body(client, tmp_path):
+    import httpx
+    from openai import APIStatusError
+
+    class UnfundedRuntime(FileRuntime):
+        def generate(self, *args):
+            request = httpx.Request(
+                "POST", "https://fixture.invalid/v1/chat/completions"
+            )
+            raise APIStatusError(
+                "secret-provider-body",
+                response=httpx.Response(402, request=request),
+                body={"error": "secret-provider-body"},
+            )
+
+    execution = run(client, material(client, tmp_path)["id"])
+    client.run_pending(runtime=UnfundedRuntime())
+    result = client.execution_get(execution["id"])
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "model_payment_required"
+    assert result["error"]["upstream_status"] == 402
+    assert "secret-provider-body" not in json.dumps(result)
