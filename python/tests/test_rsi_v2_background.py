@@ -116,6 +116,9 @@ def gateway():
                     server.structured_budget -= 1
                     if server.bad_output == "prose":
                         name, arguments = None, None
+                    elif server.bad_output == "bad_material":
+                        reference = arguments["rubrics"]["criteria"][0]["evidence"][0]
+                        reference["material_id"] = reference["locator"]
                     else:
                         arguments = '{"sufficient_information": true, "hypothesis": invalid-json}'
                 message = {
@@ -267,7 +270,8 @@ print(json.dumps({'id': run['id']}))
 
 
 @pytest.mark.parametrize(
-    "bad_output,budget", [("malformed", 1), ("prose", 1), ("malformed", 10)]
+    "bad_output,budget",
+    [("malformed", 1), ("prose", 1), ("malformed", 10), ("bad_material", 1)],
 )
 def test_structured_output_correction_is_bounded(
     tmp_path, gateway, monkeypatch, bad_output, budget
@@ -308,4 +312,6 @@ def test_structured_output_correction_is_bounded(
         assert result["result"]["test_status"] == "passed"
         traces = list(client.data_dir.glob("executions/*/input-*/analysis.json"))
         trace = json.loads(traces[0].read_text())
-        assert trace["structured_output_attempts"] == 2
+        assert trace["structured_output_attempts"] == (
+            1 if bad_output == "bad_material" else 2
+        )

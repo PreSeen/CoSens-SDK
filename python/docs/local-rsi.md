@@ -144,6 +144,8 @@ execution = rsi.execution_create(
 
 问题具有 `id/revision/question/options/assumption`，选项含 `id/label`。只有必要缺口才创建问题，其他情况不制造 Hypothesis。版本过期或试图覆盖已接受答案返回 `Conflict`；同一答案重复提交不创建重复子执行。修改已接受答案使用新反馈 Material。失败/取消后的回答会记录，但不自动续跑；明确调用 `execution_create(parent_execution_id=...)`。
 
+证据引用的 `material_id` 是材料包 ID，`locator` 是完整文件定位符（`material_id/file-index`），两者不可混用。模型可见清单分别提供这两个字段；Schema 校验格式与归属，执行前进一步检查引用是否属于授权材料清单。
+
 跨 session 可基于同一个活动 Execution 追加新材料；终态需要子 Execution。`parent_execution_id` 记录历史关系，`base_recipe_version_id` 指定延续的 Recipe 版本，`material_ids` 明确列出获准使用的全部材料，不隐式读取其他 session。
 
 ### Rubrics
@@ -192,6 +194,8 @@ result = rsi.wait(execution_id, timeout=300)  # 可选轮询助手，超时不�
 也可以在与 Hook 相同的 Python 环境运行 `python -m cosens.rsi.worker --data-dir /home/me/.cosens/rsi`，处理队列后退出。检查点本身不能在机器重启后自动唤醒进程，宿主需要调用恢复入口。
 
 测试执行器只提供受限的 `read_evidence/write_output/read_output`，不会启动 shell、浏览器或任意网络工具。适用于可通过输入文件和文件产物复现的任务；涉及外部系统、编译、浏览器等任务需要扩展 Runtime 工具能力并提供受控环境，不能把没有做过的测试标为通过。测试执行不能读取宿主产物/上下文，评价使用独立 Agent 上下文和实际输出。
+
+评价 Agent 同时获得本次 Recipe 内容及只读执行轨迹文件，可以核查方法约束和工具使用证据；确定性文件检查由 SDK 计算，不由模型自行宣告通过。
 
 本地文件和轨迹保留在指定目录；学习图明确关闭继承自宿主的远端 LangSmith tracing。配置模型地址如果是远端服务，模型调用中的选定证据自然会发送到该地址，部署方应选择符合材料使用范围的模型。宿主自行安装的外部 instrumentation 仍需宿主管理。
 

@@ -247,6 +247,21 @@ class Engine:
                 result["reason"] = "Recipe executor produced no verifiable output files"
             else:
                 checks = self.objective_checks(workspace, task["checks"])
+                evaluator_files = artifacts + self.files(execution, test=True)
+                executor_trace = attempt / "executor-trace.json"
+                if executor_trace.is_file():
+                    trace_bytes = executor_trace.read_bytes()
+                    evaluator_files.append(
+                        {
+                            "path": str(executor_trace),
+                            "snapshot": str(executor_trace),
+                            "locator": "test/executor-trace.json",
+                            "role": "trace",
+                            "description": "Actual executor tool calls and results",
+                            "sha256": digest(trace_bytes),
+                            "size": len(trace_bytes),
+                        }
+                    )
                 self.begin(state, "evaluate")
                 assessment = Assessment.model_validate(
                     self.runtime.assess(
@@ -254,8 +269,9 @@ class Engine:
                             "test_task": task,
                             "rubrics": rubric["content"],
                             "objective_checks": checks,
+                            "recipe": recipe["content"],
                         },
-                        artifacts + self.files(execution, test=True),
+                        evaluator_files,
                         attempt / "evaluator-trace.json",
                     )
                 ).model_dump()

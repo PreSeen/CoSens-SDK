@@ -124,6 +124,10 @@ class FileRuntime:
         return {"summary": "Created output"}
 
     def assess(self, context, files, trace_path):
+        assert context["recipe"]["instructions"]
+        assert any(
+            f["role"] == "trace" and json.loads(read_snapshot(f)["text"]) for f in files
+        )
         assert any(
             read_snapshot(f)["text"] == self.output
             for f in files

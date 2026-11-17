@@ -63,3 +63,31 @@
 修复后干净快照完整 Python 回归：**180 passed, 3 skipped**。工作区完整回归：**186 passed, 3 skipped**，另含原有未提交的 6 个测试。Python 3.10 新版本地 RSI 测试：**22 passed**。4 个独立 Hook 的后台并发测试再次通过，Execution 峰值为 2，模型请求峰值为 1。
 
 **真实模型验收尚未完成，真实模型案例没有生成 Recipe。** 需要恢复可用模型服务后继续验证；协议测试和故障回归生成的测试 Recipe 不计为真实模型成功产物。
+
+## 2026-11-18 指定模型复测：成功
+
+上述失败属于旧配置下的联调记录。随后按用户明确指定的 `deepseek-v4.1-flash-1017` 与 `/v1/chat/completions` 重新执行真实模型案例，未修改仓库 `.env`，密钥仅传入测试进程环境。
+
+首次发现模型把 `material_id` 填成了 `material_id/file-index`。已在材料清单中分别提供两字段，并在 EvidenceRef Schema 中添加格式与归属校验，使模型在结构化输出阶段获得纠错机会，而不是在保存 Rubrics 时才失败。补充了此类错误的真实 LangChain 工具循环回归。
+
+同时补齐独立评价输入：评价 Agent 可以读取实际执行工具轨迹，并看到本次采用的 Recipe 内容，从而检查“实际读取了哪个输入”和“方法是否可复用”等标准；其对话上下文仍与测试执行 Agent 分离。
+
+最终实测：
+
+- Execution：`execution_b426cd9b0df14efab3e1585426addc48`。
+- 约 **44 秒**完成：分析材料 → 创建 Rubrics → 生成 Recipe → 新输入实际执行 → 独立评分 → 自动启用。
+- Recipe：`recipe_68aa77cc927d4b618b96c44713c27f98`，版本 `version_de52c4d551b5408db5af296ff0f1134e`。
+- 首轮测试 `passed`；8 条 Rubrics 得分均为 1.0；完整文件 `text_equals` 检查通过。
+- `provisional=false`、`activated=true`，没有生成必要澄清问题。
+- 使用新输入计算得到 `book=1.25`、`pen=4.00`，没有复制历史产物中的 `book=20.00`、`pen=3.00`。
+- 测试目录中的文件与 SQLite 检查点未发现凭据格式内容；未发布或同步到云端。
+
+生成的实际产物：
+
+```csv
+category,total
+book,1.25
+pen,4.00
+```
+
+修复后干净快照 Python 回归 **181 passed, 3 skipped**，工作区回归 **187 passed, 3 skipped**；Python 3.10 新版模块测试 **23 passed**。这个结果验证了该 CSV 案例的真实模型流程，不代表所有任务的 Recipe 质量或模型吞吐量。

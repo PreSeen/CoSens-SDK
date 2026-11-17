@@ -95,8 +95,22 @@ class MaterialManifest(Contract):
 
 
 class EvidenceRef(Contract):
-    material_id: str
-    locator: str = Field(min_length=1)
+    material_id: str = Field(
+        pattern=r"^material_[0-9a-f]{32}$",
+        description="The catalog's material_id, without any /file-index suffix.",
+    )
+    locator: str = Field(
+        min_length=1,
+        description="The exact file locator from the catalog: material_id/file-index.",
+    )
+
+    @model_validator(mode="after")
+    def belongs_to_material(self):
+        if not self.locator.startswith(self.material_id + "/"):
+            raise ValueError(
+                "locator must belong to material_id; copy the two separate catalog fields"
+            )
+        return self
 
 
 class Criterion(Contract):
