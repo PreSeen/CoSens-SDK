@@ -1,5 +1,9 @@
 # CoSens SDK
 
+The embedded Python RSI SDK V2 is available as `cosens.rsi`: local SQLite storage, bounded background workers, and a LangChain/LangGraph learning and Recipe testing pipeline, without an algorithm HTTP service. Install `python[local-rsi]`; see the [local RSI API and integration guide](python/docs/local-rsi.md) and [Hook example](python/examples/05_rsi_sdk_v2.py).
+
+The sections below describe the existing remote API adapters.
+
 Python and TypeScript clients for the current CoSens Task/Execution/Revision API. All three entry points record execution without generating a Recipe:
 
 | Entry | Python | TypeScript |
@@ -8,7 +12,7 @@ Python and TypeScript clients for the current CoSens Task/Execution/Revision API
 | Explicit Agent execution | `cosens(agent).run(agent, input)` | `cosens(agent).run(agent, input)` |
 | Atomic HTTP operations | `client.atoms` / `client.sync_atoms` | `client.atoms` |
 
-The SDK does not create model clients. Build the standard OpenAI client for your model gateway and pass it in:
+The remote API adapters do not create model clients. Build the standard OpenAI client for your model gateway and pass it in:
 
 ```python
 model_client = OpenAI(base_url=os.environ["COSENS_MODEL_BASE_URL"], api_key=os.environ["COSENS_API_KEY"])
