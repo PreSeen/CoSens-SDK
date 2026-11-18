@@ -9,6 +9,7 @@ import pytest
 from cosens import CoSensClient
 from cosens.errors import RSIHTTPError
 from cosens.local import LocalRSI
+from cosens.local.recipes import RSICandidateFailed
 from cosens.local.publish import UPLOAD_SCHEMA, upload_form
 from cosens.local.recipe_stages import RECIPE_MAX_TEXT_CHARS
 from cosens.local.store import SCHEMA, canonical_json, fingerprint
@@ -33,7 +34,7 @@ class FakeService:
 
     def __init__(self):
         self.requests, self.uploads, self.memory, self.chains = [], [], {}, {}
-        self.fail_status, self.lose_response = None, False
+        self.fail_status, self.lose_response, self.fail_reads = None, False, False
 
     def add(self, recipe_id, recipe, *, version=1, origin="uploaded"):
         chain = self.chains.setdefault(recipe_id, {"origin": origin, "versions": {}, "current": None})
@@ -46,6 +47,17 @@ class FakeService:
         return {"recipe_id": recipe_id, "origin": chain["origin"], "version": version, "previous_version": stored["previous_version"],
                 "current_version": chain["current"], "recipe": stored["recipe"], "recipe_sha256": stored["sha"],
                 "task_id": "task_server" if chain["origin"] == "generated" else None, "created_at": "2026-11-13T00:00:00Z"}
+
+    def rollback(self, recipe_id, version):
+        """PUT /recipes/{id}/current: the stored versions stay, only the current one moves."""
+        self.chains[recipe_id]["current"] = version
+
+    def versions(self, recipe_id):
+        chain = self.chains[recipe_id]
+        return {"recipe_id": recipe_id, "origin": chain["origin"], "current_version": chain["current"],
+                "versions": [{"version": version, "previous_version": stored["previous_version"],
+                              "current": version == chain["current"], "recipe_sha256": stored["sha"]}
+                             for version, stored in sorted(chain["versions"].items())]}
 
     def summary(self, recipe_id):
         chain = self.chains[recipe_id]
@@ -92,6 +104,10 @@ class FakeService:
             items = [self.summary(k) for k in reversed(self.chains) if query.get("origin") in (None, self.chains[k]["origin"])]
             return httpx.Response(200, json={"items": items[:int(query["limit"])], "has_more": False, "next_cursor": None})
         recipe_id = path.removeprefix("/api/recipes/")
+        if request.method == "GET" and self.fail_reads:
+            return httpx.Response(503, json={"detail": "unavailable"})
+        if request.method == "GET" and recipe_id.endswith("/versions"):
+            return httpx.Response(200, json=self.versions(recipe_id.removesuffix("/versions")))
         if request.method == "PUT":
             recipe_id, version = recipe_id.split("/versions/")
             response = self.upload(recipe_id, {**body, "version": int(version)})
@@ -340,7 +356,8 @@ async def test_a_0_6_0_database_is_upgraded_in_place(tmp_path):
     context = {"schema": "workflow-recipe-context-v2", "task_id": "task_1", "history": [],
                "memory": {"status": "not_requested", "items": []}, "initial": True}
     db = sqlite3.connect(tmp_path / "old.sqlite3")
-    old_schema = SCHEMA.replace("remote_version INTEGER", "memory_source_id TEXT, memory_revision INTEGER NOT NULL DEFAULT 0")
+    old_schema = SCHEMA.replace("remote_version INTEGER,\n  remote_max_version INTEGER",
+                                "memory_source_id TEXT, memory_revision INTEGER NOT NULL DEFAULT 0")
     db.executescript(old_schema.replace("tasks(id TEXT PRIMARY KEY, context_json", "tasks(id TEXT PRIMARY KEY, mode TEXT NOT NULL, context_json"))
     db.execute("INSERT INTO tasks VALUES('task_1','execute',?,1)", (canonical_json({"objective": "A", "artifacts": []}),))
     db.execute("INSERT INTO recipe_candidates(id,task_id,state,phase,context_json,context_sha,recipe_json,recipe_sha,"
@@ -363,3 +380,128 @@ async def test_a_0_6_0_database_is_upgraded_in_place(tmp_path):
     reopened, _, _ = setup(tmp_path, name="old.sqlite3", service=server)
     assert (await reopened.get_recipe_candidate("c1")).publish_state == "published"
     assert reopened._store.read_one("SELECT remote_version FROM recipe_heads")["remote_version"] == 3
+
+
+async def three_versions(rsi, *, key="t1"):
+    """A chain of V1..V3, each uploaded; returns the task and the three versions."""
+    task, _, done = await first_revision(rsi, key=key)
+    versions = [await generate(rsi, task, done.revision_id)]
+    for name in ("two", "three"):
+        versions.append(await improve(rsi, task, key + name))
+    assert [(v.version, v.publish_state) for v in versions] == [(1, "published"), (2, "published"), (3, "published")]
+    return task, versions
+
+
+async def test_a_learning_after_a_rollback_builds_on_the_service_current_version(tmp_path):
+    rsi, model, server = setup(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 5)))
+    task, (_, v2, _) = await three_versions(rsi)
+    server.rollback(v2.recipe_id, 2)
+    job = await improve(rsi, task, "four")
+    assert (job.version, job.parent_candidate_id, job.publish_state) == (4, v2.recipe_candidate_id, "published")
+    assert model.calls[-1]["context"]["base_recipe"]["version"] == 2
+    assert (server.uploads[-1]["version"], server.uploads[-1]["previous_version"]) == (4, 2)
+    assert server.chains[v2.recipe_id]["current"] == 4
+    flags = [(v.version, v.rolled_back) for v in (await rsi.get_recipe_versions(v2.recipe_id)).versions]
+    assert flags == [(1, False), (2, False), (3, True), (4, False)]
+
+
+async def test_a_rollback_found_only_on_upload_fails_the_candidate_and_a_resume_publishes_it(tmp_path):
+    rsi, _, server = setup(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 4)), recipe_reply("Doomed"), recipe_reply("V4"))
+    task, (_, v2, v3) = await three_versions(rsi)
+    server.rollback(v2.recipe_id, 2)
+    server.fail_reads = True  # the check before learning cannot read the service and keeps the local base
+    started = await rsi.start_execution(task.task_id, source="new_task", objective="Do the task", key="four")
+    done = await complete_execution(rsi, started, key="four-out")
+    candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
+    assert (candidate.version, candidate.parent_candidate_id) == (4, v3.recipe_candidate_id)
+    server.fail_reads = False
+    with pytest.raises(RSICandidateFailed) as caught:
+        await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    assert (caught.value.code, caught.value.retryable) == ("previous_version_changed", True)
+    assert sorted(server.chains[v2.recipe_id]["versions"]) == [1, 2, 3] and server.chains[v2.recipe_id]["current"] == 2
+    assert (await rsi.get_task_recipe(task.task_id)).current.recipe_candidate_id == v2.recipe_candidate_id
+    await rsi.resume_recipe_candidate(candidate.recipe_candidate_id)
+    job = await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    assert (job.version, job.parent_candidate_id, job.publish_state, job.recipe["title"]) == (
+        5, v2.recipe_candidate_id, "published", "V4")
+    assert (server.uploads[-1]["version"], server.uploads[-1]["previous_version"]) == (5, 2)
+
+
+async def test_a_candidate_built_on_a_rolled_back_version_is_never_uploaded(tmp_path):
+    rsi, _, server = setup(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 4)), recipe_reply("Doomed"))
+    task, (_, v2, _) = await three_versions(rsi)
+    started = await rsi.start_execution(task.task_id, source="new_task", objective="Do the task", key="four")
+    done = await complete_execution(rsi, started, key="four-out")
+    candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
+    server.rollback(v2.recipe_id, 2)  # after the check before learning
+    with pytest.raises(RSICandidateFailed):
+        await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    with pytest.raises(RSICandidateFailed):
+        await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    published = await rsi.publish_recipe(v2.recipe_id)
+    assert (published.recipe_candidate_id, published.publish_state) == (v2.recipe_candidate_id, "published")
+    assert "Doomed" not in json.dumps([chain["versions"] for chain in server.chains.values()])
+    assert [u["version"] for u in server.uploads] == [1, 2, 3, 4]  # the one refused attempt, never stored
+
+
+async def test_after_a_rollback_versions_are_numbered_above_every_stored_version(tmp_path):
+    rsi, _, server = setup(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 5)))
+    task, (_, v2, _) = await three_versions(rsi)
+    server.add(v2.recipe_id, PLAIN, version=4)  # uploaded from another machine
+    server.rollback(v2.recipe_id, 2)
+    job = await improve(rsi, task, "five")
+    assert (job.version, job.parent_candidate_id, job.publish_state) == (5, v2.recipe_candidate_id, "published")
+    assert (server.uploads[-1]["version"], server.uploads[-1]["previous_version"]) == (5, 2)
+
+
+async def test_a_rollback_to_a_version_this_machine_never_had_imports_it(tmp_path):
+    rsi, model, server = setup(tmp_path, recipe_reply("Next"))
+    for version in (1, 2, 3):
+        server.add("team-recipe", {**PLAIN, "title": f"V{version}"}, version=version)
+    task = await rsi.create_task(key="k", objective="A", recipe=await rsi.get_recipe("team-recipe"))
+    started = await rsi.start_execution(task.task_id, source="new_task", objective="Do the task", key="e")
+    done = await complete_execution(rsi, started, key="o")
+    server.rollback("team-recipe", 2)
+    job = await generate(rsi, task, done.revision_id)
+    assert (job.version, job.publish_state) == (4, "published")
+    assert model.calls[-1]["context"]["base_recipe"]["recipe"]["title"] == "V2"
+    versions = (await rsi.get_recipe_versions("team-recipe")).versions
+    assert [(v.version, v.rolled_back, v.publish_state) for v in versions] == [
+        (2, False, "published"), (3, True, "published"), (4, False, "published")]
+    assert job.parent_candidate_id == versions[0].recipe_candidate_id
+    assert (server.uploads[-1]["version"], server.uploads[-1]["previous_version"]) == (4, 2)
+
+
+async def test_candidates_queued_behind_a_rolled_back_one_fail_and_resume_on_the_current_version(tmp_path):
+    rsi, model, server = setup(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 4)), recipe_reply("Doomed"),
+                               recipe_reply("A"), recipe_reply("B"))
+    task, (_, v2, v3) = await three_versions(rsi)
+    server.rollback(v2.recipe_id, 2)
+    server.fail_reads = True  # neither check before learning can read the service
+    queued = []
+    for key in ("four", "five"):
+        started = await rsi.start_execution(task.task_id, source="new_task", objective="Do the task", key=key)
+        done = await complete_execution(rsi, started, key=key + "-out")
+        queued.append(await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id))
+    a, b = queued
+    assert (a.version, a.parent_candidate_id, b.version, b.parent_candidate_id) == (
+        4, v3.recipe_candidate_id, 5, a.recipe_candidate_id)
+    server.fail_reads = False
+    with pytest.raises(RSICandidateFailed) as caught:
+        await rsi.wait_workflow_job("recipe_candidate", a.recipe_candidate_id)
+    assert caught.value.code == "previous_version_changed"
+    with pytest.raises(RSICandidateFailed) as caught:  # not left waiting for A to be resumed
+        await rsi.wait_workflow_job("recipe_candidate", b.recipe_candidate_id, timeout=5)
+    assert (caught.value.code, caught.value.retryable) == ("previous_version_failed", True)
+    assert [u["version"] for u in server.uploads] == [1, 2, 3, 4]  # A's refused attempt; B is never uploaded
+    for candidate in (a, b):
+        await rsi.resume_recipe_candidate(candidate.recipe_candidate_id)
+    job_a = await rsi.wait_workflow_job("recipe_candidate", a.recipe_candidate_id)
+    job_b = await rsi.wait_workflow_job("recipe_candidate", b.recipe_candidate_id)
+    assert (job_a.version, job_a.parent_candidate_id, job_a.publish_state, job_a.recipe["title"]) == (
+        6, v2.recipe_candidate_id, "published", "A")
+    assert (job_b.version, job_b.parent_candidate_id, job_b.publish_state, job_b.recipe["title"]) == (
+        7, a.recipe_candidate_id, "published", "B")
+    assert model.calls[-1]["context"]["base_recipe"]["recipe"]["title"] == "A"
+    assert [(u["version"], u["previous_version"]) for u in server.uploads[4:]] == [(6, 2), (7, 6)]
+    assert server.chains[v2.recipe_id]["current"] == 7
