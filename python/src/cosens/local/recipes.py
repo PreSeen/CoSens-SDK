@@ -318,15 +318,16 @@ class LocalRecipeLifecycle:
         version uploaded from here, else None; ``_server_moved`` decides whether to follow it. A failed read keeps the
         local base; publishing then finds the move instead.
 
-        A local version above the last one uploaded from here may be stored on the service though its upload reply was
-        lost; when the service's current version is that last one, it was rolled back off the lost upload, which
-        ``_lost_upload`` records so the move is followed."""
+        A version on the local current version's line, above the last one uploaded from here, may be stored on the
+        service though its upload reply was lost. ``_lost_upload`` records it first, before the service's current
+        version is read, so that version being current is not a move, and the last version uploaded before it being
+        current is a rollback that is followed."""
         if head is None or head["remote_version"] is None or self._atoms is None:
             return None
         try:
+            lost = await self._lost_upload(head["recipe_id"], head["current_candidate_id"], head["remote_version"])
             view = await self._atoms.get_recipe(head["recipe_id"])
-            if view["version"] == head["remote_version"] and await self._lost_upload(
-                    head["recipe_id"], head["current_candidate_id"], head["remote_version"]) is None:
+            if view["version"] == (lost or head["remote_version"]):
                 return None
             return await self._server_state(head["recipe_id"], view)
         except RSIError as exc:
@@ -383,9 +384,9 @@ class LocalRecipeLifecycle:
 
     def _follow_server(self, db, recipe_id, view, stored, previous):
         """Make the service's current version this chain's current version here: the local version with that number,
-        which the caller checked is the service's copy, else the service's, imported on the local copy of ``previous``,
-        the version it builds on, when there is one. Later versions are numbered above ``stored``, the service's
-        highest version.
+        which the caller checked is the service's copy and which is recorded as uploaded, else the service's, imported
+        on the local copy of ``previous``, the version it builds on, when there is one. Later versions are numbered
+        above ``stored``, the service's highest version.
 
         A finished version that the new current version does not lead to and that is not known to have reached the
         service is built on a version the service moved away from, so it fails like a candidate whose upload finds the
@@ -400,6 +401,7 @@ class LocalRecipeLifecycle:
             db.execute("INSERT INTO recipe_versions VALUES(?,?,?,?)", (current, recipe_id, view["version"], parent))
         else:
             current = row["id"]
+            db.execute("UPDATE recipe_candidates SET publish_state='published' WHERE id=?", (current,))
         db.execute("UPDATE recipe_heads SET current_candidate_id=?,remote_version=?,remote_max_version=? WHERE recipe_id=?",
                    (current, view["version"], stored, recipe_id))
         line = self._line(db, current)
@@ -856,12 +858,16 @@ class LocalRecipeLifecycle:
         this candidate's base (``_moved_off``): then this chain follows the service, the candidate fails with
         ``previous_version_changed`` without being uploaded, and None is returned. None is also returned when another
         learning followed such a move while the upload was in flight: its writes stand and the candidate stays failed.
+        A candidate that such a learning, in another process sharing the store, failed after the caller read it is not
+        uploaded either, and None is returned.
 
         A version this candidate builds on whose upload reply was lost (``_lost_upload``) is recorded first and the
         upload names it, so a move off it is found; when that check cannot read the service, nothing is uploaded and
-        the publish fails, to be retried."""
+        the publish fails, to be retried by ``publish_recipe``."""
         with self._store.reading() as db:
             row = self._candidate(db, candidate_id)
+            if row["state"] != "candidate":  # the last version uploaded from here may already be the one followed
+                return None
             lineage = self._lineage(db, candidate_id)
             head = db.execute("SELECT remote_version FROM recipe_heads WHERE recipe_id=?", (lineage["recipe_id"],)).fetchone()
         recipe_id, recipe, remote = lineage["recipe_id"], upload_form(json.loads(row["recipe_json"])), head["remote_version"]
