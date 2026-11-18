@@ -1,6 +1,6 @@
 """Host Hook integration. Runs only after the host has confirmed the artifact.
 
-Install: pip install -e 'python[local-rsi]'
+Install: pip install -e ./python
 Configure RSI_MODEL_NAME, RSI_MODEL_BASE_URL and RSI_MODEL_API_KEY in the Hook's
 environment. No .env file is read implicitly. The configured model must support
 OpenAI-compatible chat completions and tool calling.

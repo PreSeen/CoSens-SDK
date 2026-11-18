@@ -1,39 +1,19 @@
-# CoSens SDK
+# CoSens Local RSI SDK
 
-The embedded Python RSI SDK V2 is available as `cosens.rsi`: local SQLite storage, bounded background workers, and a LangChain/LangGraph learning and Recipe testing pipeline, without an algorithm HTTP service. Install `python[local-rsi]`; see the [local RSI API and integration guide](python/docs/local-rsi.md) and [Hook example](python/examples/05_rsi_sdk_v2.py).
+CoSens turns confirmed task evidence into reusable Recipes. The local SDK is available in TypeScript and Python. Both provide Material, Execution, Rubrics, and Recipe atomic functions.
 
-The sections below describe the existing remote API adapters.
+```text
+Host Hook → local SDK → SQLite queue → on-demand worker
+→ analyze evidence → generate candidate → execute test → score → save result
+```
 
-Python and TypeScript clients for the current CoSens Task/Execution/Revision API. All three entry points record execution without generating a Recipe:
-
-| Entry | Python | TypeScript |
+| Host | Import | Guide |
 | --- | --- | --- |
-| Transparent OpenAI | `cosens(model_client)` | `cosens(modelClient)` |
-| Explicit Agent execution | `cosens(agent).run(agent, input)` | `cosens(agent).run(agent, input)` |
-| Atomic HTTP operations | `client.atoms` / `client.sync_atoms` | `client.atoms` |
+| Node.js / TypeScript | `import { RSIClient } from 'cosens-sdk/rsi'` | [TypeScript](typescript/README.md) |
+| Python | `from cosens.rsi import RSIClient` | [Python](python/docs/local-rsi.md) |
 
-The remote API adapters do not create model clients. Build the standard OpenAI client for your model gateway and pass it in:
+The host confirms the deliverable and selects the task trajectory. It creates a Material from local file paths, calls `execution_create`, then uses the returned ID to read status or answer clarification questions. The worker continues after the Hook returns.
 
-```python
-model_client = OpenAI(base_url=os.environ["COSENS_MODEL_BASE_URL"], api_key=os.environ["COSENS_API_KEY"])
-client = cosens(model_client, mode="auto")
-```
+Use separate data directories for the two runtimes. Each owns its local SQLite queue, files and checkpoints.
 
-```ts
-const modelClient = new OpenAI({ baseURL: process.env.COSENS_MODEL_BASE_URL, apiKey: process.env.COSENS_API_KEY });
-const client = cosens(modelClient, { mode: 'auto' });
-```
-
-After the host obtains user confirmation of the artifact, call `generate_recipe` / `generateRecipe`, or the atomic Recipe endpoint. That single endpoint creates V1 or updates the associated Recipe. Feedback is recorded separately; attribution happens inside explicit generation. Generation always recalls related Memory and has no `include_memory` option.
-
-The `auto` mode selects useful existing context and records the task. It does not authorize Recipe generation. Submission, feedback, Session ACK, polling and recovery do not initiate a new generation request.
-
-See [Python](python/README.md), [TypeScript](typescript/README.md), and the three examples in each package. This is a breaking protocol change: Run, standalone attribution, acceptance and learning-job APIs have been removed.
-
-Tests: `PYTHONPATH=python/src pytest python/tests` and `npm --prefix typescript run check`. Optional real local HTTP integration: set `COSENS_TEST_ALGORITHM_HTTP_URL=http://127.0.0.1:18149` against the algorithm repository's `tests/support/explicit_http_server.py` fixture. It uses PostgreSQL and deterministic model substitutes, not a production model or production data.
-
-## One API Key
-
-Set `COSENS_API_KEY` to your CoSens API Key. The SDK uses the US CoSens API; `COSENS_REGION` defaults to `us` and accepts only `us`. Your application passes the same key as the model client's `api_key` and sets `COSENS_MODEL_BASE_URL` to `https://llm.cosens.ai/v1`. The SDK itself reads only `COSENS_API_KEY` and `COSENS_REGION`; `RSI_API_KEY*`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, `COSENS_MODE` and `COSENS_INPUT` are not SDK configuration. The application loads any `.env` file.
-
-Pass a public model ID in the model call. Algorithm operations accept only `model`, never a second API Key, base URL, auth type or provider settings. Model credentials are carried in Authorization. The algorithm gateway must forward that header alongside the authenticated user ID. Recipe generation still requires external artifact confirmation.
+Run the checks from each package directory with `npm ci && npm run check` or `python -m pip install '.[test]' && python -m pytest`.

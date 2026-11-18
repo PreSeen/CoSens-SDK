@@ -1,6 +1,6 @@
 # RSI SDK V2：本地嵌入式算法
 
-本版在 `cosens.rsi` 中实现 Material、Execution、Rubrics、Recipe 四类对象。Topic、Task、Event 不属于这套新接口。原有 `cosens` 客户端保持独立。
+本版在 `cosens.rsi` 中实现 Material、Execution、Rubrics、Recipe 四类对象。Topic、Task、Event 不属于这套新接口。
 
 Hook → Python SDK → SQLite 持久化队列 → 按需后台进程 → LangGraph 学习流程 → LangChain 工具调用 Agent。
 
@@ -9,7 +9,7 @@ Hook → Python SDK → SQLite 持久化队列 → 按需后台进程 → LangGr
 ## 安装与初始化
 
 ```bash
-pip install -e 'python[local-rsi]'
+pip install -e ./python
 ```
 
 ```python
@@ -29,7 +29,7 @@ rsi = RSIClient(
 )
 ```
 
-模型必须支持 OpenAI-compatible Chat Completions 和工具调用。地址和模型名由部署方提供；SDK 不假设本机已有模型。密钥通过指定环境变量传递给后台进程，不写入数据库、检查点、参数或提示词。不需要认证的本地模型也应设置一个非敏感占位值。SDK 不读取 `.env`。
+模型必须支持兼容 OpenAI 的 Chat Completions 和工具调用。宿主提供模型地址和模型名。密钥通过指定环境变量传递给后台进程，不写入数据库、检查点、参数或提示词。不需要认证的本地模型也应设置一个非敏感占位值。SDK 不读取 `.env`。
 
 同一 `data_dir` 的所有会话共享配置、队列和并发预算；首次初始化保存配置，后续可省略 `config`。不同配置访问同一目录会抛出 `Conflict`，防止会话各自覆盖运行设置。请在初始化时选定容量。`auto_start=False` 可关闭自动派发，由宿主明确调用 `run_pending()` 或 `recover()`。
 
@@ -176,7 +176,7 @@ execution = rsi.execution_create(
 
 `recipe_test` 指定测试请求后，该 Execution 测试所选现有版本，不再自动修改它；修订需另一次学习流程。重复相同测试请求不重复递增输入版本。默认学习流程内部调用同一测试阶段，失败时可生成新版本重测，不需要宿主逐步驱动。
 
-`recipe_get` 的 `version_id` 与 `version_selector` 互斥。本版没有语义检索或 Marketplace 同步；不发送本地材料到 CoSens 云端服务。未来同步应有独立授权和适配器。
+`recipe_get` 的 `version_id` 与 `version_selector` 互斥。本版提供本地文本检索。
 
 ## 并发、恢复与边界
 
@@ -205,12 +205,12 @@ result = rsi.wait(execution_id, timeout=300)  # 可选轮询助手，超时不�
 
 ## 代码组织与验证
 
-`client.py` 是 SDK 入口；`engine.py` 是学习图；`runtime.py` 是 LangChain Agent 与文件工具能力；`store.py` 是本地 SQLite 队列和业务存储适配；`worker.py` 是按需进程入口。云端尚未实现；未来保留同一学习图，替换进程派发为 Arq、存储为云端适配器，SDK 增加远端传输入口，不分叉本地/云端业务代码。
+`client.py` 是 SDK 入口；`engine.py` 是学习图；`runtime.py` 是 LangChain Agent 与文件工具能力；`store.py` 是本地 SQLite 队列和业务存储适配；`worker.py` 是按需进程入口。
 
 [可运行的宿主接入示例](../examples/05_rsi_sdk_v2.py)。完整测试：
 
 ```bash
-pip install -e 'python[local-rsi,agents,test]'
+pip install -e './python[test]'
 python -m pytest python/tests/test_rsi_v2.py python/tests/test_rsi_v2_background.py -q
 ```
 

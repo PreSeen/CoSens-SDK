@@ -1,7 +1,7 @@
 {
   "name": "cosens-sdk",
   "version": "0.5.3",
-  "description": "CoSens TypeScript SDK: record OpenAI and OpenAI Agents executions and generate reusable Recipes",
+  "description": "CoSens TypeScript SDK for local RSI and reusable Recipes",
   "keywords": [
     "cosens",
     "openai",
@@ -21,8 +21,7 @@
   "type": "module",
   "files": [
     "dist/",
-    "README.md",
-    "tests/fixtures/openai-public-methods.json"
+    "README.md"
   ],
   "engines": {
     "node": ">=22"
@@ -31,23 +30,31 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./rsi": {
+      "types": "./dist/rsi/index.d.ts",
+      "import": "./dist/rsi/index.js"
     }
   },
   "scripts": {
     "prepare": "npm run build",
-    "build": "tsc -p tsconfig.json",
+    "build": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
     "test": "node --import tsx --test tests/*.test.ts",
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "check": "npm run build && npm run typecheck && npm test"
   },
   "dependencies": {
-    "@openai/agents": "0.21.0",
+    "@langchain/core": "1.4.1",
+    "@langchain/langgraph": "1.7.5",
+    "@langchain/langgraph-checkpoint-sqlite": "1.1.1",
+    "@langchain/openai": "1.8.4",
     "better-sqlite3": "13.0.3",
-    "openai": "7.45.0",
+    "fflate": "0.8.3",
+    "langchain": "1.6.6",
+    "langsmith": "0.13.0",
     "zod": "4.6.7"
   },
   "devDependencies": {
-    "@openai/agents-core": "0.21.0",
     "@types/better-sqlite3": "7.6.13",
     "@types/node": "22.19.15",
     "tsx": "4.20.6",

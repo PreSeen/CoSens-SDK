@@ -1,86 +1,72 @@
-# CoSens TypeScript SDK
+# CoSens TypeScript Local RSI SDK
 
-CoSens records the tasks your application runs through an OpenAI client or an OpenAI Agents agent, and turns a confirmed result into a reusable Recipe.
+Use Node.js 22 or later. Build the package with `npm ci`. Use the built package from the host with `import { RSIClient } from 'cosens-sdk/rsi'`.
 
-## Install
-
-```bash
-npm install cosens-sdk
-```
-
-Requires Node.js 22+. The package is ESM-only.
-
-## Configure
-
-| Variable | Read by | Value |
-| --- | --- | --- |
-| `COSENS_API_KEY` | SDK and your model client | Your CoSens API Key |
-| `COSENS_REGION` | SDK | `us` (default and only supported value) |
-| `COSENS_MODEL_BASE_URL` | Your model client | `https://llm.cosens.ai/v1` |
-
-The SDK reads the process environment; load any `.env` file in your application. The model IDs you can use are listed in the [CoSens documentation](https://cosens.ai/docs/).
-
-## Wrap an OpenAI client
-
-Build a standard OpenAI client for your model gateway and pass it to `cosens(...)`:
+The model must support Chat Completions and tool calling. Set `RSI_MODEL_API_KEY` in the host process environment. The example assumes a local model endpoint. For packaging, include `dist/rsi/worker.js` and the matching `better-sqlite3` native dependency. The worker defaults to the current Node executable. A host with a bundled standalone Node can set `node_executable`.
 
 ```ts
-import OpenAI from 'openai';
-import { cosens } from 'cosens-sdk';
+import { RSIClient } from 'cosens-sdk/rsi';
 
-const modelClient = new OpenAI({ baseURL: process.env.COSENS_MODEL_BASE_URL, apiKey: process.env.COSENS_API_KEY });
-const client = cosens(modelClient, { mode: 'auto' });
-const result = await client.responses.create({ model: '<public-model-id>', input: 'Produce a report' });
-const turnId = client.cosens.lastTurnId;
-```
+const rsi = new RSIClient({
+  data_dir: appDataDirectory,
+  config: {
+    model: { model: 'your-local-model', base_url: 'http://127.0.0.1:8000/v1' },
+    max_executions: 2,
+    max_model_requests: 1,
+  },
+});
 
-The response is the native OpenAI result.
-
-In `auto` mode the SDK first makes a short structured decision call through your client (Chat Completions with a JSON schema `response_format`), so the model must support structured output. The call uses a 60-second timeout by default; tune it with `decisionTimeoutMs`. If the decision or the read-only Recipe lookup fails, your request still runs without CoSens capture.
-
-## Generate a Recipe after confirmation
-
-From your application's artifact-confirmation handler:
-
-```ts
-const turn = client.cosens.getTurn(turnId);
-if (turn?.revisionId) {
-  const receipt = await client.cosens.generateRecipe({ turnId, requestKey: 'confirmed-report-1' });
+async function onConfirmedDelivery(delivery: {
+  sessionId: string;
+  deliveryId: string;
+  confirmationRef: string;
+  contextPath: string;
+  inputPath: string;
+  outputPath: string;
+  baseRecipeVersionId?: string;
+}) {
+  const key = JSON.stringify([delivery.sessionId, delivery.deliveryId]);
+  const material = rsi.material_create({
+    manifest: {
+      context_path: delivery.contextPath,
+      source_session_id: delivery.sessionId,
+      capture_boundary: delivery.deliveryId,
+      files: [
+        { path: delivery.inputPath, role: 'input' },
+        { path: delivery.outputPath, role: 'artifact' },
+      ],
+    },
+    idempotency_key: key,
+  });
+  const execution = await rsi.execution_create({
+    material_ids: [material.id],
+    source_session_id: delivery.sessionId,
+    base_recipe_version_id: delivery.baseRecipeVersionId,
+    idempotency_key: key,
+    policy: {
+      artifact_confirmed: true,
+      confirmation_ref: delivery.confirmationRef,
+      test_task: {
+        instruction: 'Use the test input to produce summary.md.',
+        checks: [{ kind: 'exists', path: 'summary.md' }],
+      },
+    },
+  });
+  return execution.id;
 }
 ```
 
-Submission and feedback only record evidence. Explicit generation creates or updates the associated Recipe, recalls related Memory by default and analyzes feedback internally. There is no generation `includeMemory` option.
+The Hook returns after the task is queued and a worker is dispatched. The host queries `execution_get(id)` for stage, questions and results. Display required questions in the host UI and pass answers to `execution_clarification_answer`. Call `recover()` on host startup to pick up queued or expired work. Call `close()` when the host is done with the client.
 
-## Run an OpenAI Agents agent
+| Object | Atomic functions |
+| --- | --- |
+| Material | `material_create`, `material_get`, `material_list`, `material_update` |
+| Execution | `execution_create`, `execution_get`, `execution_list`, `execution_update`, `execution_cancel`, `execution_clarification_answer` |
+| Rubrics | `rubrics_create`, `rubrics_get`, `rubrics_list`, `rubrics_update`, `rubrics_version_create`, `rubrics_version_list` |
+| Recipe | `recipe_create`, `recipe_get`, `recipe_list`, `recipe_update`, `recipe_version_create`, `recipe_version_list`, `recipe_test`, `recipe_activate` |
 
-```ts
-import OpenAI from 'openai';
-import { Agent, setDefaultOpenAIClient } from '@openai/agents';
-import { CoSensAgentRunner } from 'cosens-sdk';
+Use `archived` with update functions to archive or restore records. Recipe retrieval defaults to the active version. Test results live on the Execution. A missing test task yields `unverifiable`. Activation requires a passing test and no unresolved clarification. The host owns task boundary selection and the learning confirmation UI.
 
-setDefaultOpenAIClient(new OpenAI({ baseURL: process.env.COSENS_MODEL_BASE_URL, apiKey: process.env.COSENS_API_KEY }));
-const agent = new Agent({ name: 'assistant', instructions: 'Complete the requested task.', model: '<public-model-id>' });
-const runner = new CoSensAgentRunner(agent, { mode: 'auto' });
-const result = await runner.run(agent, 'Produce a report');
-```
+SQLite records live in `rsi-ts.sqlite3` under `data_dir`. Immutable material snapshots, test files and graph checkpoints are stored alongside it. Use a separate directory for each runtime. Background workers exit after the queue drains. The tested release environment is Linux with standalone Node.
 
-## Atomic operations
-
-Use `CoSensClient.atoms` for Task, Execution, Revision, feedback, Recipe, Session and Memory operations. Keep the same request key when retrying an uncertain response.
-
-Recipe token budgets can be supplied as `maxCompletionTokens`:
-
-```ts
-await client.atoms.startRecipeCandidate(taskId, {
-  revisionId, key: 'confirmed-v1', maxCompletionTokens: 200000,
-});
-await wrapped.cosens.generateRecipe({ turnId, maxCompletionTokens: 200000 });
-await client.atoms.resumeRecipeCandidate(candidateId, { maxCompletionTokens: 300000 });
-```
-
-The value must be an integer from 1 to 1,000,000. New candidates default to 200,000, and the setting is stored per candidate for attribution and Recipe generation. Resume preserves it unless explicitly overridden. Upstream model limits still apply. The positional form `resumeRecipeCandidate(id, model)` remains supported.
-
-## More
-
-- Documentation: https://cosens.ai/docs/
-- Source, examples and issues: https://github.com/PreSeen/CoSens-SDK
+Run `npm run check` to build, typecheck and test the packaged entry point using a local model protocol fixture.
