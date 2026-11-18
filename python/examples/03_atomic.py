@@ -20,7 +20,8 @@ async def correct(client, execution_id, feedback, request_key):
     return await client.atoms.start_execution(key=request_key+':correction', previous_execution_id=execution_id)
 
 
-async def on_artifact_confirmed(client, execution_id):
-    """Call only after the user confirmed the artifact; learning is once per execution."""
+async def on_artifact_confirmed(client, execution_id, user_words, request_key):
+    """Call with the user's own words about the artifact; learning needs that feedback and is once per execution."""
+    await client.atoms.record_feedback(execution_id, feedback=user_words, source='human', key=request_key+':confirmed')
     await client.atoms.learn(execution_id)
     return await client.atoms.wait_learning(execution_id)

@@ -10,8 +10,9 @@ export async function recordTask(client:CoSensClient,objective:string,artifactCo
  return {taskId:task.task_id,executionId:result.execution_id};
 }
 
-// Call this only from the application's artifact-confirmation handler.
-export async function learnConfirmedRecipe(client:CoSensClient,executionId:string){
+// Call with the user's own words about the artifact; learning needs that feedback.
+export async function learnConfirmedRecipe(client:CoSensClient,executionId:string,userWords:string){
+ await client.atoms.recordFeedback(executionId,{feedback:userWords,source:'human',key:crypto.randomUUID()});
  await client.atoms.learn(executionId);
  return client.atoms.waitLearning(executionId);
 }

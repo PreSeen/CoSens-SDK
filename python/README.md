@@ -69,16 +69,17 @@ When a usable Recipe matches, the SDK adds it as plain text: its title, when/whe
 
 ## Generate a Recipe after confirmation
 
-A turn has something to learn from only when it recorded a completed execution. After your application obtains user confirmation of that artifact, call from its confirmation handler:
+A turn has something to learn from only when it recorded a completed execution, and learning needs feedback on it. When your user confirms or corrects that artifact, record their own words as `human` feedback, then learn:
 
 ```python
 turn = client.cosens.get_turn(turn_id) if turn_id else None
 if turn and turn.get("state") == "completed" and turn.get("execution_id"):
+    client.cosens.feedback(user_words, source="human", turn_id=turn_id)  # for example "Keep this, but shorter"
     client.cosens.generate_recipe(turn_id)
     record = client.cosens.wait_learning(turn_id)
 ```
 
-`generate_recipe` learns the first Recipe version, or the next one, from the turn's execution; an execution learns once. `wait_learning` raises `cosens.RSILearningFailed` when the learning failed and `cosens.RSILearningStopped` when it stopped in a state only you can change; both are raised after the turn's record is stored, so `client.cosens.resume_learning(turn_id)` can continue it. `feedback(message, source=...)` records feedback on the turn's execution. The learning rules, statuses and errors are in [the API reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/api-reference.md); how a follow-up message becomes a correction is in [execution capture](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/unified-auto.md).
+`generate_recipe` learns the first Recipe version, or the next one, from the turn's execution; an execution learns once. Without feedback on the execution or an earlier draft of it, it raises `cosens.RSIFeedbackRequired` (HTTP 422 `feedback_required`) and nothing is created; record the feedback and call it again. Record only what the user said as `human`; your agent's own judgement is not feedback. `wait_learning` raises `cosens.RSILearningFailed` when the learning failed and `cosens.RSILearningStopped` when it stopped in a state only you can change; both are raised after the turn's record is stored, so `client.cosens.resume_learning(turn_id)` can continue it. `feedback(message, source=...)` records feedback on the turn's execution. The learning rules, statuses and errors are in [the API reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/api-reference.md); how a follow-up message becomes a correction is in [execution capture](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/unified-auto.md).
 
 ## Run an OpenAI Agents agent
 
@@ -189,6 +190,7 @@ execution = await atoms.start_execution(task["task_id"], key="run-1", model="<pu
 result = await atoms.submit_execution(execution["execution_id"], request_sha256=execution["request_sha256"],
                                       outcome="completed", artifacts=[{"artifact_id": artifact_id, "role": "submitted_output"}])
 if result["status"] == "completed":
+    await atoms.record_feedback(execution["execution_id"], feedback=user_words, source="human", key="run-1:feedback")
     await atoms.learn(execution["execution_id"])
     learning = await atoms.wait_learning(execution["execution_id"])
 ```

@@ -6,5 +6,8 @@ export async function runTask(task:string,model:string){
  const response=await client.responses.create({model,input:task,store:false});
  return {client,response,turnId:client.cosens.lastTurnId};
 }
-// Invoke from the application's external artifact-confirmation handler.
-export function onArtifactConfirmed(client:ReturnType<typeof cosens>,turnId:string){return client.cosens.generateRecipe({turnId});}
+// Invoke with the user's own words about the artifact; learning needs that feedback.
+export async function onArtifactConfirmed(client:ReturnType<typeof cosens>,turnId:string,userWords:string){
+ await client.cosens.feedback(userWords,{source:'human',turnId});
+ return client.cosens.generateRecipe({turnId});
+}
