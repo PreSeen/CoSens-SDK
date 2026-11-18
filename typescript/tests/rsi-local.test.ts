@@ -10,8 +10,9 @@ import type { AddressInfo } from 'node:net';
 import Database from 'better-sqlite3';
 import { RSIClient, type Runtime } from '../src/rsi/index.js';
 import { Engine } from '../src/rsi/engine.js';
+import { LangChainRuntime } from '../src/rsi/runtime.js';
 
-test('independent Node hooks enqueue work that persists and passes a file test after the hooks exit', async () => {
+test('independent Node hooks enqueue work that persists and passes a file test after the hooks exit', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'cosens-rsi-ts-'));
   const data_dir = join(directory, 'rsi');
   let active = 0;
@@ -37,6 +38,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           (tool: { function: { name: string } }) => tool.function.name,
         ),
       );
+      if (tools.has('web_search')) assert.ok(tools.has('RecipeContent'));
       let call: { name: string; args: object } | undefined;
       const evidence = evidence_catalog[0];
       const attribution = evidence && {
@@ -133,6 +135,18 @@ test('independent Node hooks enqueue work that persists and passes a file test a
               ],
             },
           },
+        };
+      } else if (
+        tools.has('web_search') &&
+        !input.messages.some(
+          (m: { role: string; content: string }) =>
+            m.role === 'tool' &&
+            m.content.includes('https://docs.example.org/format'),
+        )
+      ) {
+        call = {
+          name: 'web_search',
+          args: { query: 'public text formatting conventions' },
         };
       } else if (tools.has('RecipeContent')) {
         assert.deepEqual(context.analysis.attribution, attribution);
@@ -264,7 +278,11 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         ['--input-type=module', '-e', source, ...args],
         {
           cwd: new URL('..', import.meta.url),
-          env: { ...process.env, RSI_MODEL_API_KEY: 'fixture' },
+          env: {
+            ...process.env,
+            RSI_MODEL_API_KEY: 'fixture',
+            COSENS_RSI_WEB_SEARCH_API_KEY: '',
+          },
         },
       );
       let stdout = '',
@@ -399,6 +417,74 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           recovery.execution_cancel(run.id);
       }
       recovery.close();
+    }
+
+    const environment = {
+      RSI_MODEL_API_KEY: 'fixture',
+      COSENS_RSI_WEB_SEARCH_API_KEY: 'fixture-search',
+      COSENS_RSI_WEB_SEARCH_ALLOWED_DOMAINS: 'example.org',
+      COSENS_RSI_WEB_SEARCH_BLOCKED_DOMAINS: 'blocked.example.org',
+    };
+    const saved = Object.keys(environment).map(
+      (key) => [key, process.env[key]] as const,
+    );
+    Object.assign(process.env, environment);
+    const fetch = globalThis.fetch;
+    const search = t.mock.method(globalThis, 'fetch', (input, init) => {
+      if (String(input) !== 'https://api.exa.ai/search')
+        return fetch(input, init);
+      assert.equal(
+        new Headers(init?.headers).get('x-api-key'),
+        'fixture-search',
+      );
+      assert.deepEqual(JSON.parse(String(init?.body)), {
+        query: 'public text formatting conventions',
+        type: 'auto',
+        numResults: 5,
+        contents: { highlights: true },
+        includeDomains: ['example.org'],
+        excludeDomains: ['blocked.example.org'],
+      });
+      return Promise.resolve(
+        Response.json({
+          results: [
+            {
+              url: 'https://docs.example.org/format',
+              title: 'Formatting',
+              highlights: ['Public reference text'],
+            },
+            {
+              url: 'https://blocked.example.org/item',
+              highlights: ['Blocked reference'],
+            },
+          ],
+        }),
+      );
+    });
+    try {
+      const tracePath = join(directory, 'search-trace.json');
+      const runtime = new LangChainRuntime(client, 'search-test', () => {});
+      await runtime.generate(
+        { analysis: client.execution_get(ids[0]).analysis },
+        material.files,
+        tracePath,
+      );
+      const trace = readFileSync(tracePath, 'utf8');
+      assert.equal(
+        search.mock.calls.filter(
+          ({ arguments: [url] }) => String(url) === 'https://api.exa.ai/search',
+        ).length,
+        1,
+      );
+      assert.ok(trace.includes('Public reference text'));
+      assert.ok(!trace.includes('Blocked reference'));
+      assert.ok(!trace.includes('fixture-search'));
+    } finally {
+      search.mock.restore();
+      for (const [key, value] of saved) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   } finally {
     for (const run of client.execution_list()) {

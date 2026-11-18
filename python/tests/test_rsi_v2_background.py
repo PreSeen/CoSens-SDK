@@ -22,7 +22,9 @@ from cosens.rsi import RSIClient
 
 
 @pytest.fixture
-def gateway():
+def gateway(monkeypatch):
+    monkeypatch.delenv("COSENS_RSI_WEB_SEARCH_API_KEY", raising=False)
+
     class Gateway(ThreadingHTTPServer):
         daemon_threads = True
         active = 0
@@ -51,6 +53,8 @@ def gateway():
                     next(m["content"] for m in messages if m["role"] == "user")
                 )
                 tools = {t["function"]["name"] for t in request.get("tools", [])}
+                if "web_search" in tools:
+                    assert "RecipeContent" in tools
                 called = any(m["role"] == "tool" for m in messages)
                 catalog = payload["evidence_catalog"]
                 feedback_source = next(
@@ -121,6 +125,15 @@ def gateway():
                                 ]
                             },
                         },
+                    )
+                elif "web_search" in tools and not any(
+                    m["role"] == "tool"
+                    and "https://docs.example.org/format" in m["content"]
+                    for m in messages
+                ):
+                    name, arguments = (
+                        "web_search",
+                        {"query": "public text formatting conventions"},
                     )
                 elif "RecipeContent" in tools:
                     name, arguments = (
@@ -332,6 +345,80 @@ print(json.dumps({'id': run['id']}))
                 "cancelled",
             }:
                 client.execution_cancel(execution_id)
+
+
+def test_recipe_generation_can_search_public_references(tmp_path, gateway, monkeypatch):
+    from cosens.rsi import web_search
+
+    monkeypatch.setenv("RSI_MODEL_API_KEY", "fixture")
+    monkeypatch.setenv("COSENS_RSI_WEB_SEARCH_API_KEY", "fixture-search")
+    monkeypatch.setenv("COSENS_RSI_WEB_SEARCH_ALLOWED_DOMAINS", "example.org")
+    monkeypatch.setenv("COSENS_RSI_WEB_SEARCH_BLOCKED_DOMAINS", "blocked.example.org")
+    calls = []
+
+    def search(url, *, json, headers, timeout):
+        assert url == "https://api.exa.ai/search" and timeout == 20
+        assert headers == {"x-api-key": "fixture-search"}
+        calls.append(json)
+        return web_search.httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "url": "https://docs.example.org/format",
+                        "title": "Formatting",
+                        "highlights": ["Public reference text"],
+                    },
+                    {
+                        "url": "https://blocked.example.org/item",
+                        "highlights": ["Blocked reference"],
+                    },
+                ]
+            },
+            request=web_search.httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(web_search.httpx, "post", search)
+    client = RSIClient(
+        data_dir=tmp_path / "rsi",
+        config={
+            "model": {
+                "model": "fixture",
+                "base_url": f"http://127.0.0.1:{gateway.server_port}/v1",
+            }
+        },
+        auto_start=False,
+    )
+    context = tmp_path / "context.md"
+    context.write_text("Write 42 into answer.txt")
+    material = client.material_create(manifest={"context_path": str(context)})
+    execution = client.execution_create(
+        material_ids=[material["id"]],
+        policy={
+            "artifact_confirmed": True,
+            "confirmation_ref": "fixture",
+            "test_task": {"instruction": "Write 42 into answer.txt"},
+        },
+    )
+    client.run_pending()
+    result = client.execution_get(execution["id"])
+    assert result["status"] == "completed", result
+    assert result["result"]["test_status"] == "passed"
+    assert calls == [
+        {
+            "query": "public text formatting conventions",
+            "type": "auto",
+            "numResults": 5,
+            "contents": {"highlights": True},
+            "includeDomains": ["example.org"],
+            "excludeDomains": ["blocked.example.org"],
+        }
+    ]
+    (trace,) = client.data_dir.glob("executions/*/input-*/generate-1.json")
+    content = trace.read_text()
+    assert "Public reference text" in content
+    assert "Blocked reference" not in content
+    assert "fixture-search" not in content
 
 
 def test_recover_once_waits_for_a_stopped_workers_lease(tmp_path, gateway, monkeypatch):

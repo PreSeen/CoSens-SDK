@@ -79,4 +79,6 @@ SQLite records live in `rsi-ts.sqlite3` under `data_dir`. Immutable material sna
 
 Use `test_task.input_locators` to authorize the current test files and `shared_reference_locators` to authorize reusable reference files. Each locator must come from an attached Material and match its respective `input` or `reference` role. Omitted lists authorize zero files. The learning stage gets historical evidence and excludes the declared test inputs. The evaluator uses the same authorized test files plus this run's outputs and trace.
 
+Set `COSENS_RSI_WEB_SEARCH_API_KEY` to an Exa key to enable the optional `web_search` tool during Recipe generation. Domain filters are comma-separated hostnames in `COSENS_RSI_WEB_SEARCH_ALLOWED_DOMAINS` and `COSENS_RSI_WEB_SEARCH_BLOCKED_DOMAINS`. Search results appear in the generation trace.
+
 Run `npm run check` to build, typecheck and test the packaged entry point using a local model protocol fixture.

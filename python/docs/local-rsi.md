@@ -33,6 +33,8 @@ rsi = RSIClient(
 
 同一 `data_dir` 的所有会话共享配置、队列和并发预算；首次初始化保存配置，后续可省略 `config`。不同配置访问同一目录会抛出 `Conflict`，防止会话各自覆盖运行设置。请在初始化时选定容量。`auto_start=False` 可关闭自动派发，由宿主明确调用 `run_pending()` 或 `recover()`。
 
+宿主可设置 Exa 密钥环境变量 `COSENS_RSI_WEB_SEARCH_API_KEY`，让 Recipe 生成阶段按需调用 `web_search`。可用 `COSENS_RSI_WEB_SEARCH_ALLOWED_DOMAINS` 和 `COSENS_RSI_WEB_SEARCH_BLOCKED_DOMAINS` 配置以逗号分隔的域名。搜索结果保存在生成轨迹中，测试和评分继续使用原有文件权限。
+
 ## Agent 的完整交互流程
 
 ```text

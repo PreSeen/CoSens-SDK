@@ -24,6 +24,8 @@ During Recipe analysis the worker asks for clarification only when the evidence 
 
 Rubric criteria whose conditions are absent from a test are recorded as `status: "unverified"` with `score: null`. Only verified criteria contribute to the score or required-criterion threshold. A test with no verified criteria and passing objective checks stays unverifiable. A scenario left unverified does not trigger a new Recipe round.
 
+Optional public web search is available during Recipe generation in both SDKs. Set `COSENS_RSI_WEB_SEARCH_API_KEY` to an Exa key in the host or worker environment. `COSENS_RSI_WEB_SEARCH_ALLOWED_DOMAINS` and `COSENS_RSI_WEB_SEARCH_BLOCKED_DOMAINS` accept comma-separated hostnames. The worker sends the query to Exa and records the returned excerpts and URLs in the generation trace. It can issue up to three queries per generation attempt. Test execution and assessment keep their authorized file catalogs.
+
 Use separate data directories for the two runtimes. Each owns its local SQLite queue, files and checkpoints.
 
 Run the checks from each package directory with `npm ci && npm run check` or `python -m pip install '.[test]' && python -m pytest`.
