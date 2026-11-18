@@ -163,6 +163,10 @@ class LangChainRuntime:
             tools=tools,
             system_prompt=prompt,
             response_format=ToolStrategy(schema) if schema is not None else None,
+            # Test tool results belong to the current attempt's workspace.
+            checkpointer=False
+            if workspace is not None or schema is Assessment
+            else None,
         )
         messages = [
             {

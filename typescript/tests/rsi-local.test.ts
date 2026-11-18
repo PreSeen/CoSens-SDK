@@ -288,6 +288,22 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         client.recipe_get(run.recipe_id!).selected_version?.id,
         run.recipe_version_id,
       );
+      const checkpoint = new Database(
+        join(data_dir, 'executions', run.id, 'checkpoints-1.sqlite3'),
+        { readonly: true, fileMustExist: true },
+      );
+      try {
+        const namespaces = checkpoint
+          .prepare('SELECT DISTINCT checkpoint_ns FROM checkpoints')
+          .pluck()
+          .all() as string[];
+        assert.ok(namespaces.includes(''));
+        assert.ok(
+          !namespaces.some((namespace) => namespace.startsWith('test_recipe:')),
+        );
+      } finally {
+        checkpoint.close();
+      }
     }
     assert.equal(peak, 1);
     assert.equal(requests, 33);

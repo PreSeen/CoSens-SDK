@@ -5,10 +5,12 @@ The OpenAI-compatible endpoint below is a protocol fixture, NOT a live LLM.
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -304,6 +306,20 @@ print(json.dumps({'id': run['id']}))
 
             trace = json.loads(Path(test["trace_path"]).read_text())
             assert any(m["type"] == "tool" for m in trace["messages"])
+            checkpoint = (
+                client.data_dir / "executions" / run["id"] / "checkpoints-1.sqlite3"
+            )
+            with closing(
+                sqlite3.connect(checkpoint.as_uri() + "?mode=ro", uri=True)
+            ) as conn:
+                namespaces = {
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT DISTINCT checkpoint_ns FROM checkpoints"
+                    )
+                }
+            assert "" in namespaces
+            assert not any(namespace.startswith("test:") for namespace in namespaces)
     finally:
         for caller in callers:
             if caller.poll() is None:

@@ -211,7 +211,14 @@ export class LangChainRuntime implements Runtime {
           },
         })
       : undefined;
-    const settings = { model, tools, systemPrompt };
+    // Test tool results belong to the current attempt's workspace.
+    const settings = {
+      model,
+      tools,
+      systemPrompt,
+      checkpointer:
+        stage === 'execution' || stage === 'assessment' ? false : undefined,
+    };
     const agent = responseFormat
       ? createAgent({ ...settings, responseFormat })
       : createAgent(settings);
