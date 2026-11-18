@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { CoSensClient, RSIHTTPError, RSILearningFailedError, RSILearningStoppedError } from '../src/index.ts';
+import { CoSensClient, RSIError, RSIFeedbackRequired, RSIHTTPError, RSILearningFailedError, RSILearningStoppedError } from '../src/index.ts';
 
 const DETAIL = { code: 'insufficient_credits', message: 'The model gateway reported insufficient credits.',
   retryable: false, phase: 'analyzing', upstream_status: 402, upstream_code: 'gateway_credit_insufficient' };
@@ -55,3 +55,30 @@ for (const [payload, missing, recipeIds] of [
     assert.deepEqual([error.missing, error.recipeIds], [missing, recipeIds]);
   });
 }
+
+const FEEDBACK_REQUIRED = { error: { code: 'feedback_required',
+  message: 'learning needs feedback on this execution or an earlier draft; record it with POST /executions/{id}/feedback',
+  allowed_sources: ['human', 'evaluator', 'reference', 'automated_check', 'downstream'] } };
+
+test('learn without feedback throws RSIFeedbackRequired', async () => {
+  const seen: string[] = [];
+  const client = new CoSensClient({ apiKey: 'service-key', fetch: async (input, init) => {
+    seen.push(`${init?.method} ${new URL(String(input)).pathname}`);
+    return new Response(JSON.stringify(FEEDBACK_REQUIRED), { status: 422, headers: { 'x-request-id': 'req-422' } });
+  } });
+  const error = await client.atoms.learn('execution_1').then(() => undefined, value => value);
+  assert.ok(error instanceof RSIFeedbackRequired && error instanceof RSIError && !(error instanceof RSIHTTPError));
+  assert.equal(error.code, 'feedback_required');
+  assert.equal(error.statusCode, 422);
+  assert.deepEqual(error.allowedSources, ['human', 'evaluator', 'reference', 'automated_check', 'downstream']);
+  assert.equal(error.requestId, 'req-422');
+  assert.match(error.message, /POST \/executions\/\{id\}\/feedback/);
+  assert.deepEqual(seen, ['POST /api/executions/execution_1/learn']);
+});
+
+test('another 422 stays an RSIHTTPError', async () => {
+  const client = new CoSensClient({ apiKey: 'service-key', fetch: async () => new Response(JSON.stringify({ error: { code: 'validation_error', message: 'bad' } }), { status: 422 }) });
+  const error = await client.atoms.learn('execution_1').then(() => undefined, value => value);
+  assert.ok(error instanceof RSIHTTPError);
+  assert.equal(error.code, 'validation_error');
+});

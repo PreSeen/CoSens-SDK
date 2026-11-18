@@ -2,10 +2,10 @@
 
 from .atoms import CoSensClient
 from .auto_learning import AutoLearning
-from .errors import (RSIError, RSIHTTPError, RSILearningFailed, RSILearningStopped, RSIRecoveryRequired,
-                     RSITransportError)
+from .errors import (RSIError, RSIFeedbackRequired, RSIHTTPError, RSILearningFailed, RSILearningStopped,
+                     RSIRecoveryRequired, RSITransportError)
 from .factory import cosens
 from .task_runner import TaskWorkflowRunner
 
-__all__ = ["AutoLearning", "CoSensClient", "RSIError", "RSIHTTPError", "RSILearningFailed", "RSILearningStopped",
-           "RSIRecoveryRequired", "RSITransportError", "TaskWorkflowRunner", "cosens"]
+__all__ = ["AutoLearning", "CoSensClient", "RSIError", "RSIFeedbackRequired", "RSIHTTPError", "RSILearningFailed",
+           "RSILearningStopped", "RSIRecoveryRequired", "RSITransportError", "TaskWorkflowRunner", "cosens"]

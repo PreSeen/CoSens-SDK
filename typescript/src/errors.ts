@@ -6,6 +6,17 @@ export class RSIHTTPError extends RSIError {
     public missing?: string[], public recipeIds?: string[]) { super(message); }
 }
 export class RSITransportError extends RSIError { name = 'RSITransportError'; }
+/**
+ * Learning was refused: no feedback is recorded on the execution or an earlier draft in its correction chain.
+ * Nothing was created and no version number was taken. Record the user's words (or a verifiable source listed in
+ * `allowedSources`) as feedback, then learn the same execution again.
+ */
+export class RSIFeedbackRequired extends RSIError {
+  name = 'RSIFeedbackRequired';
+  readonly code = 'feedback_required';
+  /** `statusCode` is 422 from the service. */
+  constructor(message: string, public allowedSources?: string[], public requestId?: string, public statusCode?: number) { super(message); }
+}
 export class RSIDecisionUnavailable extends RSIError { name = 'RSIDecisionUnavailable'; }
 export class RSIApprovalUnavailable extends RSIError { name = 'RSIApprovalUnavailable'; }
 export class RSIRecoveryRequired extends RSIError { name = 'RSIRecoveryRequired'; }

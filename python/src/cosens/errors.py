@@ -18,6 +18,21 @@ class RSIHTTPError(RSIError):
         self.recipe_ids = recipe_ids  # recipe_choice_required: the task's Recipes; a new execution names one, a correction or learning cannot
 
 
+class RSIFeedbackRequired(RSIError):
+    """Learning was refused: no feedback is recorded on the execution or an earlier draft in its correction chain.
+
+    Nothing was created and no version number was taken. Record the user's words (or a verifiable source listed in
+    ``allowed_sources``) as feedback, then learn the same execution again.
+    """
+
+    def __init__(self, message, *, allowed_sources, request_id=None, status_code=None):
+        super().__init__(message)
+        self.status_code = status_code  # 422 from the service; None from LocalRSI
+        self.code = "feedback_required"
+        self.allowed_sources = allowed_sources
+        self.request_id = request_id
+
+
 class RSITransportError(RSIError):
     """The server response was unavailable or malformed."""
 

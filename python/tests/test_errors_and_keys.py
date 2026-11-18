@@ -4,7 +4,8 @@ import json
 import httpx
 import pytest
 
-from cosens import CoSensClient, RSILearningFailed, RSILearningStopped, RSIRecoveryRequired
+from cosens import (CoSensClient, RSIError, RSIFeedbackRequired, RSIHTTPError, RSILearningFailed, RSILearningStopped,
+                    RSIRecoveryRequired)
 
 DETAIL = {'code': 'insufficient_credits', 'message': 'The model gateway reported insufficient credits.',
           'retryable': False, 'phase': 'analyzing', 'upstream_status': 402, 'upstream_code': 'gateway_credit_insufficient'}
@@ -164,3 +165,36 @@ def test_wait_learning_on_a_request_without_a_learning_needs_recovery(tmp_path):
         assert wrapped.cosens.resume_learning()['learning']['execution_id'] == 'execution_1'
     finally:
         wrapped.close(); native.close()
+
+
+FEEDBACK_REQUIRED = {'error': {'code': 'feedback_required',
+                               'message': 'learning needs feedback on this execution or an earlier draft; '
+                                          'record it with POST /executions/{id}/feedback',
+                               'allowed_sources': ['human', 'evaluator', 'reference', 'automated_check', 'downstream']}}
+
+
+async def test_learn_without_feedback_raises_feedback_required_for_both_clients():
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        return httpx.Response(422, json=FEEDBACK_REQUIRED, headers={'x-request-id': 'req-422'})
+    async with _client(handler) as client:
+        with pytest.raises(RSIFeedbackRequired) as caught:
+            await client.atoms.learn('execution_1')
+        with pytest.raises(RSIFeedbackRequired) as caught_sync:
+            client.sync_atoms.learn('execution_1')
+    for error in (caught.value, caught_sync.value):
+        assert (error.status_code, error.code, error.request_id) == (422, 'feedback_required', 'req-422')
+        assert error.allowed_sources == ['human', 'evaluator', 'reference', 'automated_check', 'downstream']
+        assert 'POST /executions/{id}/feedback' in str(error)
+        assert isinstance(error, RSIError) and not isinstance(error, RSIHTTPError)
+    assert seen == [('POST', '/api/executions/execution_1/learn')] * 2
+
+
+async def test_another_422_stays_an_http_error():
+    payload = {'error': {'code': 'validation_error', 'message': 'bad', 'allowed_sources': ['human']}}
+    async with _client(lambda request: httpx.Response(422, json=payload)) as client:
+        with pytest.raises(RSIHTTPError) as caught:
+            await client.atoms.learn('execution_1')
+    assert caught.value.code == 'validation_error'

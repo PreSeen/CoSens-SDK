@@ -5,7 +5,7 @@ import json
 import httpx
 
 from ._config import resolve_service
-from .errors import RSIHTTPError, RSITransportError
+from .errors import RSIFeedbackRequired, RSIHTTPError, RSITransportError
 from .models import Result, result
 
 
@@ -44,6 +44,9 @@ def _decode(response, api_key, sensitive_values=()):
             if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
                 return None
             return [redact(item) for item in value]
+        if response.status_code == 422 and code == "feedback_required":
+            raise RSIFeedbackRequired(redact(message), allowed_sources=names("allowed_sources"), request_id=request_id,
+                                      status_code=422)
         raise RSIHTTPError(
             response.status_code,
             redact(message),
