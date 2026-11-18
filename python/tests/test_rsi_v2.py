@@ -297,6 +297,46 @@ def test_test_and_evaluation_catalogs_require_explicit_file_authorization(
     ]
 
 
+def test_feedback_extraction_rejects_refs_outside_context_and_feedback(
+    client, tmp_path
+):
+    context = tmp_path / "context.md"
+    context.write_text("Write the answer into answer.txt")
+    reference = tmp_path / "reference.md"
+    reference.write_text("Example output")
+    source = client.material_create(
+        manifest={
+            "context_path": str(context),
+            "files": [{"path": str(reference), "role": "reference"}],
+        }
+    )
+
+    class MisattributedFeedback(FileRuntime):
+        def extract_feedback(self, files, trace_path):
+            assert [f["role"] for f in files] == ["context"]
+            return {
+                "items": [
+                    {
+                        "kind": "requirement",
+                        "rule": "Write only the answer",
+                        "evidence_refs": [
+                            {
+                                "material_id": source["id"],
+                                "locator": source["files"][1]["locator"],
+                            }
+                        ],
+                    }
+                ]
+            }
+
+    execution = run(client, source["id"])
+    client.run_pending(runtime=MisattributedFeedback())
+    result = client.execution_get(execution["id"])
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "invalid_model_output"
+    assert client.rubrics_list() == []
+
+
 def test_recipe_is_inactive_without_activation_policy(client, tmp_path):
     execution = run(client, material(client, tmp_path)["id"])
     client.run_pending(runtime=FileRuntime())
@@ -476,7 +516,12 @@ def test_recipe_test_uses_existing_execution(client, tmp_path, leaked_from):
     revision = client.execution_get(execution["id"])["input_revision"]
     client.recipe_test(**args)
     assert client.execution_get(execution["id"])["input_revision"] == revision
-    runtime = FileRuntime()
+
+    class FixedRubricRuntime(FileRuntime):
+        def extract_feedback(self, files, trace_path):
+            pytest.fail("An explicitly selected rubric must be reused")
+
+    runtime = FixedRubricRuntime()
     client.run_pending(runtime=runtime)
     final = client.execution_get(execution["id"])
     if leaked_from:

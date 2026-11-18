@@ -113,6 +113,16 @@ class EvidenceRef(Contract):
         return self
 
 
+class FeedbackRule(Contract):
+    kind: Literal["requirement", "correction"]
+    rule: str = Field(min_length=1)
+    evidence_refs: list[EvidenceRef] = Field(min_length=1)
+
+
+class FeedbackExtraction(Contract):
+    items: list[FeedbackRule]
+
+
 class Criterion(Contract):
     id: str = Field(min_length=1)
     description: str = Field(min_length=1)

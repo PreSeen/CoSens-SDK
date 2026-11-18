@@ -5,7 +5,14 @@ from __future__ import annotations
 from typing import TypedDict
 
 from .materials import atomic_json, authorized_test_files, digest
-from .models import Analysis, Assessment, InputChanged, ModelOutputError, RecipeContent
+from .models import (
+    Analysis,
+    Assessment,
+    FeedbackExtraction,
+    InputChanged,
+    ModelOutputError,
+    RecipeContent,
+)
 from .portability import LearningLiterals, rubric_rule_text
 from .store import uid
 
@@ -105,21 +112,58 @@ class Engine:
             )["content"]
         files = self.files(execution)
         literals = self.learning_literals(execution)
+        feedback = None
+        extract_feedback = getattr(self.runtime, "extract_feedback", None)
+        if not fixed_rubrics_id and extract_feedback is not None:
+            sources = [f for f in files if f["role"] in {"context", "feedback"}]
+            feedback = (
+                FeedbackExtraction.model_validate(
+                    extract_feedback(
+                        sources, self.directory(state) / "feedback-extraction.json"
+                    )
+                ).model_dump()["items"]
+                if sources
+                else []
+            )
+            source_locators = {f["locator"] for f in sources}
+            if any(
+                ref["locator"] not in source_locators
+                for item in feedback
+                for ref in item["evidence_refs"]
+            ) or literals.found_in(item["rule"] for item in feedback):
+                raise ModelOutputError(
+                    "Extracted feedback contains learning-only details or unauthorized evidence references"
+                )
+            context["user_feedback"] = feedback
+        feedback_locators = {
+            ref["locator"] for item in (feedback or []) for ref in item["evidence_refs"]
+        }
         for attempt in range(3):
             analysis = Analysis.model_validate(
                 self.runtime.analyze(
                     context, files, self.directory(state) / "analysis.json"
                 )
             ).model_dump()
-            if fixed_rubrics_id or not literals.found_in(
-                rubric_rule_text(analysis["rubrics"])
+            ungrounded_feedback = feedback is not None and any(
+                criterion["source"] == "user_feedback"
+                and not any(
+                    ref["locator"] in feedback_locators for ref in criterion["evidence"]
+                )
+                for criterion in analysis["rubrics"]["criteria"]
+            )
+            if fixed_rubrics_id or (
+                not literals.found_in(rubric_rule_text(analysis["rubrics"]))
+                and not ungrounded_feedback
             ):
                 break
             if attempt == 2:
-                raise ModelOutputError("Rubric rules contain learning-only literals")
+                raise ModelOutputError(
+                    "Rubric rules contain learning-only details or unsupported feedback citations"
+                )
             context["portability_feedback"] = (
                 "Rewrite the Rubric as reusable rules for any future input. "
-                "Express the requirements without copying details or references specific to past executions."
+                "Express the requirements without copying details or references specific to past executions. "
+                "Use an evidence reference from an extracted rule for every user_feedback criterion."
             )
         locators = {file["locator"] for file in files}
         for cause in (analysis["attribution"] or {}).get("possible_causes", []):
@@ -143,6 +187,8 @@ class Engine:
                     )
         if fixed_rubrics_id:
             analysis["rubrics"] = context["fixed_rubrics"]
+        if feedback is not None:
+            analysis["feedback"] = feedback
         for question in analysis["questions"]:
             question["revision"] = state["input_revision"]
         rubrics_version_id = self.store.save_analysis(

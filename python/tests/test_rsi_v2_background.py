@@ -50,6 +50,26 @@ def gateway():
                 )
                 tools = {t["function"]["name"] for t in request.get("tools", [])}
                 called = any(m["role"] == "tool" for m in messages)
+                catalog = payload["evidence_catalog"]
+                feedback_source = next(
+                    (f for f in catalog if f["role"] == "feedback"), None
+                )
+                feedback = (
+                    [
+                        {
+                            "kind": "correction",
+                            "rule": "Write only the corrected answer",
+                            "evidence_refs": [
+                                {
+                                    k: feedback_source[k]
+                                    for k in ("material_id", "locator")
+                                }
+                            ],
+                        }
+                    ]
+                    if feedback_source
+                    else []
+                )
                 if not called:
                     if "recipe test executor" in system:
                         name, arguments = (
@@ -59,10 +79,20 @@ def gateway():
                     else:
                         name, arguments = (
                             "read_evidence",
-                            {"locator": payload["evidence_catalog"][0]["locator"]},
+                            {
+                                "locator": (
+                                    feedback_source
+                                    if "FeedbackExtraction" in tools and feedback_source
+                                    else catalog[0]
+                                )["locator"]
+                            },
                         )
+                elif "FeedbackExtraction" in tools:
+                    assert all(f["role"] in {"context", "feedback"} for f in catalog)
+                    name, arguments = "FeedbackExtraction", {"items": feedback}
                 elif "Analysis" in tools:
-                    locator = payload["evidence_catalog"][0]["locator"]
+                    assert payload["context"]["user_feedback"] == feedback
+                    locator = catalog[0]["locator"]
                     name, arguments = (
                         "Analysis",
                         {
@@ -74,8 +104,12 @@ def gateway():
                                     {
                                         "id": "correct",
                                         "description": "answer.txt must contain 42",
-                                        "source": "task",
-                                        "evidence": [
+                                        "source": "user_feedback"
+                                        if feedback
+                                        else "task",
+                                        "evidence": feedback[0]["evidence_refs"]
+                                        if feedback
+                                        else [
                                             {
                                                 "material_id": locator.split("/")[0],
                                                 "locator": locator,
@@ -96,6 +130,10 @@ def gateway():
                         },
                     )
                 elif "Assessment" in tools:
+                    assert "user_feedback" not in payload["context"]
+                    assert (
+                        "evidence" not in payload["context"]["rubrics"]["criteria"][0]
+                    )
                     name, arguments = (
                         "Assessment",
                         {
@@ -196,7 +234,14 @@ def test_multiple_hook_processes_survive_exit_and_share_limits(
     source.write_text(
         "User confirmed artifact. Learn how to write the fixed answer 42 into answer.txt."
     )
-    material = client.material_create(manifest={"context_path": str(source)})
+    feedback = tmp_path / "feedback.md"
+    feedback.write_text("User: Please write only the corrected answer in the file.")
+    material = client.material_create(
+        manifest={
+            "context_path": str(source),
+            "files": [{"path": str(feedback), "role": "feedback"}],
+        }
+    )
     # Each short-lived caller models an independent host session's Hook.
     script = """
 import json, sys
@@ -247,8 +292,12 @@ print(json.dumps({'id': run['id']}))
         assert all(r["result"]["activated"] for r in runs), runs
         assert peak_running == 2
         assert gateway.peak == 1  # Separate model budget across all processes.
-        assert gateway.requests >= 32  # 4 stages, tool call + result, 4 runs.
+        assert gateway.requests >= 40  # 5 stages, tool call + result, 4 runs.
         for run in runs:
+            assert (
+                run["analysis"]["feedback"][0]["evidence_refs"][0]["locator"]
+                == material["files"][1]["locator"]
+            )
             test = run["test_results"][0]
             assert test["status"] == "passed"
             from pathlib import Path
@@ -306,7 +355,9 @@ def test_structured_output_correction_is_bounded(
         assert result["status"] == "failed"
         assert result["error"]["code"] == "invalid_model_output"
         assert client.recipe_list() == []
-        assert gateway.requests == 4  # one read + three malformed output attempts
+        assert (
+            gateway.requests == 6
+        )  # two extraction calls + analysis read and three malformed outputs
     else:
         assert result["status"] == "completed", result
         assert result["result"]["test_status"] == "passed"

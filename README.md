@@ -4,7 +4,7 @@ CoSens turns confirmed task evidence into reusable Recipes. The local SDK is ava
 
 ```text
 Host Hook → local SDK → SQLite queue → on-demand worker
-→ analyze evidence → generate candidate → execute test → score → save result
+→ extract user feedback → analyze evidence → generate candidate → execute test → score → save result
 ```
 
 | Host | Import | Guide |
@@ -13,6 +13,8 @@ Host Hook → local SDK → SQLite queue → on-demand worker
 | Python | `from cosens.rsi import RSIClient` | [Python](python/docs/local-rsi.md) |
 
 The host confirms the deliverable and selects the task trajectory. It creates a Material from local file paths, calls `execution_create`, then uses the returned ID to read status or answer clarification questions. The worker continues after the Hook returns.
+
+Before deriving new Rubrics, the worker reads context and files with the `feedback` role in a dedicated pass. It extracts reusable, explicit user requirements and corrections with their evidence references. The analysis combines them with task requirements and execution evidence. The extracted rules are available in `execution_get` → `analysis.feedback`. Supplying a fixed Rubrics version skips extraction for Rubric generation.
 
 When the learning evidence includes a correction, the worker records likely causes and their source references in `execution_get` → `analysis.attribution`. Recipe generation uses those findings to write reusable steps or checks. A successful `recipe_test` shows that the Recipe met the Rubrics on the test input.
 

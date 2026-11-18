@@ -51,7 +51,50 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           },
         ],
       };
-      if (!afterTool) {
+      const feedbackSource = evidence_catalog.find(
+        (entry: { role: string }) => entry.role === 'feedback',
+      );
+      const feedback =
+        evidence && feedbackSource
+          ? [
+              {
+                kind: 'correction',
+                rule: 'Write 42 as the answer',
+                evidence_refs: [
+                  {
+                    material_id: evidence.material_id,
+                    locator: evidence.locator,
+                  },
+                ],
+              },
+              {
+                kind: 'requirement',
+                rule: 'The file contains only the answer',
+                evidence_refs: [
+                  {
+                    material_id: feedbackSource.material_id,
+                    locator: feedbackSource.locator,
+                  },
+                ],
+              },
+            ]
+          : [];
+      if (tools.has('FeedbackExtraction') && afterTool) {
+        assert.deepEqual(
+          evidence_catalog.map((entry: { role: string }) => entry.role),
+          ['context', 'feedback'],
+        );
+        const reads = input.messages.filter(
+          (m: { role: string }) => m.role === 'tool',
+        );
+        call =
+          reads.length === 1
+            ? {
+                name: 'read_evidence',
+                args: { locator: feedbackSource.locator },
+              }
+            : { name: 'FeedbackExtraction', args: { items: feedback } };
+      } else if (!afterTool) {
         call = tools.has('write_output')
           ? {
               name: 'write_output',
@@ -59,6 +102,12 @@ test('independent Node hooks enqueue work that persists and passes a file test a
             }
           : { name: 'read_evidence', args: { locator: evidence.locator } };
       } else if (tools.has('Analysis')) {
+        assert.ok(
+          evidence_catalog.some(
+            (entry: { role: string }) => entry.role === 'reference',
+          ),
+        );
+        assert.deepEqual(context.user_feedback, feedback);
         call = {
           name: 'Analysis',
           args: {
@@ -70,14 +119,9 @@ test('independent Node hooks enqueue work that persists and passes a file test a
               criteria: [
                 {
                   id: 'answer',
-                  description: 'Write 42',
-                  source: 'task',
-                  evidence: [
-                    {
-                      material_id: evidence.material_id,
-                      locator: evidence.locator,
-                    },
-                  ],
+                  description: 'Write only the answer 42',
+                  source: 'user_feedback',
+                  evidence: feedback.flatMap((item) => item.evidence_refs),
                 },
               ],
             },
@@ -95,6 +139,8 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         };
       } else if (tools.has('Assessment')) {
         assert.ok(context.objective_checks[0].passed);
+        assert.equal(context.user_feedback, undefined);
+        assert.equal(context.rubrics.criteria[0].evidence, undefined);
         assert.ok(
           evidence_catalog.some(
             (entry: { role: string }) => entry.role === 'trace',
@@ -115,7 +161,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       res.setHeader('Content-Type', 'application/json');
       res.end(
         JSON.stringify({
-          id: 'fixture',
+          id: 'fixture_' + requests,
           object: 'chat.completion',
           model: input.model,
           created: 1,
@@ -170,8 +216,21 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       path,
       'Produce answer.txt with 42. The user corrected the prior output from 24 to 42.',
     );
+    const feedbackPath = join(directory, 'feedback.md');
+    writeFileSync(feedbackPath, 'User: Put only the answer in the file.');
+    const referencePath = join(directory, 'reference.md');
+    writeFileSync(
+      referencePath,
+      'Execution trace: the file was written with the answer.',
+    );
     const material = client.material_create({
-      manifest: { context_path: path },
+      manifest: {
+        context_path: path,
+        files: [
+          { path: feedbackPath, role: 'feedback' },
+          { path: referencePath, role: 'reference' },
+        ],
+      },
     });
     const script = `
       import { RSIClient } from 'cosens-sdk/rsi';
@@ -216,6 +275,10 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         run.analysis?.attribution?.possible_causes[0].evidence_refs,
         [{ material_id: material.id, locator: material.files[0].locator }],
       );
+      assert.deepEqual(
+        run.analysis?.feedback?.map((item) => item.evidence_refs[0].locator),
+        [material.files[0].locator, material.files[1].locator],
+      );
       assert.equal(run.result?.activated, true);
       assert.equal(
         readFileSync(run.test_results[0].artifacts[0].path, 'utf8'),
@@ -227,7 +290,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       );
     }
     assert.equal(peak, 1);
-    assert.equal(requests, 24);
+    assert.equal(requests, 33);
     const db = new Database(join(data_dir, 'rsi-ts.sqlite3'), {
       readonly: true,
     });

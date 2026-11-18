@@ -20,6 +20,7 @@ import {
 } from './materials.js';
 import {
   AnalysisSchema,
+  FeedbackExtractionSchema,
   AssessmentSchema,
   RecipeSchema,
   fail,
@@ -28,11 +29,17 @@ import {
 } from './models.js';
 
 const stages = {
+  feedback: {
+    name: 'user feedback extraction',
+    schema: FeedbackExtractionSchema.meta({ title: 'FeedbackExtraction' }),
+    instruction:
+      'Extract requirements and corrections explicitly stated or confirmed by the user in the supplied materials. Keep only reusable requirements for the task type. Express each as a rule without details specific to a past execution. Cite the exact source file for each item. Merge equivalent rules while preserving their supporting citations. Retain applicable corrections when they explicitly replace an earlier request. Do not treat assistant suggestions, unconfirmed inferences, general approval, or decisions limited to one instance as reusable user requirements. Return an empty items list when there is no qualifying evidence.',
+  },
   analysis: {
     name: 'analysis',
     schema: AnalysisSchema.meta({ title: 'Analysis' }),
     instruction:
-      'Determine whether essential Recipe information is missing. If sufficient, set hypothesis=null and questions=[]. Otherwise form a provisional hypothesis and offer 2–3 options per question. Continue without waiting. Derive scoring criteria from task requirements, explicit feedback and observed execution. Each criterion must be verifiable on future executions. Apply conditional criteria only where their conditions hold, and mark criteria that require a separate scenario as optional. Cite sources only in the evidence field of each criterion. Express the underlying requirement without including details specific to a past execution or requiring its replay. Preserve supplied fixed Rubrics. When learning evidence contains corrective feedback or a documented correction, fill attribution.possible_causes. Describe the observed issue separately from a plausible reason, explain the uncertainty, and cite the exact material_id and locator of each source you read. Return attribution=null if there is no evidence of a correction. Treat reasons as hypotheses even when the correction is confirmed.',
+      'Determine whether essential Recipe information is missing. If sufficient, set hypothesis=null and questions=[]. Otherwise form a provisional hypothesis and offer 2–3 options per question. Continue without waiting. Derive scoring criteria by combining task requirements and observed execution with the separately extracted user_feedback rules. Use extracted feedback for user_feedback criteria and carry over their source citations. Merge overlapping requirements into a single criterion. Each criterion must be verifiable on future executions. Apply conditional criteria only where their conditions hold, and mark criteria that require a separate scenario as optional. Cite sources only in the evidence field of each criterion. Express the underlying requirement without including details specific to a past execution or requiring its replay. Preserve supplied fixed Rubrics. When learning evidence contains corrective feedback or a documented correction, fill attribution.possible_causes. Describe the observed issue separately from a plausible reason, explain the uncertainty, and cite the exact material_id and locator of each source you read. Return attribution=null if there is no evidence of a correction. Treat reasons as hypotheses even when the correction is confirmed.',
   },
   generation: {
     name: 'recipe generation',
@@ -268,6 +275,9 @@ export class LangChainRuntime implements Runtime {
     }
   }
 
+  extract_feedback(files: EvidenceFile[], tracePath: string) {
+    return this.call('feedback', {}, files, tracePath);
+  }
   analyze(
     context: Record<string, unknown>,
     files: EvidenceFile[],

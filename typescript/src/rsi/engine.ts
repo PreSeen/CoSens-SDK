@@ -16,11 +16,13 @@ import { LearningLiterals, rubricRuleText } from './portability.js';
 import { uid } from './store.js';
 import {
   AnalysisSchema,
+  FeedbackExtractionSchema,
   AssessmentSchema,
   RecipeSchema,
   RubricsSchema,
   RSIError,
   fail,
+  type Analysis,
   type EvidenceFile,
   type Execution,
   type ExecutionResult,
@@ -30,7 +32,6 @@ import {
   type Versioned,
 } from './models.js';
 
-type Analysis = ReturnType<typeof AnalysisSchema.parse>;
 interface Candidate {
   recipe_id: string;
   version_id: string;
@@ -133,9 +134,40 @@ export class Engine {
       : undefined;
     const files = this.evidence(execution);
     const literals = this.learningLiterals(execution);
+    let feedback: Analysis['feedback'];
+    if (!fixed && this.runtime.extract_feedback) {
+      const sources = files.filter(
+        ({ role }) => role === 'context' || role === 'feedback',
+      );
+      feedback = sources.length
+        ? FeedbackExtractionSchema.parse(
+            await this.runtime.extract_feedback(
+              sources,
+              join(this.directory(state.revision), 'feedback-extraction.json'),
+            ),
+          ).items
+        : [];
+      const sourceLocators = new Set(sources.map(({ locator }) => locator));
+      if (
+        feedback.some(({ evidence_refs }) =>
+          evidence_refs.some(({ locator }) => !sourceLocators.has(locator)),
+        ) ||
+        literals.foundIn(feedback.map(({ rule }) => rule))
+      )
+        fail(
+          'invalid_model_output',
+          'Extracted feedback contains learning-only details or unauthorized evidence references',
+        );
+    }
+    const feedbackLocators = new Set(
+      feedback?.flatMap(({ evidence_refs }) =>
+        evidence_refs.map(({ locator }) => locator),
+      ),
+    );
     const context: Record<string, unknown> = {
       ...this.context(execution),
       fixed_rubrics: fixedRubrics,
+      user_feedback: feedback,
     };
     let analysis: Analysis;
     for (let attempt = 0; ; attempt++) {
@@ -146,15 +178,26 @@ export class Engine {
           join(this.directory(state.revision), 'analysis.json'),
         ),
       );
-      if (fixedRubrics || !literals.foundIn(rubricRuleText(analysis.rubrics)))
+      const ungroundedFeedback =
+        feedback !== undefined &&
+        analysis.rubrics.criteria.some(
+          ({ source, evidence }) =>
+            source === 'user_feedback' &&
+            !evidence.some(({ locator }) => feedbackLocators.has(locator)),
+        );
+      if (
+        fixedRubrics ||
+        (!literals.foundIn(rubricRuleText(analysis.rubrics)) &&
+          !ungroundedFeedback)
+      )
         break;
       if (attempt === 2)
         fail(
           'invalid_model_output',
-          'Rubric rules contain learning-only literals',
+          'Rubric rules contain learning-only details or unsupported feedback citations',
         );
       context.portability_feedback =
-        'Rewrite the Rubric as reusable rules for any future input. Express the requirements without copying details or references specific to past executions.';
+        'Rewrite the Rubric as reusable rules for any future input. Express the requirements without copying details or references specific to past executions. Use an evidence reference from an extracted rule for every user_feedback criterion.';
     }
     const locators = new Set(files.map((file) => file.locator));
     for (const cause of analysis.attribution?.possible_causes ?? []) {
@@ -180,6 +223,7 @@ export class Engine {
         }
       }
     }
+    if (feedback !== undefined) analysis.feedback = feedback;
     for (const question of analysis.questions)
       question.revision = state.revision;
     return this.store.tx(() => {

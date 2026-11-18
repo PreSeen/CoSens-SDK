@@ -9,7 +9,14 @@ from pathlib import Path
 from typing import Protocol
 
 from .materials import atomic_json, digest, read_snapshot
-from .models import Analysis, Assessment, InvalidState, ModelOutputError, RecipeContent
+from .models import (
+    Analysis,
+    Assessment,
+    FeedbackExtraction,
+    InvalidState,
+    ModelOutputError,
+    RecipeContent,
+)
 
 
 class Runtime(Protocol):
@@ -220,6 +227,16 @@ class LangChainRuntime:
             "reads": reads,
         }
 
+    def extract_feedback(self, files, trace_path):
+        return self._call(
+            stage="user feedback extraction",
+            context={},
+            files=files,
+            trace_path=trace_path,
+            schema=FeedbackExtraction,
+            instruction="Extract requirements and corrections explicitly stated or confirmed by the user in the supplied materials. Keep only reusable requirements for the task type. Express each as a rule without details specific to a past execution. Cite the exact source file for each item. Merge equivalent rules while preserving their supporting citations. Retain applicable corrections when they explicitly replace an earlier request. Do not treat assistant suggestions, unconfirmed inferences, general approval, or decisions limited to one instance as reusable user requirements. Return an empty items list when there is no qualifying evidence.",
+        )
+
     def analyze(self, context, files, trace_path):
         return self._call(
             stage="analysis",
@@ -231,7 +248,7 @@ class LangChainRuntime:
             "If information is sufficient: sufficient_information=true, hypothesis=null, questions=[]. A hypothesis is not a recipe summary. "
             "Do not ask about hypothetical edge cases outside the task's necessary scope. "
             "Do not pause: state a provisional assumption. "
-            "Derive scoring criteria from task requirements, explicit feedback and observed execution. "
+            "Derive scoring criteria by combining task requirements and observed execution with the separately extracted user_feedback rules. Use extracted feedback for user_feedback criteria and carry over their source citations. Merge overlapping requirements into a single criterion. "
             "Each criterion must be verifiable on future executions. Apply conditional criteria only where their conditions hold, and mark criteria that require a separate scenario as optional. "
             "Cite sources only in each criterion's evidence field. Express the underlying requirement without including details specific to a past execution or requiring its replay. "
             "If fixed Rubrics are supplied, preserve their standard. "

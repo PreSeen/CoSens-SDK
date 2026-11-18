@@ -88,6 +88,15 @@ export const EvidenceSchema = z
     (e) => e.locator.startsWith(e.material_id + '/'),
     'locator must belong to material_id',
   );
+export const FeedbackExtractionSchema = z.strictObject({
+  items: z.array(
+    z.strictObject({
+      kind: z.enum(['requirement', 'correction']),
+      rule: text,
+      evidence_refs: z.array(EvidenceSchema).min(1),
+    }),
+  ),
+});
 export const RubricsSchema = z
   .strictObject({
     criteria: z
@@ -160,6 +169,9 @@ export const AnalysisSchema = z
     (a) => new Set(a.questions.map((q) => q.id)).size === a.questions.length,
     'question IDs must be unique',
   );
+export type Analysis = z.output<typeof AnalysisSchema> & {
+  feedback?: z.output<typeof FeedbackExtractionSchema>['items'];
+};
 export const RecipeSchema = z.strictObject({
   title: text,
   applicability: text,
@@ -300,7 +312,7 @@ export interface Execution extends ObjectMetadata {
     upstream_status?: number;
   } | null;
   hypothesis?: string | null;
-  analysis?: z.output<typeof AnalysisSchema>;
+  analysis?: Analysis;
   analyzed_input_revision?: number;
   resolved_rubrics_version_id?: string;
   test_request?: {
@@ -337,6 +349,10 @@ export interface ClarificationAnswer {
   idempotency_key?: string;
 }
 export interface Runtime {
+  extract_feedback?(
+    files: EvidenceFile[],
+    trace_path: string,
+  ): Promise<unknown>;
   analyze(
     context: Record<string, unknown>,
     files: EvidenceFile[],
