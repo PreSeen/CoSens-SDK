@@ -30,13 +30,14 @@ INTERRUPTED = {"code": "interrupted", "message": "The process generating this ca
                "retryable": True, "phase": None, "upstream_status": None, "upstream_code": None}
 FEEDBACK_REQUIRED = ("learning needs feedback on this revision or an earlier one in its chain; "
                      "record it with record_feedback")
-# A finished candidate built on a version the service rolled back, and the candidates queued behind it.
+# A finished candidate built on a version the service moved its current version away from, and the candidates queued
+# behind it.
 PREVIOUS_VERSION_CHANGED = {"code": "previous_version_changed", "retryable": True, "phase": None, "upstream_status": None,
-                            "upstream_code": None, "message": "The service rolled back the version this candidate builds "
-                                                              "on; resume to learn on the current version."}
+                            "upstream_code": None, "message": "The service moved its current version off the version this "
+                                                              "candidate builds on; resume to learn on the current version."}
 PREVIOUS_VERSION_FAILED = {"code": "previous_version_failed", "retryable": True, "phase": None, "upstream_status": None,
                            "upstream_code": None, "message": "The candidate this one builds on was built on a version the "
-                                                             "service rolled back; resume to learn on the current version."}
+                                                             "service moved away from; resume to learn on the current version."}
 
 
 def recipe_request_key(task_id, revision_id, max_completion_tokens=None, *, web_search=None, web_search_blocked_domains=()):
@@ -180,6 +181,14 @@ class LocalRecipeLifecycle:
             raise LookupError("Recipe version not found")
         return dict(row)
 
+    def _line(self, db, candidate_id):
+        """``candidate_id`` and every version it builds on, parent first."""
+        line = []
+        while candidate_id is not None:
+            line.append(candidate_id)
+            candidate_id = self._lineage(db, candidate_id)["parent_candidate_id"]
+        return line
+
     def _checked_view(self, db, row):
         """The candidate's view, refusing stored content that no longer matches its hash."""
         if fingerprint(json.loads(row["context_json"])) != row["context_sha"]:
@@ -299,24 +308,40 @@ class LocalRecipeLifecycle:
         """The highest version number the service stores for this chain, rolled-back versions included."""
         return max(item["version"] for item in (await self._atoms.get_recipe_versions(recipe_id))["versions"])
 
-    async def _rolled_back_chain(self, head):
-        """The service's current version and highest stored version when it rolled this machine's uploaded chain back
-        below the last version uploaded from here, else None. A failed read keeps the local base; publishing then
-        finds the rollback instead."""
+    async def _server_chain(self, head):
+        """The service's current version and highest stored version when the current one is not the last version
+        uploaded from here, else None; ``_server_moved`` decides whether to follow it. A failed read keeps the local
+        base; publishing then finds the move instead."""
         if head is None or head["remote_version"] is None or self._atoms is None:
             return None
         try:
             view = await self._atoms.get_recipe(head["recipe_id"])
-            if view["version"] >= head["remote_version"]:
+            if view["version"] == head["remote_version"]:
                 return None
             return view, await self._stored_max(head["recipe_id"])
         except RSIError as exc:
             _LOG.warning("Reading Recipe %s before learning failed: %s", head["recipe_id"], type(exc).__name__)
             return None
 
+    @staticmethod
+    def _server_moved(db, head, view):
+        """Whether the service moved this uploaded chain's current version, back or forward, away from the local one:
+        to a version this machine lacks, or to a finished local version other than the current one. The local current
+        version with the service's number is an upload whose response was lost, and an unfinished local version with
+        it was numbered here before another machine uploaded that number; neither is followed."""
+        if head["remote_version"] in (None, view["version"]):
+            return False
+        row = db.execute("SELECT c.id,c.state FROM recipe_versions v JOIN recipe_candidates c ON c.id=v.candidate_id "
+                         "WHERE v.recipe_id=? AND v.version=?", (head["recipe_id"], view["version"])).fetchone()
+        return row is None or (row["state"] == "candidate" and row["id"] != head["current_candidate_id"])
+
     def _follow_server(self, db, recipe_id, view, stored):
         """Make the service's current version this chain's current version here: the local version with that number,
-        else the service's, imported. Later versions are numbered above ``stored``, the service's highest version."""
+        else the service's, imported. Later versions are numbered above ``stored``, the service's highest version.
+
+        A finished version that the new current version does not lead to and that is not known to have reached the
+        service is built on a version the service moved away from, so it fails like a candidate whose upload finds the
+        move."""
         row = db.execute("SELECT candidate_id FROM recipe_versions WHERE recipe_id=? AND version=?",
                          (recipe_id, view["version"])).fetchone()
         if row is None:
@@ -328,10 +353,16 @@ class LocalRecipeLifecycle:
             current = row["candidate_id"]
         db.execute("UPDATE recipe_heads SET current_candidate_id=?,remote_version=?,remote_max_version=? WHERE recipe_id=?",
                    (current, view["version"], stored, recipe_id))
+        line = self._line(db, current)
+        for unpublished in db.execute("SELECT c.id FROM recipe_versions v JOIN recipe_candidates c ON c.id=v.candidate_id "
+                                      "WHERE v.recipe_id=? AND c.state='candidate' AND c.publish_state IS NOT 'published'",
+                                      (recipe_id,)).fetchall():
+            if unpublished["id"] not in line:
+                self._fail_rolled_back(db, unpublished["id"])
 
     @staticmethod
     def _fail_rolled_back(db, candidate_id):
-        """Fail a finished candidate built on a version the service rolled back, and the candidates queued behind it;
+        """Fail a finished candidate built on a version the service moved away from, and the candidates queued behind it;
         a resume rebuilds them on the current version. Running ones fail at commit."""
         db.execute("UPDATE recipe_candidates SET state='failed',error=?,publish_state=NULL WHERE id=? AND state='candidate'",
                    (canonical_json(PREVIOUS_VERSION_CHANGED), candidate_id))
@@ -500,8 +531,8 @@ class LocalRecipeLifecycle:
         # Memory reaches a Recipe only when the execution behind this revision asked for it.
         memory = await self._recall_snapshot(source["input"]["objective"]) if "memory" in source else {
             "status": "not_requested", "items": []}
-        # An uploaded chain the service rolled back is followed first, so the model learns on the service's version.
-        rolled_back = await self._rolled_back_chain(head)
+        # An uploaded chain the service moved is followed first, so the model learns on the service's version.
+        server = await self._server_chain(head)
         with self._store.transaction() as db:
             found = self._existing_candidate(db, task_id, revision_id, key, request_hash, web_search, requested, web)
             if found is not None:
@@ -521,8 +552,8 @@ class LocalRecipeLifecycle:
                 raise ValueError("recipe history exceeds 4 MB; narrow the context")
             candidate_id = "recipe_candidate_" + uuid4().hex
             head = self._learning_head(db, task_id, source)
-            if rolled_back is not None and head is not None and rolled_back[0]["version"] < (head["remote_version"] or 0):
-                self._follow_server(db, head["recipe_id"], *rolled_back)
+            if server is not None and head is not None and self._server_moved(db, head, server[0]):
+                self._follow_server(db, head["recipe_id"], *server)
                 head = self._learning_head(db, task_id, source)
             context["initial"] = head is None
             context_sha = fingerprint(context)
@@ -763,10 +794,7 @@ class LocalRecipeLifecycle:
             if head is None:
                 raise LookupError("Recipe not found")
             rows = db.execute("SELECT candidate_id FROM recipe_versions WHERE recipe_id=? ORDER BY version", (recipe_id,)).fetchall()
-            line, candidate_id = set(), head["current_candidate_id"]
-            while candidate_id is not None:
-                line.add(candidate_id)
-                candidate_id = self._lineage(db, candidate_id)["parent_candidate_id"]
+            line = self._line(db, head["current_candidate_id"])
             versions = [{**view, "rolled_back": view["status"] == "candidate" and view["recipe_candidate_id"] not in line}
                         for view in (self._checked_view(db, self._candidate(db, r["candidate_id"])) for r in rows)]
         return result({"recipe_id": recipe_id, "current_candidate_id": head["current_candidate_id"],
@@ -775,9 +803,9 @@ class LocalRecipeLifecycle:
     async def _publish_candidate(self, candidate_id):
         """Upload this version to the service's Recipe store; returns the publish state.
 
-        The local version stands whatever happens here, except when the service rolled the chain back below the last
-        version uploaded from here: then this chain follows the service, the candidate (built on the rolled-back
-        version) fails with ``previous_version_changed`` without being uploaded, and None is returned."""
+        The local version stands whatever happens here, except when the service moved the chain's current version off
+        this candidate's base (``_moved_off``): then this chain follows the service, the candidate fails with
+        ``previous_version_changed`` without being uploaded, and None is returned."""
         with self._store.reading() as db:
             row = self._candidate(db, candidate_id)
             lineage = self._lineage(db, candidate_id)
@@ -788,16 +816,16 @@ class LocalRecipeLifecycle:
             try:
                 await self._atoms.upload_recipe(recipe_id, version=lineage["version"], recipe=recipe, previous_version=remote)
             except RSIHTTPError as exc:
-                if exc.status_code == 409 and exc.current_version is not None and exc.current_version < (remote or 0):
+                if self._moved_off(candidate_id, exc, remote):
                     view = await self._atoms.get_recipe(recipe_id)
                     stored = await self._stored_max(recipe_id)
                     with self._store.transaction() as db:
                         self._follow_server(db, recipe_id, view, stored)
                         self._fail_rolled_back(db, candidate_id)
-                    _LOG.warning("Recipe %s was rolled back to version %s; candidate %s failed", recipe_id, view["version"],
+                    _LOG.warning("Recipe %s was moved to version %s; candidate %s failed", recipe_id, view["version"],
                                  candidate_id)
                     return None
-                ours = await self._own_server_version(recipe_id, exc, remote)
+                ours = await self._own_server_version(recipe_id, candidate_id, exc, remote)
                 if ours is None:
                     raise
                 remote = ours
@@ -815,15 +843,33 @@ class LocalRecipeLifecycle:
                        (lineage["version"] if state == "published" else remote, recipe_id))
         return state
 
-    async def _own_server_version(self, recipe_id, exc, remote):
-        """The server's newer current version when it is this chain's own upload whose response was lost, else None."""
+    def _moved_off(self, candidate_id, exc, remote):
+        """Whether an upload conflict says the service moved the chain's current version off this candidate's base:
+        below the last version uploaded from here (a rollback), or to a finished local version the candidate does not
+        build on (forward again). A newer version this machine lacks was uploaded elsewhere and stays a conflict."""
+        current = exc.current_version
+        if exc.status_code != 409 or current is None or current == (remote or 0):
+            return False
+        if current < (remote or 0):
+            return True
+        with self._store.reading() as db:
+            row = db.execute("SELECT c.id FROM recipe_versions v JOIN recipe_candidates c ON c.id=v.candidate_id "
+                             "WHERE v.recipe_id=? AND v.version=? AND c.state='candidate'",
+                             (self._lineage(db, candidate_id)["recipe_id"], current)).fetchone()
+            return row is not None and row["id"] not in self._line(db, candidate_id)
+
+    async def _own_server_version(self, recipe_id, candidate_id, exc, remote):
+        """The server's newer current version when it is a version this candidate builds on, uploaded from here with
+        its response lost, else None."""
         current = exc.current_version
         if exc.status_code != 409 or current is None or current <= (remote or 0):
             return None
         stored = (await self._atoms.get_recipe(recipe_id, version=current)).get("recipe")
         with self._store.reading() as db:
-            local = db.execute("SELECT c.recipe_json FROM recipe_versions v JOIN recipe_candidates c ON c.id=v.candidate_id "
+            local = db.execute("SELECT c.id,c.recipe_json FROM recipe_versions v JOIN recipe_candidates c ON c.id=v.candidate_id "
                                "WHERE v.recipe_id=? AND v.version=?", (recipe_id, current)).fetchone()
+            if local is not None and local["id"] not in self._line(db, candidate_id)[1:]:
+                return None
         if local is None or not local["recipe_json"] or not isinstance(stored, dict):
             return None
         same = fingerprint(without_evidence(stored)) == fingerprint(upload_form(json.loads(local["recipe_json"])))

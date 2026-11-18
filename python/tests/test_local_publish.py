@@ -505,3 +505,104 @@ async def test_candidates_queued_behind_a_rolled_back_one_fail_and_resume_on_the
     assert model.calls[-1]["context"]["base_recipe"]["recipe"]["title"] == "A"
     assert [(u["version"], u["previous_version"]) for u in server.uploads[4:]] == [(6, 2), (7, 6)]
     assert server.chains[v2.recipe_id]["current"] == 7
+
+
+async def test_a_candidate_on_a_rolled_back_base_fails_when_the_service_moves_forward_again(tmp_path):
+    rsi, _, server = setup(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 4)), recipe_reply("Doomed"), recipe_reply("V4"))
+    task, (v1, _, v3) = await three_versions(rsi)
+    server.rollback(v1.recipe_id, 1)
+    started = await rsi.start_execution(task.task_id, source="new_task", objective="Do the task", key="four")
+    done = await complete_execution(rsi, started, key="four-out")
+    candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)  # follows the rollback
+    assert (candidate.version, candidate.parent_candidate_id) == (4, v1.recipe_candidate_id)
+    server.rollback(v1.recipe_id, 3)  # forward again, after the check before learning
+    with pytest.raises(RSICandidateFailed) as caught:
+        await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    assert (caught.value.code, caught.value.retryable) == ("previous_version_changed", True)
+    assert sorted(server.chains[v1.recipe_id]["versions"]) == [1, 2, 3] and server.chains[v1.recipe_id]["current"] == 3
+    assert (await rsi.get_task_recipe(task.task_id)).current.recipe_candidate_id == v3.recipe_candidate_id
+    await rsi.resume_recipe_candidate(candidate.recipe_candidate_id)
+    job = await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    assert (job.version, job.parent_candidate_id, job.publish_state, job.recipe["title"]) == (
+        5, v3.recipe_candidate_id, "published", "V4")
+    assert [(u["version"], u["previous_version"]) for u in server.uploads[3:]] == [(4, 1), (5, 3)]
+
+
+async def test_a_learning_after_a_rollback_and_forward_again_builds_on_the_service_current_version(tmp_path):
+    rsi, model, server = setup(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 6)))
+    task, (v1, _, v3) = await three_versions(rsi)
+    server.rollback(v1.recipe_id, 1)
+    v4 = await improve(rsi, task, "four")
+    assert (v4.version, v4.parent_candidate_id, v4.publish_state) == (4, v1.recipe_candidate_id, "published")
+    server.rollback(v1.recipe_id, 3)
+    job = await improve(rsi, task, "five")
+    assert (job.version, job.parent_candidate_id, job.publish_state) == (5, v3.recipe_candidate_id, "published")
+    assert model.calls[-1]["context"]["base_recipe"]["version"] == 3
+    assert (server.uploads[-1]["version"], server.uploads[-1]["previous_version"]) == (5, 3)
+    flags = [(v.version, v.rolled_back) for v in (await rsi.get_recipe_versions(v1.recipe_id)).versions]
+    assert flags == [(1, False), (2, False), (3, False), (4, True), (5, False)]
+
+
+async def test_the_check_before_learning_follows_the_service_forward_again(tmp_path):
+    rsi, model, server = setup(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 4)), recipe_reply("OnV3"))
+    task, (v1, _, v3) = await three_versions(rsi)
+    server.rollback(v1.recipe_id, 1)
+    learned = []
+    for key in ("four", "five"):
+        execution = await rsi.start_execution(task.task_id, source="new_task", objective="Do the task", key=key)
+        learned.append(await complete_execution(rsi, execution, key=key + "-out"))
+    first = await rsi.start_recipe_candidate(task.task_id, revision_id=learned[0].revision_id)  # follows the rollback
+    assert (first.version, first.parent_candidate_id) == (4, v1.recipe_candidate_id)
+    server.rollback(v1.recipe_id, 3)
+    second = await rsi.start_recipe_candidate(task.task_id, revision_id=learned[1].revision_id)
+    assert (second.version, second.parent_candidate_id) == (5, v3.recipe_candidate_id)
+    job = await rsi.wait_workflow_job("recipe_candidate", second.recipe_candidate_id)
+    assert (job.version, job.publish_state) == (5, "published")
+    assert model.calls[-1]["context"]["base_recipe"]["version"] == 3
+    assert (server.uploads[-1]["version"], server.uploads[-1]["previous_version"]) == (5, 3)
+
+
+async def test_following_a_rollback_before_learning_fails_finished_versions_never_uploaded(tmp_path):
+    rsi, _, server = setup(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 4)), recipe_reply("X"), recipe_reply("Y"),
+                           recipe_reply("X again"))
+    task, (_, v2, _) = await three_versions(rsi)
+    started = []
+    for key in ("x", "z", "y"):
+        execution = await rsi.start_execution(task.task_id, source="new_task", objective="Do the task", key=key)
+        started.append(await complete_execution(rsi, execution, key=key + "-out"))
+    x = await rsi.start_recipe_candidate(task.task_id, revision_id=started[0].revision_id)
+    await rsi._settle(x.recipe_candidate_id)  # committed as the current version; a crash came before its upload
+    assert (await rsi.get_recipe_candidate(x.recipe_candidate_id)).publish_state == "pending"
+    z = await rsi.start_recipe_candidate(task.task_id, revision_id=started[1].revision_id)
+    assert (z.version, z.parent_candidate_id) == (5, x.recipe_candidate_id)
+    server.rollback(v2.recipe_id, 2)
+    y = await rsi.start_recipe_candidate(task.task_id, revision_id=started[2].revision_id)  # follows the rollback
+    assert (y.version, y.parent_candidate_id) == (6, v2.recipe_candidate_id)
+    with pytest.raises(RSICandidateFailed) as caught:
+        await rsi.wait_workflow_job("recipe_candidate", x.recipe_candidate_id)
+    assert (caught.value.code, caught.value.retryable) == ("previous_version_changed", True)
+    with pytest.raises(RSICandidateFailed) as caught:
+        await rsi.wait_workflow_job("recipe_candidate", z.recipe_candidate_id, timeout=5)
+    assert caught.value.code == "previous_version_failed"
+    assert (await rsi.wait_workflow_job("recipe_candidate", y.recipe_candidate_id)).publish_state == "published"
+    await rsi.resume_recipe_candidate(x.recipe_candidate_id)
+    job = await rsi.wait_workflow_job("recipe_candidate", x.recipe_candidate_id)
+    assert (job.version, job.parent_candidate_id, job.publish_state, job.recipe["title"]) == (
+        7, y.recipe_candidate_id, "published", "X again")
+    assert [(u["version"], u["previous_version"]) for u in server.uploads[3:]] == [(6, 2), (7, 6)]
+
+
+async def test_publish_recipe_raises_when_the_service_rolled_back_below_the_version(tmp_path):
+    rsi, _, server = setup(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 5)))
+    task, (_, v2, _) = await three_versions(rsi)
+    server.fail_status = 503
+    v4 = await improve(rsi, task, "four")
+    server.fail_status = None
+    assert (v4.current, v4.publish_state) == (True, "failed")
+    server.rollback(v2.recipe_id, 2)
+    with pytest.raises(RSICandidateFailed) as caught:
+        await rsi.publish_recipe(v2.recipe_id)
+    assert (caught.value.code, caught.value.candidate_id) == ("previous_version_changed", v4.recipe_candidate_id)
+    published = await rsi.publish_recipe(v2.recipe_id)
+    assert (published.recipe_candidate_id, published.publish_state) == (v2.recipe_candidate_id, "published")
+    assert [u["version"] for u in server.uploads] == [1, 2, 3, 4]  # the refused retry; V4 is never stored
