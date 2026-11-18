@@ -6,6 +6,7 @@ from typing import TypedDict
 
 from .materials import atomic_json, authorized_test_files, digest
 from .models import Analysis, Assessment, InputChanged, ModelOutputError, RecipeContent
+from .portability import LearningLiterals, rubric_rule_text
 from .store import uid
 
 
@@ -53,6 +54,21 @@ class Engine:
         held_out = set((task or {}).get("input_locators") or [])
         return [file for file in files if file["locator"] not in held_out]
 
+    def learning_literals(self, execution, *source_execution_ids):
+        sources = {execution["id"]: execution}
+        for source_id in source_execution_ids:
+            if source_id and source_id not in sources:
+                sources[source_id] = self.store.get(source_id, "execution")
+        files = {}
+        for source in sources.values():
+            authorized = {f["locator"] for f in self.files(source, test=True)}
+            files.update(
+                (f["locator"], f)
+                for f in self.files(source)
+                if f["locator"] not in authorized
+            )
+        return LearningLiterals(files.values())
+
     def directory(self, state):
         directory = (
             self.client.data_dir
@@ -88,11 +104,23 @@ class Engine:
                 fixed_rubrics_id, "rubrics"
             )["content"]
         files = self.files(execution)
-        analysis = Analysis.model_validate(
-            self.runtime.analyze(
-                context, files, self.directory(state) / "analysis.json"
+        literals = self.learning_literals(execution)
+        for attempt in range(3):
+            analysis = Analysis.model_validate(
+                self.runtime.analyze(
+                    context, files, self.directory(state) / "analysis.json"
+                )
+            ).model_dump()
+            if fixed_rubrics_id or not literals.found_in(
+                rubric_rule_text(analysis["rubrics"])
+            ):
+                break
+            if attempt == 2:
+                raise ModelOutputError("Rubric rules contain learning-only literals")
+            context["portability_feedback"] = (
+                "Rewrite the Rubric as reusable rules for any future input. "
+                "Remove copied learning rows, record identifiers, paths, and historical expected outputs."
             )
-        ).model_dump()
         locators = {file["locator"] for file in files}
         for cause in (analysis["attribution"] or {}).get("possible_causes", []):
             if any(ref["locator"] not in locators for ref in cause["evidence_refs"]):
@@ -131,10 +159,9 @@ class Engine:
             "previous_test": state.get("test"),
         }
         base_id = state.get("version_id") or execution.get("base_recipe_version_id")
-        if base_id:
-            context["base_recipe"] = self.store.version_by_id(base_id, "recipe")[
-                "content"
-            ]
+        base = self.store.version_by_id(base_id, "recipe") if base_id else None
+        if base:
+            context["base_recipe"] = base["content"]
         request = execution.get("test_request")
         if request:
             recipe = self.store.get(request["recipe_id"], "recipe")
@@ -153,13 +180,26 @@ class Engine:
                 "round": round_number,
                 "activation_revision": version["provenance"]["activation_revision"],
             }
-        content = RecipeContent.model_validate(
-            self.runtime.generate(
-                context,
-                self.files(execution),
-                self.directory(state) / f"generate-{round_number}.json",
+        files = self.files(execution)
+        literals = self.learning_literals(
+            execution, base["provenance"].get("execution_id") if base else None
+        )
+        for attempt in range(3):
+            content = RecipeContent.model_validate(
+                self.runtime.generate(
+                    context,
+                    files,
+                    self.directory(state) / f"generate-{round_number}.json",
+                )
+            ).model_dump()
+            if not literals.found_in(content.values()):
+                break
+            if attempt == 2:
+                raise ModelOutputError("Recipe rules contain learning-only literals")
+            context["portability_feedback"] = (
+                "Rewrite the Recipe as reusable rules for any future input. "
+                "Remove copied learning rows, worked examples, record identifiers, and historical paths."
             )
-        ).model_dump()
         version = self.store.publish_candidate(
             self.execution_id,
             self.owner,
@@ -209,6 +249,23 @@ class Engine:
             )
         else:
             test_files = self.files(execution, test=True)
+            literals = self.learning_literals(
+                execution,
+                recipe["provenance"].get("execution_id"),
+                rubric["provenance"].get("execution_id"),
+            )
+            # Existing versions must pass the same boundary without rewriting their rules.
+            if literals.found_in(recipe["content"].values()) or literals.found_in(
+                rubric_rule_text(rubric["content"])
+            ):
+                raise ModelOutputError("Test rules contain learning-only literals")
+            test_rubrics = {
+                "pass_threshold": rubric["content"]["pass_threshold"],
+                "criteria": [
+                    {field: c[field] for field in ("id", "description", "required")}
+                    for c in rubric["content"]["criteria"]
+                ],
+            }
             attempt = self.directory(state) / ("test-" + uid("attempt"))
             workspace = attempt / "outputs"
             workspace.mkdir(parents=True, mode=0o700)
@@ -281,7 +338,7 @@ class Engine:
                     self.runtime.assess(
                         {
                             "test_task": task,
-                            "rubrics": rubric["content"],
+                            "rubrics": test_rubrics,
                             "objective_checks": checks,
                             "recipe": recipe["content"],
                         },

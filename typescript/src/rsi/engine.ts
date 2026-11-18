@@ -12,6 +12,7 @@ import {
   inside,
   workspace_files,
 } from './materials.js';
+import { LearningLiterals, rubricRuleText } from './portability.js';
 import { uid } from './store.js';
 import {
   AnalysisSchema,
@@ -78,6 +79,26 @@ export class Engine {
     return files.filter((file) => !heldOut.has(file.locator));
   }
 
+  private learningLiterals(
+    execution: Execution,
+    ...sourceExecutionIds: unknown[]
+  ) {
+    const sources = new Map([[execution.id, execution]]);
+    for (const id of sourceExecutionIds) {
+      if (typeof id === 'string' && !sources.has(id))
+        sources.set(id, this.store.get<Execution>(id, 'execution'));
+    }
+    const files = new Map<string, EvidenceFile>();
+    for (const source of sources.values()) {
+      const authorized = new Set(
+        this.evidence(source, true).map((f) => f.locator),
+      );
+      for (const file of this.evidence(source))
+        if (!authorized.has(file.locator)) files.set(file.locator, file);
+    }
+    return new LearningLiterals([...files.values()]);
+  }
+
   private directory(revision: number) {
     return join(
       this.client.data_dir,
@@ -111,13 +132,30 @@ export class Engine {
       ? RubricsSchema.parse(this.store.version_by_id(fixed, 'rubrics').content)
       : undefined;
     const files = this.evidence(execution);
-    const analysis = AnalysisSchema.parse(
-      await this.runtime.analyze(
-        { ...this.context(execution), fixed_rubrics: fixedRubrics },
-        files,
-        join(this.directory(state.revision), 'analysis.json'),
-      ),
-    );
+    const literals = this.learningLiterals(execution);
+    const context: Record<string, unknown> = {
+      ...this.context(execution),
+      fixed_rubrics: fixedRubrics,
+    };
+    let analysis: Analysis;
+    for (let attempt = 0; ; attempt++) {
+      analysis = AnalysisSchema.parse(
+        await this.runtime.analyze(
+          context,
+          files,
+          join(this.directory(state.revision), 'analysis.json'),
+        ),
+      );
+      if (fixedRubrics || !literals.foundIn(rubricRuleText(analysis.rubrics)))
+        break;
+      if (attempt === 2)
+        fail(
+          'invalid_model_output',
+          'Rubric rules contain learning-only literals',
+        );
+      context.portability_feedback =
+        'Rewrite the Rubric as reusable rules for any future input. Remove copied learning rows, record identifiers, paths, and historical expected outputs.';
+    }
     const locators = new Set(files.map((file) => file.locator));
     for (const cause of analysis.attribution?.possible_causes ?? []) {
       if (cause.evidence_refs.some((ref) => !locators.has(ref.locator))) {
@@ -202,18 +240,35 @@ export class Engine {
     const base = baseId
       ? this.store.version_by_id<RecipeContent>(baseId, 'recipe')
       : undefined;
-    const content = RecipeSchema.parse(
-      await this.runtime.generate(
-        {
-          ...this.context(execution),
-          analysis: state.analysis,
-          previous_test: state.test,
-          base_recipe: base?.content,
-        },
-        this.evidence(execution),
-        join(this.directory(state.revision), `generate-${round}.json`),
-      ),
+    const files = this.evidence(execution);
+    const literals = this.learningLiterals(
+      execution,
+      base?.provenance.execution_id,
     );
+    const context: Record<string, unknown> = {
+      ...this.context(execution),
+      analysis: state.analysis,
+      previous_test: state.test,
+      base_recipe: base?.content,
+    };
+    let content: RecipeContent;
+    for (let attempt = 0; ; attempt++) {
+      content = RecipeSchema.parse(
+        await this.runtime.generate(
+          context,
+          files,
+          join(this.directory(state.revision), `generate-${round}.json`),
+        ),
+      );
+      if (!literals.foundIn(Object.values(content))) break;
+      if (attempt === 2)
+        fail(
+          'invalid_model_output',
+          'Recipe rules contain learning-only literals',
+        );
+      context.portability_feedback =
+        'Rewrite the Recipe as reusable rules for any future input. Remove copied learning rows, worked examples, record identifiers, and historical paths.';
+    }
 
     return this.store.tx(() => {
       const current = this.guard(state.revision);
@@ -298,9 +353,27 @@ export class Engine {
       result.recipe_id,
       result.version_id,
     );
-    const rubrics = RubricsSchema.parse(
-      this.store.version_by_id(state.rubric, 'rubrics').content,
+    const rubricVersion = this.store.version_by_id(state.rubric, 'rubrics');
+    const rubrics = RubricsSchema.parse(rubricVersion.content);
+    const literals = this.learningLiterals(
+      execution,
+      recipe.provenance.execution_id,
+      rubricVersion.provenance.execution_id,
     );
+    // Validate existing versions without rewriting the rules being tested.
+    if (
+      literals.foundIn(Object.values(recipe.content)) ||
+      literals.foundIn(rubricRuleText(rubrics))
+    )
+      fail('invalid_model_output', 'Test rules contain learning-only literals');
+    const testRubrics = {
+      pass_threshold: rubrics.pass_threshold,
+      criteria: rubrics.criteria.map(({ id, description, required }) => ({
+        id,
+        description,
+        required,
+      })),
+    };
     const inputs = this.evidence(execution, true);
     const trace = join(attempt, 'executor-trace.json');
     atomic_json(join(attempt, 'test-input.json'), {
@@ -373,7 +446,7 @@ export class Engine {
       await this.runtime.assess(
         {
           test_task: task,
-          rubrics,
+          rubrics: testRubrics,
           objective_checks: result.checks,
           recipe: recipe.content,
         },

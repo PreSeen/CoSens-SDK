@@ -281,7 +281,12 @@ test('new clarification restarts the input revision and only the corrected versi
         { name: 'confirmed-output.csv', role: 'artifact' as const },
       ].map(({ name, role }) => {
         const file = join(directory, name);
-        writeFileSync(file, name);
+        writeFileSync(
+          file,
+          name === 'old-orders.csv'
+            ? 'order_id,ordered,received\nA-12,4,7\n'
+            : name,
+        );
         return { path: file, role };
       }),
     },
@@ -342,7 +347,9 @@ test('new clarification restarts the input revision and only the corrected versi
               criteria: [
                 {
                   id: 'format',
-                  description: 'Use the selected format',
+                  description: context.portability_feedback
+                    ? 'Use the selected format'
+                    : 'Replay the historical order A-12',
                   source: 'task',
                   evidence: [
                     {
@@ -364,6 +371,13 @@ test('new clarification restarts the input revision and only the corrected versi
           );
           assert.ok(!locators.includes(current));
           assert.ok(!('test_task' in (context.policy as object)));
+          if (!context.portability_feedback) {
+            return {
+              title: 'Number format',
+              applicability: 'Format a number',
+              instructions: 'Worked example: A-12,4,7',
+            };
+          }
           generationCalls++;
           if (generationCalls === 1) {
             await client.execution_clarification_answer(execution.id, {
@@ -381,6 +395,7 @@ test('new clarification restarts the input revision and only the corrected versi
           };
         },
         async execute(context, files, workspace) {
+          assert.ok(!JSON.stringify(context).includes('A-12'));
           assert.deepEqual(
             files.map((file) => file.locator),
             [current, shared],
@@ -391,7 +406,18 @@ test('new clarification restarts the input revision and only the corrected versi
           );
           writeFileSync(join(workspace, 'result.txt'), '0x2a');
         },
-        async assess(_context, files) {
+        async assess(context, files) {
+          assert.ok(!JSON.stringify(context).includes('A-12'));
+          assert.deepEqual(context.rubrics, {
+            pass_threshold: 0.8,
+            criteria: [
+              {
+                id: 'format',
+                description: 'Use the selected format',
+                required: true,
+              },
+            ],
+          });
           const locators = files.map((file) => file.locator);
           assert.ok(
             [current, shared, 'test/result.txt'].every((locator) =>

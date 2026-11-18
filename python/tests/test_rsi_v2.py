@@ -203,7 +203,11 @@ def test_test_and_evaluation_catalogs_require_explicit_file_authorization(
         ("confirmed-output.csv", "artifact"),
     ]:
         path = tmp_path / name
-        path.write_text(name)
+        path.write_text(
+            "order_id,ordered,received\nA-12,4,7\n"
+            if name == "old-orders.csv"
+            else name
+        )
         files.append({"path": str(path), "role": role})
     m = client.material_create(manifest={"context_path": str(context), "files": files})
     old_reference, old_input, current, shared, historical_output = [
@@ -235,9 +239,14 @@ def test_test_and_evaluation_catalogs_require_explicit_file_authorization(
 
     class VerifyCatalogs(FileRuntime):
         def analyze(self, context, files, trace_path):
-            return super().analyze(context, files, trace_path) | {
+            result = super().analyze(context, files, trace_path) | {
                 "attribution": attribution
             }
+            if not cite_test_input and not context.get("portability_feedback"):
+                result["rubrics"]["criteria"][0]["description"] = (
+                    "Historical A-12 must appear as OVER"
+                )
+            return result
 
         def generate(self, context, files, trace_path):
             locators = {file["locator"] for file in files}
@@ -245,9 +254,26 @@ def test_test_and_evaluation_catalogs_require_explicit_file_authorization(
             assert current not in locators
             assert "test_task" not in context["policy"]
             assert context["analysis"]["attribution"] == attribution
-            return super().generate(context, files, trace_path)
+            assert (
+                context["analysis"]["rubrics"]["criteria"][0]["description"]
+                == "Output 42"
+            )
+            result = super().generate(context, files, trace_path)
+            if not context.get("portability_feedback"):
+                result["instructions"] += "\nWorked example: A-12,4,7"
+            return result
+
+        def execute(self, context, files, workspace, trace_path):
+            assert "A-12" not in json.dumps(context)
+            return super().execute(context, files, workspace, trace_path)
 
         def assess(self, context, files, trace_path):
+            assert "A-12" not in json.dumps(context)
+            assert set(context["rubrics"]["criteria"][0]) == {
+                "id",
+                "description",
+                "required",
+            }
             locators = {file["locator"] for file in files}
             assert {old_reference, old_input, historical_output}.isdisjoint(locators)
             assert {current, shared, "test/answer.txt"} <= locators
@@ -265,6 +291,7 @@ def test_test_and_evaluation_catalogs_require_explicit_file_authorization(
     assert result["status"] == "completed", result
     assert result["result"]["test_status"] == "passed"
     assert result["analysis"]["attribution"] == attribution
+    assert runtime.generation_count == 2
     assert [[f["locator"] for f in files] for files in runtime.test_catalogs] == [
         [current, shared]
     ]
@@ -406,10 +433,15 @@ def test_atomic_claim_shared_across_independent_clients(client, tmp_path):
         RSIClient(data_dir=client.data_dir, config=settings(max_executions=3))
 
 
-def test_recipe_test_uses_existing_execution(client, tmp_path):
+@pytest.mark.parametrize("leaked_from", [None, "recipe", "rubric"])
+def test_recipe_test_uses_existing_execution(client, tmp_path, leaked_from):
     recipe = client.recipe_create(
         name="Existing",
-        content={"title": "Write", "applicability": "test", "instructions": "write 42"},
+        content={
+            "title": "Write",
+            "applicability": "test",
+            "instructions": "write 42" if leaked_from != "recipe" else "copy A-12",
+        },
     )
     rubric = client.rubrics_create(
         name="Fixed",
@@ -417,13 +449,23 @@ def test_recipe_test_uses_existing_execution(client, tmp_path):
             "criteria": [
                 {
                     "id": "fixed-standard",
-                    "description": "42",
+                    "description": "42" if leaked_from != "rubric" else "replay A-12",
                     "source": "agent_inference",
                 }
             ]
         },
     )
-    execution = run(client, material(client, tmp_path)["id"])
+    context = tmp_path / "context.md"
+    context.write_text("Write 42 into answer.txt")
+    history = tmp_path / "history.csv"
+    history.write_text("order_id,qty\nA-12,7\n")
+    source = client.material_create(
+        manifest={
+            "context_path": str(context),
+            "files": [{"path": str(history), "role": "reference"}],
+        }
+    )
+    execution = run(client, source["id"])
     args = {
         "execution_id": execution["id"],
         "recipe_id": recipe["id"],
@@ -437,6 +479,11 @@ def test_recipe_test_uses_existing_execution(client, tmp_path):
     runtime = FileRuntime()
     client.run_pending(runtime=runtime)
     final = client.execution_get(execution["id"])
+    if leaked_from:
+        assert final["status"] == "failed"
+        assert final["error"]["code"] == "invalid_model_output"
+        assert runtime.test_catalogs == []
+        return
     assert final["result"]["recipe_version_id"] == recipe["latest_version_id"]
     assert final["analysis"]["rubrics"]["criteria"][0]["id"] == "fixed-standard"
     assert runtime.generation_count == 0

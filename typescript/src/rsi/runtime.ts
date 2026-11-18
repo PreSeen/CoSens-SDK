@@ -32,13 +32,13 @@ const stages = {
     name: 'analysis',
     schema: AnalysisSchema.meta({ title: 'Analysis' }),
     instruction:
-      'Determine whether essential Recipe information is missing. If sufficient, set hypothesis=null and questions=[]. Otherwise form a provisional hypothesis and offer 2–3 options per question. Continue without waiting. Derive Rubrics from the task, explicit feedback and the trajectory. Preserve supplied fixed Rubrics. When learning evidence contains corrective feedback or a documented correction, fill attribution.possible_causes. Describe the observed issue separately from a plausible reason, explain the uncertainty, and cite the exact material_id and locator of each source you read. Return attribution=null if there is no evidence of a correction. Treat reasons as hypotheses even when the correction is confirmed.',
+      'Determine whether essential Recipe information is missing. If sufficient, set hypothesis=null and questions=[]. Otherwise form a provisional hypothesis and offer 2–3 options per question. Continue without waiting. Derive Rubrics from the task, explicit feedback and the trajectory. Describe only rules independently observable on a future test batch. Mark separate scenarios that require a different test batch as optional, and make conditional criteria apply only when the input exercises their conditions. Keep provenance in evidence, never in rule IDs or descriptions. Omit all worked examples, historical cases, row values, file paths, and requirements to replay the learning batch. Preserve supplied fixed Rubrics. When learning evidence contains corrective feedback or a documented correction, fill attribution.possible_causes. Describe the observed issue separately from a plausible reason, explain the uncertainty, and cite the exact material_id and locator of each source you read. Return attribution=null if there is no evidence of a correction. Treat reasons as hypotheses even when the correction is confirmed.',
   },
   generation: {
     name: 'recipe generation',
     schema: RecipeSchema.meta({ title: 'RecipeContent' }),
     instruction:
-      'Derive reusable instructions from observed evidence, accepted answers and any base Recipe. Correct failures observed in the previous test. Use parameters for future task inputs. Keep instance values, file locators, secrets and unconfirmed assumptions out of reusable instructions. Use analysis.attribution to turn supported corrections into reusable instructions or checks. For a revision, retain applicable base instructions unaffected by the correction. Encode uncertain causes as conditional checks where justified, never as facts.',
+      'Derive reusable instructions from observed evidence, accepted answers and any base Recipe. Correct failures observed in the previous test. Use parameters only for values supplied separately by each future task. Preserve fixed interface requirements verbatim, including exact output headers, filenames, status labels, and invariant constants. A future executor must be able to follow those requirements from the Recipe itself. Every Recipe field must contain only reusable rules. Omit all worked examples, historical order or record IDs, instance values, learning paths, locators, secrets and provisional assumptions. Abstract examples into conditions, transformations and checks; never copy examples even as illustrations. Use analysis.attribution to turn supported corrections into reusable instructions or checks. For a revision, retain applicable base instructions unaffected by the correction. Encode uncertain causes as conditional checks where justified, never as facts.',
   },
   execution: {
     name: 'recipe test executor',
@@ -50,7 +50,7 @@ const stages = {
     name: 'independent test evaluator',
     schema: AssessmentSchema.meta({ title: 'Assessment' }),
     instruction:
-      'Read the actual outputs and execution trace. Score every fixed criterion exactly once from 0 to 1 with specific evidence. Set verifiable=false if evidence, inputs or capabilities are insufficient. Judge actual outcomes rather than executor claims.',
+      'Read the actual outputs and execution trace. Score every fixed criterion exactly once from 0 to 1 with specific evidence. Set verifiable=false if evidence, inputs or capabilities are insufficient. Judge actual outcomes rather than executor claims. Do not award credit for unexecuted historical cases or use provenance to look for historical files.',
   },
 };
 
@@ -223,6 +223,7 @@ export class LangChainRuntime implements Runtime {
         atomic_json(tracePath, {
           stage: spec.name,
           model: this.client.config.model.model,
+          system_prompt: systemPrompt,
           reads,
           messages: result.messages,
         });
