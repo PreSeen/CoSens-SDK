@@ -325,30 +325,30 @@ class LocalRecipeLifecycle:
             return None
         try:
             view = await self._atoms.get_recipe(head["recipe_id"])
-            if view["version"] == head["remote_version"] and not await self._lost_upload(head):
+            if view["version"] == head["remote_version"] and await self._lost_upload(
+                    head["recipe_id"], head["current_candidate_id"], head["remote_version"]) is None:
                 return None
             return await self._server_state(head["recipe_id"], view)
         except RSIError as exc:
             _LOG.warning("Reading Recipe %s before learning failed: %s", head["recipe_id"], type(exc).__name__)
             return None
 
-    async def _lost_upload(self, head):
-        """Record the newest version the local current version builds on (itself included), numbered above the last
-        version uploaded from here and not known to be uploaded, that the service stores as its copy
-        (``_service_copy``): its upload reached the service and only the reply was lost. Returns whether one was."""
-        recipe_id = head["recipe_id"]
+    async def _lost_upload(self, recipe_id, base_id, remote_version):
+        """Record the newest version ``base_id`` builds on (itself included), numbered above ``remote_version``, the
+        last version uploaded from here, and not known to be uploaded, that the service stores as its copy
+        (``_service_copy``): its upload reached the service and only the reply was lost. Returns its number, else None;
+        a failed read raises."""
         with self._store.reading() as db:
-            line = [{**self._candidate(db, c), "version": self._lineage(db, c)["version"]}
-                    for c in self._line(db, head["current_candidate_id"])]
-        unsent = [row for row in line if row["version"] > head["remote_version"] and row["publish_state"] != "published"]
+            line = [{**self._candidate(db, c), "version": self._lineage(db, c)["version"]} for c in self._line(db, base_id)]
+        unsent = [row for row in line if row["version"] > remote_version and row["publish_state"] != "published"]
         if not unsent:
-            return False
+            return None
         stored = {item["version"] for item in (await self._atoms.get_recipe_versions(recipe_id))["versions"]}
         row = next((row for row in unsent if row["version"] in stored), None)
         if row is None or not self._service_copy(row, await self._atoms.get_recipe(recipe_id, version=row["version"])):
-            return False
+            return None
         with self._store.transaction() as db:
-            return self._record_upload(db, row["id"], recipe_id, "published", row["version"])
+            return row["version"] if self._record_upload(db, row["id"], recipe_id, "published", row["version"]) else None
 
     async def _server_state(self, recipe_id, view):
         """The service's current version ``view``, its highest stored version, and its copy of the version ``view``
@@ -855,14 +855,19 @@ class LocalRecipeLifecycle:
         The local version stands whatever happens here, except when the service moved the chain's current version off
         this candidate's base (``_moved_off``): then this chain follows the service, the candidate fails with
         ``previous_version_changed`` without being uploaded, and None is returned. None is also returned when another
-        learning followed such a move while the upload was in flight: its writes stand and the candidate stays failed."""
+        learning followed such a move while the upload was in flight: its writes stand and the candidate stays failed.
+
+        A version this candidate builds on whose upload reply was lost (``_lost_upload``) is recorded first and the
+        upload names it, so a move off it is found; when that check cannot read the service, nothing is uploaded and
+        the publish fails, to be retried."""
         with self._store.reading() as db:
             row = self._candidate(db, candidate_id)
             lineage = self._lineage(db, candidate_id)
             head = db.execute("SELECT remote_version FROM recipe_heads WHERE recipe_id=?", (lineage["recipe_id"],)).fetchone()
-        recipe_id, recipe, read = lineage["recipe_id"], upload_form(json.loads(row["recipe_json"])), head["remote_version"]
-        remote = read
+        recipe_id, recipe, remote = lineage["recipe_id"], upload_form(json.loads(row["recipe_json"])), head["remote_version"]
         try:
+            if remote is not None and lineage["parent_candidate_id"] is not None:
+                remote = await self._lost_upload(recipe_id, lineage["parent_candidate_id"], remote) or remote
             # previous_version is the last version the server is known to have, so a version uploaded elsewhere is a conflict.
             try:
                 await self._atoms.upload_recipe(recipe_id, version=lineage["version"], recipe=recipe, previous_version=remote)
@@ -879,6 +884,8 @@ class LocalRecipeLifecycle:
                 ours = await self._own_server_version(recipe_id, candidate_id, exc, remote)
                 if ours is None:
                     raise
+                with self._store.transaction() as db:
+                    self._record_upload(db, self._numbered(db, recipe_id, ours)["id"], recipe_id, "published", ours)
                 remote = ours
                 await self._atoms.upload_recipe(recipe_id, version=lineage["version"], recipe=recipe, previous_version=remote)
             state = "published"
@@ -889,23 +896,25 @@ class LocalRecipeLifecycle:
             state = "failed"
             _LOG.warning("Uploading Recipe candidate %s failed: %s", candidate_id, type(exc).__name__)
         with self._store.transaction() as db:
-            recorded = self._record_upload(db, candidate_id, recipe_id, state, lineage["version"] if state == "published"
-                                           else None if remote == read else remote)
+            recorded = self._record_upload(db, candidate_id, recipe_id, state,
+                                           lineage["version"] if state == "published" else None)
         return state if recorded else None
 
-    @staticmethod
-    def _record_upload(db, candidate_id, recipe_id, state, stored):
+    def _record_upload(self, db, candidate_id, recipe_id, state, stored):
         """Set a finished candidate's publish state and, when ``stored`` is a version the service is now known to store
         from here, move the last version uploaded from here forward to it; returns whether the candidate was finished.
 
         Another learning may have followed a move of the service's current version meanwhile, failing this candidate and
-        setting the last version uploaded from here; those writes stand. Replies of overlapping uploads arrive in any
-        order, so an older one never moves that version back."""
+        setting the last version uploaded from here; those writes stand. A version the local current version does not
+        build on, such as one that move rolled back, leaves the last uploaded version alone. Replies of overlapping
+        uploads arrive in any order, so an older one never moves that version back."""
         updated = db.execute("UPDATE recipe_candidates SET publish_state=? WHERE id=? AND state='candidate'",
                              (state, candidate_id))
         if updated.rowcount == 1 and stored is not None:
-            db.execute("UPDATE recipe_heads SET remote_version=MAX(COALESCE(remote_version,0),?) WHERE recipe_id=?",
-                       (stored, recipe_id))
+            current = db.execute("SELECT current_candidate_id FROM recipe_heads WHERE recipe_id=?", (recipe_id,)).fetchone()
+            if candidate_id in self._line(db, current["current_candidate_id"]):
+                db.execute("UPDATE recipe_heads SET remote_version=MAX(COALESCE(remote_version,0),?) WHERE recipe_id=?",
+                           (stored, recipe_id))
         return updated.rowcount == 1
 
     async def _moved_off(self, recipe_id, candidate_id, exc, remote):

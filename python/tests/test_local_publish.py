@@ -206,7 +206,7 @@ async def test_an_upload_whose_response_was_lost_is_recognised_by_the_next_versi
     job = await improve(rsi, task, "three")
     assert (job.version, job.publish_state) == (3, "published")
     assert sorted(server.chains[first.recipe_id]["versions"]) == [1, 2, 3]
-    assert [(u["version"], u.get("previous_version")) for u in server.uploads[-2:]] == [(3, 1), (3, 2)]
+    assert [(u["version"], u.get("previous_version")) for u in server.uploads] == [(1, None), (2, 1), (3, 2)]
     assert rsi._store.read_one("SELECT remote_version FROM recipe_heads")["remote_version"] == 3
 
 
@@ -714,7 +714,7 @@ async def test_overlapping_upload_replies_keep_the_newest_uploaded_version(tmp_p
                 gate["stored"].set()  # V3 is stored on the service; its reply is slow
                 await gate["v3"].wait()
             if (version, previous) == (4, 3):
-                gate["v3"].set()  # V4's retry on 3 is stored, and V3's reply lands before V4's
+                gate["v3"].set()  # V4's upload on 3 is stored, and V3's reply lands before V4's
                 await gate["v3_done"].wait()
         return response
 
@@ -735,7 +735,7 @@ async def test_overlapping_upload_replies_keep_the_newest_uploaded_version(tmp_p
     assert (v4.version, v4.parent_candidate_id) == (4, v3.recipe_candidate_id)
     assert (await rsi.wait_workflow_job("recipe_candidate", v4.recipe_candidate_id)).publish_state == "published"
     assert (await waiting).publish_state == "published"
-    assert [(u["version"], u.get("previous_version")) for u in server.uploads] == [(1, None), (2, 1), (3, 2), (4, 2), (4, 3)]
+    assert [(u["version"], u.get("previous_version")) for u in server.uploads] == [(1, None), (2, 1), (3, 2), (4, 3)]
     assert rsi._store.read_one("SELECT remote_version FROM recipe_heads")["remote_version"] == 4
     server.rollback(v1.recipe_id, 3)
     job = await improve(rsi, task, "five")
@@ -786,3 +786,239 @@ async def test_a_rollback_below_a_lost_upload_reply_is_followed_from_a_later_ver
     assert [(v.version, v.status, v.publish_state, v.rolled_back) for v in versions] == [
         (1, "candidate", "published", False), (2, "candidate", "published", False), (3, "candidate", "published", True),
         (4, "failed", None, False), (5, "candidate", "published", False)]
+
+
+def uploaded(server):
+    return [(u["version"], u.get("previous_version")) for u in server.uploads]
+
+
+async def chain_flags(rsi, recipe_id):
+    return [(v.version, v.status, v.publish_state, v.rolled_back) for v in (await rsi.get_recipe_versions(recipe_id)).versions]
+
+
+async def lost_third_reply(rsi, server):
+    """V1 and V2 uploaded, then V3 stored on the service with its upload reply lost; returns the task and the versions."""
+    task, _, done = await first_revision(rsi)
+    v1 = await generate(rsi, task, done.revision_id)
+    v2 = await improve(rsi, task, "two")
+    server.lose_response = True
+    v3 = await improve(rsi, task, "three")
+    server.lose_response = False
+    assert v3.publish_state == "failed" and server.chains[v1.recipe_id]["current"] == 3
+    assert rsi._store.read_one("SELECT remote_version FROM recipe_heads")["remote_version"] == 2
+    return task, (v1, v2, v3)
+
+
+async def learn(rsi, task, key):
+    """Start a learning on a new execution without waiting for it."""
+    started = await rsi.start_execution(task.task_id, source="new_task", objective="Do the task", key=key)
+    done = await complete_execution(rsi, started, key=key + "-out")
+    return await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
+
+
+async def test_a_rollback_below_a_lost_upload_reply_found_only_on_upload_fails_the_candidate(tmp_path):
+    rsi, model, server = setup(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 6)))
+    task, (v1, v2, v3) = await lost_third_reply(rsi, server)
+    server.rollback(v1.recipe_id, 2)
+    server.fail_reads = True  # the check before learning cannot read the service and keeps V3 as the base
+    candidate = await learn(rsi, task, "four")
+    server.fail_reads = False
+    assert candidate.parent_candidate_id == v3.recipe_candidate_id
+    with pytest.raises(RSICandidateFailed) as caught:
+        await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    assert caught.value.code == "previous_version_changed"
+    assert uploaded(server) == [(1, None), (2, 1), (3, 2), (4, 3)]
+    assert server.chains[v1.recipe_id]["current"] == 2
+    assert (await chain_flags(rsi, v1.recipe_id))[:3] == [
+        (1, "candidate", "published", False), (2, "candidate", "published", False), (3, "candidate", "published", True)]
+    await rsi.resume_recipe_candidate(candidate.recipe_candidate_id)
+    job = await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    assert (job.parent_candidate_id, job.publish_state) == (v2.recipe_candidate_id, "published")
+    assert model.calls[-1]["context"]["base_recipe"]["recipe"]["title"] == "V2"
+    assert uploaded(server)[-1] == (job.version, 2) and server.chains[v1.recipe_id]["current"] == job.version
+
+
+async def test_a_rollback_below_a_lost_upload_reply_during_a_learning_on_it_fails_the_candidate(tmp_path):
+    rsi, _, server = setup(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 6)))
+    task, (v1, _, v3) = await lost_third_reply(rsi, server)
+    candidate = await learn(rsi, task, "four")
+    assert candidate.parent_candidate_id == v3.recipe_candidate_id
+    server.rollback(v1.recipe_id, 2)  # the user rolls V3 back while V4 learns on it
+    with pytest.raises(RSICandidateFailed) as caught:
+        await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    assert caught.value.code == "previous_version_changed"
+    assert uploaded(server) == [(1, None), (2, 1), (3, 2), (4, 3)]
+    assert server.chains[v1.recipe_id]["current"] == 2
+    assert (await chain_flags(rsi, v1.recipe_id))[2] == (3, "candidate", "published", True)
+
+
+async def test_a_publish_that_cannot_check_for_a_lost_upload_reply_uploads_nothing(tmp_path):
+    rsi, _, server = setup(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 5)))
+    task, (v1, _, v3) = await lost_third_reply(rsi, server)
+    candidate = await learn(rsi, task, "four")
+    assert candidate.parent_candidate_id == v3.recipe_candidate_id
+    server.rollback(v1.recipe_id, 2)
+    server.fail_reads = True
+    job = await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    assert (job.status, job.publish_state) == ("candidate", "failed")
+    assert uploaded(server) == [(1, None), (2, 1), (3, 2)] and server.chains[v1.recipe_id]["current"] == 2
+    server.fail_reads = False
+    with pytest.raises(RSICandidateFailed) as caught:
+        await rsi.publish_recipe(v1.recipe_id)
+    assert caught.value.code == "previous_version_changed"
+    assert uploaded(server)[3:] == [(4, 3)] and server.chains[v1.recipe_id]["current"] == 2
+
+
+async def test_a_resume_after_a_rollback_below_a_lost_upload_reply_fails_the_candidate_built_on_it(tmp_path):
+    rsi, _, server = setup(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 4)), RuntimeError("model down"),
+                           recipe_reply("X"))
+    task, (v1, _, v3) = await lost_third_reply(rsi, server)
+    with pytest.raises(RSICandidateFailed) as caught:
+        await improve(rsi, task, "x")
+    x = caught.value.candidate_id
+    server.rollback(v1.recipe_id, 2)
+    await rsi.resume_recipe_candidate(x)  # a resume runs no check before learning
+    assert (await rsi.get_recipe_candidate(x)).parent_candidate_id == v3.recipe_candidate_id
+    with pytest.raises(RSICandidateFailed) as caught:
+        await rsi.wait_workflow_job("recipe_candidate", x)
+    assert caught.value.code == "previous_version_changed"
+    assert uploaded(server)[3:] == [(4, 3)] and server.chains[v1.recipe_id]["current"] == 2
+
+
+async def test_a_rollback_below_a_version_whose_publish_crashed_fails_the_candidate_built_on_it(tmp_path):
+    rsi, _, server = setup(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 5)))
+    task, (v1, _, v3) = await three_versions(rsi)
+    with rsi._store.transaction() as db:  # V3 is stored on the service, but the process stopped before recording it
+        db.execute("UPDATE recipe_candidates SET publish_state='pending' WHERE id=?", (v3.recipe_candidate_id,))
+        db.execute("UPDATE recipe_heads SET remote_version=2")
+    candidate = await learn(rsi, task, "four")
+    assert candidate.parent_candidate_id == v3.recipe_candidate_id
+    server.rollback(v1.recipe_id, 2)
+    with pytest.raises(RSICandidateFailed) as caught:
+        await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
+    assert caught.value.code == "previous_version_changed"
+    assert uploaded(server) == [(1, None), (2, 1), (3, 2), (4, 3)]
+    assert server.chains[v1.recipe_id]["current"] == 2
+    assert (await chain_flags(rsi, v1.recipe_id))[2] == (3, "candidate", "published", True)
+
+
+async def test_a_lost_upload_reply_recognised_by_the_next_upload_is_rolled_back_not_failed(tmp_path):
+    rsi, model, server = setup(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 6)))
+    task, (v1, v2, _) = await lost_third_reply(rsi, server)
+    assert (await improve(rsi, task, "four")).publish_state == "published"
+    assert uploaded(server) == [(1, None), (2, 1), (3, 2), (4, 3)]
+    server.rollback(v1.recipe_id, 2)
+    job = await improve(rsi, task, "five")
+    assert (job.version, job.parent_candidate_id, job.publish_state) == (5, v2.recipe_candidate_id, "published")
+    assert await chain_flags(rsi, v1.recipe_id) == [
+        (1, "candidate", "published", False), (2, "candidate", "published", False), (3, "candidate", "published", True),
+        (4, "candidate", "published", True), (5, "candidate", "published", False)]
+
+
+async def test_a_lost_upload_reply_recognised_by_a_conflict_on_the_next_upload_is_rolled_back_not_failed(tmp_path):
+    server = FakeService()
+    gate = {"armed": False, "v3_sent": asyncio.Event(), "release": asyncio.Event(), "v3_done": asyncio.Event()}
+
+    async def handler(request):
+        if request.method == "PUT" and gate["armed"]:
+            if request.url.path.endswith("/versions/3"):
+                gate["v3_sent"].set()
+                await gate["release"].wait()  # V3's upload reaches the service only after V4's check before uploading
+                server(request)
+                return httpx.Response(502, json={"detail": "gateway lost the response"})
+            if request.url.path.endswith("/versions/4"):
+                gate["armed"] = False
+                gate["release"].set()
+                await gate["v3_done"].wait()
+        return server(request)
+
+    client = CoSensClient(api_key="k", _http_transport=httpx.MockTransport(handler))
+    rsi, _ = make_rsi(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 6)), client=client, name="s.sqlite3")
+    task, _, done = await first_revision(rsi)
+    v1 = await generate(rsi, task, done.revision_id)
+    v2 = await improve(rsi, task, "two")
+    gate["armed"] = True
+    v3 = await learn(rsi, task, "three")
+    waiting = asyncio.create_task(rsi.wait_workflow_job("recipe_candidate", v3.recipe_candidate_id))
+    waiting.add_done_callback(lambda _: gate["v3_done"].set())
+    await gate["v3_sent"].wait()
+    v4 = await learn(rsi, task, "four")
+    assert v4.parent_candidate_id == v3.recipe_candidate_id
+    assert (await rsi.wait_workflow_job("recipe_candidate", v4.recipe_candidate_id)).publish_state == "published"
+    assert (await waiting).publish_state == "failed"
+    assert uploaded(server) == [(1, None), (2, 1), (3, 2), (4, 2), (4, 3)]
+    assert (await rsi.get_recipe_candidate(v3.recipe_candidate_id)).publish_state == "published"
+    assert rsi._store.read_one("SELECT remote_version FROM recipe_heads")["remote_version"] == 4
+    server.rollback(v1.recipe_id, 2)
+    job = await improve(rsi, task, "five")
+    assert (job.version, job.parent_candidate_id, job.publish_state) == (5, v2.recipe_candidate_id, "published")
+    assert await chain_flags(rsi, v1.recipe_id) == [
+        (1, "candidate", "published", False), (2, "candidate", "published", False), (3, "candidate", "published", True),
+        (4, "candidate", "published", True), (5, "candidate", "published", False)]
+
+
+async def test_a_newer_upload_reply_before_an_older_one_keeps_the_newest_uploaded_version(tmp_path):
+    server = FakeService()
+    gate = {"stored": asyncio.Event(), "v3": asyncio.Event()}
+
+    async def handler(request):
+        response = server(request)
+        if request.method == "PUT" and request.url.path.endswith("/versions/3"):
+            gate["stored"].set()  # V3 is stored on the service; its reply arrives after V4's
+            await gate["v3"].wait()
+        return response
+
+    client = CoSensClient(api_key="k", _http_transport=httpx.MockTransport(handler))
+    rsi, model = make_rsi(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 6)), client=client, name="s.sqlite3")
+    task, _, done = await first_revision(rsi)
+    v1 = await generate(rsi, task, done.revision_id)
+    await improve(rsi, task, "two")
+    v3 = await learn(rsi, task, "three")
+    waiting = asyncio.create_task(rsi.wait_workflow_job("recipe_candidate", v3.recipe_candidate_id))
+    await gate["stored"].wait()
+    v4 = await learn(rsi, task, "four")
+    assert (await rsi.wait_workflow_job("recipe_candidate", v4.recipe_candidate_id)).publish_state == "published"
+    assert rsi._store.read_one("SELECT remote_version FROM recipe_heads")["remote_version"] == 4
+    gate["v3"].set()
+    assert (await waiting).publish_state == "published"
+    assert rsi._store.read_one("SELECT remote_version FROM recipe_heads")["remote_version"] == 4
+    server.rollback(v1.recipe_id, 3)
+    job = await improve(rsi, task, "five")
+    assert (job.version, job.parent_candidate_id, job.publish_state) == (5, v3.recipe_candidate_id, "published")
+    assert model.calls[-1]["context"]["base_recipe"]["recipe"]["title"] == "V3"
+    assert uploaded(server)[-1] == (5, 3)
+
+
+async def test_a_late_upload_reply_after_a_rollback_was_followed_keeps_the_service_current_version(tmp_path):
+    server = FakeService()
+    gate = {"armed": False, "stored": asyncio.Event(), "go": asyncio.Event()}
+
+    async def handler(request):
+        response = server(request)
+        if gate["armed"] and request.method == "PUT":
+            gate["armed"] = False
+            gate["stored"].set()  # V3 is stored on the service; its reply is slow
+            await gate["go"].wait()
+        return response
+
+    client = CoSensClient(api_key="k", _http_transport=httpx.MockTransport(handler))
+    rsi, model = make_rsi(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 5)), client=client, name="s.sqlite3")
+    task, _, done = await first_revision(rsi)
+    v1 = await generate(rsi, task, done.revision_id)
+    v2 = await improve(rsi, task, "two")
+    v3 = await learn(rsi, task, "three")
+    gate["armed"] = True
+    waiting = asyncio.create_task(rsi.wait_workflow_job("recipe_candidate", v3.recipe_candidate_id))
+    await gate["stored"].wait()
+    server.rollback(v1.recipe_id, 2)  # the user rolls V3 back before its reply arrives
+    y = await learn(rsi, task, "y")  # the check before learning records V3 as uploaded and follows the rollback
+    assert (y.version, y.parent_candidate_id) == (4, v2.recipe_candidate_id)
+    gate["go"].set()
+    assert (await waiting).publish_state == "published"
+    assert rsi._store.read_one("SELECT remote_version FROM recipe_heads")["remote_version"] == 2
+    job = await rsi.wait_workflow_job("recipe_candidate", y.recipe_candidate_id)
+    assert (job.version, job.publish_state) == (4, "published") and len(model.calls) == 4
+    assert uploaded(server) == [(1, None), (2, 1), (3, 2), (4, 2)]
+    assert await chain_flags(rsi, v1.recipe_id) == [
+        (1, "candidate", "published", False), (2, "candidate", "published", False), (3, "candidate", "published", True),
+        (4, "candidate", "published", False)]
