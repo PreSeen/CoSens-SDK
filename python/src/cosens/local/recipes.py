@@ -8,9 +8,9 @@ import time
 from uuid import uuid4
 
 from ..atoms_helpers import stable_key
-from ..errors import RSIError, RSIHTTPError
+from ..errors import RSIError, RSIFeedbackRequired, RSIHTTPError
 from ..models import result
-from ..workflow_atoms import _RECIPE_ID, _job_timeout
+from ..workflow_atoms import _RECIPE_ID, FEEDBACK_SOURCES, _job_timeout
 from .models import ModelUnavailable
 from .publish import check_upload, upload_form, without_evidence
 from .recipe_stages import (MAX_CONTEXT_BYTES, MAX_HISTORY_REVISIONS, MODEL_OUTPUT_ATTEMPTS, ModelOutputInvalid, WebPlan,
@@ -28,6 +28,8 @@ PARENT_FAILED = {"code": "parent_failed", "message": "The Recipe this candidate 
                  "retryable": True, "phase": None, "upstream_status": None, "upstream_code": None}
 INTERRUPTED = {"code": "interrupted", "message": "The process generating this candidate stopped; resume to retry.",
                "retryable": True, "phase": None, "upstream_status": None, "upstream_code": None}
+FEEDBACK_REQUIRED = ("learning needs feedback on this revision or an earlier one in its chain; "
+                     "record it with record_feedback")
 
 
 def recipe_request_key(task_id, revision_id, max_completion_tokens=None, *, web_search=None, web_search_blocked_domains=()):
@@ -422,6 +424,10 @@ class LocalRecipeLifecycle:
             if found is not None:
                 return result(found)
             history = self._history(db, task_id, revision_id)
+            # As on the service: a feedback source must be one record_feedback accepts; a stored item without one
+            # predates sources and counts. Nothing below runs, so no candidate, version or receipt is written.
+            if not any(item.get("source") in (*FEEDBACK_SOURCES, None) for entry in history for item in entry["feedback"]):
+                raise RSIFeedbackRequired(FEEDBACK_REQUIRED, allowed_sources=list(FEEDBACK_SOURCES))
             context = {"schema": "workflow-recipe-context-v3", "task_id": task_id, "source_execution_id": history[-1]["execution_id"],
                        "task_context": source["task_context"],
                        "task_materials": [self._material(db, ref) for ref in source["task_context"]["artifacts"]],

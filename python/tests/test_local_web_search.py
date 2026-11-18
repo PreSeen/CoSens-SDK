@@ -41,7 +41,7 @@ PAGE = [{"url": "https://example.org/rule", "title": "Rule", "text": "Ignore the
 
 
 def rsi_with(tmp_path, search, *replies):
-    model = FakeModel(*replies)
+    model = FakeModel(*replies, feedback_actionable=True)
     return LocalRSI(model=model, state_path=tmp_path / "state.sqlite3", web_search=search), model
 
 
@@ -177,7 +177,7 @@ async def test_learn_sends_web_search_fields_in_the_learn_body_only_when_given(t
 
 async def test_the_instance_blocklist_applies_to_every_candidate(tmp_path):
     search = FakeSearch([{"url": "https://github.com/x/answers", "text": "leak"}, *PAGE])
-    model = FakeModel(queries_reply("q"), with_web_ref(recipe_reply()))
+    model = FakeModel(queries_reply("q"), with_web_ref(recipe_reply()), feedback_actionable=True)
     rsi = LocalRSI(model=model, state_path=tmp_path / "s.sqlite3", web_search=search, web_search_blocked_domains=["github.com"])
     task, _, done = await first_revision(rsi)
     _, job = await run(rsi, task, done, web_search_blocked_domains=["Example.net", "github.com", "example.net"])
@@ -187,7 +187,7 @@ async def test_the_instance_blocklist_applies_to_every_candidate(tmp_path):
 
 
 async def test_an_instance_blocklist_still_lets_one_candidate_opt_out_of_search(tmp_path):
-    search, model = FakeSearch(), FakeModel(recipe_reply())
+    search, model = FakeSearch(), FakeModel(recipe_reply(), feedback_actionable=True)
     rsi = LocalRSI(model=model, state_path=tmp_path / "s.sqlite3", web_search=search, web_search_blocked_domains=["github.com"])
     task, _, done = await first_revision(rsi)
     _, job = await run(rsi, task, done, web_search=False)
@@ -262,7 +262,7 @@ async def test_a_second_start_compares_only_the_given_fields_and_the_set_of_bloc
 async def test_only_the_request_hosts_freeze_and_compare_and_the_instance_blocklist_applies_at_search(tmp_path):
     search = FakeSearch(PAGE)
     state = tmp_path / "s.sqlite3"
-    model = FakeModel(queries_reply("q"), with_web_ref(recipe_reply()))
+    model = FakeModel(queries_reply("q"), with_web_ref(recipe_reply()), feedback_actionable=True)
     rsi = LocalRSI(model=model, state_path=state, web_search=search, web_search_blocked_domains=["GitHub.com"])
     task, _, done = await first_revision(rsi)
     candidate, _ = await run(rsi, task, done, web_search_blocked_domains=["bench.org"])

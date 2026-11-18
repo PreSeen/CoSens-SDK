@@ -7,8 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from cosens import RSIFeedbackRequired
 from cosens.local.recipes import RSICandidateFailed
 from cosens.local import LocalRSI, ModelUnavailable
+from cosens.local.store import canonical_json
 from local_rsi_helpers import FakeModel, attribution_reply, complete_execution, first_revision, make_rsi, recipe_reply
 
 
@@ -29,8 +31,62 @@ async def test_start_only_queues_and_wait_generates_version_one(tmp_path):
     assert candidate.status == "queued" and candidate.version == 1 and model.calls == []
     job = await rsi.wait_workflow_job("recipe_candidate", candidate.recipe_candidate_id)
     assert job.status == "candidate" and job.current and job.recipe["title"] == "V1"
-    assert job.models == {"attribution": None, "generation": "fake-model"} and job.memory_context == "not_requested"
+    assert job.models == {"attribution": "fake-model", "generation": "fake-model"} and job.memory_context == "not_requested"
     assert (await rsi.get_task_recipe(task.task_id)).current.version == 1
+
+
+async def unfed_revision(rsi, task, key):
+    """A completed execution with no feedback recorded on it."""
+    started = await rsi.start_execution(task.task_id, source="new_task", objective="Do the task", key=key)
+    return await complete_execution(rsi, started, key=key + "-out", feedback=None)
+
+
+async def test_learning_without_feedback_is_refused_and_leaves_nothing(tmp_path):
+    rsi, model = make_rsi(tmp_path, recipe_reply("V1"))
+    task = await rsi.create_task(key="t1", objective="Do the task")
+    done = await unfed_revision(rsi, task, "one")
+    with pytest.raises(RSIFeedbackRequired) as caught:
+        await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
+    assert (caught.value.status_code, caught.value.code) == (None, "feedback_required")
+    assert caught.value.allowed_sources == ["human", "evaluator", "reference", "automated_check", "downstream"]
+    counts = [rsi._store.read_one(f"SELECT COUNT(*) AS n FROM {table}")["n"]
+              for table in ("recipe_candidates", "recipe_versions", "recipe_heads", "task_recipes")]
+    assert counts == [0, 0, 0, 0] and model.calls == []
+    assert rsi._store.read_one("SELECT COUNT(*) AS n FROM idempotency WHERE operation='recipe_candidate'")["n"] == 0
+    await rsi.record_feedback(done.revision_id, feedback="Keep this", source="human", key="f")
+    job = await generate(rsi, task, done)
+    assert (job.status, job.version) == ("candidate", 1)
+
+
+async def test_a_refused_learning_takes_no_version_number(tmp_path):
+    rsi, _ = make_rsi(tmp_path, recipe_reply("V1"), recipe_reply("V2"))
+    task, _, done = await first_revision(rsi)
+    v1 = await generate(rsi, task, done)
+    second = await unfed_revision(rsi, task, "two")
+    with pytest.raises(RSIFeedbackRequired):
+        await rsi.start_recipe_candidate(task.task_id, revision_id=second.revision_id)
+    recipe = await rsi.get_task_recipe(task.task_id)
+    assert recipe.current.recipe_candidate_id == recipe.latest.recipe_candidate_id == v1.recipe_candidate_id
+    await rsi.record_feedback(second.revision_id, feedback="Judge: too long", source="evaluator", key="f2")
+    assert (await generate(rsi, task, second)).version == 2
+
+
+async def test_feedback_on_an_earlier_draft_lets_a_correction_learn(tmp_path):
+    rsi, _ = make_rsi(tmp_path, recipe_reply("V1"))
+    task, _, done = await first_revision(rsi)
+    started = await rsi.start_revision(done.revision_id, key="r")
+    again = await complete_execution(rsi, started, key="r-out", feedback=None)
+    assert (await generate(rsi, task, again)).version == 1
+
+
+async def test_feedback_stored_without_a_source_counts(tmp_path):
+    rsi, _ = make_rsi(tmp_path, recipe_reply("V1"))
+    task = await rsi.create_task(key="t1", objective="Do the task")
+    done = await unfed_revision(rsi, task, "one")
+    legacy = {"feedback_id": "feedback_legacy", "revision_id": done.revision_id, "task_id": task.task_id, "message": "Keep it"}
+    with rsi._store.transaction() as db:
+        db.execute("INSERT INTO feedback VALUES(?,?,?,?)", ("feedback_legacy", done.revision_id, "legacy", canonical_json(legacy)))
+    assert (await generate(rsi, task, done)).version == 1
 
 
 async def test_same_revision_reuses_the_candidate(tmp_path):
@@ -263,7 +319,7 @@ async def test_commit_refuses_when_the_parent_is_no_longer_current(tmp_path):
                 db.execute("UPDATE recipe_heads SET current_candidate_id='other'")
             return await super().call(**kwargs)
 
-    model = ChangesHead(recipe_reply("V1"))
+    model = ChangesHead(recipe_reply("V1"), feedback_actionable=True)
     rsi = LocalRSI(client=None, model=model, state_path=tmp_path / "s.sqlite3")
     task, _, done = await first_revision(rsi)
     candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
@@ -278,7 +334,7 @@ async def test_wait_timeout_leaves_generation_running(tmp_path):
             await asyncio.sleep(0.5)
             return await super().call(**kwargs)
 
-    model = Slow(recipe_reply("V1"))
+    model = Slow(recipe_reply("V1"), feedback_actionable=True)
     rsi = LocalRSI(client=None, model=model, state_path=tmp_path / "s.sqlite3")
     task, _, done = await first_revision(rsi)
     candidate = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
@@ -410,7 +466,7 @@ async def test_two_connections_generate_once(tmp_path):
             await asyncio.sleep(0.3)
             return await super().call(**kwargs)
 
-    model = Slow(recipe_reply("V1"))
+    model = Slow(recipe_reply("V1"), feedback_actionable=True)
     first = LocalRSI(client=None, model=model, state_path=tmp_path / "s.sqlite3")
     second = LocalRSI(client=None, model=model, state_path=tmp_path / "s.sqlite3")
     task, _, done = await first_revision(first)
@@ -437,7 +493,7 @@ async def test_two_processes_generate_once(tmp_path):
                 return await super().call(**kwargs)
 
         async def main():
-            rsi = LocalRSI(client=None, model=Counted(recipe_reply("V1")), state_path={str(tmp_path / "shared.sqlite3")!r})
+            rsi = LocalRSI(client=None, model=Counted(recipe_reply("V1"), feedback_actionable=True), state_path={str(tmp_path / "shared.sqlite3")!r})
             job = await rsi.wait_workflow_job("recipe_candidate", {candidate.recipe_candidate_id!r}, timeout=30)
             print(job.status)
 
@@ -447,7 +503,7 @@ async def test_two_processes_generate_once(tmp_path):
     processes = [subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, env=env, text=True) for _ in range(2)]
     outputs = [p.communicate(timeout=60)[0].strip() for p in processes]
     assert outputs == ["candidate", "candidate"]
-    assert calls.read_text().count("call") == 1
+    assert calls.read_text().count("call") == 2  # attribution and generation, in one process
 
 
 async def test_context_over_the_limit_is_rejected(tmp_path, monkeypatch):
@@ -482,8 +538,8 @@ async def test_history_follows_the_revision_chain_with_feedback(tmp_path):
     assert [h["execution_id"] for h in history] == [done.execution_id, again.execution_id]
     assert [h["origin"] for h in history] == ["original", "correction"]
     assert context["source_execution_id"] == again.execution_id and "source_revision_id" not in context
-    assert history[0]["feedback"][0]["message"] == "wrong"
-    assert history[0]["feedback"][0]["execution_id"] == done.execution_id and "revision_id" not in history[0]["feedback"][0]
+    assert [item["message"] for item in history[0]["feedback"]] == ["Keep this method", "wrong"]
+    assert history[0]["feedback"][1]["execution_id"] == done.execution_id and "revision_id" not in history[0]["feedback"][1]
     assert all("revision_id" not in entry for entry in history)
 
 
