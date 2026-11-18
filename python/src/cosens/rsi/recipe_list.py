@@ -37,7 +37,6 @@ WITH execution_activity AS (
         ) AS recipe_id,
         COALESCE(
             NULLIF(json_extract(e.data, '$.name'), ''),
-            NULLIF(json_extract(m.data, '$.name'), ''),
             '首次学习'
         ) AS name,
         json_extract(e.data, '$.status') AS execution_status,
@@ -60,7 +59,6 @@ WITH execution_activity AS (
         ) AS unanswered
     FROM objects e
     LEFT JOIN versions base ON base.id = json_extract(e.data, '$.base_recipe_version_id')
-    LEFT JOIN objects m ON m.id = json_extract(e.data, '$.material_ids[0]')
     WHERE e.kind = 'execution'
 ),
 activities AS (

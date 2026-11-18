@@ -821,7 +821,8 @@ test('recipe_list shows first-time learning and preserves the usable version dur
     assert.equal(row.kind, 'learning');
     assert.equal(row.recipe_id, null);
     assert.equal(row.execution_id, execution.id);
-    assert.equal(row.name, 'task.md');
+    assert.equal(row.name, '首次学习');
+    assert.deepEqual(client.recipe_list({ q: 'task.md' }), []);
     assert.equal(row.status, 'queued');
     assert.deepEqual(client.recipe_list({ active_only: true }), []);
 

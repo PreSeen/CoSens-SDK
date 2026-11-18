@@ -1,6 +1,6 @@
 {
   "name": "cosens-sdk",
-  "version": "0.5.4-rsi.4",
+  "version": "0.5.4-rsi.5",
   "description": "CoSens TypeScript SDK for local RSI and reusable Recipes",
   "keywords": [
     "cosens",

@@ -803,7 +803,8 @@ def test_recipe_list_includes_learning_and_revision_status(client, tmp_path):
         "queued",
     )
     assert row["execution_id"] == learning["id"]
-    assert row["name"] == source["name"]
+    assert row["name"] == "首次学习"
+    assert client.recipe_list(q=source["name"]) == []
     assert client.recipe_list(active_only=True) == []
     with client.store.connect() as conn:
         assert (
