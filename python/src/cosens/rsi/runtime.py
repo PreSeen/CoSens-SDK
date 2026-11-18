@@ -244,10 +244,15 @@ class LangChainRuntime:
             files=files,
             trace_path=trace_path,
             schema=Analysis,
-            instruction="Decide whether NECESSARY recipe information is missing. Only then form a hypothesis and 2-3 selectable options per question. "
-            "If information is sufficient: sufficient_information=true, hypothesis=null, questions=[]. A hypothesis is not a recipe summary. "
-            "Do not ask about hypothetical edge cases outside the task's necessary scope. "
-            "Do not pause: state a provisional assumption. "
+            instruction="When generalizing the current execution into a reusable Recipe, decide whether a user choice is necessary. "
+            "If evidence or an accepted answer resolves the rule and its scope, encode that rule directly. "
+            "If an input supplied on future executions or a condition established by the evidence determines the correct behavior, express it as a parameter or conditional branch without asking. "
+            "Ask only if at least two interpretations of the same reusable rule remain plausible from the evidence, selecting between them would materially change a future result or applicability, and available evidence and accepted answers cannot resolve the choice. "
+            "Do not invent conditions simply to disguise an unresolved choice. Do not ask about incidental case details or unsupported hypothetical scenarios. "
+            "If a choice is required, set sufficient_information=false, describe the unresolved interpretation in hypothesis, and provide 2–3 distinct selectable options per question that make their consequences clear. "
+            "Include only the plausible interpretations identified from the evidence, with two options when the evidence supports only two. Do not propose additional policies. "
+            "Record a provisional assumption and continue without waiting. "
+            "Otherwise set sufficient_information=true, hypothesis=null and questions=[]. Limit applicability to what the evidence supports. "
             "Derive scoring criteria by combining task requirements and observed execution with the separately extracted user_feedback rules. Use extracted feedback for user_feedback criteria and carry over their source citations. Merge overlapping requirements into a single criterion. "
             "Each criterion must be verifiable on future executions. Apply conditional criteria only where their conditions hold, and mark criteria that require a separate scenario as optional. "
             "Cite sources only in each criterion's evidence field. Express the underlying requirement without including details specific to a past execution or requiring its replay. "

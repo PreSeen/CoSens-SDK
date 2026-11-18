@@ -20,6 +20,8 @@ When the learning evidence includes a correction, the worker records likely caus
 
 Recipe and Rubric rules generalize historical examples into conditions, transformations and checks. The worker retries generation when it detects copied learning records. The evaluator receives only criteria, required flags and the pass threshold from the Rubric. Evidence references remain available for learning audits.
 
+During Recipe analysis the worker asks for clarification only when the evidence leaves multiple plausible interpretations of a reusable rule and the choice changes a future outcome or the rule's applicability. The worker applies rules supported by the evidence directly and expresses differences that future inputs or established conditions can resolve as parameters or branches.
+
 Use separate data directories for the two runtimes. Each owns its local SQLite queue, files and checkpoints.
 
 Run the checks from each package directory with `npm ci && npm run check` or `python -m pip install '.[test]' && python -m pytest`.
