@@ -18,6 +18,26 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def authorized_test_files(files, task):
+    """Resolve an explicit test catalog against the attached Material snapshots."""
+    if task is None:
+        return []
+    by_locator = {file["locator"]: file for file in files}
+    selected = []
+    for field, role in (
+        ("input_locators", "input"),
+        ("shared_reference_locators", "reference"),
+    ):
+        for locator in dict.fromkeys(task.get(field) or []):
+            file = by_locator.get(locator)
+            if file is None or file["role"] != role:
+                raise ValueError(
+                    f"{field} must name attached Material files with role {role}"
+                )
+            selected.append(file)
+    return selected
+
+
 def snapshot(root, manifest, config):
     manifest = MaterialManifest.model_validate(manifest)
     material_id = uid("material")

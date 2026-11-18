@@ -48,6 +48,8 @@ async function onConfirmedDelivery(delivery: {
       confirmation_ref: delivery.confirmationRef,
       test_task: {
         instruction: 'Use the test input to produce summary.md.',
+        input_locators: [material.files[1].locator],
+        shared_reference_locators: [],
         checks: [{ kind: 'exists', path: 'summary.md' }],
       },
     },
@@ -68,5 +70,7 @@ The Hook returns after the task is queued and a worker is dispatched. The host q
 Use `archived` with update functions to archive or restore records. Recipe retrieval defaults to the active version. Test results live on the Execution. A missing test task yields `unverifiable`. Activation requires a passing test and no unresolved clarification. The host owns task boundary selection and the learning confirmation UI.
 
 SQLite records live in `rsi-ts.sqlite3` under `data_dir`. Immutable material snapshots, test files and graph checkpoints are stored alongside it. Use a separate directory for each runtime. Background workers exit after the queue drains. The tested release environment is Linux with standalone Node.
+
+Use `test_task.input_locators` to authorize the current test files and `shared_reference_locators` to authorize reusable reference files. Each locator must come from an attached Material and match its respective `input` or `reference` role. Omitted lists authorize zero files. The learning stage gets historical evidence and excludes the declared test inputs. The evaluator uses the same authorized test files plus this run's outputs and trace.
 
 Run `npm run check` to build, typecheck and test the packaged entry point using a local model protocol fixture.

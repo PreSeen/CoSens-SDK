@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 
-from .materials import snapshot
+from .materials import authorized_test_files, snapshot
 from .models import (
     TERMINAL,
     Conflict,
@@ -253,9 +253,17 @@ class RSIClient:
         return self._version_list(recipe_id, "recipe", **pagination)
 
     def _execution_insert(self, conn, request):
-        for material_id in request["material_ids"]:
-            if self.store.get_in(conn, material_id, "material")["archived_at"]:
+        materials = [
+            self.store.get_in(conn, material_id, "material")
+            for material_id in request["material_ids"]
+        ]
+        for material in materials:
+            if material["archived_at"]:
                 raise InvalidState("archived materials cannot be attached")
+        authorized_test_files(
+            [file for material in materials for file in material["files"]],
+            request["policy"].get("test_task"),
+        )
         for field, kind in [
             ("rubrics_version_id", "rubrics"),
             ("base_recipe_version_id", "recipe"),
@@ -305,6 +313,12 @@ class RSIClient:
         idempotency_key=None,
     ):
         policy = ExecutionPolicy.model_validate(policy).model_dump()
+        task = policy["test_task"]
+        if task is not None:
+            # Preserve idempotency hashes for requests made before the allowlist.
+            for field in ("input_locators", "shared_reference_locators"):
+                if task[field] is None:
+                    del task[field]
         material_ids = list(dict.fromkeys(material_ids))
         if not material_ids:
             raise ValueError("at least one Material is required")

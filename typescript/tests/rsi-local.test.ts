@@ -249,7 +249,38 @@ test('new clarification restarts the input revision and only the corrected versi
   });
   const path = join(directory, 'context.md');
   writeFileSync(path, 'Write a number using the user-selected format.');
-  const material = client.material_create({ manifest: { context_path: path } });
+  const material = client.material_create({
+    manifest: {
+      context_path: path,
+      files: [
+        { name: 'old-orders.csv', role: 'reference' as const },
+        { name: 'historical-input.csv', role: 'input' as const },
+        { name: 'current-orders.csv', role: 'input' as const },
+        { name: 'format.md', role: 'reference' as const },
+        { name: 'confirmed-output.csv', role: 'artifact' as const },
+      ].map(({ name, role }) => {
+        const file = join(directory, name);
+        writeFileSync(file, name);
+        return { path: file, role };
+      }),
+    },
+  });
+  const [oldReference, oldInput, current, shared, historicalOutput] =
+    material.files.slice(1).map((file) => file.locator);
+  await assert.rejects(
+    client.execution_create({
+      material_ids: [material.id],
+      policy: {
+        artifact_confirmed: true,
+        confirmation_ref: 'test',
+        test_task: {
+          instruction: 'Generate result.txt',
+          input_locators: [historicalOutput],
+        },
+      },
+    }),
+    /input_locators/,
+  );
   const execution = await client.execution_create({
     material_ids: [material.id],
     policy: {
@@ -258,6 +289,8 @@ test('new clarification restarts the input revision and only the corrected versi
       auto_activate: true,
       test_task: {
         instruction: 'Generate result.txt',
+        input_locators: [current],
+        shared_reference_locators: [shared],
         checks: [{ kind: 'text_equals', path: 'result.txt', value: '0x2a' }],
       },
     },
@@ -301,7 +334,15 @@ test('new clarification restarts the input revision and only the corrected versi
             },
           };
         },
-        async generate() {
+        async generate(context, files) {
+          const locators = files.map((file) => file.locator);
+          assert.ok(
+            [oldReference, oldInput, shared, historicalOutput].every(
+              (locator) => locators.includes(locator),
+            ),
+          );
+          assert.ok(!locators.includes(current));
+          assert.ok(!('test_task' in (context.policy as object)));
           generationCalls++;
           if (generationCalls === 1) {
             await client.execution_clarification_answer(execution.id, {
@@ -319,14 +360,28 @@ test('new clarification restarts the input revision and only the corrected versi
           };
         },
         async execute(context, files, workspace) {
-          assert.equal(files.length, 0);
+          assert.deepEqual(
+            files.map((file) => file.locator),
+            [current, shared],
+          );
           assert.equal(
             (context.recipe as { instructions: string }).instructions,
             'Write hexadecimal',
           );
           writeFileSync(join(workspace, 'result.txt'), '0x2a');
         },
-        async assess() {
+        async assess(_context, files) {
+          const locators = files.map((file) => file.locator);
+          assert.ok(
+            [current, shared, 'test/result.txt'].every((locator) =>
+              locators.includes(locator),
+            ),
+          );
+          assert.ok(
+            [oldReference, oldInput, historicalOutput].every(
+              (locator) => !locators.includes(locator),
+            ),
+          );
           return {
             verifiable: true,
             scores: [

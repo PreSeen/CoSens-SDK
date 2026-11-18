@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TypedDict
 
-from .materials import atomic_json, digest
+from .materials import atomic_json, authorized_test_files, digest
 from .models import Analysis, Assessment, InputChanged, RecipeContent
 from .store import uid
 
@@ -47,10 +47,11 @@ class Engine:
             for material_id in execution["material_ids"]
             for f in self.client.material_get(material_id)["files"]
         ]
-        # Test execution cannot copy recorded host deliverables, context or feedback.
-        return (
-            [f for f in files if f["role"] in {"input", "reference"}] if test else files
-        )
+        task = execution["policy"].get("test_task")
+        if test:
+            return authorized_test_files(files, task)
+        held_out = set((task or {}).get("input_locators") or [])
+        return [file for file in files if file["locator"] not in held_out]
 
     def directory(self, state):
         directory = (
@@ -63,7 +64,13 @@ class Engine:
         return directory
 
     def context(self, execution):
-        return {k: execution.get(k) for k in ("answers", "policy", "source_session_id")}
+        return {
+            "answers": execution.get("answers"),
+            "policy": {
+                k: v for k, v in execution["policy"].items() if k != "test_task"
+            },
+            "source_session_id": execution.get("source_session_id"),
+        }
 
     def analyze(self, state):
         execution = self.begin(state, "analyze")
@@ -195,6 +202,7 @@ class Engine:
                 "Host did not supply a reproducible test task; Recipe is not validated"
             )
         else:
+            test_files = self.files(execution, test=True)
             attempt = self.directory(state) / ("test-" + uid("attempt"))
             workspace = attempt / "outputs"
             workspace.mkdir(parents=True, mode=0o700)
@@ -211,7 +219,7 @@ class Engine:
                     "test_task": {"instruction": task["instruction"]},
                     "recipe": recipe["content"],
                 },
-                self.files(execution, test=True),
+                test_files,
                 workspace,
                 attempt / "executor-trace.json",
             )
@@ -247,7 +255,7 @@ class Engine:
                 result["reason"] = "Recipe executor produced no verifiable output files"
             else:
                 checks = self.objective_checks(workspace, task["checks"])
-                evaluator_files = artifacts + self.files(execution, test=True)
+                evaluator_files = artifacts + test_files
                 executor_trace = attempt / "executor-trace.json"
                 if executor_trace.is_file():
                     trace_bytes = executor_trace.read_bytes()

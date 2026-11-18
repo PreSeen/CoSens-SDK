@@ -179,6 +179,8 @@ export const PolicySchema = z.strictObject({
   test_task: z
     .strictObject({
       instruction: text,
+      input_locators: z.array(text).nullable().optional(),
+      shared_reference_locators: z.array(text).nullable().optional(),
       checks: z.array(CheckSchema).default([]),
     })
     .nullable()

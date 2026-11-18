@@ -85,7 +85,14 @@ def main():
             "artifact_confirmed": True,
             "confirmation_ref": args.confirmation_ref,
             "auto_activate": args.auto_activate,
-            "test_task": {"instruction": args.test_instruction}
+            "test_task": {
+                "instruction": args.test_instruction,
+                "input_locators": [
+                    file["locator"]
+                    for file in material["files"]
+                    if file["role"] == "input"
+                ],
+            }
             if args.test_instruction
             else None,
         },

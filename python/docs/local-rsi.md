@@ -123,6 +123,8 @@ execution = rsi.execution_create(
         "max_rounds": 2,
         "test_task": {
             "instruction": "读取输入 CSV，生成 summary.md，写明记录数。",
+            "input_locators": [material["files"][1]["locator"]],
+            "shared_reference_locators": [],
             "checks": [{"kind": "exists", "path": "summary.md"}],
         },
     },
@@ -141,6 +143,8 @@ execution = rsi.execution_create(
 | `execution_cancel` | `execution_id` | 协作取消排队/运行任务；阻止后续提交和启用，保留已发生的本地工作 |
 
 `policy.test_task` 缺失、没有实际输出或评价无法验证时，测试为 `unverifiable`，不能启用。确定性检查支持 `exists/text_equals/text_contains/sha256`，路径必须位于测试输出目录内。`max_rounds` 限制 1–10，模型请求有超时和工具循环步数上限。
+
+宿主通过 `test_task.input_locators` 指定本轮测试输入，并用 `shared_reference_locators` 授权测试可读的共享资料。两者都使用本次 Execution 所附 Material 返回的完整文件定位符，角色必须分别为 `input` 和 `reference`。省略名单时对应文件默认不可读，已有执行也遵循这个默认值。历史文件和已确认产物留给学习阶段，本轮测试输入留给测试执行和评分。评分还可读取本轮测试产物和执行轨迹。
 
 问题具有 `id/revision/question/options/assumption`，选项含 `id/label`。只有必要缺口才创建问题，其他情况不制造 Hypothesis。版本过期或试图覆盖已接受答案返回 `Conflict`；同一答案重复提交不创建重复子执行。修改已接受答案使用新反馈 Material。失败/取消后的回答会记录，但不自动续跑；明确调用 `execution_create(parent_execution_id=...)`。
 

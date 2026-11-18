@@ -205,6 +205,8 @@ class ObjectiveCheck(Contract):
 
 class TestTask(Contract):
     instruction: str = Field(min_length=1)
+    input_locators: list[str] | None = None
+    shared_reference_locators: list[str] | None = None
     # Deterministic checks on files produced in a fresh test workspace.
     checks: list[ObjectiveCheck] = Field(default_factory=list)
 

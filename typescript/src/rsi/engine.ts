@@ -5,7 +5,13 @@ import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
 import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite';
 import { traceable } from 'langsmith/traceable';
 import type { RSIClient } from './client.js';
-import { atomic_json, digest, inside, workspace_files } from './materials.js';
+import {
+  atomic_json,
+  authorizedTestFiles,
+  digest,
+  inside,
+  workspace_files,
+} from './materials.js';
 import { uid } from './store.js';
 import {
   AnalysisSchema,
@@ -66,9 +72,10 @@ export class Engine {
     const files = execution.material_ids.flatMap(
       (id) => this.client.material_get(id).files,
     );
-    return forTest
-      ? files.filter((file) => ['input', 'reference'].includes(file.role))
-      : files;
+    const task = execution.policy.test_task;
+    if (forTest) return authorizedTestFiles(files, task);
+    const heldOut = new Set(task?.input_locators);
+    return files.filter((file) => !heldOut.has(file.locator));
   }
 
   private directory(revision: number) {
@@ -81,9 +88,10 @@ export class Engine {
   }
 
   private context(execution: Execution) {
+    const { test_task: _testTask, ...policy } = execution.policy;
     return {
       answers: execution.answers,
-      policy: execution.policy,
+      policy,
       source_session_id: execution.source_session_id,
     };
   }

@@ -19,10 +19,37 @@ import {
   type MaterialManifest,
   type LocalConfig,
   type EvidenceFile,
+  type ExecutionPolicy,
 } from './models.js';
 import { uid, encode } from './store.js';
 export const digest = (data: Uint8Array) =>
   createHash('sha256').update(data).digest('hex');
+
+export function authorizedTestFiles(
+  files: EvidenceFile[],
+  task: ExecutionPolicy['test_task'],
+): EvidenceFile[] {
+  if (!task) return [];
+  const byLocator = new Map(files.map((file) => [file.locator, file]));
+  const selected: EvidenceFile[] = [];
+  for (const [field, role] of [
+    ['input_locators', 'input'],
+    ['shared_reference_locators', 'reference'],
+  ] as const) {
+    for (const locator of new Set(task[field])) {
+      const file = byLocator.get(locator);
+      if (!file || file.role !== role) {
+        return fail(
+          'invalid_argument',
+          `${field} must name attached Material files with role ${role}`,
+        );
+      }
+      selected.push(file);
+    }
+  }
+  return selected;
+}
+
 export function snapshot(
   root: string,
   input: MaterialManifest,

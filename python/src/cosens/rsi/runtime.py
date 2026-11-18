@@ -85,7 +85,7 @@ class LangChainRuntime:
             """Read a declared immutable evidence file by its exact catalog locator."""
             self.check_alive()
             if locator not in by_locator:
-                raise ValueError("file is outside this stage's evidence catalog")
+                return "File is outside the declared evidence catalog."
             result = read_snapshot(by_locator[locator])
             reads.append({k: result[k] for k in ("locator", "sha256", "truncated")})
             return json.dumps(result, ensure_ascii=False)
@@ -241,7 +241,8 @@ class LangChainRuntime:
             trace_path=trace_path,
             schema=RecipeContent,
             instruction="Produce reusable task instructions grounded in evidence, accepted answers and applicable prior recipe. "
-            "Correct the previous round's observed failures. Do not include task-specific secrets or pretend provisional assumptions are confirmed.",
+            "Correct the previous round's observed failures. Refer to future inputs by their purpose, not historical file locators or paths. "
+            "Do not embed historical record values or task-specific secrets, or present provisional assumptions as confirmed.",
         )
 
     def execute(self, context, files, workspace, trace_path):
@@ -252,7 +253,7 @@ class LangChainRuntime:
             workspace=workspace,
             trace_path=trace_path,
             instruction="Actually perform test_task using recipe.instructions. Read task inputs with read_evidence; "
-            "write the resulting deliverable files with write_output. Host outputs and previous attempts are unavailable. "
+            "write the resulting deliverable files with write_output. Use only the authorized input and shared reference files in this catalog. "
             "If these tools cannot perform the task, explain the missing capability; do not claim completion. No shell/network tools exist.",
         )
 

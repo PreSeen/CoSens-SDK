@@ -44,7 +44,7 @@ const stages = {
     name: 'recipe test executor',
     schema: undefined,
     instruction:
-      'Actually do test_task using recipe.instructions. Read the task inputs and write the resulting deliverable files. Historical deliverables are unavailable. Report missing capabilities honestly. Use only the supplied tools.',
+      'Actually do test_task using recipe.instructions. Read only the authorized input and shared reference files in this catalog. Write the resulting deliverable files and report any missing capabilities honestly.',
   },
   assessment: {
     name: 'independent test evaluator',

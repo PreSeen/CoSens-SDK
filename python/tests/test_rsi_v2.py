@@ -187,6 +187,59 @@ def test_complete_learning_test_and_activation(client, tmp_path):
     )
 
 
+def test_test_and_evaluation_catalogs_require_explicit_file_authorization(
+    client, tmp_path
+):
+    context = tmp_path / "context.md"
+    context.write_text("Create answer.txt with the number in the current input.")
+    files = []
+    for name, role in [
+        ("old-orders.csv", "reference"),
+        ("historical-input.csv", "input"),
+        ("current-orders.csv", "input"),
+        ("format.md", "reference"),
+        ("confirmed-output.csv", "artifact"),
+    ]:
+        path = tmp_path / name
+        path.write_text(name)
+        files.append({"path": str(path), "role": role})
+    m = client.material_create(manifest={"context_path": str(context), "files": files})
+    old_reference, old_input, current, shared, historical_output = [
+        f["locator"] for f in m["files"][1:]
+    ]
+    task = policy()["test_task"] | {
+        "input_locators": [current],
+        "shared_reference_locators": [shared],
+    }
+    for invalid in (historical_output, "material_unknown/0"):
+        with pytest.raises(ValueError, match="input_locators"):
+            run(client, m["id"], test_task=task | {"input_locators": [invalid]})
+
+    class VerifyCatalogs(FileRuntime):
+        def generate(self, context, files, trace_path):
+            locators = {file["locator"] for file in files}
+            assert {old_reference, old_input, shared, historical_output} <= locators
+            assert current not in locators
+            assert "test_task" not in context["policy"]
+            return super().generate(context, files, trace_path)
+
+        def assess(self, context, files, trace_path):
+            locators = {file["locator"] for file in files}
+            assert {old_reference, old_input, historical_output}.isdisjoint(locators)
+            assert {current, shared, "test/answer.txt"} <= locators
+            return super().assess(context, files, trace_path)
+
+    execution = run(client, m["id"], test_task=task)
+    runtime = VerifyCatalogs()
+    client.run_pending(runtime=runtime)
+    result = client.execution_get(execution["id"])
+    assert result["status"] == "completed", result
+    assert result["result"]["test_status"] == "passed"
+    assert [[f["locator"] for f in files] for files in runtime.test_catalogs] == [
+        [current, shared]
+    ]
+
+
 def test_recipe_is_inactive_without_activation_policy(client, tmp_path):
     execution = run(client, material(client, tmp_path)["id"])
     client.run_pending(runtime=FileRuntime())

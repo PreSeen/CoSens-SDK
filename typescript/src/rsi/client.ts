@@ -3,7 +3,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { snapshot } from './materials.js';
+import { authorizedTestFiles, snapshot } from './materials.js';
 import { Store, uid, now, encode, pagination } from './store.js';
 import {
   LocalConfigSchema,
@@ -353,9 +353,14 @@ export class RSIClient {
   ): Execution {
     if (!request.material_ids.length)
       fail('invalid_argument', 'at least one Material is required');
-    for (const id of request.material_ids)
-      if (this.material_get(id).archived_at)
+    const materials = request.material_ids.map((id) => this.material_get(id));
+    for (const material of materials)
+      if (material.archived_at)
         fail('invalid_state', 'archived material cannot be attached');
+    authorizedTestFiles(
+      materials.flatMap((material) => material.files),
+      request.policy.test_task,
+    );
     for (const [id, kind] of [
       [request.rubrics_version_id, 'rubrics'],
       [request.base_recipe_version_id, 'recipe'],
