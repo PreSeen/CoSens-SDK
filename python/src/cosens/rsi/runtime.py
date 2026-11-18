@@ -230,11 +230,11 @@ class LangChainRuntime:
             instruction="Decide whether NECESSARY recipe information is missing. Only then form a hypothesis and 2-3 selectable options per question. "
             "If information is sufficient: sufficient_information=true, hypothesis=null, questions=[]. A hypothesis is not a recipe summary. "
             "Do not ask about hypothetical edge cases outside the task's necessary scope. "
-            "Do not pause: state a provisional assumption. Initialize rubrics from task requirements; refine from explicit user feedback and actual trajectory. "
-            "Keep explicit evidence separate from agent inference. Define only rules independently observable on a future test batch. "
-            "Mark separate scenarios that require a different test batch as optional, and make conditional criteria apply only when the input exercises their conditions. "
-            "Keep provenance in evidence, never in rule IDs or descriptions. Omit all worked examples, historical cases, row values, file paths, "
-            "and requirements to replay the learning batch. If fixed rubrics are supplied, preserve their standard. "
+            "Do not pause: state a provisional assumption. "
+            "Derive scoring criteria from task requirements, explicit feedback and observed execution. "
+            "Each criterion must be verifiable on future executions. Apply conditional criteria only where their conditions hold, and mark criteria that require a separate scenario as optional. "
+            "Cite sources only in each criterion's evidence field. Express the underlying requirement without including details specific to a past execution or requiring its replay. "
+            "If fixed Rubrics are supplied, preserve their standard. "
             "When learning evidence contains corrective feedback or a documented correction, fill attribution.possible_causes. "
             "Describe the observed issue separately from a plausible reason, explain the uncertainty, and cite the exact material_id and locator of each source you read. "
             "Return attribution=null if there is no evidence of a correction. Treat reasons as hypotheses even when the correction is confirmed.",
@@ -247,14 +247,13 @@ class LangChainRuntime:
             files=files,
             trace_path=trace_path,
             schema=RecipeContent,
-            instruction="Produce reusable task instructions grounded in evidence, accepted answers and applicable prior recipe. "
-            "Correct the previous round's observed failures. Use parameters only for values supplied separately by each future task. "
-            "Preserve fixed interface requirements verbatim, including exact output headers, filenames, status labels, and invariant constants. "
-            "A future executor must be able to follow those requirements from the Recipe itself. Refer to future inputs by their purpose. "
-            "Every Recipe field must contain only reusable rules. Omit all worked examples, historical order or record IDs, instance values, "
-            "learning paths, locators, secrets and provisional assumptions. Abstract examples into conditions, transformations and checks; never copy examples even as illustrations. "
-            "Use analysis.attribution to turn supported corrections into reusable instructions or checks. "
-            "For a revision, retain applicable base instructions unaffected by the correction. Encode uncertain causes as conditional checks where justified, never as facts.",
+            instruction="Learn reusable requirements and procedures from the available evidence and accepted clarifications. "
+            "Preserve existing requirements from a base Recipe when the evidence still supports them. "
+            "Correct observed test failures and use analysis.attribution to turn supported corrections into reusable steps or checks. "
+            "Preserve the exact terms and values of requirements that the evidence establishes as fixed across executions. "
+            "Parameterize details supplied at execution time. A future executor must be able to apply the Recipe using the inputs available to that execution. "
+            "Abstract evidence into rules and applicability conditions without copying case-specific details, evidence references or secrets. "
+            "Treat uncertain causes as hypotheses and use conditional checks where the evidence supports them.",
         )
 
     def execute(self, context, files, workspace, trace_path):

@@ -154,7 +154,7 @@ export class Engine {
           'Rubric rules contain learning-only literals',
         );
       context.portability_feedback =
-        'Rewrite the Rubric as reusable rules for any future input. Remove copied learning rows, record identifiers, paths, and historical expected outputs.';
+        'Rewrite the Rubric as reusable rules for any future input. Express the requirements without copying details or references specific to past executions.';
     }
     const locators = new Set(files.map((file) => file.locator));
     for (const cause of analysis.attribution?.possible_causes ?? []) {
@@ -267,7 +267,7 @@ export class Engine {
           'Recipe rules contain learning-only literals',
         );
       context.portability_feedback =
-        'Rewrite the Recipe as reusable rules for any future input. Remove copied learning rows, worked examples, record identifiers, and historical paths.';
+        'Rewrite the Recipe as reusable rules for any future input. Express the procedure without copying details or references specific to past executions.';
     }
 
     return this.store.tx(() => {

@@ -119,7 +119,7 @@ class Engine:
                 raise ModelOutputError("Rubric rules contain learning-only literals")
             context["portability_feedback"] = (
                 "Rewrite the Rubric as reusable rules for any future input. "
-                "Remove copied learning rows, record identifiers, paths, and historical expected outputs."
+                "Express the requirements without copying details or references specific to past executions."
             )
         locators = {file["locator"] for file in files}
         for cause in (analysis["attribution"] or {}).get("possible_causes", []):
@@ -198,7 +198,7 @@ class Engine:
                 raise ModelOutputError("Recipe rules contain learning-only literals")
             context["portability_feedback"] = (
                 "Rewrite the Recipe as reusable rules for any future input. "
-                "Remove copied learning rows, worked examples, record identifiers, and historical paths."
+                "Express the procedure without copying details or references specific to past executions."
             )
         version = self.store.publish_candidate(
             self.execution_id,
