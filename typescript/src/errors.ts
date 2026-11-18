@@ -1,11 +1,25 @@
 export class RSIError extends Error { name = 'RSIError'; }
-/** `missing` (input_incomplete) is what the execution input lacks; `recipeIds` (recipe_choice_required) are the task's Recipes; a new execution names one, a correction or learning cannot. */
+/**
+ * `missing` (input_incomplete) is what the execution input lacks; `recipeIds` (recipe_choice_required) are the task's Recipes; a new execution names one, a correction or learning cannot.
+ * `currentVersion` (recipe_version_conflict) is the Recipe chain's current version.
+ */
 export class RSIHTTPError extends RSIError {
   name = 'RSIHTTPError';
   constructor(public statusCode: number, message: string, public code?: string, public requestId?: string,
-    public missing?: string[], public recipeIds?: string[]) { super(message); }
+    public missing?: string[], public recipeIds?: string[], public currentVersion?: number) { super(message); }
 }
 export class RSITransportError extends RSIError { name = 'RSITransportError'; }
+/**
+ * Learning was refused: no feedback is recorded on the execution or an earlier draft in its correction chain.
+ * Nothing was created and no version number was taken. Record the user's words (or a verifiable source listed in
+ * `allowedSources`) as feedback, then learn the same execution again.
+ */
+export class RSIFeedbackRequired extends RSIError {
+  name = 'RSIFeedbackRequired';
+  readonly code = 'feedback_required';
+  /** `statusCode` is 422 from the service. */
+  constructor(message: string, public allowedSources?: string[], public requestId?: string, public statusCode?: number) { super(message); }
+}
 export class RSIDecisionUnavailable extends RSIError { name = 'RSIDecisionUnavailable'; }
 export class RSIApprovalUnavailable extends RSIError { name = 'RSIApprovalUnavailable'; }
 export class RSIRecoveryRequired extends RSIError { name = 'RSIRecoveryRequired'; }

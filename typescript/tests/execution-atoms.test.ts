@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, test } from 'node:test';
 import * as sdk from '../src/index.ts';
-import { CoSensClient, RSIError, RSILearningFailedError, RSILearningStoppedError, RSIRecoveryRequired } from '../src/index.ts';
+import { CoSensClient, RSIError, RSIHTTPError, RSILearningFailedError, RSILearningStoppedError, RSIRecoveryRequired } from '../src/index.ts';
 import * as http from '../src/http.ts';
 import { clock } from '../src/clock.ts';
 
@@ -250,6 +250,28 @@ test('the Recipe store atoms send previous_version and the exact query', async (
     () => client.atoms.listRecipes({ limit: 101 }), () => client.atoms.searchRecipes(''), () => client.atoms.searchRecipes('x', { limit: 51 })]) {
     assert.throws(call, TypeError);
   }
+});
+
+test('setCurrentRecipeVersion sends the expected current version without an idempotency key', async () => {
+  const { seen, client } = server();
+  await client.atoms.setCurrentRecipeVersion('r1', { version: 2, expectedCurrentVersion: 3 });
+  assert.deepEqual(seen, [['PUT', '/api/recipes/r1/current', { version: 2, expected_current_version: 3 }, null]]);
+  for (const call of [() => client.atoms.setCurrentRecipeVersion('', { version: 2, expectedCurrentVersion: 1 }),
+    () => client.atoms.setCurrentRecipeVersion('r1', { version: 0, expectedCurrentVersion: 1 }),
+    () => client.atoms.setCurrentRecipeVersion('r1', { version: 2, expectedCurrentVersion: 1.5 })]) {
+    assert.throws(call, TypeError);
+  }
+  assert.equal(seen.length, 1);
+});
+
+test('a stale expectedCurrentVersion is a 409 with the current version', async () => {
+  const client = new CoSensClient({ apiKey: 'test-key', fetch: async () => new Response(JSON.stringify(
+    { error: { code: 'recipe_version_conflict', message: 'the current version changed', current_version: 2 } }), { status: 409 }) });
+  const error = await client.atoms.setCurrentRecipeVersion('r1', { version: 1, expectedCurrentVersion: 3 }).then(() => undefined, value => value);
+  assert.ok(error instanceof RSIHTTPError);
+  assert.equal(error.statusCode, 409);
+  assert.equal(error.code, 'recipe_version_conflict');
+  assert.equal(error.currentVersion, 2);
 });
 
 test('removed atoms, errors and helpers are gone', async () => {

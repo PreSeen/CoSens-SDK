@@ -67,7 +67,7 @@ When a usable Recipe matches, the SDK adds it as plain text: its title, when/whe
 
 ## Generate a Recipe after confirmation
 
-A turn has something to learn from only when it recorded a completed execution. From your application's artifact-confirmation handler:
+A turn has something to learn from only when it recorded a completed execution, and learning needs feedback on it. When your user confirms or corrects that artifact, record their own words as `human` feedback, then learn:
 
 ```ts
 import { CoSensClient } from 'cosens-sdk';
@@ -75,12 +75,13 @@ import { CoSensClient } from 'cosens-sdk';
 const atoms = new CoSensClient().atoms;
 const turn = client.cosens.getTurn(turnId);
 if (turn?.state === 'completed' && turn.executionId) {
+  await client.cosens.feedback(userWords, { source: 'human', turnId }); // for example 'Keep this, but shorter'
   await client.cosens.generateRecipe({ turnId });
   const learning = await atoms.waitLearning(turn.executionId);
 }
 ```
 
-`generateRecipe` learns the first Recipe version, or the next one, from the turn's execution; an execution learns once. `cosens.feedback(message, { source })` records feedback on the turn's execution. The learning rules, statuses and errors are in [the API reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/api-reference.md) (Python names; the TypeScript ones are camelCase).
+`generateRecipe` learns the first Recipe version, or the next one, from the turn's execution; an execution learns once. Without feedback on the execution or an earlier draft of it, it throws `RSIFeedbackRequired` (HTTP 422 `feedback_required`, with `allowedSources`) and nothing is created; record the feedback and call it again. `cosens.feedback(message, { source })` records feedback on the turn's execution; record only what the user said as `human`. The learning rules, statuses and errors are in [the API reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/api-reference.md) (Python names; the TypeScript ones are camelCase).
 
 ### Differences from the Python SDK
 
@@ -121,11 +122,12 @@ const correction = await client.atoms.startExecution(undefined, { key: 'correcti
 
 A correction (`previousExecutionId`) takes only `model` besides, and a `taskId` is optional and must be the previous execution's task; `source`, an input field, `recipeId` or `recallMemory: true` with it fails to compile and throws before sending. A 422 `input_incomplete` or `recipe_choice_required` from the start is an `RSIHTTPError` whose `missing` or `recipeIds` names what the input lacks or the task's Recipes. Treat an execution as done only when the result's `status` is `'completed'`.
 
-Learning is explicit and once per execution:
+Learning is explicit, once per execution, and needs feedback on the execution or an earlier draft of it (otherwise `learn` throws `RSIFeedbackRequired`):
 
 ```ts
 import { RSILearningFailedError, RSILearningStoppedError } from 'cosens-sdk';
 
+await client.atoms.recordFeedback(executionId, { feedback: userWords, source: 'human', key: 'feedback-2' });
 await client.atoms.learn(executionId, { maxCompletionTokens: 200000 });
 try {
   const learning = await client.atoms.waitLearning(executionId);
@@ -136,7 +138,7 @@ try {
 }
 ```
 
-`learn` and `resumeLearning` send no key, and `waitLearning(executionId, { timeout })` takes seconds. When each error is thrown, and the 422 cases, are in [the API reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/api-reference.md). The TypeScript fields: `RSILearningFailedError` has `executionId`, `code`, `detailMessage` (the service's text; `message` is the error's own), `retryable` (`true`, `false` or `undefined`), `phase`, `upstreamStatus`, `upstreamCode` and `requestId`; `RSILearningStoppedError` has `learning`, `executionId`, `status` and `requestId`. A learning still in flight at the deadline throws an `Error` named `TimeoutError`.
+`learn` and `resumeLearning` send no key, and `waitLearning(executionId, { timeout })` takes seconds. `setCurrentRecipeVersion(recipeId, { version, expectedCurrentVersion })` rolls a Recipe back to a completed version, or forward again; a stale `expectedCurrentVersion` is a 409 `recipe_version_conflict`. When each error is thrown, and the 422 cases, are in [the API reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/api-reference.md). The TypeScript fields: `RSILearningFailedError` has `executionId`, `code`, `detailMessage` (the service's text; `message` is the error's own), `retryable` (`true`, `false` or `undefined`), `phase`, `upstreamStatus`, `upstreamCode` and `requestId`; `RSILearningStoppedError` has `learning`, `executionId`, `status` and `requestId`. A learning still in flight at the deadline throws an `Error` named `TimeoutError`.
 
 `learn(executionId, { webSearch, webSearchBlockedDomains })` controls web search while the Recipe is written, and sends each field only when given: omitted means the service default (on when it has a search provider), `false` opts out, and `webSearchBlockedDomains` (at most 50 bare hostnames) adds hosts whose pages are dropped. The setting is frozen on the learning, blocked hosts lowercased, deduplicated and sorted, so `resumeLearning` takes no web fields. Learning again compares only the web fields that call gives, blocked hosts as a set, and giving none returns the learning; blocked hosts count only when searching, so against a learning frozen with search off they differ only when the request itself would search (on a service without a provider the same request returns the same learning); a different setting gets a 422 while the learning is active, `completed` or `awaiting_material`, and re-queues a `failed`, `interrupted` or `awaiting_runner` learning with the new setting, dropping the sources frozen under the old one; like `resumeLearning`, it may move behind a newer version and take a new version number. The learning's `web_search` lists the queries, the sources used and the dropped results. `generateRecipe` on the wrappers takes the same options.
 

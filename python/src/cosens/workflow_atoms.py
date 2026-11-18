@@ -165,6 +165,11 @@ def _recipe_upload(recipe_id, version, recipe, previous_version):
     return body
 
 
+def _recipe_current(version, expected_current_version):
+    return {"version": _positive(version, "version"),
+            "expected_current_version": _positive(expected_current_version, "expected_current_version")}
+
+
 def _recipe_path(recipe_id, version):
     suffix = "?" + urlencode({"version": _positive(version, "version")}) if version is not None else ""
     return f"/recipes/{path_part(recipe_id)}" + suffix
@@ -357,6 +362,18 @@ class AsyncWorkflowAtoms:
         body = _recipe_upload(recipe_id, version, recipe, previous_version)
         return await self._http.request("PUT", f"/recipes/{path_part(recipe_id)}/versions/{version}", body=body)
 
+    async def set_current_recipe_version(self, recipe_id, *, version, expected_current_version):
+        """Make ``version``, a completed version of the Recipe, its current version: a rollback, or forward again.
+
+        ``expected_current_version`` is the version the caller saw as current; when it is no longer current the
+        service answers 409 ``recipe_version_conflict`` with ``current_version``. Setting the version that is
+        already current is a replay and changes nothing. ``interrupted_learnings`` lists the learnings the move
+        stopped: ``failed`` ones (``previous_version_changed``) can be resumed at once, and a ``running`` one fails
+        when it commits. New executions and the next learning use the new current version.
+        """
+        return await self._http.request("PUT", f"/recipes/{path_part(recipe_id)}/current",
+                                        body=_recipe_current(version, expected_current_version))
+
     async def get_recipe(self, recipe_id, *, version=None):
         return await self._http.request("GET", _recipe_path(recipe_id, version))
 
@@ -443,6 +460,11 @@ class SyncWorkflowAtoms:
     def upload_recipe(self, recipe_id, *, version, recipe, previous_version=None):
         body = _recipe_upload(recipe_id, version, recipe, previous_version)
         return self._http.request("PUT", f"/recipes/{path_part(recipe_id)}/versions/{version}", body=body)
+
+    def set_current_recipe_version(self, recipe_id, *, version, expected_current_version):
+        """Make ``version`` the Recipe's current version; see the async form for conflicts and interrupted learnings."""
+        return self._http.request("PUT", f"/recipes/{path_part(recipe_id)}/current",
+                                  body=_recipe_current(version, expected_current_version))
 
     def get_recipe(self, recipe_id, *, version=None):
         return self._http.request("GET", _recipe_path(recipe_id, version))

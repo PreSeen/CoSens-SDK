@@ -9,4 +9,8 @@ export async function runTask(task:string,model:string){
  const result=await client.run(agent,task);
  return {client,result,turnId:client.cosens.lastTurnId};
 }
-export function onArtifactConfirmed(client:CoSensAgentRunner,turnId:string){return client.cosens.generateRecipe(turnId);}
+// Invoke with the user's own words about the artifact; learning needs that feedback.
+export async function onArtifactConfirmed(client:CoSensAgentRunner,turnId:string,userWords:string){
+ await client.cosens.feedback(userWords,'human',turnId);
+ return client.cosens.generateRecipe(turnId);
+}

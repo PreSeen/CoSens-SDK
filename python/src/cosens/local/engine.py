@@ -4,7 +4,7 @@ import asyncio
 import warnings
 
 from ..models import result
-from .recipes import LocalRecipeLifecycle
+from .recipes import LocalRecipeLifecycle, RSICandidateFailed
 from .store import LocalStore
 from .web_search import validate_blocked_domains
 from .workflow import LocalTaskWorkflow
@@ -63,7 +63,10 @@ class LocalRSI(LocalTaskWorkflow, LocalRecipeLifecycle):
         return await self._client_atoms("get_recipe").get_recipe(recipe_id, version=version)
 
     async def publish_recipe(self, recipe_id):
-        """Retry uploading the current version of a Recipe chain."""
+        """Retry uploading the current version of a Recipe chain.
+
+        Raises ``RSICandidateFailed`` (``previous_version_changed``) when the service moved the chain's current version
+        off that version's base: the chain then follows the service and the version is not uploaded."""
         self._client_atoms("publish_recipe")
         with self._store.reading() as db:
             head = db.execute("SELECT current_candidate_id FROM recipe_heads WHERE recipe_id=?", (recipe_id,)).fetchone()
@@ -73,4 +76,6 @@ class LocalRSI(LocalTaskWorkflow, LocalRecipeLifecycle):
             state = self._candidate(db, candidate_id)["publish_state"]
         if state != "published":
             state = await self._publish_candidate(candidate_id)
+            if state is None:
+                raise RSICandidateFailed.from_candidate(await self.get_recipe_candidate(candidate_id))
         return result({"recipe_id": recipe_id, "recipe_candidate_id": candidate_id, "publish_state": state})

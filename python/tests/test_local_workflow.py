@@ -147,7 +147,7 @@ async def test_revision_carries_base_result_and_feedback(tmp_path):
     assert started.request["task_context"]["context_version"] == 1 and started.request["task_context"]["artifacts"] == []
     assert started.instance_id == done.execution_id and started.kind == "revision"
     assert (await rsi.get_execution(started.execution_id)).instance_id == done.execution_id
-    assert started.request["feedback"][0]["message"] == "fix it"
+    assert [item["message"] for item in started.request["feedback"]] == ["Keep this method", "fix it"]
     assert started.request["base_result"]["events"][0]["id"] == "e1"
     again = await complete_execution(rsi, started, key="second")
     assert (await rsi.get_revision(again.revision_id)).trace_origin == "revision"
@@ -200,7 +200,7 @@ async def test_unknown_ids_raise_lookup_error(tmp_path):
 
 
 async def test_recall_asks_for_the_execution_input_with_the_8000_token_budget(tmp_path):
-    rsi = LocalRSI(client=None, model=FakeModel(recipe_reply()), state_path=tmp_path / "s.sqlite3")
+    rsi = LocalRSI(client=None, model=FakeModel(recipe_reply(), feedback_actionable=True), state_path=tmp_path / "s.sqlite3")
     task = await rsi.create_task(key="k", objective="Write the weekly report")
     calls = []
 

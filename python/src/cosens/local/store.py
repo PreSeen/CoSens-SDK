@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS recipe_candidates(
   recipe_sha TEXT, attribution_json TEXT, error TEXT, generation INTEGER NOT NULL DEFAULT 1,
   lease_expires_at REAL, publish_state TEXT);
 CREATE TABLE IF NOT EXISTS recipe_heads(
-  recipe_id TEXT PRIMARY KEY, current_candidate_id TEXT, latest_candidate_id TEXT NOT NULL, remote_version INTEGER);
+  recipe_id TEXT PRIMARY KEY, current_candidate_id TEXT, latest_candidate_id TEXT NOT NULL, remote_version INTEGER,
+  remote_max_version INTEGER);
 CREATE TABLE IF NOT EXISTS recipe_versions(
   candidate_id TEXT PRIMARY KEY REFERENCES recipe_candidates(id), recipe_id TEXT NOT NULL REFERENCES recipe_heads(recipe_id),
   version INTEGER NOT NULL, parent_candidate_id TEXT, UNIQUE(recipe_id, version));
@@ -321,6 +322,9 @@ class LocalStore:
                 db.execute("ALTER TABLE recipe_heads ADD COLUMN remote_version INTEGER")
                 # 0.6 published to Memory, so no version is in the Recipe store yet.
                 db.execute("UPDATE recipe_candidates SET publish_state='pending' WHERE publish_state IS NOT NULL")
+            if "remote_max_version" not in {row["name"] for row in db.execute("PRAGMA table_info(recipe_heads)")}:
+                # The highest version the service stores for an uploaded chain, read when it rolled the chain back.
+                db.execute("ALTER TABLE recipe_heads ADD COLUMN remote_max_version INTEGER")
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version > STORE_VERSION:
                 raise LocalStoreUpgradeError(
