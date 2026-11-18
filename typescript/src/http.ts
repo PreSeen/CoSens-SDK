@@ -67,8 +67,9 @@ export class Transport {
       };
       const message = redact(error?.message ?? detail?.message ?? payload?.detail ?? response.statusText);
       if (response.status === 422 && code === 'feedback_required') throw new RSIFeedbackRequired(message, names('allowed_sources'), requestId, response.status);
+      const currentVersion = error?.current_version ?? detail?.current_version;
       throw new RSIHTTPError(response.status, message, code == null ? undefined : redact(code), requestId,
-        names('missing'), names('recipe_ids'));
+        names('missing'), names('recipe_ids'), Number.isInteger(currentVersion) ? currentVersion : undefined);
     }
     // Expose x-request-id without changing the object's enumerable fields or JSON.
     if (payload && typeof payload === 'object' && !Array.isArray(payload) && !Object.hasOwn(payload, 'requestId')) {

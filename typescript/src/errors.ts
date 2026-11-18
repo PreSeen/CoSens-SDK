@@ -1,9 +1,12 @@
 export class RSIError extends Error { name = 'RSIError'; }
-/** `missing` (input_incomplete) is what the execution input lacks; `recipeIds` (recipe_choice_required) are the task's Recipes; a new execution names one, a correction or learning cannot. */
+/**
+ * `missing` (input_incomplete) is what the execution input lacks; `recipeIds` (recipe_choice_required) are the task's Recipes; a new execution names one, a correction or learning cannot.
+ * `currentVersion` (recipe_version_conflict) is the Recipe chain's current version.
+ */
 export class RSIHTTPError extends RSIError {
   name = 'RSIHTTPError';
   constructor(public statusCode: number, message: string, public code?: string, public requestId?: string,
-    public missing?: string[], public recipeIds?: string[]) { super(message); }
+    public missing?: string[], public recipeIds?: string[], public currentVersion?: number) { super(message); }
 }
 export class RSITransportError extends RSIError { name = 'RSITransportError'; }
 /**

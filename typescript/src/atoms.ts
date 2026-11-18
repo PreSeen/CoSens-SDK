@@ -251,6 +251,19 @@ export class Atoms {
     const body = { ...(previousVersion === undefined ? {} : { previous_version: boundedInteger(previousVersion, 'previousVersion', Number.MAX_SAFE_INTEGER) }), recipe };
     return this.http.request('PUT', `/recipes/${pathPart(recipeId)}/versions/${version}`, body);
   }
+  /**
+   * Make `version`, a completed version of the Recipe, its current version: a rollback, or forward again.
+   * `expectedCurrentVersion` is the version the caller saw as current; when it is no longer current the service
+   * answers 409 `recipe_version_conflict` with `current_version`. Setting the version that is already current is a
+   * replay and changes nothing. `interrupted_learnings` lists the learnings the move stopped: `failed` ones
+   * (`previous_version_changed`) can be resumed at once, and a `running` one fails when it commits.
+   */
+  setCurrentRecipeVersion(recipeId: string, { version, expectedCurrentVersion }: { version: number; expectedCurrentVersion: number }) {
+    return this.http.request('PUT', `/recipes/${pathPart(recipeId)}/current`, {
+      version: boundedInteger(version, 'version', Number.MAX_SAFE_INTEGER),
+      expected_current_version: boundedInteger(expectedCurrentVersion, 'expectedCurrentVersion', Number.MAX_SAFE_INTEGER),
+    });
+  }
   getRecipe(recipeId: string, { version }: { version?: number } = {}) {
     const query = version === undefined ? '' : '?' + new URLSearchParams({ version: String(boundedInteger(version, 'version', Number.MAX_SAFE_INTEGER)) });
     return this.http.request('GET', `/recipes/${pathPart(recipeId)}${query}`);
