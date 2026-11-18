@@ -89,6 +89,146 @@ async def test_feedback_stored_without_a_source_counts(tmp_path):
     assert (await generate(rsi, task, done)).version == 1
 
 
+def move_current(rsi, candidate_id):
+    """Move the chain's current version back, as following a rollback on the service does."""
+    with rsi._store.transaction() as db:
+        db.execute("UPDATE recipe_heads SET current_candidate_id=?", (candidate_id,))
+
+
+def interrupt(rsi, candidate_id):
+    with rsi._store.transaction() as db:
+        db.execute("UPDATE recipe_candidates SET state='interrupted' WHERE id=?", (candidate_id,))
+
+
+async def test_after_a_rollback_the_next_learning_builds_on_the_current_version(tmp_path):
+    rsi, model = make_rsi(tmp_path, recipe_reply("V1"), recipe_reply("V2"), recipe_reply("V3"))
+    task, _, done = await first_revision(rsi)
+    v1 = await generate(rsi, task, done)
+    _, second = await next_revision(rsi, task, "two")
+    await generate(rsi, task, second)
+    move_current(rsi, v1.recipe_candidate_id)
+    _, third = await next_revision(rsi, task, "three")
+    v3 = await generate(rsi, task, third)
+    assert (v3.version, v3.parent_candidate_id, v3.current) == (3, v1.recipe_candidate_id, True)
+    assert model.calls[-1]["context"]["base_recipe"]["recipe"]["title"] == "V1"
+
+
+async def test_a_learning_queued_on_a_rolled_back_version_is_not_followed(tmp_path):
+    rsi, _ = make_rsi(tmp_path, recipe_reply("V1"), recipe_reply("V2"))
+    task, _, done = await first_revision(rsi)
+    v1 = await generate(rsi, task, done)
+    _, second = await next_revision(rsi, task, "two")
+    v2 = await generate(rsi, task, second)
+    _, third = await next_revision(rsi, task, "three")
+    doomed = await rsi.start_recipe_candidate(task.task_id, revision_id=third.revision_id)
+    assert doomed.parent_candidate_id == v2.recipe_candidate_id
+    move_current(rsi, v1.recipe_candidate_id)
+    _, fourth = await next_revision(rsi, task, "four")
+    fresh = await rsi.start_recipe_candidate(task.task_id, revision_id=fourth.revision_id)
+    assert (fresh.version, fresh.parent_candidate_id) == (4, v1.recipe_candidate_id)
+
+
+async def test_an_interrupted_latest_is_not_waited_for_when_a_version_is_current(tmp_path):
+    rsi, _ = make_rsi(tmp_path, recipe_reply("V1"), recipe_reply("V3"), recipe_reply("V2"))
+    task, _, done = await first_revision(rsi)
+    v1 = await generate(rsi, task, done)
+    _, second = await next_revision(rsi, task, "two")
+    stopped = await rsi.start_recipe_candidate(task.task_id, revision_id=second.revision_id)
+    interrupt(rsi, stopped.recipe_candidate_id)
+    _, third = await next_revision(rsi, task, "three")
+    fresh = await rsi.start_recipe_candidate(task.task_id, revision_id=third.revision_id)
+    assert (fresh.version, fresh.parent_candidate_id) == (3, v1.recipe_candidate_id)
+    await rsi.wait_workflow_job("recipe_candidate", fresh.recipe_candidate_id)
+    await rsi.resume_recipe_candidate(stopped.recipe_candidate_id)
+    resumed = await rsi.wait_workflow_job("recipe_candidate", stopped.recipe_candidate_id)
+    assert (resumed.version, resumed.parent_candidate_id, resumed.current) == (4, fresh.recipe_candidate_id, True)
+
+
+async def test_with_no_current_version_a_learning_queues_behind_an_interrupted_first_version(tmp_path):
+    rsi, _ = make_rsi(tmp_path)
+    task, _, done = await first_revision(rsi)
+    first = await rsi.start_recipe_candidate(task.task_id, revision_id=done.revision_id)
+    interrupt(rsi, first.recipe_candidate_id)
+    _, second = await next_revision(rsi, task, "two")
+    queued = await rsi.start_recipe_candidate(task.task_id, revision_id=second.revision_id)
+    assert (queued.version, queued.parent_candidate_id) == (2, first.recipe_candidate_id)
+
+
+async def test_a_resumed_candidate_leaves_an_in_flight_parent_on_a_rolled_back_version(tmp_path):
+    rsi, _ = make_rsi(tmp_path, recipe_reply("V1"), recipe_reply("V2"), recipe_reply("Again"))
+    task, _, done = await first_revision(rsi)
+    v1 = await generate(rsi, task, done)
+    _, second = await next_revision(rsi, task, "two")
+    await generate(rsi, task, second)
+    _, third = await next_revision(rsi, task, "three")
+    doomed = await rsi.start_recipe_candidate(task.task_id, revision_id=third.revision_id)
+    _, fourth = await next_revision(rsi, task, "four")
+    child = await rsi.start_recipe_candidate(task.task_id, revision_id=fourth.revision_id)
+    assert child.parent_candidate_id == doomed.recipe_candidate_id
+    interrupt(rsi, child.recipe_candidate_id)
+    move_current(rsi, v1.recipe_candidate_id)
+    await rsi.resume_recipe_candidate(child.recipe_candidate_id)
+    job = await rsi.wait_workflow_job("recipe_candidate", child.recipe_candidate_id)
+    assert (job.version, job.parent_candidate_id, job.current) == (5, v1.recipe_candidate_id, True)
+
+
+async def test_an_in_flight_child_does_not_pin_a_resumed_candidate_to_a_rolled_back_version(tmp_path):
+    rsi, _ = make_rsi(tmp_path, recipe_reply("V1"), recipe_reply("V2"))
+    task, _, done = await first_revision(rsi)
+    v1 = await generate(rsi, task, done)
+    _, second = await next_revision(rsi, task, "two")
+    await generate(rsi, task, second)
+    _, third = await next_revision(rsi, task, "three")
+    stopped = await rsi.start_recipe_candidate(task.task_id, revision_id=third.revision_id)
+    _, fourth = await next_revision(rsi, task, "four")
+    await rsi.start_recipe_candidate(task.task_id, revision_id=fourth.revision_id)  # queued behind it
+    interrupt(rsi, stopped.recipe_candidate_id)
+    move_current(rsi, v1.recipe_candidate_id)
+    await rsi.resume_recipe_candidate(stopped.recipe_candidate_id)
+    view = await rsi.get_recipe_candidate(stopped.recipe_candidate_id)
+    assert (view.version, view.parent_candidate_id, view.status) == (5, v1.recipe_candidate_id, "queued")
+
+
+async def test_an_interrupted_candidate_resumes_behind_a_newer_one_although_its_child_waits_for_it(tmp_path):
+    rsi, _ = make_rsi(tmp_path, recipe_reply("V1"), recipe_reply("V4"), recipe_reply("V2"))
+    task, _, done = await first_revision(rsi)
+    v1 = await generate(rsi, task, done)
+    _, second = await next_revision(rsi, task, "two")
+    stopped = await rsi.start_recipe_candidate(task.task_id, revision_id=second.revision_id)
+    _, third = await next_revision(rsi, task, "three")
+    child = await rsi.start_recipe_candidate(task.task_id, revision_id=third.revision_id)
+    assert child.parent_candidate_id == stopped.recipe_candidate_id
+    interrupt(rsi, stopped.recipe_candidate_id)
+    _, fourth = await next_revision(rsi, task, "four")
+    fresh = await rsi.start_recipe_candidate(task.task_id, revision_id=fourth.revision_id)
+    assert (fresh.version, fresh.parent_candidate_id) == (4, v1.recipe_candidate_id)
+    # The child waits on the interrupted candidate, but it does not keep it on V1, where it would race the new V4.
+    await rsi.resume_recipe_candidate(stopped.recipe_candidate_id)
+    await rsi.wait_workflow_job("recipe_candidate", fresh.recipe_candidate_id)
+    job = await rsi.wait_workflow_job("recipe_candidate", stopped.recipe_candidate_id)
+    assert (job.version, job.parent_candidate_id, job.current) == (5, fresh.recipe_candidate_id, True)
+
+
+async def test_rolled_back_follows_the_current_versions_ancestors(tmp_path):
+    rsi, _ = make_rsi(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 5)))
+    task, _, done = await first_revision(rsi)
+    versions = [await generate(rsi, task, done)]
+    for key in ("two", "three"):
+        _, revision = await next_revision(rsi, task, key)
+        versions.append(await generate(rsi, task, revision))
+
+    async def flags():
+        return [(item.version, item.rolled_back) for item in (await rsi.get_recipe_versions(versions[0].recipe_id)).versions]
+
+    move_current(rsi, versions[0].recipe_candidate_id)
+    assert await flags() == [(1, False), (2, True), (3, True)]
+    _, fourth = await next_revision(rsi, task, "four")
+    versions.append(await generate(rsi, task, fourth))
+    assert await flags() == [(1, False), (2, True), (3, True), (4, False)]
+    move_current(rsi, versions[2].recipe_candidate_id)
+    assert await flags() == [(1, False), (2, False), (3, False), (4, True)]
+
+
 async def test_same_revision_reuses_the_candidate(tmp_path):
     rsi, _ = make_rsi(tmp_path, recipe_reply())
     task, _, done = await first_revision(rsi)

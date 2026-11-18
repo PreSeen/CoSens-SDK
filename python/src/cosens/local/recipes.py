@@ -210,19 +210,33 @@ class LocalRecipeLifecycle:
         view = self._checked_view(db, self._candidate(db, head["current_candidate_id"]))
         return {k: view[k] for k in ("recipe_id", "recipe_candidate_id", "version", "recipe_sha256", "recipe")}
 
+    def _roots_at_current(self, db, candidate_id, current_candidate_id):
+        """Whether ``candidate_id`` builds on the current version: past the in-flight versions on its way up, the first
+        version is the current one, as the service decides it."""
+        while candidate_id is not None and self._candidate(db, candidate_id)["state"] in _IN_FLIGHT:
+            candidate_id = self._lineage(db, candidate_id)["parent_candidate_id"]
+        return candidate_id is not None and candidate_id == current_candidate_id
+
     def _register_version(self, db, candidate_id, task_id, head):
+        """A new candidate builds on the version new executions use: the current one, or the in-flight latest when
+        that builds on the current one. Before any version is finished it queues behind the latest unless that
+        failed or awaits material."""
         if head is None:
             recipe_id, parent, version = candidate_id, None, 1
             db.execute("INSERT INTO recipe_heads(recipe_id,current_candidate_id,latest_candidate_id) VALUES(?,NULL,?)",
                        (recipe_id, candidate_id))
             db.execute("INSERT INTO task_recipes VALUES(?,?)", (task_id, recipe_id))
         else:
-            recipe_id, parent = head["recipe_id"], head["latest_candidate_id"]
-            state = db.execute("SELECT state FROM recipe_candidates WHERE id=?", (parent,)).fetchone()["state"]
-            if state in ("failed", "awaiting_material"):
-                parent = head["current_candidate_id"]
-            if not parent:
-                raise ValueError("initial Recipe must be recovered before further improvement")
+            recipe_id, current, latest = head["recipe_id"], head["current_candidate_id"], head["latest_candidate_id"]
+            state = self._candidate(db, latest)["state"]
+            if current is None:
+                if state in ("failed", "awaiting_material"):
+                    raise ValueError("initial Recipe must be recovered before further improvement")
+                parent = latest
+            elif state in _IN_FLIGHT and self._roots_at_current(db, latest, current):
+                parent = latest
+            else:
+                parent = current
             version = db.execute("SELECT MAX(version)+1 AS version FROM recipe_versions WHERE recipe_id=?",
                                  (recipe_id,)).fetchone()["version"]
             db.execute("UPDATE recipe_heads SET latest_candidate_id=? WHERE recipe_id=?", (candidate_id, recipe_id))
@@ -343,26 +357,29 @@ class LocalRecipeLifecycle:
         service rebases a resumed learning.
 
         Its frozen context holds only its own revision history and Memory; the parent is read when generation runs, so
-        moving the lineage is enough. It stays behind an in-flight parent, is left alone while one of its descendants is
-        in flight, and with no current or in-flight version keeps its lineage."""
+        moving the lineage is enough. It stays behind an in-flight parent, is left alone while one of its descendants
+        is in flight, and with no current version keeps its lineage. Only in-flight versions that build on the current
+        version count (_roots_at_current), as on the service: one built on a rolled-back version fails."""
         lineage = self._lineage(db, candidate_id)
-        parent, latest = lineage["parent_candidate_id"], lineage["latest_candidate_id"]
+        parent, latest, current = lineage["parent_candidate_id"], lineage["latest_candidate_id"], lineage["current_candidate_id"]
 
-        def in_flight(other):
-            return other is not None and self._candidate(db, other)["state"] in _IN_FLIGHT
+        def in_flight_on_current(other):
+            return (other is not None and self._candidate(db, other)["state"] in _IN_FLIGHT
+                    and self._roots_at_current(db, other, current))
 
         placeholders = ",".join("?" * len(_IN_FLIGHT))
-        if db.execute("WITH RECURSIVE descendants AS (SELECT candidate_id FROM recipe_versions WHERE parent_candidate_id=? "
-                      "UNION ALL SELECT v.candidate_id FROM recipe_versions v JOIN descendants d ON v.parent_candidate_id=d.candidate_id) "
-                      f"SELECT 1 FROM descendants d JOIN recipe_candidates c ON c.id=d.candidate_id WHERE c.state IN ({placeholders}) "
-                      "LIMIT 1", (candidate_id, *_IN_FLIGHT)).fetchone():
+        if any(in_flight_on_current(row["candidate_id"]) for row in db.execute(
+                "WITH RECURSIVE descendants AS (SELECT candidate_id FROM recipe_versions WHERE parent_candidate_id=? "
+                "UNION ALL SELECT v.candidate_id FROM recipe_versions v JOIN descendants d ON v.parent_candidate_id=d.candidate_id) "
+                f"SELECT d.candidate_id FROM descendants d JOIN recipe_candidates c ON c.id=d.candidate_id WHERE c.state IN ({placeholders})",
+                (candidate_id, *_IN_FLIGHT)).fetchall()):
             return
-        if in_flight(parent):
+        if in_flight_on_current(parent):
             base = parent
-        elif latest != candidate_id and in_flight(latest):
+        elif latest != candidate_id and in_flight_on_current(latest):
             base = latest
         else:
-            base = lineage["current_candidate_id"]
+            base = current
         if base is None:
             return
         base_version = db.execute("SELECT version FROM recipe_versions WHERE candidate_id=?", (base,)).fetchone()["version"]
@@ -669,12 +686,18 @@ class LocalRecipeLifecycle:
         return result({"task_id": task_id, "recipe_id": head["recipe_id"], "status": latest["status"], "current": current, "latest": latest})
 
     async def get_recipe_versions(self, recipe_id):
+        """Every version of the chain; ``rolled_back`` marks a finished version the current version does not lead to."""
         with self._store.reading() as db:
             head = db.execute("SELECT * FROM recipe_heads WHERE recipe_id=?", (recipe_id,)).fetchone()
             if head is None:
                 raise LookupError("Recipe not found")
             rows = db.execute("SELECT candidate_id FROM recipe_versions WHERE recipe_id=? ORDER BY version", (recipe_id,)).fetchall()
-            versions = [self._checked_view(db, self._candidate(db, r["candidate_id"])) for r in rows]
+            line, candidate_id = set(), head["current_candidate_id"]
+            while candidate_id is not None:
+                line.add(candidate_id)
+                candidate_id = self._lineage(db, candidate_id)["parent_candidate_id"]
+            versions = [{**view, "rolled_back": view["status"] == "candidate" and view["recipe_candidate_id"] not in line}
+                        for view in (self._checked_view(db, self._candidate(db, r["candidate_id"])) for r in rows)]
         return result({"recipe_id": recipe_id, "current_candidate_id": head["current_candidate_id"],
                        "latest_candidate_id": head["latest_candidate_id"], "versions": versions})
 
