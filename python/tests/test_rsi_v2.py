@@ -394,6 +394,7 @@ def test_uncovered_criteria_excluded_from_scoring_and_iteration(
     class CoverageRuntime(FileRuntime):
         def analyze(self, context, files, trace_path):
             analysis = super().analyze(context, files, trace_path)
+            analysis["recipe_name"] = "Format signed answers"
             analysis["rubrics"]["criteria"].append(
                 {
                     "id": "negative-answer-format",
@@ -403,6 +404,11 @@ def test_uncovered_criteria_excluded_from_scoring_and_iteration(
                 }
             )
             return analysis
+
+        def generate(self, context, files, trace_path):
+            assert context["recipe_name"] == "Format signed answers"
+            result = super().generate(context, files, trace_path)
+            return {**result, "title": f"Alternative title {self.generation_count}"}
 
         def assess(self, context, files, trace_path):
             result = super().assess(context, files, trace_path)
@@ -424,6 +430,9 @@ def test_uncovered_criteria_excluded_from_scoring_and_iteration(
     assert result["result"]["activated"] == (expected_status == "passed")
     assert runtime.generation_count == expected_rounds
     assert len(result["test_results"]) == expected_rounds
+    assert result["name"] == client.recipe_list()[0]["name"] == "Format signed answers"
+    for version in client.recipe_version_list(result["recipe_id"]):
+        assert version["content"]["title"] == result["name"]
     for test in result["test_results"]:
         assert test["score"] == covered_score
         assert test["scores"][1]["status"] == "unverified"
@@ -463,7 +472,18 @@ def test_answer_during_generation_restarts_revision(client, tmp_path):
     execution = run(client, material(client, tmp_path)["id"], auto_activate=True)
 
     class AnsweringRuntime(FileRuntime):
-        def generate(self, *args):
+        def analyze(self, context, *args):
+            return {
+                **super().analyze(context, *args),
+                "recipe_name": "Attempted rename"
+                if context["answers"]
+                else "Format numbers",
+            }
+
+        def generate(self, context, *args):
+            assert context["recipe_name"] == "Format numbers"
+            assert client.execution_get(execution["id"])["name"] == "Format numbers"
+            assert client.recipe_list()[0]["name"] == "Format numbers"
             if not self.generation_count:
                 client.execution_clarification_answer(
                     execution["id"],
@@ -471,7 +491,7 @@ def test_answer_during_generation_restarts_revision(client, tmp_path):
                     question_revision=1,
                     selected_option_ids=["decimal"],
                 )
-            return super().generate(*args)
+            return super().generate(context, *args)
 
     runtime = AnsweringRuntime(questions=True)
     client.run_pending(runtime=runtime)
@@ -479,6 +499,9 @@ def test_answer_during_generation_restarts_revision(client, tmp_path):
     assert final["status"] == "completed", final
     assert final["input_revision"] == 2
     assert runtime.generation_count == 2
+    recipe = client.recipe_get(final["recipe_id"])
+    assert final["name"] == recipe["name"] == "Format numbers"
+    assert recipe["selected_version"]["content"]["title"] == final["name"]
     assert all(t["input_revision"] == 2 for t in final["test_results"])
     assert final["result"]["activated"]
 
@@ -659,6 +682,9 @@ def test_crash_reclaims_expired_run_and_resumes_checkpoint(client, tmp_path):
     execution = run(client, material(client, tmp_path)["id"])
 
     class CrashingRuntime(FileRuntime):
+        def analyze(self, *args):
+            return {**super().analyze(*args), "recipe_name": "Write an answer file"}
+
         def execute(self, *args):
             super().execute(*args)
             # Simulates process exit, not a catchable model/runtime failure.
@@ -678,6 +704,12 @@ def test_crash_reclaims_expired_run_and_resumes_checkpoint(client, tmp_path):
     recovered = client.execution_get(execution["id"])
     assert recovered["status"] == "completed", recovered
     assert recovered_runtime.generation_count == 0
+    assert (
+        recovered["name"]
+        == before["name"]
+        == client.recipe_list()[0]["name"]
+        == "Write an answer file"
+    )
     assert len(client.recipe_version_list(recovered["recipe_id"])) == 1
     assert len(client.rubrics_list()) == 1
     assert (

@@ -168,8 +168,10 @@ export class Engine {
         evidence_refs.map(({ locator }) => locator),
       ),
     );
+    const recipeName = this.store.executionRecipeName(execution);
     const context: Record<string, unknown> = {
       ...this.context(execution),
+      recipe_name: recipeName,
       fixed_rubrics: fixedRubrics,
       user_feedback: feedback,
     };
@@ -190,18 +192,21 @@ export class Engine {
             !evidence.some(({ locator }) => feedbackLocators.has(locator)),
         );
       if (
-        fixedRubrics ||
-        (!literals.foundIn(rubricRuleText(analysis.rubrics)) &&
-          !ungroundedFeedback)
+        (recipeName ||
+          !analysis.recipe_name ||
+          !literals.foundIn([analysis.recipe_name])) &&
+        (fixedRubrics ||
+          (!literals.foundIn(rubricRuleText(analysis.rubrics)) &&
+            !ungroundedFeedback))
       )
         break;
       if (attempt === 2)
         fail(
           'invalid_model_output',
-          'Rubric rules contain learning-only details or unsupported feedback citations',
+          'Recipe name or Rubric rules contain learning-only details or unsupported feedback citations',
         );
       context.portability_feedback =
-        'Rewrite the Rubric as reusable rules for any future input. Express the requirements without copying details or references specific to past executions. Refer to input roles instead of naming learning source files. Use an evidence reference from an extracted rule for every user_feedback criterion.';
+        'Rewrite the Rubric as reusable rules for any future input. Express the requirements without copying details or references specific to past executions. Refer to input roles instead of naming learning source files. Use an evidence reference from an extracted rule for every user_feedback criterion. If asked to propose a Recipe name, make it reusable and omit learning-only details.';
     }
     const locators = new Set(files.map((file) => file.locator));
     for (const cause of analysis.attribution?.possible_causes ?? []) {
@@ -227,6 +232,7 @@ export class Engine {
         }
       }
     }
+    if (recipeName) delete analysis.recipe_name;
     if (feedback !== undefined) analysis.feedback = feedback;
     for (const question of analysis.questions)
       question.revision = state.revision;
@@ -246,6 +252,7 @@ export class Engine {
       }
       this.store.save({
         ...current,
+        name: this.store.executionRecipeName(current) ?? analysis.recipe_name,
         questions: analysis.questions,
         hypothesis: analysis.hypothesis,
         analysis,
@@ -295,6 +302,7 @@ export class Engine {
     );
     const context: Record<string, unknown> = {
       ...this.context(execution),
+      recipe_name: this.store.executionRecipeName(execution),
       analysis: state.analysis,
       previous_test: state.test,
       base_recipe: base?.content,
@@ -308,6 +316,8 @@ export class Engine {
           join(this.directory(state.revision), `generate-${round}.json`),
         ),
       );
+      if (typeof context.recipe_name === 'string')
+        content.title = context.recipe_name;
       if (!literals.foundIn(Object.values(content))) break;
       if (attempt === 2)
         fail(
@@ -325,7 +335,7 @@ export class Engine {
       const recipe = recipeId
         ? this.store.get<Versioned<RecipeContent>>(recipeId, 'recipe')
         : this.store.insert<Versioned<RecipeContent>>('recipe', {
-            name: content.title,
+            name: current.name ?? content.title,
             description: '',
             latest_version_id: null,
             active_version_id: null,
@@ -333,13 +343,19 @@ export class Engine {
       if (recipe.archived_at)
         fail('invalid_state', 'recipe was archived during learning');
       const activation_revision = recipe.revision + 1;
-      const version = this.store.append(recipe, content, key, {
-        activation_revision,
-        execution_id: this.id,
-        input_revision: state.revision,
-      });
+      const version = this.store.append(
+        recipe,
+        { ...content, title: recipe.name ?? content.title },
+        key,
+        {
+          activation_revision,
+          execution_id: this.id,
+          input_revision: state.revision,
+        },
+      );
       this.store.save({
         ...current,
+        name: recipe.name ?? content.title,
         recipe_id: recipe.id,
         recipe_version_id: version.id,
       });

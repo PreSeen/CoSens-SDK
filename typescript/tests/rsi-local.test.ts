@@ -119,6 +119,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         call = {
           name: 'Analysis',
           args: {
+            recipe_name: 'Write checked answers',
             sufficient_information: true,
             hypothesis: null,
             questions: [],
@@ -587,6 +588,7 @@ test('new clarification restarts the input revision and only the corrected versi
         async analyze(context) {
           const hasAnswer = Object.keys(context.answers as object).length > 0;
           return {
+            recipe_name: hasAnswer ? 'Attempted rename' : 'Format numbers',
             sufficient_information: hasAnswer,
             hypothesis: hasAnswer ? null : 'Use decimal temporarily',
             questions: hasAnswer
@@ -622,6 +624,12 @@ test('new clarification restarts the input revision and only the corrected versi
           };
         },
         async generate(context, files) {
+          assert.equal(context.recipe_name, 'Format numbers');
+          assert.equal(
+            client.execution_get(execution.id).name,
+            'Format numbers',
+          );
+          assert.equal(client.recipe_list()[0].name, 'Format numbers');
           const locators = files.map((file) => file.locator);
           assert.ok(
             [oldReference, oldInput, shared, historicalOutput].every(
@@ -705,6 +713,10 @@ test('new clarification restarts the input revision and only the corrected versi
     assert.equal(result.test_results.length, 1);
     assert.equal(result.test_results[0].input_revision, 2);
     assert.equal(result.result?.activated, true);
+    assert.equal(result.name, 'Format numbers');
+    const recipe = client.recipe_get(result.recipe_id!);
+    assert.equal(recipe.name, result.name);
+    assert.equal(recipe.selected_version?.content.title, result.name);
     assert.equal(client.recipe_version_list(result.recipe_id!).length, 1);
   } finally {
     client.close();
@@ -740,6 +752,7 @@ test('an expired worker lease resumes the graph without regenerating the candida
     const runtime: Runtime = {
       async analyze() {
         return {
+          recipe_name: 'Write an answer file',
           sufficient_information: true,
           rubrics: {
             criteria: [
@@ -780,6 +793,7 @@ test('an expired worker lease resumes the graph without regenerating the candida
     );
     const before = client.execution_get(execution.id);
     assert.equal(before.status, 'running');
+    assert.equal(before.name, 'Write an answer file');
     assert.equal(generated, 1);
     client.store.db
       .prepare('UPDATE jobs SET lease_until = 0 WHERE id = ?')
@@ -796,6 +810,8 @@ test('an expired worker lease resumes the graph without regenerating the candida
     assert.equal(after.status, 'completed', JSON.stringify(after.error));
     assert.equal(after.result?.test_status, 'passed');
     assert.equal(after.recipe_version_id, before.recipe_version_id);
+    assert.equal(after.name, before.name);
+    assert.equal(client.recipe_list()[0].name, before.name);
     assert.equal(generated, 1);
     assert.equal(after.test_results.length, 1);
     assert.throws(

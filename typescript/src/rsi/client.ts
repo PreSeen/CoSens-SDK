@@ -345,6 +345,7 @@ export class RSIClient {
   private execution_insert(
     request: Omit<ExecutionCreate, 'idempotency_key'> & {
       answers?: Record<string, unknown>;
+      name?: string;
     },
     config = this.config,
   ): Execution {
@@ -416,7 +417,13 @@ export class RSIClient {
     return obj;
   }
   execution_get(id: string): Execution {
-    return this.store.get(id, 'execution');
+    return this.store.db.transaction(() => {
+      const execution = this.store.get<Execution>(id, 'execution');
+      return {
+        ...execution,
+        name: this.store.executionRecipeName(execution) ?? '首次学习',
+      };
+    })();
   }
   execution_list(options: Pagination = {}): Execution[] {
     return this.store.list('execution', options);
@@ -434,7 +441,7 @@ export class RSIClient {
     },
   ): Promise<Execution> {
     const result = this.store.tx(() => {
-      const obj = this.execution_get(id);
+      const obj = this.store.get<Execution>(id, 'execution');
       this.check_revision(obj, expected_revision);
       if (material_ids !== undefined) {
         if (TERMINAL.has(obj.status))
@@ -460,7 +467,7 @@ export class RSIClient {
   }
   execution_cancel(id: string): Execution {
     return this.store.tx(() => {
-      const obj = this.execution_get(id);
+      const obj = this.store.get<Execution>(id, 'execution');
       if (obj.status === 'completed')
         fail('invalid_state', 'completed execution cannot be cancelled');
       if (TERMINAL.has(obj.status)) return obj;
@@ -494,7 +501,7 @@ export class RSIClient {
         continuation_execution_id: string | null;
       }>('clarification', idempotency_key, request);
       if (prev) return prev;
-      const obj = this.execution_get(id),
+      const obj = this.store.get<Execution>(id, 'execution'),
         q = obj.questions.find(
           (q) =>
             q.id === args.question_id && q.revision === args.question_revision,
@@ -541,6 +548,7 @@ export class RSIClient {
             parent_execution_id: id,
             base_recipe_version_id: obj.recipe_version_id,
             answers: obj.answers,
+            name: this.store.executionRecipeName(obj),
           },
           this.suppliedConfig ?? obj.runtime_config,
         ).id;
@@ -616,7 +624,7 @@ export class RSIClient {
     material_ids?: string[];
   }) {
     const result = this.store.tx(() => {
-      const obj = this.execution_get(execution_id);
+      const obj = this.store.get<Execution>(execution_id, 'execution');
       if (TERMINAL.has(obj.status))
         fail(
           'invalid_state',

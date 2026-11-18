@@ -20,6 +20,7 @@ from .models import (
     FeedbackExtraction,
     InvalidState,
     ModelOutputError,
+    NamedAnalysis,
     RecipeContent,
 )
 
@@ -196,7 +197,9 @@ class ChatRuntime:
                 ),
             },
         ]
-        final_name = schema.__name__ if schema is not None else None
+        final_name = (
+            "Analysis" if schema is NamedAnalysis else getattr(schema, "__name__", None)
+        )
         by_name = {tool.name: tool for tool in tools}
         definitions = [tool.definition() for tool in tools]
         if final_name:
@@ -322,8 +325,13 @@ class ChatRuntime:
             context=context,
             files=files,
             trace_path=trace_path,
-            schema=Analysis,
-            instruction="When generalizing the current execution into a reusable Recipe, decide whether a user choice is necessary. "
+            schema=Analysis if context.get("recipe_name") else NamedAnalysis,
+            instruction=(
+                ""
+                if context.get("recipe_name")
+                else "Read the task context and propose recipe_name, a short standalone title for the reusable capability in the language of the task. Leave out one-off dates, identifiers and learning filenames. "
+            )
+            + "When generalizing the current execution into a reusable Recipe, decide whether a user choice is necessary. "
             "If evidence or an accepted answer resolves the rule and its scope, encode that rule directly. "
             "If an input supplied on future executions or a condition established by the evidence determines the correct behavior, express it as a parameter or conditional branch without asking. "
             "Ask only if at least two interpretations of the same reusable rule remain plausible from the evidence, selecting between them would materially change a future result or applicability, and available evidence and accepted answers cannot resolve the choice. "
@@ -349,7 +357,7 @@ class ChatRuntime:
             trace_path=trace_path,
             schema=RecipeContent,
             instruction="Learn reusable requirements and procedures from the available evidence and accepted clarifications. "
-            "Preserve existing requirements from a base Recipe when the evidence still supports them. "
+            "Preserve existing requirements from a base Recipe when the evidence still supports them. Use the supplied recipe_name as the title when it is present. "
             "Correct verified test failures and failed objective checks. Do not change rules solely because a scenario was unverified. Use analysis.attribution to turn supported corrections into reusable steps or checks. "
             "Preserve the exact terms and values of requirements that the evidence establishes as fixed across executions. "
             "Parameterize details supplied at execution time. A future executor must be able to apply the Recipe using the inputs available to that execution. "

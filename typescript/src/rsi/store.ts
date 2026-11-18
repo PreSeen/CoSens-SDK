@@ -92,6 +92,22 @@ export class Store {
       fail('not_found', `${kind ?? 'object'} not found`);
     return JSON.parse(row!.data) as T;
   }
+  executionRecipeName(execution: Execution): string | undefined {
+    const recipeId =
+      execution.recipe_id ??
+      execution.result?.recipe_id ??
+      execution.test_request?.recipe_id ??
+      null;
+    const baseId = execution.base_recipe_version_id ?? null;
+    if (!recipeId && !baseId) return execution.name;
+    const recipe = this.db
+      .prepare(
+        `SELECT json_extract(data, '$.name') AS name FROM objects
+       WHERE kind='recipe' AND id=COALESCE(?, (SELECT object_id FROM versions WHERE id=?))`,
+      )
+      .get(recipeId, baseId) as { name: string | null } | undefined;
+    return recipe?.name ?? execution.name;
+  }
   insert<T extends ObjectMetadata>(
     kind: Kind,
     data: Record<string, unknown>,

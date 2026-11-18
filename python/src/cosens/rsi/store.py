@@ -102,6 +102,24 @@ class Store:
             return self.get_in(conn, object_id, kind)
 
     @staticmethod
+    def execution_recipe_name(conn, execution):
+        recipe_id = (
+            execution.get("recipe_id")
+            or (execution.get("result") or {}).get("recipe_id")
+            or (execution.get("test_request") or {}).get("recipe_id")
+        )
+        base_id = execution.get("base_recipe_version_id")
+        if recipe_id or base_id:
+            row = conn.execute(
+                """SELECT json_extract(data, '$.name') FROM objects
+                WHERE kind='recipe' AND id=COALESCE(?, (SELECT object_id FROM versions WHERE id=?))""",
+                (recipe_id, base_id),
+            ).fetchone()
+            if row and row[0]:
+                return row[0]
+        return execution.get("name")
+
+    @staticmethod
     def insert(conn, kind, data):
         now = time.time()
         data = {
@@ -220,6 +238,11 @@ class Store:
                         "input_revision": revision,
                     },
                 )["id"]
+            name = self.execution_recipe_name(conn, execution) or analysis.get(
+                "recipe_name"
+            )
+            if name:
+                execution["name"] = name
             execution.update(
                 questions=analysis["questions"],
                 hypothesis=analysis["hypothesis"],
@@ -259,7 +282,7 @@ class Store:
                     conn,
                     "recipe",
                     {
-                        "name": content["title"],
+                        "name": execution.get("name") or content["title"],
                         "description": "",
                         "latest_version_id": None,
                         "active_version_id": None,
@@ -272,7 +295,7 @@ class Store:
             version = self.append_version(
                 conn,
                 recipe,
-                content,
+                {**content, "title": recipe["name"]},
                 operation_key=operation_key,
                 provenance={
                     "execution_id": execution_id,
@@ -280,7 +303,11 @@ class Store:
                     "activation_revision": activation_revision,
                 },
             )
-            execution.update(recipe_id=recipe["id"], recipe_version_id=version["id"])
+            execution.update(
+                name=recipe["name"],
+                recipe_id=recipe["id"],
+                recipe_version_id=version["id"],
+            )
             self.save(conn, execution)
             return version
 

@@ -101,6 +101,7 @@ def gateway(monkeypatch):
                     name, arguments = (
                         "Analysis",
                         {
+                            "recipe_name": "Write checked answers",
                             "sufficient_information": True,
                             "hypothesis": None,
                             "questions": [],

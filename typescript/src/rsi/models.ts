@@ -150,8 +150,15 @@ const AttributionSchema = z.strictObject({
     )
     .min(1),
 });
+const recipeName = z
+  .string()
+  .trim()
+  .min(1)
+  .max(120)
+  .regex(/^[^\r\n]+$/u);
 export const AnalysisSchema = z
   .strictObject({
+    recipe_name: recipeName.optional(),
     sufficient_information: z.boolean(),
     hypothesis: z.string().nullable().default(null),
     questions: z.array(QuestionSchema).default([]),
@@ -169,6 +176,9 @@ export const AnalysisSchema = z
     (a) => new Set(a.questions.map((q) => q.id)).size === a.questions.length,
     'question IDs must be unique',
   );
+export const NamedAnalysisSchema = AnalysisSchema.safeExtend({
+  recipe_name: recipeName,
+});
 export type Analysis = z.output<typeof AnalysisSchema> & {
   feedback?: z.output<typeof FeedbackExtractionSchema>['items'];
 };

@@ -106,6 +106,9 @@ class Engine:
                 "rubrics_version_id": execution["resolved_rubrics_version_id"],
             }
         context = self.context(execution)
+        with self.store.connect() as conn:
+            recipe_name = self.store.execution_recipe_name(conn, execution)
+        context["recipe_name"] = recipe_name
         fixed_rubrics_id = (execution.get("test_request") or {}).get(
             "rubrics_version_id"
         ) or execution.get("rubrics_version_id")
@@ -154,19 +157,27 @@ class Engine:
                 )
                 for criterion in analysis["rubrics"]["criteria"]
             )
-            if fixed_rubrics_id or (
-                not literals.found_in(rubric_rule_text(analysis["rubrics"]))
-                and not ungrounded_feedback
+            proposed_name = analysis.get("recipe_name")
+            if (
+                recipe_name
+                or not proposed_name
+                or not literals.found_in([proposed_name])
+            ) and (
+                fixed_rubrics_id
+                or (
+                    not literals.found_in(rubric_rule_text(analysis["rubrics"]))
+                    and not ungrounded_feedback
+                )
             ):
                 break
             if attempt == 2:
                 raise ModelOutputError(
-                    "Rubric rules contain learning-only details or unsupported feedback citations"
+                    "Recipe name or Rubric rules contain learning-only details or unsupported feedback citations"
                 )
             context["portability_feedback"] = (
                 "Rewrite the Rubric as reusable rules for any future input. "
                 "Express the requirements without copying details or references specific to past executions. Refer to input roles instead of naming learning source files. "
-                "Use an evidence reference from an extracted rule for every user_feedback criterion."
+                "Use an evidence reference from an extracted rule for every user_feedback criterion. If asked to propose a Recipe name, make it reusable and omit learning-only details."
             )
         locators = {file["locator"] for file in files}
         for cause in (analysis["attribution"] or {}).get("possible_causes", []):
@@ -190,6 +201,8 @@ class Engine:
                     )
         if fixed_rubrics_id:
             analysis["rubrics"] = context["fixed_rubrics"]
+        if recipe_name:
+            analysis.pop("recipe_name", None)
         if feedback is not None:
             analysis["feedback"] = feedback
         for question in analysis["questions"]:
@@ -202,8 +215,11 @@ class Engine:
     def generate(self, state):
         execution = self.begin(state, "generate")
         round_number = state.get("round", 0) + 1
+        with self.store.connect() as conn:
+            recipe_name = self.store.execution_recipe_name(conn, execution)
         context = {
             **self.context(execution),
+            "recipe_name": recipe_name,
             "analysis": state["analysis"],
             "previous_test": state.get("test"),
         }
@@ -241,6 +257,8 @@ class Engine:
                     self.directory(state) / f"generate-{round_number}.json",
                 )
             ).model_dump()
+            if recipe_name:
+                content["title"] = recipe_name
             if not literals.found_in(content.values()):
                 break
             if attempt == 2:

@@ -352,7 +352,13 @@ class RSIClient:
         return obj
 
     def execution_get(self, execution_id):
-        return self.store.get(execution_id, "execution")
+        with self.store.connect() as conn:
+            conn.execute("BEGIN")
+            execution = self.store.get_in(conn, execution_id, "execution")
+            execution["name"] = (
+                self.store.execution_recipe_name(conn, execution) or "首次学习"
+            )
+            return execution
 
     def execution_list(self, **pagination):
         return self.store.list("execution", **pagination)
@@ -496,6 +502,9 @@ class RSIClient:
                         "source_session_id",
                     )
                 }
+                name = self.store.execution_recipe_name(conn, obj)
+                if name:
+                    inherited["name"] = name
                 inherited.update(
                     parent_execution_id=execution_id,
                     base_recipe_version_id=obj["recipe_version_id"],

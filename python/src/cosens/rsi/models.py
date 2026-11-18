@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 
 class RSIError(RuntimeError):
@@ -172,7 +172,16 @@ class Attribution(Contract):
     possible_causes: list[PossibleCause] = Field(min_length=1)
 
 
+RecipeName = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True, min_length=1, max_length=120, pattern=r"^[^\r\n]+$"
+    ),
+]
+
+
 class Analysis(Contract):
+    recipe_name: RecipeName | None = None
     sufficient_information: bool
     hypothesis: str | None = None
     questions: list[Question] = Field(default_factory=list)
@@ -194,6 +203,10 @@ class Analysis(Contract):
         if len({q.id for q in self.questions}) != len(self.questions):
             raise ValueError("question IDs must be unique")
         return self
+
+
+class NamedAnalysis(Analysis):
+    recipe_name: RecipeName
 
 
 class RecipeContent(Contract):
