@@ -39,6 +39,18 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       );
       let call: { name: string; args: object } | undefined;
       const evidence = evidence_catalog[0];
+      const attribution = evidence && {
+        possible_causes: [
+          {
+            observed_issue: 'Prior output used 24; user corrected it to 42',
+            reason: 'The digits may have been transposed',
+            uncertainty: 'The previous reasoning was not recorded',
+            evidence_refs: [
+              { material_id: evidence.material_id, locator: evidence.locator },
+            ],
+          },
+        ],
+      };
       if (!afterTool) {
         call = tools.has('write_output')
           ? {
@@ -53,6 +65,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
             sufficient_information: true,
             hypothesis: null,
             questions: [],
+            attribution,
             rubrics: {
               criteria: [
                 {
@@ -71,6 +84,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           },
         };
       } else if (tools.has('RecipeContent')) {
+        assert.deepEqual(context.analysis.attribution, attribution);
         call = {
           name: 'RecipeContent',
           args: {
@@ -152,7 +166,10 @@ test('independent Node hooks enqueue work that persists and passes a file test a
   });
   try {
     const path = join(directory, 'context.md');
-    writeFileSync(path, 'Produce answer.txt with 42');
+    writeFileSync(
+      path,
+      'Produce answer.txt with 42. The user corrected the prior output from 24 to 42.',
+    );
     const material = client.material_create({
       manifest: { context_path: path },
     });
@@ -195,6 +212,10 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       const run = await client.wait(id, { timeout: 25, poll_interval: 0.05 });
       assert.equal(run.status, 'completed', JSON.stringify(run.error));
       assert.equal(run.result?.test_status, 'passed');
+      assert.deepEqual(
+        run.analysis?.attribution?.possible_causes[0].evidence_refs,
+        [{ material_id: material.id, locator: material.files[0].locator }],
+      );
       assert.equal(run.result?.activated, true);
       assert.equal(
         readFileSync(run.test_results[0].artifacts[0].path, 'utf8'),

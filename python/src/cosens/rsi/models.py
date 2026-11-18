@@ -151,11 +151,23 @@ class Question(Contract):
         return self
 
 
+class PossibleCause(Contract):
+    observed_issue: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    uncertainty: str = Field(min_length=1)
+    evidence_refs: list[EvidenceRef] = Field(min_length=1)
+
+
+class Attribution(Contract):
+    possible_causes: list[PossibleCause] = Field(min_length=1)
+
+
 class Analysis(Contract):
     sufficient_information: bool
     hypothesis: str | None = None
     questions: list[Question] = Field(default_factory=list)
     rubrics: RubricsContent
+    attribution: Attribution | None = None
 
     @model_validator(mode="after")
     def necessary_questions(self):

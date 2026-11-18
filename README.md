@@ -14,6 +14,8 @@ Host Hook → local SDK → SQLite queue → on-demand worker
 
 The host confirms the deliverable and selects the task trajectory. It creates a Material from local file paths, calls `execution_create`, then uses the returned ID to read status or answer clarification questions. The worker continues after the Hook returns.
 
+When the learning evidence includes a correction, the worker records likely causes and their source references in `execution_get` → `analysis.attribution`. Recipe generation uses those findings to write reusable steps or checks. A successful `recipe_test` shows that the Recipe met the Rubrics on the test input.
+
 Use separate data directories for the two runtimes. Each owns its local SQLite queue, files and checkpoints.
 
 Run the checks from each package directory with `npm ci && npm run check` or `python -m pip install '.[test]' && python -m pytest`.

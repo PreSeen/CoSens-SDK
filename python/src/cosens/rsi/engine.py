@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TypedDict
 
 from .materials import atomic_json, authorized_test_files, digest
-from .models import Analysis, Assessment, InputChanged, RecipeContent
+from .models import Analysis, Assessment, InputChanged, ModelOutputError, RecipeContent
 from .store import uid
 
 
@@ -87,12 +87,18 @@ class Engine:
             context["fixed_rubrics"] = self.store.version_by_id(
                 fixed_rubrics_id, "rubrics"
             )["content"]
+        files = self.files(execution)
         analysis = Analysis.model_validate(
             self.runtime.analyze(
-                context, self.files(execution), self.directory(state) / "analysis.json"
+                context, files, self.directory(state) / "analysis.json"
             )
         ).model_dump()
-        locators = {f["locator"] for f in self.files(execution)}
+        locators = {file["locator"] for file in files}
+        for cause in (analysis["attribution"] or {}).get("possible_causes", []):
+            if any(ref["locator"] not in locators for ref in cause["evidence_refs"]):
+                raise ModelOutputError(
+                    "Attribution contains unauthorized evidence references"
+                )
         for criterion in (
             analysis["rubrics"]["criteria"] if not fixed_rubrics_id else []
         ):

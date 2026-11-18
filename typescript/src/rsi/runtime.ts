@@ -32,13 +32,13 @@ const stages = {
     name: 'analysis',
     schema: AnalysisSchema.meta({ title: 'Analysis' }),
     instruction:
-      'Determine whether essential Recipe information is missing. If sufficient, set hypothesis=null and questions=[]. Otherwise form a provisional hypothesis and offer 2–3 options per question. Continue without waiting. Derive Rubrics from the task, explicit feedback and the trajectory. Preserve supplied fixed Rubrics.',
+      'Determine whether essential Recipe information is missing. If sufficient, set hypothesis=null and questions=[]. Otherwise form a provisional hypothesis and offer 2–3 options per question. Continue without waiting. Derive Rubrics from the task, explicit feedback and the trajectory. Preserve supplied fixed Rubrics. When learning evidence contains corrective feedback or a documented correction, fill attribution.possible_causes. Describe the observed issue separately from a plausible reason, explain the uncertainty, and cite the exact material_id and locator of each source you read. Return attribution=null if there is no evidence of a correction. Treat reasons as hypotheses even when the correction is confirmed.',
   },
   generation: {
     name: 'recipe generation',
     schema: RecipeSchema.meta({ title: 'RecipeContent' }),
     instruction:
-      'Derive reusable instructions from observed evidence, accepted answers and any base Recipe. Correct failures observed in the previous test. Use parameters for future task inputs. Keep instance values, file locators, secrets and unconfirmed assumptions out of reusable instructions.',
+      'Derive reusable instructions from observed evidence, accepted answers and any base Recipe. Correct failures observed in the previous test. Use parameters for future task inputs. Keep instance values, file locators, secrets and unconfirmed assumptions out of reusable instructions. Use analysis.attribution to turn supported corrections into reusable instructions or checks. For a revision, retain applicable base instructions unaffected by the correction. Encode uncertain causes as conditional checks where justified, never as facts.',
   },
   execution: {
     name: 'recipe test executor',

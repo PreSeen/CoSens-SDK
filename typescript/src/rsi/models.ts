@@ -129,12 +129,25 @@ export const QuestionSchema = z
     'option IDs must be unique',
   );
 export type Question = z.output<typeof QuestionSchema>;
+const AttributionSchema = z.strictObject({
+  possible_causes: z
+    .array(
+      z.strictObject({
+        observed_issue: text,
+        reason: text,
+        uncertainty: text,
+        evidence_refs: z.array(EvidenceSchema).min(1),
+      }),
+    )
+    .min(1),
+});
 export const AnalysisSchema = z
   .strictObject({
     sufficient_information: z.boolean(),
     hypothesis: z.string().nullable().default(null),
     questions: z.array(QuestionSchema).default([]),
     rubrics: RubricsSchema,
+    attribution: AttributionSchema.nullable().default(null),
   })
   .refine(
     (a) =>

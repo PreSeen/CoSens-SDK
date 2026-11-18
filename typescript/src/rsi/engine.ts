@@ -118,9 +118,17 @@ export class Engine {
         join(this.directory(state.revision), 'analysis.json'),
       ),
     );
+    const locators = new Set(files.map((file) => file.locator));
+    for (const cause of analysis.attribution?.possible_causes ?? []) {
+      if (cause.evidence_refs.some((ref) => !locators.has(ref.locator))) {
+        fail(
+          'invalid_model_output',
+          'Attribution contains unauthorized evidence references',
+        );
+      }
+    }
     if (fixedRubrics) analysis.rubrics = fixedRubrics;
     else {
-      const locators = new Set(files.map((file) => file.locator));
       for (const criterion of analysis.rubrics.criteria) {
         if (
           (criterion.source !== 'agent_inference' &&

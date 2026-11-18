@@ -173,6 +173,7 @@ def test_complete_learning_test_and_activation(client, tmp_path):
     assert result["status"] == "completed", result
     assert result["result"]["test_status"] == "passed"
     assert result["result"]["activated"]
+    assert result["analysis"]["attribution"] is None
     assert result["test_results"][0]["artifacts"][0]["sha256"]
     assert runtime.test_catalogs == [[]]  # host context/output is excluded
     assert (
@@ -187,8 +188,9 @@ def test_complete_learning_test_and_activation(client, tmp_path):
     )
 
 
+@pytest.mark.parametrize("cite_test_input", [False, True])
 def test_test_and_evaluation_catalogs_require_explicit_file_authorization(
-    client, tmp_path
+    client, tmp_path, cite_test_input
 ):
     context = tmp_path / "context.md"
     context.write_text("Create answer.txt with the number in the current input.")
@@ -215,12 +217,34 @@ def test_test_and_evaluation_catalogs_require_explicit_file_authorization(
         with pytest.raises(ValueError, match="input_locators"):
             run(client, m["id"], test_task=task | {"input_locators": [invalid]})
 
+    attribution = {
+        "possible_causes": [
+            {
+                "observed_issue": "The old order was reported with the wrong quantity",
+                "reason": "The quantity columns may have been swapped",
+                "uncertainty": "The historical input does not include the calculation",
+                "evidence_refs": [
+                    {
+                        "material_id": m["id"],
+                        "locator": current if cite_test_input else old_input,
+                    }
+                ],
+            }
+        ]
+    }
+
     class VerifyCatalogs(FileRuntime):
+        def analyze(self, context, files, trace_path):
+            return super().analyze(context, files, trace_path) | {
+                "attribution": attribution
+            }
+
         def generate(self, context, files, trace_path):
             locators = {file["locator"] for file in files}
             assert {old_reference, old_input, shared, historical_output} <= locators
             assert current not in locators
             assert "test_task" not in context["policy"]
+            assert context["analysis"]["attribution"] == attribution
             return super().generate(context, files, trace_path)
 
         def assess(self, context, files, trace_path):
@@ -233,8 +257,14 @@ def test_test_and_evaluation_catalogs_require_explicit_file_authorization(
     runtime = VerifyCatalogs()
     client.run_pending(runtime=runtime)
     result = client.execution_get(execution["id"])
+    if cite_test_input:
+        assert result["status"] == "failed", result
+        assert result["error"]["code"] == "invalid_model_output"
+        assert runtime.generation_count == 0
+        return
     assert result["status"] == "completed", result
     assert result["result"]["test_status"] == "passed"
+    assert result["analysis"]["attribution"] == attribution
     assert [[f["locator"] for f in files] for files in runtime.test_catalogs] == [
         [current, shared]
     ]

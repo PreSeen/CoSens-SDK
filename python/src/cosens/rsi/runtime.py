@@ -230,7 +230,10 @@ class LangChainRuntime:
             "If information is sufficient: sufficient_information=true, hypothesis=null, questions=[]. A hypothesis is not a recipe summary. "
             "Do not ask about hypothetical edge cases outside the task's necessary scope. "
             "Do not pause: state a provisional assumption. Initialize rubrics from task requirements; refine from explicit user feedback and actual trajectory. "
-            "Keep explicit evidence separate from agent inference. If fixed rubrics are supplied, preserve their standard.",
+            "Keep explicit evidence separate from agent inference. If fixed rubrics are supplied, preserve their standard. "
+            "When learning evidence contains corrective feedback or a documented correction, fill attribution.possible_causes. "
+            "Describe the observed issue separately from a plausible reason, explain the uncertainty, and cite the exact material_id and locator of each source you read. "
+            "Return attribution=null if there is no evidence of a correction. Treat reasons as hypotheses even when the correction is confirmed.",
         )
 
     def generate(self, context, files, trace_path):
@@ -242,7 +245,9 @@ class LangChainRuntime:
             schema=RecipeContent,
             instruction="Produce reusable task instructions grounded in evidence, accepted answers and applicable prior recipe. "
             "Correct the previous round's observed failures. Refer to future inputs by their purpose, not historical file locators or paths. "
-            "Do not embed historical record values or task-specific secrets, or present provisional assumptions as confirmed.",
+            "Do not embed historical record values or task-specific secrets, or present provisional assumptions as confirmed. "
+            "Use analysis.attribution to turn supported corrections into reusable instructions or checks. "
+            "For a revision, retain applicable base instructions unaffected by the correction. Encode uncertain causes as conditional checks where justified, never as facts.",
         )
 
     def execute(self, context, files, workspace, trace_path):
