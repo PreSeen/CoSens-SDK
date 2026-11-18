@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -14,7 +15,9 @@ import { join } from 'node:path';
 import test from 'node:test';
 import type { AddressInfo } from 'node:net';
 import Database from 'better-sqlite3';
-import { RSIClient, type Runtime } from '../src/rsi/index.js';
+import { RSIClient } from '../src/rsi/client.js';
+import { RSIClient as PublicRSIClient } from '../src/rsi/index.js';
+import type { Runtime } from '../src/rsi/models.js';
 import { Engine } from '../src/rsi/engine.js';
 import { ChatRuntime } from '../src/rsi/runtime.js';
 
@@ -102,6 +105,29 @@ test('independent Node hooks enqueue work that persists and passes a file test a
                 args: { locator: feedbackSource.locator },
               }
             : { name: 'FeedbackExtraction', args: { items: feedback } };
+      } else if (
+        tools.has('write_output') &&
+        context.test_task.instruction.startsWith('Repeat the current task')
+      ) {
+        assert.deepEqual(
+          evidence_catalog.map((entry: { role: string }) => entry.role),
+          ['input'],
+        );
+        const read = input.messages.find(
+          (m: { role: string }) => m.role === 'tool',
+        );
+        const written =
+          input.messages.filter((m: { role: string }) => m.role === 'tool')
+            .length > 1;
+        if (!read)
+          call = { name: 'read_evidence', args: { locator: evidence.locator } };
+        else if (!written) {
+          assert.match(read.content, /CURRENT_CASE_42/);
+          call = {
+            name: 'write_output',
+            args: { path: 'answer.txt', content: '42' },
+          };
+        }
       } else if (!afterTool) {
         call = tools.has('write_output')
           ? {
@@ -166,7 +192,15 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           },
         };
       } else if (tools.has('Assessment')) {
-        assert.ok(context.objective_checks[0].passed);
+        if (context.test_task.replay_current_case) {
+          assert.deepEqual(context.objective_checks, []);
+          assert.deepEqual(
+            evidence_catalog.map((entry: { role: string }) => entry.role),
+            ['artifact', 'input', 'trace'],
+          );
+        } else {
+          assert.ok(context.objective_checks[0].passed);
+        }
         assert.equal(context.user_feedback, undefined);
         assert.equal(context.rubrics.criteria[0].evidence, undefined);
         assert.ok(
@@ -225,7 +259,8 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
         }),
       );
-    } catch {
+    } catch (error) {
+      console.error(error);
       res
         .writeHead(400)
         .end(JSON.stringify({ error: { message: 'Invalid fixture request' } }));
@@ -253,6 +288,8 @@ test('independent Node hooks enqueue work that persists and passes a file test a
     );
     const feedbackPath = join(directory, 'feedback.md');
     writeFileSync(feedbackPath, 'User: Put only the answer in the file.');
+    const currentPath = join(directory, 'current.txt');
+    writeFileSync(currentPath, 'CURRENT_CASE_42');
     const referencePath = join(directory, 'reference.md');
     writeFileSync(
       referencePath,
@@ -268,16 +305,19 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       },
     });
     const script = `
+      import assert from 'node:assert/strict';
       import { RSIClient } from 'cosens-sdk/rsi';
-      const [data_dir, material_id, key, configText] = process.argv.slice(1);
-      const config = JSON.parse(configText);
-      config.model.model += '-' + key;
-      const client = new RSIClient({ data_dir, config });
+      const [data_dir, evidenceText, key, configText] = process.argv.slice(1);
+      const { model, base_url } = JSON.parse(configText).model;
+      const client = new RSIClient({ data_dir, config: { model: model + '-' + key, base_url, auto_start: true } });
       const execution = await client.execution_create({
-        material_ids: [material_id], idempotency_key: key,
-        policy: { artifact_confirmed: true, confirmation_ref: 'test', auto_activate: true,
-          test_task: { instruction: 'Create answer.txt', checks: [{kind:'text_equals',path:'answer.txt',value:'42'}] } },
+        evidence: JSON.parse(evidenceText), idempotency_key: key, base_execution_id: null,
       });
+      assert.equal('material_create' in client, false);
+      assert.equal('run_pending' in client, false);
+      assert.equal('wait' in client, false);
+      assert.equal('material_ids' in execution, false);
+      assert.equal(execution.evidence.length, 4);
       client.close();
       process.stdout.write(execution.id);
     `;
@@ -310,15 +350,25 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       ['a', 'b', 'c', 'a'].map((key) =>
         runHook(script, [
           data_dir,
-          material.id,
+          JSON.stringify({
+            context_path: path,
+            files: [
+              { path: feedbackPath, role: 'feedback' },
+              { path: referencePath, role: 'reference' },
+              { path: currentPath, role: 'input' },
+            ],
+          }),
           key,
           JSON.stringify(client.config),
         ]),
       ),
     );
     assert.equal(ids[0], ids[3]);
+    assert.equal(readdirSync(join(data_dir, 'materials')).length, 4);
+
     for (const id of new Set(ids)) {
       const run = await client.wait(id, { timeout: 25, poll_interval: 0.05 });
+      const captured = client.material_get(run.material_ids[0]);
       assert.equal(
         run.runtime_config.model.model,
         'fixture-' + ['a', 'b', 'c'][ids.indexOf(id)],
@@ -343,11 +393,11 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       );
       assert.deepEqual(
         run.analysis?.attribution?.possible_causes[0].evidence_refs,
-        [{ material_id: material.id, locator: material.files[0].locator }],
+        [{ material_id: captured.id, locator: captured.files[0].locator }],
       );
       assert.deepEqual(
         run.analysis?.feedback?.map((item) => item.evidence_refs[0].locator),
-        [material.files[0].locator, material.files[1].locator],
+        [captured.files[0].locator, captured.files[1].locator],
       );
       assert.equal(run.result?.activated, true);
       assert.equal(
@@ -358,6 +408,45 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         client.recipe_get(run.recipe_id!).selected_version?.id,
         run.recipe_version_id,
       );
+      const host = new PublicRSIClient({ data_dir, config: null });
+      try {
+        const available = host
+          .recipe_list()
+          .find((row) => row.recipe_id === run.recipe_id);
+        assert.equal('recipe_activate' in host, false);
+        assert.equal(available?.available_version_id, run.recipe_version_id);
+        assert.equal(available?.archived, false);
+        const version_id = run.recipe_version_id!;
+        host.recipe_version_set_archived(run.recipe_id!, {
+          version_id,
+          archived: true,
+        });
+        const archived = host
+          .recipe_list()
+          .find((row) => row.recipe_id === run.recipe_id);
+        assert.equal(archived?.available_version_id, null);
+        assert.equal(archived?.archived, true);
+        assert.equal(
+          host.recipe_get(run.recipe_id!, version_id).selected_version
+            ?.archived,
+          true,
+        );
+        host.recipe_version_set_archived(run.recipe_id!, {
+          version_id,
+          archived: false,
+        });
+        assert.equal(
+          host.recipe_get(run.recipe_id!, 'active').selected_version?.id,
+          version_id,
+        );
+        assert.equal(
+          host.recipe_get(available!.recipe_id!, available!.active_version_id!)
+            .selected_version?.id,
+          run.recipe_version_id,
+        );
+      } finally {
+        host.close();
+      }
       const checkpoint = new Database(
         join(data_dir, 'executions', run.id, 'checkpoints-1.sqlite3'),
         { readonly: true, fileMustExist: true },
@@ -375,8 +464,8 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         checkpoint.close();
       }
     }
-    assert.equal(peak, 1);
-    assert.equal(requests, 33);
+    assert.equal(peak, 2);
+    assert.equal(requests, 36);
     const db = new Database(join(data_dir, 'rsi-ts.sqlite3'), {
       readonly: true,
     });
@@ -389,7 +478,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           .all(),
         [
           { kind: 'execution', n: 3 },
-          { kind: 'material', n: 1 },
+          { kind: 'material', n: 4 },
           { kind: 'recipe', n: 3 },
           { kind: 'rubrics', n: 3 },
         ],
@@ -421,7 +510,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       const reply = await runHook(
         `
         import { RSIClient } from 'cosens-sdk/rsi';
-        const client = new RSIClient({ data_dir: process.argv[1] });
+        const client = new RSIClient({ data_dir: process.argv[1], config: null });
         console.log(JSON.stringify(await client.recover()));
         client.close();
       `,
@@ -486,9 +575,10 @@ test('independent Node hooks enqueue work that persists and passes a file test a
     try {
       const tracePath = join(directory, 'search-trace.json');
       const runtime = new ChatRuntime(client, 'search-test', () => {});
+      const run = client.execution_get(ids[0]);
       await runtime.generate(
-        { analysis: client.execution_get(ids[0]).analysis },
-        material.files,
+        { analysis: run.analysis },
+        client.material_get(run.material_ids[0]).files,
         tracePath,
       );
       const trace = readFileSync(tracePath, 'utf8');
@@ -717,7 +807,7 @@ test('new clarification restarts the input revision and only the corrected versi
     const recipe = client.recipe_get(result.recipe_id!);
     assert.equal(recipe.name, result.name);
     assert.equal(recipe.selected_version?.content.title, result.name);
-    assert.equal(client.recipe_version_list(result.recipe_id!).length, 1);
+    assert.equal(recipe.selected_version?.number, 1);
   } finally {
     client.close();
     rmSync(directory, { recursive: true, force: true });
@@ -748,6 +838,7 @@ test('an expired worker lease resumes the graph without regenerating the candida
         },
       },
     });
+    assert.equal(execution.progress_percent, 0);
     let generated = 0;
     const runtime: Runtime = {
       async analyze() {
@@ -793,6 +884,7 @@ test('an expired worker lease resumes the graph without regenerating the candida
     );
     const before = client.execution_get(execution.id);
     assert.equal(before.status, 'running');
+    assert.equal(before.progress_percent, 40);
     assert.equal(before.name, 'Write an answer file');
     assert.equal(generated, 1);
     client.store.db
@@ -809,11 +901,104 @@ test('an expired worker lease resumes the graph without regenerating the candida
     const after = client.execution_get(execution.id);
     assert.equal(after.status, 'completed', JSON.stringify(after.error));
     assert.equal(after.result?.test_status, 'passed');
+    assert.equal(after.progress_percent, 100);
     assert.equal(after.recipe_version_id, before.recipe_version_id);
     assert.equal(after.name, before.name);
     assert.equal(client.recipe_list()[0].name, before.name);
     assert.equal(generated, 1);
     assert.equal(after.test_results.length, 1);
+    const host = new PublicRSIClient({
+      data_dir: client.data_dir,
+      config: {
+        model: 'fixture',
+        base_url: 'http://127.0.0.1:1/v1',
+        auto_start: false,
+      },
+    });
+    try {
+      const submission = {
+        evidence: { context_path: path, files: [] },
+        base_execution_id: after.id,
+        idempotency_key: 'follow-up',
+      };
+      const followUp = await host.execution_create(submission);
+      assert.equal(followUp.parent_execution_id, after.id);
+      assert.equal(followUp.base_recipe_version_id, after.recipe_version_id);
+      assert.equal((await host.execution_create(submission)).id, followUp.id);
+      assert.equal('execution_update' in host, false);
+      assert.equal('rubrics_update' in host, false);
+      assert.equal('recipe_update' in host, false);
+      assert.equal('recipe_version_list' in host, false);
+      assert.equal('recipe_search' in host, false);
+      assert.ok(
+        host.recipe_list().some((row) => row.recipe_id === after.recipe_id),
+      );
+      const latest = host.recipe_get(
+        after.recipe_id!,
+        'latest',
+      ).selected_version;
+      assert.equal(latest?.id, after.recipe_version_id);
+      assert.deepEqual(
+        host.recipe_get(after.recipe_id!, latest!.id).selected_version,
+        latest,
+      );
+      const feedback = join(directory, 'feedback.md');
+      writeFileSync(feedback, 'Keep the answer concise.');
+      const extra = { context_path: feedback, files: [] };
+      const appended = await host.execution_append_evidence(followUp.id, extra);
+      assert.equal(appended.input_revision, followUp.input_revision + 1);
+      assert.equal(appended.evidence.length, followUp.evidence.length + 1);
+      assert.equal(appended.progress_percent, 0);
+      assert.deepEqual(appended.policy.test_task, followUp.policy.test_task);
+      assert.deepEqual(
+        await host.execution_append_evidence(followUp.id, extra),
+        appended,
+      );
+      await assert.rejects(
+        host.execution_append_evidence(after.id, extra),
+        /terminal inputs are immutable/,
+      );
+      assert.equal(
+        host.recipe_list()[0].available_version_id,
+        after.recipe_version_id,
+      );
+      await client.run_pending({
+        runtime: {
+          ...runtime,
+          async execute(_context, _files, workspace) {
+            writeFileSync(join(workspace, 'answer.txt'), '42');
+          },
+        },
+      });
+      const next = host.execution_get(followUp.id);
+      assert.equal(next.result?.test_status, 'passed');
+      assert.equal(next.progress_percent, 100);
+      assert.equal(
+        host
+          .execution_list({ offset: 0, archived: false })
+          .find((row) => row.id === next.id)?.progress_percent,
+        100,
+      );
+      assert.equal(
+        host.recipe_list()[0].available_version_id,
+        next.recipe_version_id,
+      );
+      assert.equal(
+        host.recipe_get(after.recipe_id!, after.recipe_version_id!)
+          .selected_version?.archived,
+        true,
+      );
+      assert.throws(
+        () =>
+          host.recipe_version_set_archived(after.recipe_id!, {
+            version_id: after.recipe_version_id!,
+            archived: false,
+          }),
+        /only the latest qualified/,
+      );
+    } finally {
+      host.close();
+    }
     assert.throws(
       () => client.store.guard(execution.id, 'old-worker', claim.fence),
       /lease expired/,
@@ -853,10 +1038,28 @@ test('recipe_list shows first-time learning and preserves the usable version dur
       applicability: 'Sample',
       instructions: 'Write the output',
     };
-    const recipe = client.recipe_create({ name: 'Output Recipe', content });
-    const active = recipe.latest_version_id!;
+    for (const method of [
+      'recipe_create',
+      'recipe_version_create',
+      'rubrics_create',
+      'rubrics_version_create',
+      'rubrics_version_list',
+    ]) {
+      assert.equal(method in client, false);
+    }
+    const seed = client.store.insert('recipe', {
+      name: 'Output Recipe',
+      description: '',
+      latest_version_id: null,
+      active_version_id: null,
+    });
+    const active = client.store.append(seed, content).id;
+    const recipe = client.recipe_get(seed.id);
     client.store.save({ ...recipe, active_version_id: active });
-    const candidate = client.recipe_version_create(recipe.id, { content });
+    const candidate = client.store.append(
+      client.recipe_get(recipe.id),
+      content,
+    );
     client.store.save({
       ...client.execution_get(execution.id),
       base_recipe_version_id: active,

@@ -214,6 +214,7 @@ export const PolicySchema = z.strictObject({
   test_task: z
     .strictObject({
       instruction: text,
+      replay_current_case: z.literal(true).nullish(),
       input_locators: z.array(text).nullable().optional(),
       shared_reference_locators: z.array(text).nullable().optional(),
       checks: z.array(CheckSchema).default([]),
@@ -270,11 +271,13 @@ export interface Version<C = unknown> {
   number: number;
   content: C;
   provenance: Record<string, unknown>;
+  archived?: boolean;
   created_at: number;
 }
 export interface Versioned<C = unknown> extends ObjectMetadata {
   latest_version_id: string | null;
   active_version_id?: string | null;
+  latest_qualified_version_id?: string | null;
   selected_version?: Version<C> | null;
 }
 export interface TestResult {
@@ -314,6 +317,7 @@ export interface Execution extends ObjectMetadata {
   base_recipe_version_id?: string | null;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
   stage: string;
+  progress_percent?: number;
   input_revision: number;
   questions: Question[];
   answers: Record<string, unknown>;

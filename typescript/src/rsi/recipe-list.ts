@@ -25,6 +25,8 @@ interface RecipeListProgress {
   candidate_version_id: string | null;
   candidate_version_number: number | null;
   pending_question_count: number;
+  available_version_id: string | null;
+  archived: boolean;
 }
 
 export type RecipeListRecipeEntry = Versioned<RecipeContent> &
@@ -42,7 +44,10 @@ export type RecipeListEntry =
       latest_version_id: null;
     });
 
-type RecipeListRow = RecipeListProgress & {
+type RecipeListRow = Omit<
+  RecipeListProgress,
+  'available_version_id' | 'archived'
+> & {
   id: string;
   kind: RecipeListEntry['kind'];
   name: string;
@@ -52,31 +57,41 @@ type RecipeListRow = RecipeListProgress & {
 export function readRecipeList(
   store: Store,
   options: Pagination & { q?: string; active_only?: boolean },
+  all = false,
 ): RecipeListEntry[] {
   const rows = store.db.prepare(recipeListQuery).all({
-    ...pagination(options),
+    ...(all ? { limit: -1, offset: 0 } : pagination(options)),
     q: options.q ?? null,
     archived: Number(options.archived ?? false),
     active_only: Number(options.active_only ?? false),
   }) as RecipeListRow[];
-  return rows.map(
-    ({ metadata, id, name, kind, execution_id, ...progress }) => {
-      if (kind === 'learning') {
-        return {
-          ...progress,
-          id,
-          name,
-          kind,
-          recipe_id: null,
-          execution_id: id,
-          active_version_id: null,
-          latest_version_id: null,
-        };
-      }
-      const recipe = JSON.parse(metadata!) as Versioned<RecipeContent>;
-      return { ...recipe, ...progress, kind, recipe_id: id, execution_id };
-    },
-  );
+  return rows.map(({ metadata, id, name, kind, execution_id, ...progress }) => {
+    if (kind === 'learning') {
+      return {
+        ...progress,
+        id,
+        name,
+        kind,
+        recipe_id: null,
+        execution_id: id,
+        active_version_id: null,
+        available_version_id: null,
+        archived: false,
+        latest_version_id: null,
+      };
+    }
+    const recipe = JSON.parse(metadata!) as Versioned<RecipeContent>;
+    return {
+      ...recipe,
+      ...progress,
+      kind,
+      recipe_id: id,
+      execution_id,
+      available_version_id: recipe.active_version_id ?? null,
+      archived:
+        !!recipe.latest_qualified_version_id && !recipe.active_version_id,
+    };
+  });
 }
 
 const recipeListQuery = `

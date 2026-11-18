@@ -14,6 +14,7 @@ import {
 } from './materials.js';
 import { LearningLiterals, rubricRuleText } from './portability.js';
 import { uid } from './store.js';
+import { executionProgress, stageProgress } from './progress.js';
 import {
   AnalysisSchema,
   FeedbackExtractionSchema,
@@ -35,7 +36,6 @@ import {
 interface Candidate {
   recipe_id: string;
   version_id: string;
-  activation_revision: number;
   round: number;
 }
 
@@ -64,10 +64,18 @@ export class Engine {
     return this.store.guard(this.id, this.owner, this.fence, revision);
   }
 
-  private inStage(revision: number, stage: string): Execution {
-    return this.store.tx(() =>
-      this.store.save({ ...this.guard(revision), stage }),
-    );
+  private inStage(revision: number, stage: string, round = 1): Execution {
+    return this.store.tx(() => {
+      const execution = this.guard(revision);
+      return this.store.save({
+        ...execution,
+        stage,
+        progress_percent: Math.max(
+          executionProgress(execution),
+          stageProgress(stage, round, execution.policy.max_rounds),
+        ),
+      });
+    });
   }
 
   private evidence(execution: Execution, forTest = false): EvidenceFile[] {
@@ -76,6 +84,7 @@ export class Engine {
     );
     const task = execution.policy.test_task;
     if (forTest) return authorizedTestFiles(files, task);
+    if (task?.replay_current_case) return files;
     const heldOut = new Set(task?.input_locators);
     return files.filter((file) => !heldOut.has(file.locator));
   }
@@ -94,8 +103,10 @@ export class Engine {
       const authorized = new Set(
         this.evidence(source, true).map((f) => f.locator),
       );
+      const replaysCurrentCase = source.policy.test_task?.replay_current_case;
       for (const file of this.evidence(source))
-        if (!authorized.has(file.locator)) files.set(file.locator, file);
+        if (replaysCurrentCase || !authorized.has(file.locator))
+          files.set(file.locator, file);
     }
     const allowedPaths = [
       ...this.evidence(execution, true).map((file) => file.path),
@@ -264,16 +275,14 @@ export class Engine {
   }
 
   private async generate(state: State): Promise<{ candidate: Candidate }> {
-    const execution = this.inStage(state.revision, 'generate');
     const round = (state.candidate?.round ?? 0) + 1;
+    const execution = this.inStage(state.revision, 'generate', round);
     if (execution.test_request) {
       const request = execution.test_request;
-      const recipe = this.client.recipe_get(request.recipe_id);
       return {
         candidate: {
-          recipe_id: recipe.id,
+          recipe_id: request.recipe_id,
           version_id: request.version_id,
-          activation_revision: recipe.revision,
           round,
         },
       };
@@ -285,7 +294,6 @@ export class Engine {
         candidate: {
           recipe_id: cached.object_id,
           version_id: cached.id,
-          activation_revision: Number(cached.provenance.activation_revision),
           round,
         },
       };
@@ -339,16 +347,15 @@ export class Engine {
             description: '',
             latest_version_id: null,
             active_version_id: null,
+            latest_qualified_version_id: null,
           });
       if (recipe.archived_at)
         fail('invalid_state', 'recipe was archived during learning');
-      const activation_revision = recipe.revision + 1;
       const version = this.store.append(
         recipe,
         { ...content, title: recipe.name ?? content.title },
         key,
         {
-          activation_revision,
           execution_id: this.id,
           input_revision: state.revision,
         },
@@ -363,7 +370,6 @@ export class Engine {
         candidate: {
           recipe_id: recipe.id,
           version_id: version.id,
-          activation_revision,
           round,
         },
       };
@@ -371,8 +377,8 @@ export class Engine {
   }
 
   private async test(state: State): Promise<{ test: TestResult }> {
-    const execution = this.inStage(state.revision, 'test');
     const { recipe_id, version_id, round } = state.candidate!;
+    const execution = this.inStage(state.revision, 'test', round);
     const id = `test:${this.id}:${state.revision}:${round}:${version_id}`;
     const previous = execution.test_results.find((test) => test.id === id);
     if (previous) return { test: previous };
@@ -504,7 +510,7 @@ export class Engine {
           'Actual executor tool calls and results',
         ),
       );
-    this.inStage(state.revision, 'evaluate');
+    this.inStage(state.revision, 'evaluate', result.round);
     const judgeTrace = join(attempt, 'evaluator-trace.json');
     const assessment = AssessmentSchema.parse(
       await this.runtime.assess(
@@ -602,30 +608,16 @@ export class Engine {
         provisional,
         activated: false,
       };
-      if (
-        execution.policy.auto_activate &&
-        result.test_status === 'passed' &&
-        !provisional
-      ) {
-        const recipe = this.store.get<Versioned<RecipeContent>>(
+      if (result.test_status === 'passed' && !provisional)
+        result.activated = this.store.publishRecipeVersion(
           candidate.recipe_id,
-          'recipe',
+          candidate.version_id,
         );
-        if (
-          recipe.revision === candidate.activation_revision &&
-          !recipe.archived_at
-        ) {
-          this.store.save({
-            ...recipe,
-            active_version_id: candidate.version_id,
-          });
-          result.activated = true;
-        } else result.activation_conflict = true;
-      }
       this.store.save({
         ...execution,
         status: 'completed',
         stage: 'done',
+        progress_percent: 100,
         result,
         recipe_id: candidate.recipe_id,
         recipe_version_id: candidate.version_id,

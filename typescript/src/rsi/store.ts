@@ -9,6 +9,8 @@ import {
   type Version,
   type Pagination,
   type Execution,
+  type Versioned,
+  type RecipeContent,
 } from './models.js';
 
 export const uid = (prefix: string) =>
@@ -40,6 +42,41 @@ export function pagination({ limit = 50, offset = 0 }: Pagination = {}) {
     );
   return { limit, offset };
 }
+const initializeRecipeAvailability = `
+WITH legacy AS MATERIALIZED (
+    SELECT id, data FROM objects WHERE kind='recipe'
+        AND json_type(data, '$.latest_qualified_version_id') IS NULL
+),
+eligible AS (
+    SELECT id AS recipe_id, json_extract(data, '$.active_version_id') AS version_id
+    FROM legacy
+    UNION
+    SELECT json_extract(e.data, '$.result.recipe_id'),
+        json_extract(t.value, '$.version_id')
+    FROM objects e JOIN legacy r ON r.id=json_extract(e.data, '$.result.recipe_id')
+    JOIN json_each(e.data, '$.test_results') t
+    WHERE e.kind='execution' AND json_extract(e.data, '$.status')='completed'
+        AND json_extract(e.data, '$.result.provisional')=0
+        AND json_extract(t.value, '$.status')='passed'
+        AND json_extract(t.value, '$.input_revision')=json_extract(e.data, '$.input_revision')
+),
+ranked AS (
+    SELECT v.id, v.object_id, row_number() OVER (
+        PARTITION BY v.object_id ORDER BY v.number DESC
+    ) AS position
+    FROM eligible e JOIN versions v ON v.object_id=e.recipe_id AND v.id=e.version_id
+),
+target AS MATERIALIZED (
+    SELECT r.id, v.id AS version_id
+    FROM legacy r LEFT JOIN ranked v ON v.object_id=r.id AND v.position=1
+)
+UPDATE objects
+SET data=json_set(objects.data, '$.latest_qualified_version_id', target.version_id,
+    '$.active_version_id', CASE WHEN json_extract(objects.data, '$.archived_at') IS NULL
+        THEN target.version_id END)
+FROM target WHERE objects.id=target.id
+`;
+
 export class Store {
   readonly root: string;
   readonly db: Database.Database;
@@ -79,6 +116,14 @@ export class Store {
           )
           .run(encode(saved.config));
     }
+    if (
+      this.db
+        .prepare(
+          "SELECT 1 FROM objects WHERE kind='recipe' AND json_type(data, '$.latest_qualified_version_id') IS NULL LIMIT 1",
+        )
+        .get()
+    )
+      this.db.exec(initializeRecipeAvailability);
     chmodSync(path, 0o600);
   }
   tx<T>(fn: () => T): T {
@@ -162,6 +207,22 @@ export class Store {
         'version does not belong to this object or does not exist',
       );
     return JSON.parse(row!.data);
+  }
+  publishRecipeVersion(recipeId: string, versionId: string): boolean {
+    const recipe = this.get<Versioned<RecipeContent>>(recipeId, 'recipe');
+    if (recipe.archived_at) return false;
+    const version = this.version(recipeId, versionId);
+    const latest = recipe.latest_qualified_version_id
+      ? this.version(recipeId, recipe.latest_qualified_version_id)
+      : null;
+    if (latest && version.number <= latest.number)
+      return recipe.active_version_id === versionId;
+    this.save({
+      ...recipe,
+      latest_qualified_version_id: versionId,
+      active_version_id: versionId,
+    });
+    return true;
   }
   version_by_id<C = unknown>(id: string, kind: Kind): Version<C> {
     const row = this.db

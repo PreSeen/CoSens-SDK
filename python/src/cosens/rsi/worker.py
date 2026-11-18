@@ -36,7 +36,7 @@ def failure_details(exc, stage):
 
 
 def drain(client, *, runtime=None, owner=None, slot=None):
-    from .client import RSIClient
+    from ._queue_client import RSIClient
     from .engine import Engine
     from .runtime import ChatRuntime
 
@@ -177,7 +177,7 @@ def wait_for_worker_slot(client, owner, waiting_slot):
 
 
 def main():
-    from .client import RSIClient
+    from ._queue_client import RSIClient
 
     parser = argparse.ArgumentParser(
         description="Drain the local RSI queue and exit; no server is started"

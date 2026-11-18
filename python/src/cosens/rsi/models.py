@@ -240,6 +240,7 @@ class ObjectiveCheck(Contract):
 
 class TestTask(Contract):
     instruction: str = Field(min_length=1)
+    replay_current_case: Literal[True] | None = None
     input_locators: list[str] | None = None
     shared_reference_locators: list[str] | None = None
     # Deterministic checks on files produced in a fresh test workspace.

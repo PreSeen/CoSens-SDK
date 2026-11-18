@@ -1,31 +1,6 @@
-"""Embedded RSI SDK; import does not start workers or contact any service."""
+"""Host-facing local RSI SDK."""
 
 from .client import RSIClient
-from .models import (
-    Conflict,
-    ExecutionPolicy,
-    FileRef,
-    InvalidState,
-    LocalConfig,
-    MaterialManifest,
-    ModelConfig,
-    NotFound,
-    ObjectiveCheck,
-    RSIError,
-    TestTask,
-)
+from .models import Conflict, InvalidState, NotFound, RSIError
 
-__all__ = [
-    "Conflict",
-    "ExecutionPolicy",
-    "FileRef",
-    "InvalidState",
-    "LocalConfig",
-    "MaterialManifest",
-    "ModelConfig",
-    "NotFound",
-    "ObjectiveCheck",
-    "RSIClient",
-    "RSIError",
-    "TestTask",
-]
+__all__ = ["Conflict", "InvalidState", "NotFound", "RSIClient", "RSIError"]

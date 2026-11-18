@@ -26,7 +26,6 @@ class State(TypedDict, total=False):
     version_id: str
     rubrics_version_id: str
     test: dict
-    activation_revision: int
 
 
 class Engine:
@@ -40,13 +39,14 @@ class Engine:
                 conn, self.execution_id, self.owner, self.fence, revision
             )
 
-    def begin(self, state, stage):
+    def begin(self, state, stage, *, round_number=1):
         return self.store.progress(
             self.execution_id,
             self.owner,
             self.fence,
             state["input_revision"],
             stage=stage,
+            round_number=round_number,
         )
 
     def files(self, execution, *, test=False):
@@ -58,6 +58,8 @@ class Engine:
         task = execution["policy"].get("test_task")
         if test:
             return authorized_test_files(files, task)
+        if task and task.get("replay_current_case"):
+            return files
         held_out = set((task or {}).get("input_locators") or [])
         return [file for file in files if file["locator"] not in held_out]
 
@@ -69,10 +71,13 @@ class Engine:
         files = {}
         for source in sources.values():
             authorized = {f["locator"] for f in self.files(source, test=True)}
+            replays_current_case = (source["policy"].get("test_task") or {}).get(
+                "replay_current_case"
+            )
             files.update(
                 (f["locator"], f)
                 for f in self.files(source)
-                if f["locator"] not in authorized
+                if replays_current_case or f["locator"] not in authorized
             )
         task = execution["policy"].get("test_task") or {}
         allowed_paths = [f["path"] for f in self.files(execution, test=True)]
@@ -213,8 +218,8 @@ class Engine:
         return {"analysis": analysis, "rubrics_version_id": rubrics_version_id}
 
     def generate(self, state):
-        execution = self.begin(state, "generate")
         round_number = state.get("round", 0) + 1
+        execution = self.begin(state, "generate", round_number=round_number)
         with self.store.connect() as conn:
             recipe_name = self.store.execution_recipe_name(conn, execution)
         context = {
@@ -229,12 +234,10 @@ class Engine:
             context["base_recipe"] = base["content"]
         request = execution.get("test_request")
         if request:
-            recipe = self.store.get(request["recipe_id"], "recipe")
             return {
-                "recipe_id": recipe["id"],
+                "recipe_id": request["recipe_id"],
                 "version_id": request["version_id"],
                 "round": round_number,
-                "activation_revision": recipe["revision"],
             }
         key = f"recipe:{self.execution_id}:{state['input_revision']}:{round_number}"
         version = self.store.version_by_operation(key)
@@ -243,7 +246,6 @@ class Engine:
                 "recipe_id": version["object_id"],
                 "version_id": version["id"],
                 "round": round_number,
-                "activation_revision": version["provenance"]["activation_revision"],
             }
         files = self.files(execution)
         literals = self.learning_literals(
@@ -281,11 +283,10 @@ class Engine:
             "recipe_id": version["object_id"],
             "version_id": version["id"],
             "round": round_number,
-            "activation_revision": version["provenance"]["activation_revision"],
         }
 
     def test(self, state):
-        execution = self.begin(state, "test")
+        execution = self.begin(state, "test", round_number=state["round"])
         # Test IDs are deterministic for graph-node replay; each attempt gets a fresh workspace.
         test_id = f"test:{self.execution_id}:{state['input_revision']}:{state['round']}:{state['version_id']}"
         previous = next(
@@ -400,7 +401,7 @@ class Engine:
                             "size": len(trace_bytes),
                         }
                     )
-                self.begin(state, "evaluate")
+                self.begin(state, "evaluate", round_number=state["round"])
                 assessment = Assessment.model_validate(
                     self.runtime.assess(
                         {

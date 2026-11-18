@@ -11,9 +11,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from pathlib import Path
 
-from cosens.rsi import LocalConfig, ModelConfig, RSIClient
+from cosens.rsi import RSIClient
 
 
 def main():
@@ -26,7 +27,7 @@ def main():
         "--input",
         action="append",
         default=[],
-        help="File used to reproduce the test task",
+        help="Current task input, used for learning and replay",
     )
     parser.add_argument(
         "--artifact",
@@ -40,62 +41,28 @@ def main():
         required=True,
         help="Stable ID, changes for each confirmed delivery",
     )
-    parser.add_argument(
-        "--confirmation-ref",
-        required=True,
-        help="Host's actual artifact confirmation record",
-    )
-    parser.add_argument(
-        "--test-instruction", help="A task the file-tools RSI executor can reproduce"
-    )
-    parser.add_argument("--auto-activate", action="store_true")
     parser.add_argument("--wait", action="store_true")
     args = parser.parse_args()
     client = RSIClient(
         data_dir=args.data_dir,
-        config=LocalConfig(
-            model=ModelConfig(
-                model=os.environ["RSI_MODEL_NAME"],
-                base_url=os.environ.get("RSI_MODEL_BASE_URL"),
-            ),
-            max_executions=2,
-            max_model_requests=1,
-        ),
+        config={
+            "model": os.environ["RSI_MODEL_NAME"],
+            "base_url": os.environ["RSI_MODEL_BASE_URL"],
+            "auto_start": True,
+        },
     )
-    material = client.material_create(
-        manifest={
+    inputs = [str(Path(p).resolve()) for p in args.input]
+    execution = client.execution_create(
+        evidence={
             "context_path": str(Path(args.context).resolve()),
-            "source_session_id": args.session_id,
-            "capture_boundary": args.delivery_id,
-            "files": [
-                {"path": str(Path(p).resolve()), "role": "input"} for p in args.input
-            ]
+            "files": [{"path": path, "role": "input"} for path in inputs]
             + [
                 {"path": str(Path(p).resolve()), "role": "artifact"}
                 for p in args.artifact
             ],
         },
-        idempotency_key="material:" + args.session_id + ":" + args.delivery_id,
-    )
-    execution = client.execution_create(
-        material_ids=[material["id"]],
-        source_session_id=args.session_id,
         idempotency_key="execution:" + args.session_id + ":" + args.delivery_id,
-        policy={
-            "artifact_confirmed": True,
-            "confirmation_ref": args.confirmation_ref,
-            "auto_activate": args.auto_activate,
-            "test_task": {
-                "instruction": args.test_instruction,
-                "input_locators": [
-                    file["locator"]
-                    for file in material["files"]
-                    if file["role"] == "input"
-                ],
-            }
-            if args.test_instruction
-            else None,
-        },
+        base_execution_id=None,
     )
     print(
         json.dumps(
@@ -104,7 +71,17 @@ def main():
         )
     )
     if args.wait:
-        print(json.dumps(client.wait(execution["id"]), ensure_ascii=False, indent=2))
+        deadline = time.monotonic() + 300
+        while True:
+            result = client.execution_get(execution["id"])
+            if result["status"] in {"completed", "failed", "cancelled"}:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "execution is still pending; background work continues"
+                )
+            time.sleep(0.2)
 
 
 if __name__ == "__main__":

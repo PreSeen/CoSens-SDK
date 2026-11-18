@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { authorizedTestFiles, snapshot } from './materials.js';
-import { Store, uid, now, encode, pagination } from './store.js';
+import { executionProgress, restartExecution } from './progress.js';
+import { Store, uid, now, encode } from './store.js';
 import {
   readRecipeList,
   type RecipeListEntry,
@@ -13,8 +14,7 @@ import {
 import {
   LocalConfigSchema,
   PolicySchema,
-  RecipeSchema,
-  RubricsSchema,
+  type RubricsSchema,
   TERMINAL,
   fail,
   type LocalConfig,
@@ -30,10 +30,16 @@ import {
   type Versioned,
   type Version,
   type RecipeContent,
-  type RubricsContent,
   type ClarificationAnswer,
   type Runtime,
 } from './models.js';
+
+type EvidenceExecutionCreate = {
+  evidence: MaterialManifest;
+  confirmation_ref: string;
+  idempotency_key: string;
+  base: { kind: 'execution'; id: string } | null;
+};
 
 export class RSIClient {
   readonly store: Store;
@@ -142,49 +148,6 @@ export class RSIClient {
   material_update(id: string, changes: MetadataUpdate): Material {
     return this.update(id, 'material', changes);
   }
-  private create_versioned<C>(
-    kind: 'recipe' | 'rubrics',
-    name: string,
-    content?: C,
-  ): Versioned<C> {
-    if (!name.trim()) fail('invalid_argument', 'name is required');
-    return this.store.tx(() => {
-      const parsed =
-        content === undefined
-          ? undefined
-          : (kind === 'recipe' ? RecipeSchema : RubricsSchema).parse(content);
-      const obj = this.store.insert<Versioned<C>>(kind, {
-        name,
-        description: '',
-        latest_version_id: null,
-        ...(kind === 'recipe' ? { active_version_id: null } : {}),
-      });
-      if (parsed) this.store.append(obj, parsed);
-      return this.store.get(obj.id, kind);
-    });
-  }
-  rubrics_create({
-    name,
-    content,
-  }: {
-    name: string;
-    content?: RubricsContent;
-  }): Versioned<ResolvedRubrics> {
-    return this.create_versioned(
-      'rubrics',
-      name,
-      content,
-    ) as Versioned<ResolvedRubrics>;
-  }
-  recipe_create({
-    name,
-    content,
-  }: {
-    name: string;
-    content?: RecipeContent;
-  }): Versioned<RecipeContent> {
-    return this.create_versioned('recipe', name, content);
-  }
   private get_versioned<C>(
     id: string,
     kind: 'recipe' | 'rubrics',
@@ -210,6 +173,15 @@ export class RSIClient {
           ? obj.active_version_id
           : obj.latest_version_id);
     const version = selected ? this.store.version<C>(id, selected) : null;
+    if (version && kind === 'recipe') {
+      const qualified = obj.latest_qualified_version_id
+        ? this.store.version(id, obj.latest_qualified_version_id)
+        : null;
+      version.archived =
+        !!qualified &&
+        version.number <= qualified.number &&
+        version.id !== obj.active_version_id;
+    }
     if (version && !include_content)
       delete (version as Partial<Version<C>>).content;
     return { ...obj, selected_version: version };
@@ -244,103 +216,8 @@ export class RSIClient {
   ): RecipeListEntry[] {
     return readRecipeList(this.store, options);
   }
-  rubrics_update(
-    id: string,
-    changes: MetadataUpdate,
-  ): Versioned<ResolvedRubrics> {
-    return this.update(id, 'rubrics', changes);
-  }
-  recipe_update(id: string, changes: MetadataUpdate): Versioned<RecipeContent> {
-    return this.update(id, 'recipe', changes);
-  }
-  private version_create<C>(
-    id: string,
-    kind: 'recipe' | 'rubrics',
-    options: {
-      content: C;
-      expected_revision?: number;
-      idempotency_key?: string;
-    },
-  ): Version<C> {
-    const content = (kind === 'recipe' ? RecipeSchema : RubricsSchema).parse(
-      options.content,
-    ) as C;
-    const request = {
-      object_id: id,
-      content,
-      expected_revision: options.expected_revision,
-    };
-    return this.store.tx(() => {
-      const prev = this.store.replay<Version<C>>(
-        kind + '_version_create',
-        options.idempotency_key,
-        request,
-      );
-      if (prev) return prev;
-      const obj = this.store.get(id, kind);
-      this.check_revision(obj, options.expected_revision);
-      if (obj.archived_at)
-        fail('invalid_state', 'restore the object before creating a version');
-      const version = this.store.append(obj, content);
-      this.store.remember(
-        kind + '_version_create',
-        options.idempotency_key,
-        request,
-        version,
-      );
-      return version;
-    });
-  }
-  recipe_version_create(
-    id: string,
-    options: {
-      content: RecipeContent;
-      expected_revision?: number;
-      idempotency_key?: string;
-    },
-  ): Version<RecipeContent> {
-    return this.version_create(id, 'recipe', options);
-  }
-  rubrics_version_create(
-    id: string,
-    options: {
-      content: RubricsContent;
-      expected_revision?: number;
-      idempotency_key?: string;
-    },
-  ): Version<ResolvedRubrics> {
-    return this.version_create(
-      id,
-      'rubrics',
-      options,
-    ) as Version<ResolvedRubrics>;
-  }
-  private version_list<C>(
-    id: string,
-    kind: 'recipe' | 'rubrics',
-    options: Pagination = {},
-  ): Version<C>[] {
-    const { limit, offset } = pagination(options);
-    this.store.get(id, kind);
-    return (
-      this.store.db
-        .prepare(
-          'SELECT data FROM versions WHERE object_id=? ORDER BY number LIMIT ? OFFSET ?',
-        )
-        .all(id, limit, offset) as { data: string }[]
-    ).map((r) => JSON.parse(r.data));
-  }
-  recipe_version_list(
-    id: string,
-    options: Pagination = {},
-  ): Version<RecipeContent>[] {
-    return this.version_list(id, 'recipe', options);
-  }
-  rubrics_version_list(
-    id: string,
-    options: Pagination = {},
-  ): Version<ResolvedRubrics>[] {
-    return this.version_list(id, 'rubrics', options);
+  recipe_list_all(): RecipeListEntry[] {
+    return readRecipeList(this.store, {}, true);
   }
   private execution_insert(
     request: Omit<ExecutionCreate, 'idempotency_key'> & {
@@ -373,13 +250,17 @@ export class RSIClient {
       request.parent_execution_id &&
       !TERMINAL.has(this.execution_get(request.parent_execution_id).status)
     )
-      fail('invalid_state', 'continue active execution with execution_update');
+      fail(
+        'invalid_state',
+        'continue active execution with execution_append_evidence',
+      );
     return this.store.insert<Execution>('execution', {
       ...request,
       runtime_config: config,
       policy: PolicySchema.parse(request.policy),
       status: 'queued',
       stage: 'queued',
+      progress_percent: 0,
       input_revision: 1,
       questions: [],
       answers: request.answers ?? {},
@@ -416,6 +297,133 @@ export class RSIClient {
     if (this.auto_start) await this.recover();
     return obj;
   }
+  private writeExecutionEvidence(
+    evidence: MaterialManifest,
+    config: LocalConfig,
+    write: (data: ReturnType<typeof snapshot>) => {
+      execution: Execution;
+      attached: boolean;
+    },
+  ): Execution {
+    const data = snapshot(this.data_dir, evidence, config);
+    let attached = false;
+    try {
+      const result = this.store.tx(() => write(data));
+      attached = result.attached;
+      return result.execution;
+    } finally {
+      if (!attached)
+        rmSync(join(this.data_dir, 'materials', data.id), {
+          recursive: true,
+          force: true,
+        });
+    }
+  }
+
+  async execution_create_with_evidence(
+    request: EvidenceExecutionCreate,
+  ): Promise<Execution> {
+    const { evidence, confirmation_ref, idempotency_key, base } = request;
+    const scope = 'execution_create';
+    const replay = () =>
+      this.store.replay<{ id: string }>(scope, idempotency_key, request);
+    const previous = replay();
+    if (!previous && this.auto_start) this.check_runtime();
+    const execution = previous
+      ? this.execution_get(previous.id)
+      : this.writeExecutionEvidence(evidence, this.config, (data) => {
+          const existing = replay();
+          if (existing)
+            return {
+              execution: this.execution_get(existing.id),
+              attached: false,
+            };
+          const parent = base ? this.execution_get(base.id) : null;
+          const material = this.store.insert<Material>('material', data);
+          const learningPaths = new Set(
+            data.files
+              .filter((file) => file.role !== 'input')
+              .map((file) => file.path),
+          );
+          const inputs = data.files.filter((file) => file.role === 'input');
+          if (inputs.some((file) => learningPaths.has(file.path)))
+            fail(
+              'invalid_argument',
+              'current case inputs cannot also have a learning-only role',
+            );
+          const created = this.execution_insert({
+            material_ids: [material.id],
+            base_recipe_version_id: parent?.recipe_version_id,
+            parent_execution_id: parent?.id,
+            policy: {
+              artifact_confirmed: true,
+              confirmation_ref,
+              test_task: {
+                instruction:
+                  'Repeat the current task using the Recipe and the supplied current inputs. Produce the expected deliverables from scratch.',
+                replay_current_case: true,
+                input_locators: inputs.map((file) => file.locator),
+                checks: [],
+              },
+            },
+          });
+          this.store.remember(scope, idempotency_key, request, {
+            id: created.id,
+          });
+          return { execution: created, attached: true };
+        });
+    if (this.auto_start) await this.recover();
+    return execution;
+  }
+
+  async execution_append_evidence(
+    id: string,
+    evidence: MaterialManifest,
+  ): Promise<Execution> {
+    const current = this.store.get<Execution>(id, 'execution');
+    const validate = (execution: Execution) => {
+      if (TERMINAL.has(execution.status))
+        fail(
+          'invalid_state',
+          'terminal inputs are immutable; create a child execution',
+        );
+    };
+    validate(current);
+    const result = this.writeExecutionEvidence(
+      evidence,
+      current.runtime_config,
+      (data) => {
+        const execution = this.store.get<Execution>(id, 'execution');
+        validate(execution);
+        const alreadyAttached = execution.material_ids.some((materialId) => {
+          const existing = this.material_get(materialId).files;
+          return (
+            existing.length === data.files.length &&
+            existing.every((file, index) => {
+              const incoming = data.files[index];
+              return (
+                file.path === incoming.path &&
+                file.role === incoming.role &&
+                file.sha256 === incoming.sha256
+              );
+            })
+          );
+        });
+        if (alreadyAttached) return { execution, attached: false };
+        const material = this.store.insert<Material>('material', data);
+        execution.material_ids.push(material.id);
+        restartExecution(execution);
+        return { execution: this.store.save(execution), attached: true };
+      },
+    );
+    if (this.auto_start) await this.recover();
+    return result;
+  }
+
+  execution_evidence(execution: Execution) {
+    return execution.material_ids.flatMap((id) => this.material_get(id).files);
+  }
+
   execution_get(id: string): Execution {
     return this.store.db.transaction(() => {
       const execution = this.store.get<Execution>(id, 'execution');
@@ -455,7 +463,7 @@ export class RSIClient {
         const updated = [...new Set([...obj.material_ids, ...material_ids])];
         if (updated.length !== obj.material_ids.length) {
           obj.material_ids = updated;
-          obj.input_revision++;
+          restartExecution(obj);
         }
       }
       if (archived !== undefined)
@@ -471,6 +479,7 @@ export class RSIClient {
       if (obj.status === 'completed')
         fail('invalid_state', 'completed execution cannot be cancelled');
       if (TERMINAL.has(obj.status)) return obj;
+      obj.progress_percent = executionProgress(obj);
       obj.status = 'cancelled';
       obj.stage = 'cancelled';
       const result = this.store.save(obj);
@@ -553,7 +562,7 @@ export class RSIClient {
           this.suppliedConfig ?? obj.runtime_config,
         ).id;
         obj.answer_children = { ...obj.answer_children, [key]: child_id };
-      } else if (!TERMINAL.has(obj.status)) obj.input_revision++;
+      } else if (!TERMINAL.has(obj.status)) restartExecution(obj);
       this.store.save(obj);
       const result = { execution_id: id, continuation_execution_id: child_id };
       this.store.remember('clarification', idempotency_key, request, result);
@@ -568,46 +577,36 @@ export class RSIClient {
       await this.recover();
     return result;
   }
-  recipe_activate(
+  recipe_version_set_archived(
     id: string,
-    {
-      version_id,
-      expected_revision,
-    }: { version_id: string | null; expected_revision: number },
-  ): Versioned<RecipeContent> {
+    versionId: string,
+    archived: boolean,
+  ) {
     return this.store.tx(() => {
-      const obj = this.store.get<Versioned<RecipeContent>>(id, 'recipe');
-      this.check_revision(obj, expected_revision);
-      if (version_id) {
-        this.store.version(id, version_id);
-        if (obj.archived_at)
-          fail('invalid_state', 'restore recipe before activation');
-        const rows = this.store.db
-          .prepare(
-            "SELECT data FROM objects WHERE kind='execution' AND json_extract(data,'$.status')='completed'",
-          )
-          .all() as { data: string }[];
-        const eligible = rows.some((row) => {
-          const e = JSON.parse(row.data) as Execution;
-          return (
-            e.result &&
-            !e.result.provisional &&
-            e.test_results.some(
-              (t) =>
-                t.version_id === version_id &&
-                t.status === 'passed' &&
-                t.input_revision === e.input_revision,
-            )
-          );
-        });
-        if (!eligible)
+      const recipe = this.store.get<Versioned<RecipeContent>>(id, 'recipe');
+      const version = this.store.version(id, versionId);
+      const latest = recipe.latest_qualified_version_id
+        ? this.store.version(id, recipe.latest_qualified_version_id)
+        : null;
+      if (!latest || version.number > latest.number)
+        fail(
+          'invalid_state',
+          'version is not eligible for archival or restoration',
+        );
+      if (versionId !== latest!.id) {
+        if (!archived)
           fail(
             'invalid_state',
-            'version has no completed non-provisional passing test',
+            'only the latest qualified version can be restored',
           );
+      } else {
+        if (!archived && recipe.archived_at)
+          fail('invalid_state', 'recipe is archived');
+        const active = archived ? null : versionId;
+        if (recipe.active_version_id !== active)
+          this.store.save({ ...recipe, active_version_id: active });
       }
-      obj.active_version_id = version_id;
-      return this.store.save(obj);
+      return { recipe_id: id, version_id: versionId, archived };
     });
   }
   async recipe_test({
@@ -643,7 +642,7 @@ export class RSIClient {
       const request = { recipe_id, version_id, rubrics_version_id };
       if (encode(obj.test_request) !== encode(request)) {
         obj.test_request = request;
-        obj.input_revision++;
+        restartExecution(obj);
         this.store.save(obj);
       }
       return { execution_id, status: 'queued' as const, ...request };

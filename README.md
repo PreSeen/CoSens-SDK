@@ -1,6 +1,6 @@
 # CoSens Local RSI SDK
 
-CoSens turns confirmed task evidence into reusable Recipes. The local SDK is available in TypeScript and Python. Both provide Material, Execution, Rubrics, and Recipe atomic functions.
+CoSens turns confirmed task evidence into reusable Recipes. The local SDK is available in TypeScript and Python. Both provide Execution, Rubrics, and Recipe atomic functions.
 
 ```text
 Host Hook → local SDK → SQLite queue → on-demand worker
@@ -12,7 +12,7 @@ Host Hook → local SDK → SQLite queue → on-demand worker
 | Node.js / TypeScript | `import { RSIClient } from 'cosens-sdk/rsi'` | [TypeScript](typescript/README.md) |
 | Python | `from cosens.rsi import RSIClient` | [Python](python/docs/local-rsi.md) |
 
-The host confirms the deliverable and selects the task trajectory. It creates a Material from local file paths, calls `execution_create`, then uses the returned ID to read status or answer clarification questions. The worker continues after the Hook returns.
+The host confirms the deliverable and selects the task trajectory. It submits the context and file paths to `execution_create`, then uses the returned ID to read status or answer clarification questions. The worker continues after the Hook returns.
 
 Before deriving new Rubrics, the worker reads context and files with the `feedback` role in a dedicated pass. It extracts reusable, explicit user requirements and corrections with their evidence references. The analysis combines them with task requirements and execution evidence. The extracted rules are available in `execution_get` → `analysis.feedback`. Supplying a fixed Rubrics version skips extraction for Rubric generation.
 

@@ -17,7 +17,7 @@ import pytest
 
 pytest.importorskip("langgraph.checkpoint.sqlite")
 
-from cosens.rsi import RSIClient
+from cosens.rsi._queue_client import RSIClient
 
 
 @pytest.fixture
@@ -251,24 +251,19 @@ def test_multiple_hook_processes_survive_exit_and_share_limits(
     )
     feedback = tmp_path / "feedback.md"
     feedback.write_text("User: Please write only the corrected answer in the file.")
-    material = client.material_create(
-        manifest={
-            "context_path": str(source),
-            "files": [{"path": str(feedback), "role": "feedback"}],
-        }
-    )
+    evidence = {
+        "context_path": str(source),
+        "files": [{"path": str(feedback), "role": "feedback"}],
+    }
     # Each short-lived caller models an independent host session's Hook.
     script = """
 import json, sys
 from cosens.rsi import RSIClient
-config = json.loads(sys.argv[4])
-config["model"]["model"] += "-" + sys.argv[3]
-c = RSIClient(data_dir=sys.argv[1], config=config)
-run = c.execution_create(material_ids=[sys.argv[2]], source_session_id=sys.argv[3],
-    idempotency_key='hook-' + sys.argv[3], policy={
-        'artifact_confirmed': True, 'confirmation_ref': 'host-confirmation', 'auto_activate': True,
-        'test_task': {'instruction': 'Write 42 into answer.txt', 'checks': [
-            {'kind': 'text_equals', 'path': 'answer.txt', 'value': '42'}]}})
+config = json.loads(sys.argv[4])["model"]
+config["model"] += "-" + sys.argv[3]
+c = RSIClient(data_dir=sys.argv[1], config={**config, "auto_start": True})
+run = c.execution_create(evidence=json.loads(sys.argv[2]), base_execution_id=None,
+    idempotency_key='hook-' + sys.argv[3])
 print(json.dumps({'id': run['id']}))
 """
     callers = [
@@ -278,7 +273,7 @@ print(json.dumps({'id': run['id']}))
                 "-c",
                 script,
                 str(root),
-                material["id"],
+                json.dumps(evidence),
                 f"session-{index}",
                 json.dumps(config),
             ],
@@ -309,9 +304,10 @@ print(json.dumps({'id': run['id']}))
         assert all(r["status"] == "completed" for r in runs), runs
         assert all(r["result"]["activated"] for r in runs), runs
         assert peak_running == 2
-        assert gateway.peak == 1  # Separate model budget across all processes.
+        assert gateway.peak == 2  # Shared default model budget across processes.
         assert gateway.requests >= 40  # 5 stages, tool call + result, 4 runs.
-        for run in runs:
+        for index, run in enumerate(runs):
+            material = client.material_get(run["material_ids"][0])
             assert (
                 run["analysis"]["feedback"][0]["evidence_refs"][0]["locator"]
                 == material["files"][1]["locator"]
@@ -321,7 +317,7 @@ print(json.dumps({'id': run['id']}))
             from pathlib import Path
 
             trace = json.loads(Path(test["trace_path"]).read_text())
-            expected_model = "local-test-" + run["source_session_id"]
+            expected_model = f"local-test-session-{index}"
             assert run["runtime_config"]["model"]["model"] == expected_model
             assert trace["model"] == expected_model
             assert any(m["role"] == "tool" for m in trace["messages"])
@@ -462,7 +458,7 @@ def test_recover_once_waits_for_a_stopped_workers_lease(tmp_path, gateway, monke
 import json, sys
 from cosens.rsi import RSIClient
 
-print(json.dumps(RSIClient(data_dir=sys.argv[1]).recover()))
+print(json.dumps(RSIClient(data_dir=sys.argv[1], config=None).recover()))
 """
     hook = subprocess.run(
         [sys.executable, "-c", script, str(client.data_dir)],

@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .models import Conflict, InputChanged, InvalidState, LeaseLost, NotFound
+from .progress import execution_progress, stage_progress
 
 
 def uid(prefix):
@@ -23,6 +24,42 @@ def uid(prefix):
 
 def encode(value):
     return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True)
+
+
+INITIALIZE_RECIPE_AVAILABILITY = """
+WITH legacy AS MATERIALIZED (
+    SELECT id, data FROM objects WHERE kind='recipe'
+        AND json_type(data, '$.latest_qualified_version_id') IS NULL
+),
+eligible AS (
+    SELECT id AS recipe_id, json_extract(data, '$.active_version_id') AS version_id
+    FROM legacy
+    UNION
+    SELECT json_extract(e.data, '$.result.recipe_id'),
+        json_extract(t.value, '$.version_id')
+    FROM objects e JOIN legacy r ON r.id=json_extract(e.data, '$.result.recipe_id')
+    JOIN json_each(e.data, '$.test_results') t
+    WHERE e.kind='execution' AND json_extract(e.data, '$.status')='completed'
+        AND json_extract(e.data, '$.result.provisional')=0
+        AND json_extract(t.value, '$.status')='passed'
+        AND json_extract(t.value, '$.input_revision')=json_extract(e.data, '$.input_revision')
+),
+ranked AS (
+    SELECT v.id, v.object_id, row_number() OVER (
+        PARTITION BY v.object_id ORDER BY v.number DESC
+    ) AS position
+    FROM eligible e JOIN versions v ON v.object_id=e.recipe_id AND v.id=e.version_id
+),
+target AS MATERIALIZED (
+    SELECT r.id, v.id AS version_id
+    FROM legacy r LEFT JOIN ranked v ON v.object_id=r.id AND v.position=1
+)
+UPDATE objects
+SET data=json_set(objects.data, '$.latest_qualified_version_id', target.version_id,
+    '$.active_version_id', CASE WHEN json_extract(objects.data, '$.archived_at') IS NULL
+        THEN target.version_id END)
+FROM target WHERE objects.id=target.id
+"""
 
 
 class Store:
@@ -64,6 +101,11 @@ class Store:
                            WHERE kind='execution' AND json_type(data, '$.runtime_config') IS NULL""",
                         (legacy["data"],),
                     )
+            if conn.execute(
+                """SELECT 1 FROM objects WHERE kind='recipe'
+                   AND json_type(data, '$.latest_qualified_version_id') IS NULL LIMIT 1"""
+            ).fetchone():
+                conn.execute(INITIALIZE_RECIPE_AVAILABILITY)
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -286,12 +328,12 @@ class Store:
                         "description": "",
                         "latest_version_id": None,
                         "active_version_id": None,
+                        "latest_qualified_version_id": None,
                     },
                 )
             )
             if recipe["archived_at"]:
                 raise InvalidState("recipe was archived during learning")
-            activation_revision = recipe["revision"] + 1
             version = self.append_version(
                 conn,
                 recipe,
@@ -300,7 +342,6 @@ class Store:
                 provenance={
                     "execution_id": execution_id,
                     "input_revision": revision,
-                    "activation_revision": activation_revision,
                 },
             )
             execution.update(
@@ -335,29 +376,36 @@ class Store:
                 "provisional": provisional,
                 "activated": False,
             }
-            if (
-                execution["policy"]["auto_activate"]
-                and state["test"]["status"] == "passed"
-                and not provisional
-            ):
-                recipe = self.get_in(conn, state["recipe_id"], "recipe")
-                if (
-                    recipe["revision"] == state["activation_revision"]
-                    and not recipe["archived_at"]
-                ):
-                    recipe["active_version_id"] = state["version_id"]
-                    self.save(conn, recipe)
-                    result["activated"] = True
-                else:
-                    result["activation_conflict"] = True
+            if state["test"]["status"] == "passed" and not provisional:
+                result["activated"] = self.publish_recipe_version(
+                    conn, state["recipe_id"], state["version_id"]
+                )
             execution.update(
                 status="completed",
                 stage="done",
+                progress_percent=100,
                 recipe_id=state["recipe_id"],
                 recipe_version_id=state["version_id"],
                 result=result,
             )
             return self.save(conn, execution)
+
+    def publish_recipe_version(self, conn, recipe_id, version_id):
+        recipe = self.get_in(conn, recipe_id, "recipe")
+        if recipe["archived_at"]:
+            return False
+        version = self.version_in(conn, recipe_id, version_id)
+        latest_id = recipe.get("latest_qualified_version_id")
+        if latest_id:
+            latest = self.version_in(conn, recipe_id, latest_id)
+            if version["number"] <= latest["number"]:
+                return recipe["active_version_id"] == version_id
+        recipe.update(
+            active_version_id=version_id,
+            latest_qualified_version_id=version_id,
+        )
+        self.save(conn, recipe)
+        return True
 
     @staticmethod
     def append_version(conn, obj, content, *, operation_key=None, provenance=None):
@@ -504,9 +552,17 @@ class Store:
             raise InputChanged("execution inputs changed; restart from analysis")
         return obj
 
-    def progress(self, execution_id, owner, fence, input_revision, **changes):
+    def progress(
+        self, execution_id, owner, fence, input_revision, *, round_number=1, **changes
+    ):
         with self.transaction() as conn:
             obj = self.guard(conn, execution_id, owner, fence, input_revision)
+            obj["progress_percent"] = max(
+                execution_progress(obj),
+                stage_progress(
+                    changes.get("stage"), round_number, obj["policy"]["max_rounds"]
+                ),
+            )
             obj.update(changes)
             return self.save(conn, obj)
 

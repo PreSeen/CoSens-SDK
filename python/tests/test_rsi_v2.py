@@ -9,9 +9,10 @@ import pytest
 
 pytest.importorskip("langgraph")
 
-from cosens.rsi import Conflict, InvalidState, RSIClient
+from cosens.rsi import Conflict, InvalidState
+from cosens.rsi._queue_client import RSIClient
 from cosens.rsi.materials import atomic_json, read_snapshot
-from cosens.rsi.models import LeaseLost
+from cosens.rsi.models import LeaseLost, RubricsContent
 
 
 def settings(**overrides):
@@ -32,6 +33,24 @@ def material(client, tmp_path, *, text="Write the answer 42 into answer.txt", ke
     return client.material_create(
         manifest={"context_path": str(path)}, idempotency_key=key
     )
+
+
+def existing_versioned_object(client, kind, *, name, content):
+    if kind == "rubrics":
+        content = RubricsContent.model_validate(content).model_dump()
+    with client.store.transaction() as conn:
+        obj = client.store.insert(
+            conn,
+            kind,
+            {
+                "name": name,
+                "description": "",
+                "latest_version_id": None,
+                **({"active_version_id": None} if kind == "recipe" else {}),
+            },
+        )
+        client.store.append_version(conn, obj, content)
+        return client.store.get_in(conn, obj["id"], kind)
 
 
 def policy(**overrides):
@@ -336,22 +355,60 @@ def test_feedback_extraction_rejects_refs_outside_context_and_feedback(
     assert client.rubrics_list() == []
 
 
-def test_recipe_is_inactive_without_activation_policy(client, tmp_path):
-    execution = run(client, material(client, tmp_path)["id"])
+def test_version_availability_archive_restore_and_legacy_database(client, tmp_path):
+    from cosens.rsi import RSIClient as PublicClient
+
+    source = material(client, tmp_path)
+    execution = run(client, source["id"])
     client.run_pending(runtime=FileRuntime())
     result = client.execution_get(execution["id"])
-    recipe = client.recipe_get(result["recipe_id"])
-    assert recipe["selected_version"] is None
-    latest = client.recipe_get(recipe["id"], version_selector="latest")[
-        "selected_version"
+    recipe_id, version_id = result["recipe_id"], result["recipe_version_id"]
+    with client.store.transaction() as conn:
+        conn.execute(
+            """UPDATE objects SET data=json_set(json_remove(data,
+               '$.latest_qualified_version_id'), '$.active_version_id', NULL) WHERE id=?""",
+            (recipe_id,),
+        )
+
+    host = PublicClient(data_dir=client.data_dir, config=None)
+    assert not hasattr(host, "recipe_activate")
+    assert host.recipe_list()[0]["available_version_id"] == version_id
+    assert not host.recipe_list()[0]["archived"]
+    assert host.recipe_version_set_archived(
+        recipe_id, version_id=version_id, archived=True
+    ) == {"recipe_id": recipe_id, "version_id": version_id, "archived": True}
+    reopened = PublicClient(data_dir=client.data_dir, config=None)
+    [row] = reopened.recipe_list()
+    assert row["available_version_id"] is None
+    assert row["archived"]
+    assert row["latest_qualified_version_id"] == version_id
+    assert reopened.recipe_get(recipe_id, version=version_id)["selected_version"][
+        "archived"
     ]
-    activated = client.recipe_activate(
-        recipe["id"], version_id=latest["id"], expected_revision=recipe["revision"]
+    assert reopened.recipe_get(recipe_id, version="active")["selected_version"] is None
+
+    reopened.recipe_version_set_archived(
+        recipe_id, version_id=version_id, archived=False
     )
-    assert activated["active_version_id"] == latest["id"]
-    with pytest.raises(Conflict):
-        client.recipe_activate(
-            recipe["id"], version_id=None, expected_revision=recipe["revision"]
+    assert reopened.recipe_list()[0]["available_version_id"] == version_id
+
+    revision = client.execution_create(
+        material_ids=[source["id"]], policy=policy(), base_recipe_version_id=version_id
+    )
+    assert reopened.recipe_list()[0]["available_version_id"] == version_id
+    client.run_pending(runtime=FileRuntime())
+    new_id = client.execution_get(revision["id"])["recipe_version_id"]
+    assert reopened.recipe_list()[0]["available_version_id"] == new_id
+    assert reopened.recipe_get(recipe_id, version=version_id)["selected_version"][
+        "archived"
+    ]
+    reopened.recipe_version_set_archived(
+        recipe_id, version_id=version_id, archived=True
+    )
+    assert reopened.recipe_list()[0]["available_version_id"] == new_id
+    with pytest.raises(InvalidState, match="only the latest qualified"):
+        reopened.recipe_version_set_archived(
+            recipe_id, version_id=version_id, archived=False
         )
 
 
@@ -362,7 +419,7 @@ def test_recipe_is_inactive_without_activation_policy(client, tmp_path):
         ({}, "failed", 2),
     ],
 )
-def test_missing_task_or_failed_objective_check_cannot_activate(
+def test_missing_task_or_failed_objective_check_cannot_publish(
     client, tmp_path, changes, expected, rounds
 ):
     execution = run(
@@ -377,10 +434,8 @@ def test_missing_task_or_failed_objective_check_cannot_activate(
     assert not result["result"]["activated"]
     recipe = client.recipe_get(result["recipe_id"])
     with pytest.raises(InvalidState):
-        client.recipe_activate(
-            recipe["id"],
-            version_id=result["recipe_version_id"],
-            expected_revision=recipe["revision"],
+        client.recipe_version_set_archived(
+            recipe["id"], version_id=result["recipe_version_id"], archived=False
         )
 
 
@@ -391,8 +446,14 @@ def test_missing_task_or_failed_objective_check_cannot_activate(
 def test_uncovered_criteria_excluded_from_scoring_and_iteration(
     client, tmp_path, covered_score, expected_status, expected_rounds
 ):
+    milestones = []
+
+    def record_progress():
+        milestones.append(client.execution_get(execution["id"])["progress_percent"])
+
     class CoverageRuntime(FileRuntime):
         def analyze(self, context, files, trace_path):
+            record_progress()
             analysis = super().analyze(context, files, trace_path)
             analysis["recipe_name"] = "Format signed answers"
             analysis["rubrics"]["criteria"].append(
@@ -406,11 +467,17 @@ def test_uncovered_criteria_excluded_from_scoring_and_iteration(
             return analysis
 
         def generate(self, context, files, trace_path):
+            record_progress()
             assert context["recipe_name"] == "Format signed answers"
             result = super().generate(context, files, trace_path)
             return {**result, "title": f"Alternative title {self.generation_count}"}
 
+        def execute(self, *args):
+            record_progress()
+            return super().execute(*args)
+
         def assess(self, context, files, trace_path):
+            record_progress()
             result = super().assess(context, files, trace_path)
             result["scores"][1].update(
                 status="unverified", score=None, evidence="No negative input"
@@ -426,14 +493,24 @@ def test_uncovered_criteria_excluded_from_scoring_and_iteration(
     client.run_pending(runtime=runtime)
     result = client.execution_get(execution["id"])
     assert result["status"] == "completed", result
+    expected_progress = [10, 25, 40, 55]
+    if expected_rounds == 2:
+        expected_progress += [65, 75, 90]
+    assert milestones == expected_progress
+    assert result["progress_percent"] == 100
     assert result["result"]["test_status"] == expected_status
     assert result["result"]["activated"] == (expected_status == "passed")
     assert runtime.generation_count == expected_rounds
     assert len(result["test_results"]) == expected_rounds
     assert result["name"] == client.recipe_list()[0]["name"] == "Format signed answers"
-    for version in client.recipe_version_list(result["recipe_id"]):
-        assert version["content"]["title"] == result["name"]
+    recipe_id = result["recipe_id"]
+    latest = client.recipe_get(recipe_id, version_selector="latest")["selected_version"]
+    assert latest["number"] == expected_rounds
     for test in result["test_results"]:
+        version = client.recipe_get(recipe_id, version_id=test["version_id"])[
+            "selected_version"
+        ]
+        assert version["content"]["title"] == result["name"]
         assert test["score"] == covered_score
         assert test["scores"][1]["status"] == "unverified"
         assert test["scores"][1]["score"] is None
@@ -550,7 +627,9 @@ def test_atomic_claim_shared_across_independent_clients(client, tmp_path):
     [None, "recipe", "rubric", "filename_in_recipe", "filename_in_rubric"],
 )
 def test_recipe_test_uses_existing_execution(client, tmp_path, leaked_from):
-    recipe = client.recipe_create(
+    recipe = existing_versioned_object(
+        client,
+        "recipe",
         name="Existing",
         content={
             "title": "Write",
@@ -561,7 +640,9 @@ def test_recipe_test_uses_existing_execution(client, tmp_path, leaked_from):
             }.get(leaked_from, "write 42"),
         },
     )
-    rubric = client.rubrics_create(
+    rubric = existing_versioned_object(
+        client,
+        "rubrics",
         name="Fixed",
         content={
             "criteria": [
@@ -649,33 +730,41 @@ def test_execution_idempotency_and_unapproved_generation(client, tmp_path):
         )
 
 
-def test_version_append_is_immutable_and_separate(client):
-    recipe = client.recipe_create(name="A")
-    content = {"title": "A", "applicability": "B", "instructions": "C"}
-    first = client.recipe_version_create(
-        recipe["id"], content=content, idempotency_key="v1"
+def test_learning_appends_an_immutable_recipe_version(client, tmp_path):
+    source = material(client, tmp_path)
+    first = run(client, source["id"])
+    client.run_pending(runtime=FileRuntime())
+    first = client.execution_get(first["id"])
+    recipe_id = first["recipe_id"]
+    first_version = client.recipe_get(recipe_id, version_selector="latest")[
+        "selected_version"
+    ]
+    assert first_version["number"] == 1
+
+    revision = client.execution_create(
+        material_ids=[source["id"]],
+        policy=policy(),
+        base_recipe_version_id=first_version["id"],
     )
-    assert (
-        client.recipe_version_create(
-            recipe["id"], content=content, idempotency_key="v1"
-        )
-        == first
-    )
-    second = client.recipe_version_create(
-        recipe["id"], content={**content, "instructions": "D"}
-    )
-    assert first["number"] == 1 and second["number"] == 2
-    assert (
-        client.recipe_get(recipe["id"], version_id=first["id"])["selected_version"][
-            "content"
-        ]["instructions"]
-        == "C"
-    )
-    assert len(client.recipe_version_list(recipe["id"])) == 2
-    with pytest.raises(InvalidState):
-        client.recipe_activate(
-            recipe["id"], version_id=second["id"], expected_revision=3
-        )
+    client.run_pending(runtime=FileRuntime())
+    revised = client.execution_get(revision["id"])
+    assert revised["recipe_id"] == recipe_id
+    retained = client.recipe_get(recipe_id, version_id=first_version["id"])[
+        "selected_version"
+    ]
+    latest = client.recipe_get(recipe_id, version_selector="latest")["selected_version"]
+    assert retained == {**first_version, "archived": True}
+    assert latest["number"] == 2
+    assert revised["recipe_version_id"] == latest["id"]
+    assert client.recipe_get(recipe_id)["selected_version"] == latest
+
+    rubrics = client.rubrics_list()
+    assert len(rubrics) == 2
+    for rubric in rubrics:
+        version = client.rubrics_get(rubric["id"])["selected_version"]
+        assert version["object_id"] == rubric["id"]
+        assert version["id"] == rubric["latest_version_id"]
+        assert version["content"]["criteria"]
 
 
 def test_crash_reclaims_expired_run_and_resumes_checkpoint(client, tmp_path):
@@ -694,6 +783,7 @@ def test_crash_reclaims_expired_run_and_resumes_checkpoint(client, tmp_path):
         client.run_pending(runtime=CrashingRuntime())
     before = client.execution_get(execution["id"])
     assert before["status"] == "running"
+    assert before["progress_percent"] == 40
     with client.store.transaction() as conn:
         conn.execute(
             "UPDATE jobs SET lease_until=? WHERE id=?",
@@ -704,13 +794,17 @@ def test_crash_reclaims_expired_run_and_resumes_checkpoint(client, tmp_path):
     recovered = client.execution_get(execution["id"])
     assert recovered["status"] == "completed", recovered
     assert recovered_runtime.generation_count == 0
+    assert recovered["progress_percent"] == 100
     assert (
         recovered["name"]
         == before["name"]
         == client.recipe_list()[0]["name"]
         == "Write an answer file"
     )
-    assert len(client.recipe_version_list(recovered["recipe_id"])) == 1
+    latest = client.recipe_get(recovered["recipe_id"], version_selector="latest")[
+        "selected_version"
+    ]
+    assert latest["number"] == 1
     assert len(client.rubrics_list()) == 1
     assert (
         len(
@@ -725,7 +819,9 @@ def test_crash_reclaims_expired_run_and_resumes_checkpoint(client, tmp_path):
 
 
 def test_concurrent_revisions_cannot_overwrite_active_pointer(client, tmp_path):
-    recipe = client.recipe_create(
+    recipe = existing_versioned_object(
+        client,
+        "recipe",
         name="Base",
         content={"title": "Base", "applicability": "task", "instructions": "Original"},
     )
@@ -755,9 +851,11 @@ def test_concurrent_revisions_cannot_overwrite_active_pointer(client, tmp_path):
             future.result(timeout=20)
     final = [client.execution_get(r["id"]) for r in runs]
     assert all(r["status"] == "completed" for r in final), final
-    assert sum(r["result"]["activated"] for r in final) == 1
-    assert sum(r["result"].get("activation_conflict", False) for r in final) == 1
-    assert len(client.recipe_version_list(recipe["id"])) == 3
+    latest = client.recipe_get(recipe["id"], version_selector="latest")[
+        "selected_version"
+    ]
+    assert latest["number"] == 3
+    assert client.recipe_get(recipe["id"])["selected_version"]["id"] == latest["id"]
 
 
 def test_input_and_capability_boundaries(client, tmp_path):
@@ -826,6 +924,14 @@ def test_model_payment_error_is_actionable_without_persisting_body(client, tmp_p
 
 
 def test_recipe_list_includes_learning_and_revision_status(client, tmp_path):
+    for method in (
+        "recipe_create",
+        "recipe_version_create",
+        "rubrics_create",
+        "rubrics_version_create",
+        "rubrics_version_list",
+    ):
+        assert not hasattr(client, method)
     source = material(client, tmp_path)
     learning = run(client, source["id"], auto_activate=True)
     [row] = client.recipe_list()
@@ -870,3 +976,141 @@ def test_recipe_list_includes_learning_and_revision_status(client, tmp_path):
     client.execution_update(revision["id"], archived=True)
     [restored] = client.recipe_list()
     assert restored["status"] == "passed"
+
+
+def test_public_required_inputs_preserve_test_and_revision(tmp_path):
+    from cosens.rsi import RSIClient as PublicClient
+
+    client = PublicClient(
+        data_dir=tmp_path / "sdk",
+        config={
+            "model": "local-test",
+            "base_url": "http://127.0.0.1:1/v1",
+            "auto_start": False,
+        },
+    )
+    context = tmp_path / "context.md"
+    context.write_text("Write the answer to answer.txt")
+    source = tmp_path / "input.txt"
+    source.write_text("42")
+    reference = tmp_path / "reference.md"
+    reference.write_text("Use plain text")
+    original = tmp_path / "confirmed.txt"
+    original.write_text("42")
+    manifest = {
+        "context_path": str(context),
+        "files": [
+            {"path": str(source), "role": "input"},
+            {"path": str(reference), "role": "reference"},
+            {"path": str(original), "role": "artifact"},
+        ],
+    }
+    assert not hasattr(client, "run_pending")
+    assert not hasattr(client, "wait")
+    assert not any(
+        hasattr(client, method)
+        for method in (
+            "material_create",
+            "material_get",
+            "material_list",
+            "material_update",
+        )
+    )
+    payload = {
+        "evidence": manifest,
+        "base_execution_id": None,
+        "idempotency_key": "delivery",
+    }
+    queue = RSIClient(data_dir=client.data_dir, config=settings(), auto_start=False)
+    with pytest.raises(ValueError, match="learning-only role"):
+        client.execution_create(
+            **{
+                **payload,
+                "evidence": {
+                    **manifest,
+                    "files": manifest["files"]
+                    + [{"path": str(original), "role": "input"}],
+                },
+            }
+        )
+    assert queue.material_list() == []
+    assert list((client.data_dir / "materials").iterdir()) == []
+    created = client.execution_create(**payload)
+    assert "material_ids" not in created
+    assert created["progress_percent"] == 0
+    assert client.execution_create(**payload)["id"] == created["id"]
+    assert len(queue.material_list()) == 1
+    [learning] = client.recipe_list()
+    assert learning["execution_id"] == created["id"]
+    assert learning["active_version_id"] is None
+    assert not hasattr(client, "recipe_search")
+    files = {f["role"]: f["locator"] for f in created["evidence"]}
+    assert created["policy"]["confirmation_ref"] == payload["idempotency_key"]
+    task = created["policy"]["test_task"]
+    assert task["input_locators"] == [files["input"]]
+    assert task["replay_current_case"]
+    assert task["shared_reference_locators"] is None
+    assert task["checks"] == []
+    feedback = tmp_path / "feedback.md"
+    feedback.write_text("Keep the answer concise.")
+    extra = {"context_path": str(feedback), "files": []}
+    assert not hasattr(client, "execution_update")
+    assert not hasattr(client, "rubrics_update")
+    assert not hasattr(client, "recipe_update")
+    assert not hasattr(client, "recipe_version_list")
+    updated = client.execution_append_evidence(created["id"], evidence=extra)
+    assert client.execution_append_evidence(created["id"], evidence=extra) == updated
+    assert updated["input_revision"] == 2
+    assert len(updated["evidence"]) == len(created["evidence"]) + 1
+    assert updated["policy"]["test_task"] == task
+    runtime = FileRuntime()
+    queue.run_pending(runtime=runtime)
+    assert [[f["locator"] for f in catalog] for catalog in runtime.test_catalogs] == [
+        [files["input"]]
+    ]
+    finished = client.execution_get(created["id"])
+    assert finished["result"]["test_status"] == "passed"
+    assert finished["progress_percent"] == 100
+    assert client.execution_list(offset=0, archived=False)[0]["progress_percent"] == 100
+    with pytest.raises(InvalidState, match="terminal inputs are immutable"):
+        client.execution_append_evidence(created["id"], evidence=extra)
+    recipe = client.recipe_get(finished["recipe_id"], version="latest")
+    assert any(row["recipe_id"] == recipe["id"] for row in client.recipe_list())
+    assert (
+        client.recipe_get(recipe["id"], version=recipe["latest_version_id"])[
+            "selected_version"
+        ]
+        == recipe["selected_version"]
+    )
+    [available] = [row for row in client.recipe_list() if row["available_version_id"]]
+    assert available["recipe_id"] == recipe["id"]
+    assert available["active_version_id"] == recipe["latest_version_id"]
+    assert (
+        client.recipe_get(
+            available["recipe_id"], version=available["active_version_id"]
+        )["selected_version"]
+        == recipe["selected_version"]
+    )
+
+    revised = client.execution_create(
+        **{
+            **payload,
+            "idempotency_key": "same-delivery-revision",
+            "base_execution_id": created["id"],
+        }
+    )
+    assert revised["parent_execution_id"] == created["id"]
+    assert revised["base_recipe_version_id"] == finished["recipe_version_id"]
+
+    context.unlink()
+    replayed = client.execution_create(**payload)
+    assert replayed["id"] == created["id"]
+    assert replayed["evidence"][0]["sha256"] == created["evidence"][0]["sha256"]
+
+    legacy_material = queue.material_create(manifest={"context_path": str(feedback)})
+    legacy = queue.execution_create(
+        material_ids=[legacy_material["id"]], policy=policy(), idempotency_key="legacy"
+    )
+    with pytest.raises(Conflict):
+        client.execution_create(**{**payload, "idempotency_key": "legacy"})
+    assert client.execution_get(legacy["id"])["evidence"] == legacy_material["files"]

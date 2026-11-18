@@ -1,90 +1,45 @@
 # CoSens TypeScript Local RSI SDK
 
-Use Node.js 22 or later. Install the tarball from your Agent project and import the ESM entry point.
+Use Node.js 22 or later. Install the SDK tarball from your Agent project.
 
 ```sh
 npm install /path/to/cosens-sdk-<version>.tgz
 ```
 
-Use `import { RSIClient } from 'cosens-sdk/rsi'` in the host. To work from the SDK source, run `npm ci` in this directory.
-
-The model must support Chat Completions and tool calling. Set `RSI_MODEL_API_KEY` in the host process environment. The example assumes a local model endpoint. For packaging, include `dist/rsi/worker.js` and the matching `better-sqlite3` native dependency. The worker defaults to the current Node executable. A host with a bundled standalone Node can set `node_executable`.
+Set `RSI_MODEL_API_KEY` in the Agent process. The model must support Chat Completions and tool calls. If you package a standalone Node with the host, set `RSI_NODE_EXECUTABLE` and include the SDK worker and the matching `better-sqlite3` native dependency.
 
 ```ts
 import { RSIClient } from 'cosens-sdk/rsi';
 
 const rsi = new RSIClient({
-  data_dir: appDataDirectory,
+  data_dir: './rsi-data',
   config: {
-    model: { model: 'your-local-model', base_url: 'http://127.0.0.1:8000/v1' },
-    max_executions: 2,
-    max_model_requests: 1,
+    model: 'your-model-id',
+    base_url: 'http://127.0.0.1:8000/v1',
+    auto_start: true,
   },
 });
+await rsi.recover();
 
-async function onConfirmedDelivery(delivery: {
-  sessionId: string;
-  deliveryId: string;
-  confirmationRef: string;
-  contextPath: string;
-  inputPath: string;
-  outputPath: string;
-  baseRecipeVersionId?: string;
-}) {
-  const key = JSON.stringify([delivery.sessionId, delivery.deliveryId]);
-  const material = rsi.material_create({
-    manifest: {
-      context_path: delivery.contextPath,
-      source_session_id: delivery.sessionId,
-      capture_boundary: delivery.deliveryId,
-      files: [
-        { path: delivery.inputPath, role: 'input' },
-        { path: delivery.outputPath, role: 'artifact' },
-      ],
+async function onConfirmedDelivery(
+  contextPath: string,
+  currentInputPath: string,
+  confirmationRef: string,
+) {
+  const run = await rsi.execution_create({
+    evidence: {
+      context_path: contextPath,
+      files: [{ path: currentInputPath, role: 'input' }],
     },
-    idempotency_key: key,
+    idempotency_key: confirmationRef,
+    base_execution_id: null,
   });
-  const execution = await rsi.execution_create({
-    material_ids: [material.id],
-    source_session_id: delivery.sessionId,
-    base_recipe_version_id: delivery.baseRecipeVersionId,
-    idempotency_key: key,
-    policy: {
-      artifact_confirmed: true,
-      confirmation_ref: delivery.confirmationRef,
-      test_task: {
-        instruction: 'Use the test input to produce summary.md.',
-        input_locators: [material.files[1].locator],
-        shared_reference_locators: [],
-        checks: [{ kind: 'exists', path: 'summary.md' }],
-      },
-    },
-  });
-  return execution.id;
+  return run.id;
 }
 ```
 
-The Hook returns after the task is queued and a worker is dispatched. The host queries `execution_get(id)` for stage, questions and results. Display required questions in the host UI and pass answers to `execution_clarification_answer`. Call `recover()` once on host startup to pick up unfinished work. If worker leases still occupy all slots, `scheduled: true` indicates that a detached process will wait for a slot and take over after expiry. Call `close()` when the host is done with the client.
+The SDK submits the snapshots and queues the Execution in one call. The Worker reruns the current task in a fresh workspace using its submitted `input` files and scores the new output with the Rubric. An active Execution can append evidence through `execution_append_evidence(id, evidence)`. The hook returns an Execution ID after queuing. Use `recipe_list()` for the panel and for choosing an available Recipe. Read the selected `available_version_id` with `recipe_get(recipe_id, version_id)`. Use `execution_get(id)` for questions and test results. The SDK automatically publishes a passing, non-provisional version and archives the previous one. Use `recipe_version_set_archived(id, { version_id, archived })` to archive or restore the latest qualified version.
 
-| Object | Atomic functions |
-| --- | --- |
-| Material | `material_create`, `material_get`, `material_list`, `material_update` |
-| Execution | `execution_create`, `execution_get`, `execution_list`, `execution_update`, `execution_cancel`, `execution_clarification_answer` |
-| Rubrics | `rubrics_create`, `rubrics_get`, `rubrics_list`, `rubrics_update`, `rubrics_version_create`, `rubrics_version_list` |
-| Recipe | `recipe_create`, `recipe_get`, `recipe_list`, `recipe_update`, `recipe_version_create`, `recipe_version_list`, `recipe_test`, `recipe_activate` |
+Use `config: null` for read-only or recovery clients. Close each client with `close()` when done. SQLite and checkpoints use the same data directory across restarts. The worker uses LangGraph for recovery and sends direct model API requests from its nodes.
 
-Call `rsi.recipe_list()` for the Recipe panel. Each row has a `status` and a stable list key in `id`. A first-time learning row has `kind: 'learning'`, `recipe_id: null` and an `execution_id`. It shows `首次学习` until analysis names the reusable Recipe. The SDK stores that name on the Execution before generation and reuses it for the Recipe and its generated versions. Clarification and recovery keep the name. `execution_get()` resolves the same display name as `recipe_list()`, including the existing name when learning a revision. Once the execution is associated with a Recipe, its status appears on the `kind: 'recipe'` row. The list uses the most recently started ongoing execution per Recipe, then the most recently started terminal one. `active_version_id` and `active_version_number` show what can be used while `status`, `candidate_version_id` and `pending_question_count` track the selected execution. A Recipe with no associated execution has status `active` or `inactive`. `recipe_list({ active_only: true })` returns enabled Recipes for task-time selection.
-
-Use `archived` with update functions to archive or restore records. Recipe retrieval defaults to the active version. Test results live on the Execution. A missing test task yields `unverifiable`. Activation requires a passing test and no unresolved clarification. The host owns task boundary selection and the learning confirmation UI.
-
-Each client can supply its own `config` when using the same `data_dir`. Execution creation saves that configuration on the Execution, and the Worker reads it from there. Opening a client for reads or recovery can omit `config`.
-
-SQLite records live in `rsi-ts.sqlite3` under `data_dir`. Immutable material snapshots, test files and graph checkpoints are stored alongside it. Use a separate directory for each runtime. Background workers exit after the queue drains. The tested release environment is Linux with standalone Node.
-
-Use `test_task.input_locators` to authorize the current test files and `shared_reference_locators` to authorize reusable reference files. Each locator must come from an attached Material and match its respective `input` or `reference` role. Omitted lists authorize zero files. The learning stage gets historical evidence and excludes the declared test inputs. The evaluator uses the same authorized test files plus this run's outputs and trace.
-
-Set `COSENS_RSI_WEB_SEARCH_API_KEY` to an Exa key to enable the optional `web_search` tool during Recipe generation. Domain filters are comma-separated hostnames in `COSENS_RSI_WEB_SEARCH_ALLOWED_DOMAINS` and `COSENS_RSI_WEB_SEARCH_BLOCKED_DOMAINS`. Search results appear in the generation trace.
-
-LangGraph manages stage transitions and SQLite checkpoints. Each stage sends non-streaming Chat Completions requests directly using `fetch` and executes only its registered tools. `model.base_url` is the API base (for example, `http://localhost:1234/v1`). The worker appends `/chat/completions`; the default base is `https://api.openai.com/v1`. Stage traces record tool calls and results. If a test is interrupted before its result is stored, recovery starts it in a new workspace with an empty tool history.
-
-Run `npm run check` to build, typecheck and test the packaged entry point using a local model protocol fixture.
+See the [complete TS and Python interface reference](../python/docs/local-rsi.md). Run `npm run check` to build, typecheck and test the public package.
