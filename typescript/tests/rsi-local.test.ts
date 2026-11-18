@@ -262,8 +262,10 @@ test('independent Node hooks enqueue work that persists and passes a file test a
     });
     const script = `
       import { RSIClient } from 'cosens-sdk/rsi';
-      const [data_dir, material_id, key] = process.argv.slice(1);
-      const client = new RSIClient({ data_dir });
+      const [data_dir, material_id, key, configText] = process.argv.slice(1);
+      const config = JSON.parse(configText);
+      config.model.model += '-' + key;
+      const client = new RSIClient({ data_dir, config });
       const execution = await client.execution_create({
         material_ids: [material_id], idempotency_key: key,
         policy: { artifact_confirmed: true, confirmation_ref: 'test', auto_activate: true,
@@ -299,12 +301,25 @@ test('independent Node hooks enqueue work that persists and passes a file test a
     };
     const ids = await Promise.all(
       ['a', 'b', 'c', 'a'].map((key) =>
-        runHook(script, [data_dir, material.id, key]),
+        runHook(script, [
+          data_dir,
+          material.id,
+          key,
+          JSON.stringify(client.config),
+        ]),
       ),
     );
     assert.equal(ids[0], ids[3]);
     for (const id of new Set(ids)) {
       const run = await client.wait(id, { timeout: 25, poll_interval: 0.05 });
+      assert.equal(
+        run.runtime_config.model.model,
+        'fixture-' + ['a', 'b', 'c'][ids.indexOf(id)],
+      );
+      assert.equal(
+        JSON.parse(readFileSync(run.test_results[0].trace_path!, 'utf8')).model,
+        run.runtime_config.model.model,
+      );
       assert.equal(run.status, 'completed', JSON.stringify(run.error));
       assert.equal(run.result?.test_status, 'passed');
       assert.equal(run.test_results.length, 1);

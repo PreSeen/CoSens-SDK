@@ -295,6 +295,7 @@ export interface ExecutionResult {
   activation_conflict?: boolean;
 }
 export interface Execution extends ObjectMetadata {
+  runtime_config: LocalConfig;
   material_ids: string[];
   policy: z.output<typeof PolicySchema>;
   source_session_id?: string | null;

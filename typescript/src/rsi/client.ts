@@ -32,7 +32,7 @@ import {
 
 export class RSIClient {
   readonly store: Store;
-  readonly config: LocalConfig;
+  private readonly suppliedConfig?: LocalConfig;
   readonly data_dir: string;
   readonly auto_start: boolean;
   private readonly node_executable: string;
@@ -52,15 +52,18 @@ export class RSIClient {
     this.auto_start = auto_start;
     this.node_executable = node_executable;
     try {
-      this.config = LocalConfigSchema.parse(
-        this.store.configure(
-          config ? LocalConfigSchema.parse(config) : undefined,
-        ),
-      );
+      this.suppliedConfig =
+        config === undefined ? undefined : LocalConfigSchema.parse(config);
     } catch (e) {
       this.store.close();
       throw e;
     }
+  }
+  get config(): LocalConfig {
+    return (
+      this.suppliedConfig ??
+      fail('invalid_state', 'config is required to create work')
+    );
   }
   material_create({
     manifest,
@@ -350,6 +353,7 @@ export class RSIClient {
     request: Omit<ExecutionCreate, 'idempotency_key'> & {
       answers?: Record<string, unknown>;
     },
+    config = this.config,
   ): Execution {
     if (!request.material_ids.length)
       fail('invalid_argument', 'at least one Material is required');
@@ -378,6 +382,7 @@ export class RSIClient {
       fail('invalid_state', 'continue active execution with execution_update');
     return this.store.insert<Execution>('execution', {
       ...request,
+      runtime_config: config,
       policy: PolicySchema.parse(request.policy),
       status: 'queued',
       stage: 'queued',
@@ -534,15 +539,18 @@ export class RSIClient {
       obj.answers[key] = answer;
       let child_id: string | null = null;
       if (obj.status === 'completed') {
-        child_id = this.execution_insert({
-          material_ids: obj.material_ids,
-          policy: obj.policy,
-          rubrics_version_id: obj.rubrics_version_id,
-          source_session_id: obj.source_session_id,
-          parent_execution_id: id,
-          base_recipe_version_id: obj.recipe_version_id,
-          answers: obj.answers,
-        }).id;
+        child_id = this.execution_insert(
+          {
+            material_ids: obj.material_ids,
+            policy: obj.policy,
+            rubrics_version_id: obj.rubrics_version_id,
+            source_session_id: obj.source_session_id,
+            parent_execution_id: id,
+            base_recipe_version_id: obj.recipe_version_id,
+            answers: obj.answers,
+          },
+          this.suppliedConfig ?? obj.runtime_config,
+        ).id;
         obj.answer_children = { ...obj.answer_children, [key]: child_id };
       } else if (!TERMINAL.has(obj.status)) obj.input_revision++;
       this.store.save(obj);
@@ -642,16 +650,24 @@ export class RSIClient {
     if (this.auto_start) await this.recover();
     return result;
   }
-  private check_runtime() {
-    if (!process.env[this.config.model.api_key_env])
+  private check_runtime(config = this.config) {
+    if (!process.env[config.model.api_key_env])
       fail(
         'invalid_state',
         'configured model credential environment variable is missing',
       );
   }
   async recover(): Promise<{ started: number; scheduled?: true }> {
-    this.check_runtime();
-    if (!this.store.has_pending()) return { started: 0 };
+    const first = this.store.pending_execution();
+    if (!first) return { started: 0 };
+    const credentials = Object.keys(process.env).filter(
+      (name) => process.env[name],
+    );
+    const pending = this.store.pending_execution(credentials);
+    const config = LocalConfigSchema.parse(
+      JSON.parse((pending ?? first).config),
+    );
+    this.check_runtime(config);
     const worker = fileURLToPath(new URL('./worker.js', import.meta.url));
     if (!existsSync(worker))
       fail(
@@ -661,7 +677,13 @@ export class RSIClient {
 
     const launch = async (owner: string, slot: string, deferred = false) => {
       try {
-        const args = [worker, this.data_dir, owner, slot];
+        const args = [
+          worker,
+          this.data_dir,
+          owner,
+          slot,
+          (pending ?? first).id,
+        ];
         if (deferred) args.push('--wait-for-slot');
         const child = spawn(this.node_executable, args, {
           detached: true,
@@ -685,13 +707,13 @@ export class RSIClient {
     };
 
     let started = 0;
-    for (let i = 0; i < this.config.max_executions; i++) {
+    for (let i = 0; i < config.max_executions; i++) {
       const owner = uid('worker');
       const slot = this.store.reserve(
         'worker',
         owner,
-        this.config.max_executions,
-        this.config.lease_seconds,
+        config.max_executions,
+        config.lease_seconds,
         true,
       );
       if (!slot) break;
@@ -702,8 +724,8 @@ export class RSIClient {
 
     const owner = uid('worker');
     const deferred = this.store.tx(() =>
-      this.store.has_pending()
-        ? this.store.reserve('recovery', owner, 1, this.config.lease_seconds)
+      this.store.has_pending(credentials)
+        ? this.store.reserve('recovery', owner, 1, config.lease_seconds)
         : null,
     );
     if (!deferred) return { started: 0 };
@@ -714,7 +736,19 @@ export class RSIClient {
     processed: number;
   }> {
     const { drain } = await import('./worker.js');
-    return drain(this, runtime);
+    if (this.suppliedConfig) return drain(this, runtime);
+    const pending = this.store.pending_execution();
+    if (!pending) return { processed: 0 };
+    const client = new RSIClient({
+      data_dir: this.data_dir,
+      config: LocalConfigSchema.parse(JSON.parse(pending.config)),
+      auto_start: false,
+    });
+    try {
+      return await drain(client, runtime);
+    } finally {
+      client.close();
+    }
   }
   async wait(
     id: string,

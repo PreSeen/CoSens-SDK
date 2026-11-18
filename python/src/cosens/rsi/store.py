@@ -1,6 +1,6 @@
 """SQLite adapter: short transactions, durable queue, leases and fencing.
 
-All local clients using a data directory share its settings and concurrency budget.
+Executions in one data directory share the queue and concurrency coordination.
 No transaction stays open while a model or tool runs.
 """
 
@@ -33,7 +33,6 @@ class Store:
         with self.connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript("""
-                CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS objects (
                     id TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL,
                     created REAL NOT NULL, revision INTEGER NOT NULL DEFAULT 1);
@@ -54,6 +53,17 @@ class Store:
                     scope TEXT NOT NULL, key TEXT NOT NULL, request TEXT NOT NULL, result TEXT NOT NULL,
                     PRIMARY KEY(scope,key));
             """)
+            if conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'"
+            ).fetchone():
+                legacy = conn.execute("SELECT data FROM settings WHERE id=1").fetchone()
+                if legacy:
+                    conn.execute(
+                        """UPDATE objects
+                           SET data=json_set(data, '$.runtime_config', json(?))
+                           WHERE kind='execution' AND json_type(data, '$.runtime_config') IS NULL""",
+                        (legacy["data"],),
+                    )
         os.chmod(self.path, 0o600)
 
     @contextmanager
@@ -77,21 +87,6 @@ class Store:
             except BaseException:
                 conn.rollback()
                 raise
-
-    def configure(self, config=None):
-        with self.transaction() as conn:
-            row = conn.execute("SELECT data FROM settings WHERE id=1").fetchone()
-            if row:
-                existing = json.loads(row["data"])
-                if config is not None and config != existing:
-                    raise Conflict(
-                        "this data directory already has different runtime settings"
-                    )
-                return existing
-            if config is None:
-                raise InvalidState("initialize this directory with LocalConfig first")
-            conn.execute("INSERT INTO settings VALUES (1,?)", (encode(config),))
-            return config
 
     @staticmethod
     def get_in(conn, object_id, kind=None):
@@ -428,7 +423,7 @@ class Store:
                 (now + ttl, owner, now),
             )
 
-    def claim(self, owner, ttl, max_executions):
+    def claim(self, owner, ttl, max_executions, credentials=None):
         now = time.time()
         with self.transaction() as conn:
             running = conn.execute(
@@ -438,9 +433,22 @@ class Store:
             if running >= max_executions:
                 return None
             row = conn.execute(
-                """SELECT id,fence FROM jobs WHERE status='queued'
-                OR (status='running' AND lease_until<?) ORDER BY created,id LIMIT 1""",
-                (now,),
+                """SELECT jobs.id,jobs.fence FROM jobs JOIN objects ON objects.id=jobs.id
+                WHERE (jobs.status='queued' OR (jobs.status='running' AND jobs.lease_until<?))
+                AND COALESCE(json_extract(objects.data,'$.runtime_config.max_executions'),?)>?
+                AND (? IS NULL OR json_extract(objects.data,'$.runtime_config.model.api_key_env')
+                     IN (SELECT value FROM json_each(?)))
+                ORDER BY jobs.created,jobs.id LIMIT 1""",
+                (
+                    now,
+                    max_executions,
+                    running,
+                    *(
+                        [encode(credentials)] * 2
+                        if credentials is not None
+                        else (None, None)
+                    ),
+                ),
             ).fetchone()
             if not row:
                 return None
@@ -475,11 +483,19 @@ class Store:
             obj.update(changes)
             return self.save(conn, obj)
 
-    def has_pending(self):
+    def pending_execution(self, credentials=None):
+        keys = encode(credentials) if credentials is not None else None
         with self.connect() as conn:
-            return (
-                conn.execute(
-                    "SELECT 1 FROM jobs WHERE status IN ('queued','running') LIMIT 1"
-                ).fetchone()
-                is not None
-            )
+            row = conn.execute(
+                """SELECT jobs.id, json_extract(objects.data,'$.runtime_config') AS config
+                   FROM jobs JOIN objects ON objects.id=jobs.id
+                   WHERE jobs.status IN ('queued','running')
+                   AND (? IS NULL OR json_extract(objects.data,'$.runtime_config.model.api_key_env')
+                        IN (SELECT value FROM json_each(?)))
+                   ORDER BY jobs.created,jobs.id LIMIT 1""",
+                (keys, keys),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def has_pending(self, credentials=None):
+        return self.pending_execution(credentials) is not None

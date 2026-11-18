@@ -28,13 +28,16 @@ class RSIClient:
         self, *, data_dir, config: LocalConfig | dict | None = None, auto_start=True
     ):
         self.store = Store(data_dir)
-        settings = (
-            LocalConfig.model_validate(config).model_dump()
-            if config is not None
-            else None
+        self._supplied_config = (
+            LocalConfig.model_validate(config) if config is not None else None
         )
-        self.config = LocalConfig.model_validate(self.store.configure(settings))
         self.auto_start = auto_start
+
+    @property
+    def config(self):
+        if self._supplied_config is None:
+            raise InvalidState("config is required to create work")
+        return self._supplied_config
 
     @property
     def data_dir(self):
@@ -252,7 +255,7 @@ class RSIClient:
     def recipe_version_list(self, recipe_id, **pagination):
         return self._version_list(recipe_id, "recipe", **pagination)
 
-    def _execution_insert(self, conn, request):
+    def _execution_insert(self, conn, request, *, config=None):
         materials = [
             self.store.get_in(conn, material_id, "material")
             for material_id in request["material_ids"]
@@ -288,6 +291,7 @@ class RSIClient:
             "execution",
             {
                 **request,
+                "runtime_config": (config or self.config).model_dump(),
                 "status": "queued",
                 "stage": "queued",
                 "input_revision": 1,
@@ -501,7 +505,12 @@ class RSIClient:
                     base_recipe_version_id=obj["recipe_version_id"],
                     answers=obj["answers"],
                 )
-                child_id = self._execution_insert(conn, inherited)["id"]
+                child_id = self._execution_insert(
+                    conn,
+                    inherited,
+                    config=self._supplied_config
+                    or LocalConfig.model_validate(obj["runtime_config"]),
+                )["id"]
                 obj.setdefault("answer_children", {})[key] = child_id
             elif obj["status"] not in TERMINAL:
                 obj["input_revision"] += 1
@@ -588,23 +597,27 @@ class RSIClient:
             self.recover()
         return result
 
-    def _check_runtime(self):
+    def _check_runtime(self, config=None):
         if not importlib.util.find_spec("langgraph") or not importlib.util.find_spec(
             "langchain_openai"
         ):
             raise InvalidState(
                 "install cosens-sdk[local-rsi] in the Hook Python environment"
             )
-        if not os.environ.get(self.config.model.api_key_env):
+        if not os.environ.get((config or self.config).model.api_key_env):
             raise InvalidState(
                 "set the configured model API key environment variable (a nonsecret placeholder is allowed for unauthenticated local gateways)"
             )
 
     def recover(self):
         """Dispatch detached workers, or schedule one to wait for an expired lease."""
-        self._check_runtime()
-        if not self.store.has_pending():
+        first = self.store.pending_execution()
+        if not first:
             return {"started": 0}
+        credentials = [name for name, value in os.environ.items() if value]
+        pending = self.store.pending_execution(credentials) or first
+        config = LocalConfig.model_validate_json(pending["config"])
+        self._check_runtime(config)
 
         def launch(owner, slot, *, deferred=False):
             env = dict(os.environ)
@@ -620,6 +633,8 @@ class RSIClient:
                 owner,
                 "--slot",
                 slot,
+                "--execution-id",
+                pending["id"],
             ]
             if deferred:
                 command.append("--wait-for-slot")
@@ -638,10 +653,10 @@ class RSIClient:
                 raise
 
         started = 0
-        for _ in range(self.config.max_executions):
+        for _ in range(config.max_executions):
             owner = uid("worker")
             slot = self.store.reserve(
-                "worker", owner, self.config.max_executions, self.config.lease_seconds
+                "worker", owner, config.max_executions, config.lease_seconds
             )
             if not slot:
                 break
@@ -651,7 +666,7 @@ class RSIClient:
             return {"started": started}
 
         owner = uid("worker")
-        deferred = self.store.reserve("recovery", owner, 1, self.config.lease_seconds)
+        deferred = self.store.reserve("recovery", owner, 1, config.lease_seconds)
         if not deferred:
             return {"started": 0}
         launch(owner, deferred, deferred=True)
@@ -661,7 +676,17 @@ class RSIClient:
         """Foreground worker for embedding/tests; same queue, graph and lease limits."""
         from .worker import drain
 
-        return drain(self, runtime=runtime)
+        if self._supplied_config:
+            return drain(self, runtime=runtime)
+        pending = self.store.pending_execution()
+        if not pending:
+            return {"processed": 0}
+        client = RSIClient(
+            data_dir=self.data_dir,
+            config=LocalConfig.model_validate_json(pending["config"]),
+            auto_start=False,
+        )
+        return drain(client, runtime=runtime)
 
     def wait(self, execution_id, *, timeout=300, poll_interval=0.2):
         deadline = time.monotonic() + timeout

@@ -9,7 +9,6 @@ import {
   type Version,
   type Pagination,
   type Execution,
-  type LocalConfig,
 } from './models.js';
 
 export const uid = (prefix: string) =>
@@ -54,7 +53,6 @@ export class Store {
     this.db.pragma('busy_timeout=20000');
     this.db.pragma('foreign_keys=ON');
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS objects (id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL,created REAL NOT NULL,revision INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS objects_kind ON objects(kind,created,id);
       CREATE TABLE IF NOT EXISTS versions (id TEXT PRIMARY KEY,object_id TEXT NOT NULL REFERENCES objects(id),number INTEGER NOT NULL,data TEXT NOT NULL,operation_key TEXT UNIQUE,UNIQUE(object_id,number));
@@ -64,31 +62,27 @@ export class Store {
       CREATE INDEX IF NOT EXISTS slots_kind ON slots(kind,expires);
       CREATE TABLE IF NOT EXISTS idempotency (scope TEXT NOT NULL,key TEXT NOT NULL,request TEXT NOT NULL,result TEXT NOT NULL,PRIMARY KEY(scope,key));
     `);
+    const legacy = this.db
+      .prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'",
+      )
+      .get();
+    if (legacy) {
+      const row = this.db
+        .prepare('SELECT data FROM settings WHERE id=1')
+        .get() as { data: string } | undefined;
+      const saved = row && JSON.parse(row.data);
+      if (saved?.runtime === 'typescript-v2')
+        this.db
+          .prepare(
+            "UPDATE objects SET data=json_set(data, '$.runtime_config', json(?)) WHERE kind='execution' AND json_type(data, '$.runtime_config') IS NULL",
+          )
+          .run(encode(saved.config));
+    }
     chmodSync(path, 0o600);
   }
   tx<T>(fn: () => T): T {
     return this.db.transaction(fn).immediate();
-  }
-  configure(config?: LocalConfig): LocalConfig {
-    return this.tx(() => {
-      const row = this.db
-        .prepare('SELECT data FROM settings WHERE id=1')
-        .get() as { data: string } | undefined;
-      if (row) {
-        const saved = JSON.parse(row.data);
-        if (saved.runtime !== 'typescript-v2')
-          fail('conflict', 'incompatible RSI runtime');
-        if (config && encode(config) !== encode(saved.config))
-          fail('conflict', 'data directory has different runtime settings');
-        return saved.config;
-      }
-      if (!config)
-        fail('invalid_state', 'initialize this directory with config first');
-      this.db
-        .prepare('INSERT INTO settings VALUES (1,?)')
-        .run(encode({ runtime: 'typescript-v2', config }));
-      return config!;
-    });
   }
   get<T extends ObjectMetadata>(id: string, kind?: Kind): T {
     const row = this.db
@@ -276,6 +270,7 @@ export class Store {
     owner: string,
     ttl: number,
     limit: number,
+    credentials?: string[],
   ): { id: string; fence: number } | null {
     return this.tx(() => {
       const time = now();
@@ -287,9 +282,19 @@ export class Store {
       if (count >= limit) return null;
       const row = this.db
         .prepare(
-          "SELECT id,fence FROM jobs WHERE status='queued' OR (status='running' AND lease_until<?) ORDER BY created,id LIMIT 1",
+          `SELECT jobs.id, jobs.fence FROM jobs JOIN objects ON objects.id = jobs.id
+           WHERE (jobs.status='queued' OR (jobs.status='running' AND jobs.lease_until<?))
+           AND COALESCE(json_extract(objects.data, '$.runtime_config.max_executions'), ?) > ?
+           AND (? IS NULL OR json_extract(objects.data, '$.runtime_config.model.api_key_env') IN (SELECT value FROM json_each(?)))
+           ORDER BY jobs.created,jobs.id LIMIT 1`,
         )
-        .get(time) as { id: string; fence: number } | undefined;
+        .get(
+          time,
+          limit,
+          count,
+          credentials ? encode(credentials) : null,
+          credentials ? encode(credentials) : null,
+        ) as { id: string; fence: number } | undefined;
       if (!row) return null;
       this.db
         .prepare(
@@ -325,12 +330,22 @@ export class Store {
       fail('input_changed', 'execution inputs changed');
     return execution;
   }
-  has_pending(): boolean {
-    return !!this.db
+  pending_execution(credentials?: string[]) {
+    return this.db
       .prepare(
-        "SELECT 1 FROM jobs WHERE status IN ('queued','running') LIMIT 1",
+        `SELECT jobs.id AS id, json_extract(objects.data, '$.runtime_config') AS config
+       FROM jobs JOIN objects ON objects.id = jobs.id
+       WHERE jobs.status IN ('queued','running')
+       AND (? IS NULL OR json_extract(objects.data, '$.runtime_config.model.api_key_env') IN (SELECT value FROM json_each(?)))
+       ORDER BY jobs.created, jobs.id LIMIT 1`,
       )
-      .get();
+      .get(
+        credentials ? encode(credentials) : null,
+        credentials ? encode(credentials) : null,
+      ) as { id: string; config: string } | undefined;
+  }
+  has_pending(credentials?: string[]): boolean {
+    return !!this.pending_execution(credentials);
   }
   close() {
     this.db.close();

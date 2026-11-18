@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sqlite3
 import threading
 import time
 
-from .models import LeaseLost, RSIError
+from .models import LeaseLost, LocalConfig, RSIError
 from .store import uid
 
 
@@ -35,10 +36,16 @@ def failure_details(exc, stage):
 
 
 def drain(client, *, runtime=None, owner=None, slot=None):
+    from .client import RSIClient
     from .engine import Engine
     from .runtime import LangChainRuntime
 
     store, config = client.store, client.config
+    credentials = (
+        None
+        if runtime is not None
+        else [name for name, value in os.environ.items() if value]
+    )
     owner = owner or uid("worker")
     detached = slot is not None
     slot = slot or store.reserve(
@@ -49,6 +56,7 @@ def drain(client, *, runtime=None, owner=None, slot=None):
     stop = threading.Event()
     lost = threading.Event()
     active = [None]
+    lease_seconds = config.lease_seconds
 
     def check_alive():
         if lost.is_set():
@@ -59,9 +67,10 @@ def drain(client, *, runtime=None, owner=None, slot=None):
                 store.guard(conn, execution_id, owner, fence, revision)
 
     def heartbeat():
-        while not stop.wait(config.lease_seconds / 3):
+        # One third of the minimum supported lease.
+        while not stop.wait(1):
             try:
-                store.heartbeat(owner, config.lease_seconds, worker_slot=slot)
+                store.heartbeat(owner, lease_seconds, worker_slot=slot)
             except (sqlite3.Error, LeaseLost):
                 lost.set()
                 return
@@ -69,12 +78,13 @@ def drain(client, *, runtime=None, owner=None, slot=None):
     processed = 0
     thread = threading.Thread(target=heartbeat, daemon=True)
     thread.start()
-    runtime = runtime or LangChainRuntime(client, owner, check_alive)
     try:
         store.heartbeat(owner, config.lease_seconds, worker_slot=slot)
         idle_since = time.monotonic()
         while not lost.is_set():
-            claim = store.claim(owner, config.lease_seconds, config.max_executions)
+            claim = store.claim(
+                owner, config.lease_seconds, config.max_executions, credentials
+            )
             if claim is None:
                 # Brief idle grace handles simultaneous hook dispatch; exits once drained.
                 if time.monotonic() - idle_since >= 1:
@@ -82,11 +92,15 @@ def drain(client, *, runtime=None, owner=None, slot=None):
                     # enqueue after this check can reserve our released slot and spawn.
                     with store.transaction() as conn:
                         # Detached workers can take over a running job after its lease expires.
-                        pending = conn.execute(
-                            "SELECT 1 FROM jobs WHERE status='queued' "
-                            "OR (status='running' AND (? OR lease_until<?)) LIMIT 1",
-                            (detached, time.time()),
-                        ).fetchone()
+                        pending = (
+                            store.has_pending(credentials)
+                            if detached
+                            else conn.execute(
+                                "SELECT 1 FROM jobs WHERE status='queued' "
+                                "OR (status='running' AND lease_until<?) LIMIT 1",
+                                (time.time(),),
+                            ).fetchone()
+                        )
                         if not pending:
                             conn.execute("DELETE FROM slots WHERE token=?", (slot,))
                             break
@@ -99,7 +113,15 @@ def drain(client, *, runtime=None, owner=None, slot=None):
             # before committing a stage and restarts analysis when needed.
             active[0] = (execution_id, fence, None)
             try:
-                Engine(client, runtime, owner, fence, execution_id).run()
+                work = RSIClient(
+                    data_dir=client.data_dir,
+                    config=store.get(execution_id, "execution")["runtime_config"],
+                    auto_start=False,
+                )
+                lease_seconds = work.config.lease_seconds
+                store.heartbeat(owner, lease_seconds, worker_slot=slot)
+                agent = runtime or LangChainRuntime(work, owner, check_alive)
+                Engine(work, agent, owner, fence, execution_id).run()
             except LeaseLost:
                 pass
             except Exception as exc:  # noqa: BLE001 - isolate arbitrary model/tool failures at the job boundary
@@ -121,6 +143,7 @@ def drain(client, *, runtime=None, owner=None, slot=None):
                     pass
             finally:
                 active[0] = None
+                lease_seconds = config.lease_seconds
             processed += 1
     finally:
         stop.set()
@@ -131,6 +154,7 @@ def drain(client, *, runtime=None, owner=None, slot=None):
 
 def wait_for_worker_slot(client, owner, waiting_slot):
     store, config = client.store, client.config
+    credentials = [name for name, value in os.environ.items() if value]
     next_heartbeat = 0
     try:
         while True:
@@ -138,9 +162,7 @@ def wait_for_worker_slot(client, owner, waiting_slot):
                 store.heartbeat(owner, config.lease_seconds, worker_slot=waiting_slot)
                 next_heartbeat = time.monotonic() + config.lease_seconds / 3
             with store.transaction() as conn:
-                if not conn.execute(
-                    "SELECT 1 FROM jobs WHERE status IN ('queued','running') LIMIT 1"
-                ).fetchone():
+                if not store.has_pending(credentials):
                     conn.execute("DELETE FROM slots WHERE token=?", (waiting_slot,))
                     return None
 
@@ -163,11 +185,20 @@ def main():
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--owner")
     parser.add_argument("--slot")
+    parser.add_argument("--execution-id")
     parser.add_argument("--wait-for-slot", action="store_true")
     args = parser.parse_args()
     if bool(args.owner) != bool(args.slot) or (args.wait_for_slot and not args.slot):
         parser.error("owner and slot must be supplied together")
-    client = RSIClient(data_dir=args.data_dir, auto_start=False)
+    reader = RSIClient(data_dir=args.data_dir, auto_start=False)
+    if args.execution_id:
+        config = reader.execution_get(args.execution_id)["runtime_config"]
+    else:
+        pending = reader.store.pending_execution()
+        if not pending:
+            return
+        config = LocalConfig.model_validate_json(pending["config"])
+    client = RSIClient(data_dir=args.data_dir, config=config, auto_start=False)
     slot = args.slot
     if args.wait_for_slot:
         slot = wait_for_worker_slot(client, args.owner, slot)

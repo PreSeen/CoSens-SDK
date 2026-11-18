@@ -31,7 +31,7 @@ rsi = RSIClient(
 
 模型必须支持兼容 OpenAI 的 Chat Completions 和工具调用。宿主提供模型地址和模型名。密钥通过指定环境变量传递给后台进程，不写入数据库、检查点、参数或提示词。不需要认证的本地模型也应设置一个非敏感占位值。SDK 不读取 `.env`。
 
-同一 `data_dir` 的所有会话共享配置、队列和并发预算；首次初始化保存配置，后续可省略 `config`。不同配置访问同一目录会抛出 `Conflict`，防止会话各自覆盖运行设置。请在初始化时选定容量。`auto_start=False` 可关闭自动派发，由宿主明确调用 `run_pending()` 或 `recover()`。
+同一 `data_dir` 共享 SQLite 和本地队列。每个 Client 可以传自己的 `config`，创建 Execution 时保存该配置的快照。Worker 用该任务的快照执行，之后创建的 Client 不会改变已提交任务。只查询或恢复已有工作时可以省略 `config`。`auto_start=False` 可关闭自动派发，由宿主明确调用 `run_pending()` 或 `recover()`。
 
 宿主可设置 Exa 密钥环境变量 `COSENS_RSI_WEB_SEARCH_API_KEY`，让 Recipe 生成阶段按需调用 `web_search`。可用 `COSENS_RSI_WEB_SEARCH_ALLOWED_DOMAINS` 和 `COSENS_RSI_WEB_SEARCH_BLOCKED_DOMAINS` 配置以逗号分隔的域名。搜索结果保存在生成轨迹中，测试和评分继续使用原有文件权限。
 

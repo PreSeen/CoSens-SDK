@@ -3,7 +3,12 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { RSIClient } from './client.js';
 import { Engine } from './engine.js';
 import { LangChainRuntime } from './runtime.js';
-import { RSIError, type Runtime } from './models.js';
+import {
+  LocalConfigSchema,
+  RSIError,
+  type Execution,
+  type Runtime,
+} from './models.js';
 import { now, uid } from './store.js';
 
 export async function drain(
@@ -13,13 +18,17 @@ export async function drain(
   reservedSlot?: string,
 ) {
   const { store, config } = client;
+  const credentials = runtime
+    ? undefined
+    : Object.keys(process.env).filter((name) => process.env[name]);
   const slot =
     reservedSlot ??
     store.reserve('worker', owner, config.max_executions, config.lease_seconds);
   if (!slot) return { processed: 0 };
   let leaseError: unknown;
   let active: { id: string; fence: number } | null = null;
-  const renew = () => store.heartbeat(owner, config.lease_seconds, slot);
+  let leaseSeconds = config.lease_seconds;
+  const renew = () => store.heartbeat(owner, leaseSeconds, slot);
   const heartbeat = setInterval(
     () => {
       try {
@@ -28,26 +37,25 @@ export async function drain(
         leaseError = error;
       }
     },
-    (config.lease_seconds * 1000) / 3,
+    1000, // One third of the minimum supported lease.
   );
-  const agent =
-    runtime ??
-    new LangChainRuntime(client, owner, () => {
-      if (leaseError) throw leaseError;
-      if (active) store.guard(active.id, owner, active.fence);
-    });
   let processed = 0;
   try {
     renew();
     let idleSince = Date.now();
     while (!leaseError) {
-      active = store.claim(owner, config.lease_seconds, config.max_executions);
+      active = store.claim(
+        owner,
+        config.lease_seconds,
+        config.max_executions,
+        credentials,
+      );
       if (!active) {
         if (Date.now() - idleSince >= 1000) {
           const emptied = store.tx(() => {
             // A detached worker can pick up an interrupted job once its lease expires.
             const pending = reservedSlot
-              ? store.has_pending()
+              ? store.has_pending(credentials)
               : store.db
                   .prepare(
                     "SELECT 1 FROM jobs WHERE status='queued' OR (status='running' AND lease_until<?) LIMIT 1",
@@ -63,8 +71,22 @@ export async function drain(
         continue;
       }
       const { id, fence } = active;
+      let executionClient: RSIClient | undefined;
       try {
-        await new Engine(client, agent, owner, fence, id).run();
+        executionClient = new RSIClient({
+          data_dir: client.data_dir,
+          config: store.get<Execution>(id, 'execution').runtime_config,
+          auto_start: false,
+        });
+        leaseSeconds = executionClient.config.lease_seconds;
+        renew();
+        const agent =
+          runtime ??
+          new LangChainRuntime(executionClient, owner, () => {
+            if (leaseError) throw leaseError;
+            if (active) store.guard(active.id, owner, active.fence);
+          });
+        await new Engine(executionClient, agent, owner, fence, id).run();
       } catch (error) {
         if (!(error instanceof RSIError && error.code === 'lease_lost')) {
           try {
@@ -88,7 +110,9 @@ export async function drain(
           }
         }
       } finally {
+        executionClient?.close();
         active = null;
+        leaseSeconds = config.lease_seconds;
       }
       processed++;
       idleSince = Date.now();
@@ -106,6 +130,9 @@ async function waitForWorkerSlot(
   waitingSlot: string,
 ) {
   const { store, config } = client;
+  const credentials = Object.keys(process.env).filter(
+    (name) => process.env[name],
+  );
   let nextHeartbeat = 0;
   try {
     for (;;) {
@@ -114,7 +141,7 @@ async function waitForWorkerSlot(
         nextHeartbeat = now() + config.lease_seconds / 3;
       }
       const pending = store.tx(() => {
-        if (store.has_pending()) return true;
+        if (store.has_pending(credentials)) return true;
         store.release(waitingSlot);
         return false;
       });
@@ -161,7 +188,7 @@ if (
   process.argv[1] &&
   pathToFileURL(process.argv[1]).href === import.meta.url
 ) {
-  const [data_dir, owner, slot, mode] = process.argv.slice(2);
+  const [data_dir, owner, slot, executionId, mode] = process.argv.slice(2);
   try {
     if (
       !data_dir ||
@@ -169,15 +196,26 @@ if (
       (mode && (mode !== '--wait-for-slot' || !owner || !slot))
     )
       throw new Error('worker expects a data directory and optional lease');
-    const client = new RSIClient({ data_dir, auto_start: false });
+    const reader = new RSIClient({ data_dir, auto_start: false });
     try {
-      const workerSlot = mode
-        ? await waitForWorkerSlot(client, owner, slot)
-        : slot;
-      if (workerSlot !== null)
-        await drain(client, undefined, owner, workerSlot);
+      const pending = reader.store.pending_execution();
+      const config = executionId
+        ? reader.execution_get(executionId).runtime_config
+        : pending && LocalConfigSchema.parse(JSON.parse(pending.config));
+      if (config) {
+        const client = new RSIClient({ data_dir, config, auto_start: false });
+        try {
+          const workerSlot = mode
+            ? await waitForWorkerSlot(client, owner, slot)
+            : slot;
+          if (workerSlot !== null)
+            await drain(client, undefined, owner, workerSlot);
+        } finally {
+          client.close();
+        }
+      }
     } finally {
-      client.close();
+      reader.close();
     }
   } catch {
     // The host can recover a job after lease expiry. Avoid exposing model data in process logs.

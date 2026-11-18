@@ -261,7 +261,9 @@ def test_multiple_hook_processes_survive_exit_and_share_limits(
     script = """
 import json, sys
 from cosens.rsi import RSIClient
-c = RSIClient(data_dir=sys.argv[1])
+config = json.loads(sys.argv[4])
+config["model"]["model"] += "-" + sys.argv[3]
+c = RSIClient(data_dir=sys.argv[1], config=config)
 run = c.execution_create(material_ids=[sys.argv[2]], source_session_id=sys.argv[3],
     idempotency_key='hook-' + sys.argv[3], policy={
         'artifact_confirmed': True, 'confirmation_ref': 'host-confirmation', 'auto_activate': True,
@@ -278,6 +280,7 @@ print(json.dumps({'id': run['id']}))
                 str(root),
                 material["id"],
                 f"session-{index}",
+                json.dumps(config),
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -318,6 +321,9 @@ print(json.dumps({'id': run['id']}))
             from pathlib import Path
 
             trace = json.loads(Path(test["trace_path"]).read_text())
+            expected_model = "local-test-" + run["source_session_id"]
+            assert run["runtime_config"]["model"]["model"] == expected_model
+            assert trace["model"] == expected_model
             assert any(m["type"] == "tool" for m in trace["messages"])
             checkpoint = (
                 client.data_dir / "executions" / run["id"] / "checkpoints-1.sqlite3"

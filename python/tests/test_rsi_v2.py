@@ -515,8 +515,12 @@ def test_atomic_claim_shared_across_independent_clients(client, tmp_path):
         claims = [c for c in pool.map(claim, range(8)) if c]
     assert len(claims) == 2
     assert len({c[0] for c in claims}) == 2
-    with pytest.raises(Conflict):
-        RSIClient(data_dir=client.data_dir, config=settings(max_executions=3))
+    different = RSIClient(
+        data_dir=client.data_dir, config=settings(max_executions=3), auto_start=False
+    )
+    execution = run(different, material_id)
+    assert execution["runtime_config"]["max_executions"] == 3
+    assert client.execution_get(claims[0][0])["runtime_config"]["max_executions"] == 2
 
 
 @pytest.mark.parametrize("leaked_from", [None, "recipe", "rubric"])
