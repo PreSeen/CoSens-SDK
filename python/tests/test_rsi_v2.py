@@ -385,6 +385,52 @@ def test_missing_task_or_failed_objective_check_cannot_activate(
         )
 
 
+@pytest.mark.parametrize(
+    "covered_score, expected_status, expected_rounds",
+    [(1, "passed", 1), (None, "unverifiable", 1), (0, "failed", 2)],
+)
+def test_uncovered_criteria_excluded_from_scoring_and_iteration(
+    client, tmp_path, covered_score, expected_status, expected_rounds
+):
+    class CoverageRuntime(FileRuntime):
+        def analyze(self, context, files, trace_path):
+            analysis = super().analyze(context, files, trace_path)
+            analysis["rubrics"]["criteria"].append(
+                {
+                    "id": "negative-answer-format",
+                    "description": "If the answer is negative, preserve its sign",
+                    "source": "agent_inference",
+                    "required": True,
+                }
+            )
+            return analysis
+
+        def assess(self, context, files, trace_path):
+            result = super().assess(context, files, trace_path)
+            result["scores"][1].update(
+                status="unverified", score=None, evidence="No negative input"
+            )
+            result["scores"][0].update(
+                status="unverified" if covered_score is None else "verified",
+                score=covered_score,
+            )
+            return result
+
+    execution = run(client, material(client, tmp_path)["id"], auto_activate=True)
+    runtime = CoverageRuntime()
+    client.run_pending(runtime=runtime)
+    result = client.execution_get(execution["id"])
+    assert result["status"] == "completed", result
+    assert result["result"]["test_status"] == expected_status
+    assert result["result"]["activated"] == (expected_status == "passed")
+    assert runtime.generation_count == expected_rounds
+    assert len(result["test_results"]) == expected_rounds
+    for test in result["test_results"]:
+        assert test["score"] == covered_score
+        assert test["scores"][1]["status"] == "unverified"
+        assert test["scores"][1]["score"] is None
+
+
 def test_late_clarification_creates_child_once(client, tmp_path):
     execution = run(client, material(client, tmp_path)["id"], auto_activate=True)
     client.run_pending(runtime=FileRuntime(questions=True))

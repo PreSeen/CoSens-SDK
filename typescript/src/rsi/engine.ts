@@ -512,22 +512,29 @@ export class Engine {
       ) {
         fail(
           'invalid_model_output',
-          'evaluator must score every fixed criterion exactly once',
+          'evaluator must report every fixed criterion exactly once',
         );
       }
-      result.score =
-        [...scores.values()].reduce((sum, score) => sum + score, 0) /
-        scores.size;
-      result.status =
-        result.score >= rubrics.pass_threshold &&
-        result.checks.every((check) => check.passed) &&
-        rubrics.criteria.every(
-          (criterion) =>
-            !criterion.required ||
-            scores.get(criterion.id)! >= rubrics.pass_threshold,
-        )
-          ? 'passed'
-          : 'failed';
+      const verifiedScores = [...scores.values()].filter(
+        (score) => score !== null,
+      );
+      if (verifiedScores.length) {
+        result.score =
+          verifiedScores.reduce((sum, score) => sum + score, 0) /
+          verifiedScores.length;
+      }
+      if (!result.checks.every((check) => check.passed))
+        result.status = 'failed';
+      else if (result.score !== null) {
+        const failedRequired = rubrics.criteria.some(({ id, required }) => {
+          const score = scores.get(id);
+          return required && score != null && score < rubrics.pass_threshold;
+        });
+        result.status =
+          result.score >= rubrics.pass_threshold && !failedRequired
+            ? 'passed'
+            : 'failed';
+      }
     }
     atomic_json(join(attempt, 'result.json'), result);
   }

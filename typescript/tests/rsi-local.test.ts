@@ -123,6 +123,13 @@ test('independent Node hooks enqueue work that persists and passes a file test a
                   source: 'user_feedback',
                   evidence: feedback.flatMap((item) => item.evidence_refs),
                 },
+                {
+                  id: 'negative-answer-format',
+                  description:
+                    'If the answer is negative, preserve the minus sign',
+                  source: 'agent_inference',
+                  required: true,
+                },
               ],
             },
           },
@@ -152,6 +159,13 @@ test('independent Node hooks enqueue work that persists and passes a file test a
             verifiable: true,
             scores: [
               { criterion_id: 'answer', score: 1, evidence: 'test/answer.txt' },
+              {
+                criterion_id: 'negative-answer-format',
+                status: 'unverified',
+                score: null,
+                evidence:
+                  'The answer 42 is positive, so the condition was not exercised',
+              },
             ],
             reason: 'Output verified',
           },
@@ -275,6 +289,18 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       const run = await client.wait(id, { timeout: 25, poll_interval: 0.05 });
       assert.equal(run.status, 'completed', JSON.stringify(run.error));
       assert.equal(run.result?.test_status, 'passed');
+      assert.equal(run.test_results.length, 1);
+      assert.equal(run.test_results[0].score, 1);
+      assert.deepEqual(
+        run.test_results[0].scores.map(({ status, score }) => ({
+          status,
+          score,
+        })),
+        [
+          { status: 'verified', score: 1 },
+          { status: 'unverified', score: null },
+        ],
+      );
       assert.deepEqual(
         run.analysis?.attribution?.possible_causes[0].evidence_refs,
         [{ material_id: material.id, locator: material.files[0].locator }],

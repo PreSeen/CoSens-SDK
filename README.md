@@ -22,6 +22,8 @@ Recipe and Rubric rules generalize historical examples into conditions, transfor
 
 During Recipe analysis the worker asks for clarification only when the evidence leaves multiple plausible interpretations of a reusable rule and the choice changes a future outcome or the rule's applicability. The worker applies rules supported by the evidence directly and expresses differences that future inputs or established conditions can resolve as parameters or branches.
 
+Rubric criteria whose conditions are absent from a test are recorded as `status: "unverified"` with `score: null`. Only verified criteria contribute to the score or required-criterion threshold. A test with no verified criteria and passing objective checks stays unverifiable. A scenario left unverified does not trigger a new Recipe round.
+
 Use separate data directories for the two runtimes. Each owns its local SQLite queue, files and checkpoints.
 
 Run the checks from each package directory with `npm ci && npm run check` or `python -m pip install '.[test]' && python -m pytest`.

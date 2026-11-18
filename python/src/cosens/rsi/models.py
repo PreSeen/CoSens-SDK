@@ -243,8 +243,17 @@ class ExecutionPolicy(Contract):
 
 class CriterionScore(Contract):
     criterion_id: str
-    score: float = Field(ge=0, le=1)
+    status: Literal["verified", "unverified"] = "verified"
+    score: float | None = Field(ge=0, le=1)
     evidence: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def score_matches_status(self):
+        if (self.status == "unverified") != (self.score is None):
+            raise ValueError(
+                "unverified criteria require null scores; verified criteria require numeric scores"
+            )
+        return self
 
 
 class Assessment(Contract):

@@ -215,11 +215,17 @@ export type ExecutionPolicy = z.input<typeof PolicySchema>;
 export const AssessmentSchema = z.strictObject({
   verifiable: z.boolean(),
   scores: z.array(
-    z.strictObject({
-      criterion_id: text,
-      score: z.number().min(0).max(1),
-      evidence: text,
-    }),
+    z
+      .strictObject({
+        criterion_id: text,
+        status: z.enum(['verified', 'unverified']).default('verified'),
+        score: z.number().min(0).max(1).nullable(),
+        evidence: text,
+      })
+      .refine(
+        ({ status, score }) => (status === 'unverified') === (score === null),
+        'unverified criteria require null scores; verified criteria require numeric scores',
+      ),
   ),
   reason: z.string(),
 });
@@ -271,7 +277,7 @@ export interface TestResult {
   round: number;
   status: 'passed' | 'failed' | 'unverifiable';
   score: number | null;
-  scores: z.output<typeof AssessmentSchema>['scores'];
+  scores: z.input<typeof AssessmentSchema>['scores'];
   checks: Array<z.output<typeof CheckSchema> & { passed: boolean }>;
   artifacts: EvidenceFile[];
   reason?: string;

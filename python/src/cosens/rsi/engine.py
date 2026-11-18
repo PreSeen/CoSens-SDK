@@ -392,34 +392,40 @@ class Engine:
                         attempt / "evaluator-trace.json",
                     )
                 ).model_dump()
-                criteria = rubric["content"]["criteria"]
-                scores = {s["criterion_id"]: s for s in assessment["scores"]}
-                if len(scores) != len(assessment["scores"]) or set(scores) != {
-                    c["id"] for c in criteria
-                }:
-                    raise ValueError(
-                        "evaluator must score each fixed criterion exactly once"
-                    )
-                score = sum(s["score"] for s in scores.values()) / len(scores)
-                passed = (
-                    score >= rubric["content"]["pass_threshold"]
-                    and all(c["passed"] for c in checks)
-                    and all(
-                        scores[c["id"]]["score"] >= rubric["content"]["pass_threshold"]
-                        for c in criteria
-                        if c["required"]
-                    )
-                )
                 result.update(
-                    status=("passed" if passed else "failed")
-                    if assessment["verifiable"]
-                    else "unverifiable",
                     scores=assessment["scores"],
-                    score=score,
                     checks=checks,
                     reason=assessment["reason"],
                     evaluator_trace_path=str(attempt / "evaluator-trace.json"),
                 )
+                if assessment["verifiable"]:
+                    criteria = rubric["content"]["criteria"]
+                    scores = {
+                        s["criterion_id"]: s["score"] for s in assessment["scores"]
+                    }
+                    if len(scores) != len(assessment["scores"]) or set(scores) != {
+                        c["id"] for c in criteria
+                    }:
+                        raise ModelOutputError(
+                            "evaluator must report every fixed criterion exactly once"
+                        )
+                    verified_scores = {
+                        key: score for key, score in scores.items() if score is not None
+                    }
+                    if verified_scores:
+                        result["score"] = sum(verified_scores.values()) / len(
+                            verified_scores
+                        )
+                    threshold = rubric["content"]["pass_threshold"]
+                    if not all(c["passed"] for c in checks):
+                        result["status"] = "failed"
+                    elif result["score"] is not None:
+                        passed = result["score"] >= threshold and all(
+                            verified_scores[c["id"]] >= threshold
+                            for c in criteria
+                            if c["required"] and c["id"] in verified_scores
+                        )
+                        result["status"] = "passed" if passed else "failed"
             atomic_json(attempt / "result.json", result)
         self.store.save_test(
             self.execution_id, self.owner, self.fence, state["input_revision"], result

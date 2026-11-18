@@ -258,7 +258,7 @@ class LangChainRuntime:
             "Record a provisional assumption and continue without waiting. "
             "Otherwise set sufficient_information=true, hypothesis=null and questions=[]. Limit applicability to what the evidence supports. "
             "Derive scoring criteria by combining task requirements and observed execution with the separately extracted user_feedback rules. Use extracted feedback for user_feedback criteria and carry over their source citations. Merge overlapping requirements into a single criterion. "
-            "Each criterion must be verifiable on future executions. Apply conditional criteria only where their conditions hold, and mark criteria that require a separate scenario as optional. "
+            "Each criterion must be verifiable on future executions. State the applicable condition for each conditional criterion and keep distinct scenarios separate so each can be verified independently. "
             "Cite sources only in each criterion's evidence field. Express the underlying requirement without including details specific to a past execution or requiring its replay. "
             "If fixed Rubrics are supplied, preserve their standard. "
             "When learning evidence contains corrective feedback or a documented correction, fill attribution.possible_causes. "
@@ -275,7 +275,7 @@ class LangChainRuntime:
             schema=RecipeContent,
             instruction="Learn reusable requirements and procedures from the available evidence and accepted clarifications. "
             "Preserve existing requirements from a base Recipe when the evidence still supports them. "
-            "Correct observed test failures and use analysis.attribution to turn supported corrections into reusable steps or checks. "
+            "Correct verified test failures and failed objective checks. Do not change rules solely because a scenario was unverified. Use analysis.attribution to turn supported corrections into reusable steps or checks. "
             "Preserve the exact terms and values of requirements that the evidence establishes as fixed across executions. "
             "Parameterize details supplied at execution time. A future executor must be able to apply the Recipe using the inputs available to that execution. "
             "Abstract evidence into rules and applicability conditions without copying case-specific details, evidence references or secrets. "
@@ -301,8 +301,12 @@ class LangChainRuntime:
             files=files,
             trace_path=trace_path,
             schema=Assessment,
-            instruction="Read actual test outputs. Score EVERY fixed criterion once, 0..1 with exact output evidence. "
-            "Judge actual output and trace, not recipe plausibility or the executor's claims. "
-            "Do not award credit for unexecuted historical cases or use provenance to look for historical files. "
-            "Set verifiable=false if inputs, environment, required capability or result evidence is insufficient.",
+            instruction="Read the actual inputs, outputs and execution trace. Report each fixed criterion exactly once. "
+            "If this run did not exercise a criterion's condition, use status=unverified and score=null with evidence showing the condition was not exercised. "
+            "Never score a scenario absent from this run as zero, grant it credit, or infer its outcome from the Recipe. "
+            "For an exercised criterion with sufficient evidence, use status=verified and a numeric score from 0 to 1. "
+            "If the condition was exercised and the required behavior is observably missing or wrong, score that as a verified failure. "
+            "If an applicable criterion cannot be judged from the available evidence, mark it unverified and set verifiable=false. "
+            "A scenario simply not exercised does not make the entire test unverifiable. "
+            "Base judgments on actual evidence and do not seek learning files.",
         )
