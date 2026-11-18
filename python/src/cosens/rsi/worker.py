@@ -14,14 +14,14 @@ from .store import uid
 
 def failure_details(exc, stage):
     """Keep actionable status metadata, never upstream bodies, headers or prompts."""
-    from openai import APIStatusError
+    from .chat_completions import ModelStatusError
 
     details = {
         "code": exc.code if isinstance(exc, RSIError) else "execution_failed",
         "type": type(exc).__name__,
         "stage": stage,
     }
-    if isinstance(exc, APIStatusError):
+    if isinstance(exc, ModelStatusError):
         details["upstream_status"] = exc.status_code
         details["code"] = (
             "model_payment_required"
@@ -38,7 +38,7 @@ def failure_details(exc, stage):
 def drain(client, *, runtime=None, owner=None, slot=None):
     from .client import RSIClient
     from .engine import Engine
-    from .runtime import LangChainRuntime
+    from .runtime import ChatRuntime
 
     store, config = client.store, client.config
     credentials = (
@@ -120,7 +120,7 @@ def drain(client, *, runtime=None, owner=None, slot=None):
                 )
                 lease_seconds = work.config.lease_seconds
                 store.heartbeat(owner, lease_seconds, worker_slot=slot)
-                agent = runtime or LangChainRuntime(work, owner, check_alive)
+                agent = runtime or ChatRuntime(work, owner, check_alive)
                 Engine(work, agent, owner, fence, execution_id).run()
             except LeaseLost:
                 pass

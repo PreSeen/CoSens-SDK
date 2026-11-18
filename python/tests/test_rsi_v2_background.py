@@ -15,7 +15,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-pytest.importorskip("langchain_openai")
 pytest.importorskip("langgraph.checkpoint.sqlite")
 
 from cosens.rsi import RSIClient
@@ -324,7 +323,7 @@ print(json.dumps({'id': run['id']}))
             expected_model = "local-test-" + run["source_session_id"]
             assert run["runtime_config"]["model"]["model"] == expected_model
             assert trace["model"] == expected_model
-            assert any(m["type"] == "tool" for m in trace["messages"])
+            assert any(m["role"] == "tool" for m in trace["messages"])
             checkpoint = (
                 client.data_dir / "executions" / run["id"] / "checkpoints-1.sqlite3"
             )
@@ -527,6 +526,4 @@ def test_structured_output_correction_is_bounded(
         assert result["result"]["test_status"] == "passed"
         traces = list(client.data_dir.glob("executions/*/input-*/analysis.json"))
         trace = json.loads(traces[0].read_text())
-        assert trace["structured_output_attempts"] == (
-            1 if bad_output == "bad_material" else 2
-        )
+        assert trace["structured_output_attempts"] == 2

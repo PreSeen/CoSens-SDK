@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +16,7 @@ import type { AddressInfo } from 'node:net';
 import Database from 'better-sqlite3';
 import { RSIClient, type Runtime } from '../src/rsi/index.js';
 import { Engine } from '../src/rsi/engine.js';
-import { LangChainRuntime } from '../src/rsi/runtime.js';
+import { ChatRuntime } from '../src/rsi/runtime.js';
 
 test('independent Node hooks enqueue work that persists and passes a file test after the hooks exit', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'cosens-rsi-ts-'));
@@ -478,7 +484,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
     });
     try {
       const tracePath = join(directory, 'search-trace.json');
-      const runtime = new LangChainRuntime(client, 'search-test', () => {});
+      const runtime = new ChatRuntime(client, 'search-test', () => {});
       await runtime.generate(
         { analysis: client.execution_get(ids[0]).analysis },
         material.files,
@@ -628,7 +634,7 @@ test('new clarification restarts the input revision and only the corrected versi
             return {
               title: 'Number format',
               applicability: 'Format a number',
-              instructions: 'Worked example: A-12,4,7',
+              instructions: 'Read old-orders.csv as a worked example.',
             };
           }
           generationCalls++;
@@ -648,7 +654,7 @@ test('new clarification restarts the input revision and only the corrected versi
           };
         },
         async execute(context, files, workspace) {
-          assert.ok(!JSON.stringify(context).includes('A-12'));
+          assert.doesNotMatch(JSON.stringify(context), /A-12|old-orders\.csv/);
           assert.deepEqual(
             files.map((file) => file.locator),
             [current, shared],
@@ -660,7 +666,7 @@ test('new clarification restarts the input revision and only the corrected versi
           writeFileSync(join(workspace, 'result.txt'), '0x2a');
         },
         async assess(context, files) {
-          assert.ok(!JSON.stringify(context).includes('A-12'));
+          assert.doesNotMatch(JSON.stringify(context), /A-12|old-orders\.csv/);
           assert.deepEqual(context.rubrics, {
             pass_threshold: 0.8,
             criteria: [
@@ -896,5 +902,109 @@ test('recipe_list shows first-time learning and preserves the usable version dur
   } finally {
     client.close();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('direct model loop preserves tool order and correlates every response with its call', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'cosens-rsi-model-wire-'));
+  const key = 'COSENS_RSI_FIXTURE_KEY';
+  const previous = process.env[key];
+  process.env[key] = 'fixture-key';
+  const client = new RSIClient({
+    data_dir: join(directory, 'db'),
+    config: {
+      model: {
+        model: 'fixture',
+        base_url: 'http://127.0.0.1:1/v1/',
+        api_key_env: key,
+      },
+    },
+    auto_start: false,
+  });
+  const workspace = join(directory, 'outputs');
+  const trace = join(directory, 'trace.json');
+  let requests = 0;
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    assert.equal(String(url), 'http://127.0.0.1:1/v1/chat/completions');
+    const input = JSON.parse(String(options.body));
+    if (++requests === 1) {
+      return Response.json({
+        choices: [
+          {
+            finish_reason: 'tool_calls',
+            message: {
+              role: 'assistant',
+              content: null,
+              reasoning_content: 'provider continuation',
+              tool_calls: [
+                {
+                  id: 'write',
+                  type: 'function',
+                  function: {
+                    name: 'write_output',
+                    arguments: '{"path":"answer.txt","content":"42"}',
+                  },
+                },
+                {
+                  id: 'read',
+                  type: 'function',
+                  function: {
+                    name: 'read_output',
+                    arguments: '{"path":"answer.txt"}',
+                  },
+                },
+                {
+                  id: 'bad',
+                  type: 'function',
+                  function: {
+                    name: 'write_output',
+                    arguments: '{broken',
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      });
+    }
+    assert.equal(input.messages[2].reasoning_content, 'provider continuation');
+    const [write, read, bad] = input.messages.slice(3);
+    assert.equal(write.tool_call_id, 'write');
+    assert.equal(JSON.parse(write.content).path, 'answer.txt');
+    assert.equal(read.tool_call_id, 'read');
+    assert.equal(read.content, '42');
+    assert.equal(bad.tool_call_id, 'bad');
+    assert.match(bad.content, /Invalid JSON/);
+    return Response.json({
+      choices: [
+        {
+          finish_reason: 'stop',
+          message: {
+            role: 'assistant',
+            content: 'Done',
+            tool_calls: null,
+          },
+        },
+      ],
+    });
+  });
+  try {
+    mkdirSync(workspace);
+    const runtime = new ChatRuntime(client, 'fixture', () => {});
+    assert.deepEqual(await runtime.execute({}, [], workspace, trace), {
+      summary: 'Done',
+      reads: [],
+    });
+    assert.equal(requests, 2);
+    assert.equal(readFileSync(join(workspace, 'answer.txt'), 'utf8'), '42');
+    assert.doesNotMatch(
+      readFileSync(trace, 'utf8'),
+      /provider continuation|fixture-key/,
+    );
+  } finally {
+    client.close();
+    if (previous === undefined) delete process.env[key];
+    else process.env[key] = previous;
+    rmSync(directory, { recursive: true, force: true });
   }
 });

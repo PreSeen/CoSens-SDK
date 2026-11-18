@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 pytest.importorskip("langgraph")
-pytest.importorskip("langchain")
 
 from cosens.rsi import Conflict, InvalidState, RSIClient
 from cosens.rsi.materials import atomic_json, read_snapshot
@@ -523,14 +522,20 @@ def test_atomic_claim_shared_across_independent_clients(client, tmp_path):
     assert client.execution_get(claims[0][0])["runtime_config"]["max_executions"] == 2
 
 
-@pytest.mark.parametrize("leaked_from", [None, "recipe", "rubric"])
+@pytest.mark.parametrize(
+    "leaked_from",
+    [None, "recipe", "rubric", "filename_in_recipe", "filename_in_rubric"],
+)
 def test_recipe_test_uses_existing_execution(client, tmp_path, leaked_from):
     recipe = client.recipe_create(
         name="Existing",
         content={
             "title": "Write",
             "applicability": "test",
-            "instructions": "write 42" if leaked_from != "recipe" else "copy A-12",
+            "instructions": {
+                "recipe": "copy A-12",
+                "filename_in_recipe": "read history.csv",
+            }.get(leaked_from, "write 42"),
         },
     )
     rubric = client.rubrics_create(
@@ -539,7 +544,10 @@ def test_recipe_test_uses_existing_execution(client, tmp_path, leaked_from):
             "criteria": [
                 {
                     "id": "fixed-standard",
-                    "description": "42" if leaked_from != "rubric" else "replay A-12",
+                    "description": {
+                        "rubric": "replay A-12",
+                        "filename_in_rubric": "compare with history.csv",
+                    }.get(leaked_from, "42"),
                     "source": "agent_inference",
                 }
             ]
@@ -770,19 +778,11 @@ def test_clarification_retry_repairs_dispatch_without_duplicate_child(
 
 
 def test_model_payment_error_is_actionable_without_persisting_body(client, tmp_path):
-    import httpx
-    from openai import APIStatusError
+    from cosens.rsi.chat_completions import ModelStatusError
 
     class UnfundedRuntime(FileRuntime):
         def generate(self, *args):
-            request = httpx.Request(
-                "POST", "https://fixture.invalid/v1/chat/completions"
-            )
-            raise APIStatusError(
-                "secret-provider-body",
-                response=httpx.Response(402, request=request),
-                body={"error": "secret-provider-body"},
-            )
+            raise ModelStatusError(402) from RuntimeError("secret-provider-body")
 
     execution = run(client, material(client, tmp_path)["id"])
     client.run_pending(runtime=UnfundedRuntime())

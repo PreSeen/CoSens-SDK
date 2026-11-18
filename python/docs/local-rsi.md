@@ -2,7 +2,7 @@
 
 本版在 `cosens.rsi` 中实现 Material、Execution、Rubrics、Recipe 四类对象。Topic、Task、Event 不属于这套新接口。
 
-Hook → Python SDK → SQLite 持久化队列 → 按需后台进程 → LangGraph 学习流程 → LangChain 工具调用 Agent。
+Hook → Python SDK → SQLite 持久化队列 → 按需后台进程 → LangGraph 学习流程 → 节点直接调用模型 Chat Completions API。
 
 本地没有算法 HTTP 服务、端口、Redis 或常驻调度服务。Hook 返回后，独立后台进程继续运行；队列排空后进程退出。宿主退出会杀死全部子进程的容器或沙箱环境，需要宿主通过 `recover()` 或系统任务重新启动 Worker。宿主启动时调用一次 `recover()` 即可。如果旧租约仍占用并发名额，返回 `scheduled: true` 表示后台进程会等待租约释放或过期后接管。
 
@@ -213,7 +213,7 @@ result = rsi.wait(execution_id, timeout=300)  # 可选轮询助手，超时不�
 
 ## 代码组织与验证
 
-`client.py` 是 SDK 入口；`engine.py` 是学习图；`runtime.py` 是 LangChain Agent 与文件工具能力；`store.py` 是本地 SQLite 队列和业务存储适配；`worker.py` 是按需进程入口。
+`client.py` 是 SDK 入口；`engine.py` 是学习图；`runtime.py` 通过标准库调用 Chat Completions，并负责节点内的工具循环、结构化校验和文件权限；`store.py` 是本地 SQLite 队列和业务存储适配；`worker.py` 是按需进程入口。
 
 [可运行的宿主接入示例](../examples/05_rsi_sdk_v2.py)。完整测试：
 
@@ -222,4 +222,4 @@ pip install -e './python[test]'
 python -m pytest python/tests/test_rsi_v2.py python/tests/test_rsi_v2_background.py -q
 ```
 
-测试覆盖真实 LangGraph 图、SQLite、文件测试、版本启用、澄清、恢复和并发。后台测试启动 4 个独立 Hook 进程，使用一个本机 OpenAI-compatible **协议测试服务器** 驱动真实 LangChain 工具循环，验证 Hook 退出后的继续执行、2 个流程并发上限和 1 个模型请求上限。它不证明某个真实模型的学习质量；部署模型需另做真实任务验收。
+测试覆盖真实 LangGraph 图、SQLite、文件测试、版本启用、澄清、恢复和并发。后台测试启动 4 个独立 Hook 进程，使用一个本机 OpenAI-compatible **协议测试服务器** 驱动实际的工具调用循环，验证 Hook 退出后的继续执行、2 个流程并发上限和 1 个模型请求上限。它不证明某个真实模型的学习质量；部署模型需另做真实任务验收。

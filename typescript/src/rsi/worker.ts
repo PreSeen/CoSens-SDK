@@ -2,7 +2,7 @@ import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { RSIClient } from './client.js';
 import { Engine } from './engine.js';
-import { LangChainRuntime } from './runtime.js';
+import { ChatRuntime } from './runtime.js';
 import {
   LocalConfigSchema,
   RSIError,
@@ -82,7 +82,7 @@ export async function drain(
         renew();
         const agent =
           runtime ??
-          new LangChainRuntime(executionClient, owner, () => {
+          new ChatRuntime(executionClient, owner, () => {
             if (leaseError) throw leaseError;
             if (active) store.guard(active.id, owner, active.fence);
           });

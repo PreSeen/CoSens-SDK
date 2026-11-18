@@ -1,4 +1,4 @@
-import { tool } from '@langchain/core/tools';
+import { defineTool } from './chat-completions.js';
 import { z } from 'zod';
 
 const SEARCH_URL = 'https://api.exa.ai/search';
@@ -38,7 +38,7 @@ export function createWebSearch(checkAlive: () => void) {
   const blocked = domains(process.env.COSENS_RSI_WEB_SEARCH_BLOCKED_DOMAINS);
   let queries = 0;
 
-  return tool(
+  return defineTool(
     async ({ query }) => {
       checkAlive();
       if (queries >= MAX_QUERIES)

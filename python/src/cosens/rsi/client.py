@@ -594,9 +594,7 @@ class RSIClient:
         return result
 
     def _check_runtime(self, config=None):
-        if not importlib.util.find_spec("langgraph") or not importlib.util.find_spec(
-            "langchain_openai"
-        ):
+        if not importlib.util.find_spec("langgraph"):
             raise InvalidState(
                 "install cosens-sdk[local-rsi] in the Hook Python environment"
             )

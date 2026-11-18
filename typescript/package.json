@@ -1,6 +1,6 @@
 {
   "name": "cosens-sdk",
-  "version": "0.5.4-rsi.5",
+  "version": "0.5.4-rsi.6",
   "description": "CoSens TypeScript SDK for local RSI and reusable Recipes",
   "keywords": [
     "cosens",
@@ -44,14 +44,11 @@
     "check": "npm run build && npm run typecheck && npm test"
   },
   "dependencies": {
-    "@langchain/core": "1.4.1",
     "@langchain/langgraph": "1.7.5",
     "@langchain/langgraph-checkpoint-sqlite": "1.1.1",
-    "@langchain/openai": "1.8.4",
     "@types/better-sqlite3": "7.6.13",
     "better-sqlite3": "13.0.3",
     "fflate": "0.8.3",
-    "langchain": "1.6.6",
     "langsmith": "0.13.0",
     "zod": "4.6.7"
   },

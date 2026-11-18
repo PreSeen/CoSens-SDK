@@ -12,7 +12,13 @@ _MATERIAL_LOCATOR = re.compile(r"\bmaterial_[a-f0-9]{32}(?:/\d+)?\b", re.IGNOREC
 
 
 class LearningLiterals:
-    def __init__(self, files):
+    def __init__(self, files, allowed_paths):
+        allowed_names = {Path(path).name.lower() for path in allowed_paths}
+        names = {Path(file["path"]).name.lower() for file in files}
+        self.filenames = [
+            re.compile(r"(?<![\w.-])" + re.escape(name) + r"(?![\w.-])", re.IGNORECASE)
+            for name in sorted(names - allowed_names - {""})
+        ]
         self.ids = set()
         self.paths = set()
         self.rows = set()
@@ -41,6 +47,8 @@ class LearningLiterals:
             if _MATERIAL_LOCATOR.search(field) or any(
                 path in field for path in self.paths
             ):
+                return True
+            if any(name.search(field) for name in self.filenames):
                 return True
             if self.ids.intersection(_RECORD_ID.findall(field.lower())):
                 return True

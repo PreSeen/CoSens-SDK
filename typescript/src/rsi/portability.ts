@@ -1,4 +1,4 @@
-import { extname } from 'node:path';
+import { basename, extname } from 'node:path';
 import { read_snapshot } from './materials.js';
 import type { EvidenceFile, RubricsContent } from './models.js';
 
@@ -17,8 +17,24 @@ export class LearningLiterals {
   private ids = new Set<string>();
   private paths = new Set<string>();
   private rows = new Set<string>();
+  private filenames: RegExp[];
 
-  constructor(files: EvidenceFile[]) {
+  constructor(files: EvidenceFile[], allowedPaths: string[]) {
+    const allowedNames = new Set(
+      allowedPaths.map((path) => basename(path).toLowerCase()),
+    );
+    const names = new Set(
+      files.map((file) => basename(file.path).toLowerCase()),
+    );
+    this.filenames = [...names]
+      .filter((name) => name && !allowedNames.has(name))
+      .map((name) => {
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return new RegExp(
+          `(?<![\\p{L}\\p{N}_.-])${escaped}(?![\\p{L}\\p{N}_.-])`,
+          'iu',
+        );
+      });
     for (const file of files) {
       this.paths.add(file.path);
       this.paths.add(file.snapshot);
@@ -43,7 +59,11 @@ export class LearningLiterals {
 
   foundIn(fields: Iterable<string>) {
     for (const field of fields) {
-      if (materialLocator.test(field)) return true;
+      if (
+        materialLocator.test(field) ||
+        this.filenames.some((name) => name.test(field))
+      )
+        return true;
       for (const path of this.paths) if (field.includes(path)) return true;
       for (const id of field.toLowerCase().match(recordId) ?? [])
         if (this.ids.has(id)) return true;

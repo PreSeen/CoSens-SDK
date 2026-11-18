@@ -85,4 +85,6 @@ Use `test_task.input_locators` to authorize the current test files and `shared_r
 
 Set `COSENS_RSI_WEB_SEARCH_API_KEY` to an Exa key to enable the optional `web_search` tool during Recipe generation. Domain filters are comma-separated hostnames in `COSENS_RSI_WEB_SEARCH_ALLOWED_DOMAINS` and `COSENS_RSI_WEB_SEARCH_BLOCKED_DOMAINS`. Search results appear in the generation trace.
 
+LangGraph manages stage transitions and SQLite checkpoints. Each stage sends non-streaming Chat Completions requests directly using `fetch` and executes only its registered tools. `model.base_url` is the API base (for example, `http://localhost:1234/v1`). The worker appends `/chat/completions`; the default base is `https://api.openai.com/v1`. Stage traces record tool calls and results. If a test is interrupted before its result is stored, recovery starts it in a new workspace with an empty tool history.
+
 Run `npm run check` to build, typecheck and test the packaged entry point using a local model protocol fixture.

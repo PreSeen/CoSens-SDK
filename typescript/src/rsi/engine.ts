@@ -97,7 +97,11 @@ export class Engine {
       for (const file of this.evidence(source))
         if (!authorized.has(file.locator)) files.set(file.locator, file);
     }
-    return new LearningLiterals([...files.values()]);
+    const allowedPaths = [
+      ...this.evidence(execution, true).map((file) => file.path),
+      ...(execution.policy.test_task?.checks ?? []).map((check) => check.path),
+    ];
+    return new LearningLiterals([...files.values()], allowedPaths);
   }
 
   private directory(revision: number) {
@@ -197,7 +201,7 @@ export class Engine {
           'Rubric rules contain learning-only details or unsupported feedback citations',
         );
       context.portability_feedback =
-        'Rewrite the Rubric as reusable rules for any future input. Express the requirements without copying details or references specific to past executions. Use an evidence reference from an extracted rule for every user_feedback criterion.';
+        'Rewrite the Rubric as reusable rules for any future input. Express the requirements without copying details or references specific to past executions. Refer to input roles instead of naming learning source files. Use an evidence reference from an extracted rule for every user_feedback criterion.';
     }
     const locators = new Set(files.map((file) => file.locator));
     for (const cause of analysis.attribution?.possible_causes ?? []) {
@@ -311,7 +315,7 @@ export class Engine {
           'Recipe rules contain learning-only literals',
         );
       context.portability_feedback =
-        'Rewrite the Recipe as reusable rules for any future input. Express the procedure without copying details or references specific to past executions.';
+        'Rewrite the Recipe as reusable rules for any future input. Express the procedure without copying details or references specific to past executions. Refer to input roles instead of naming learning source files.';
     }
 
     return this.store.tx(() => {

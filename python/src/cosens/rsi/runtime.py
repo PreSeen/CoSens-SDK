@@ -1,17 +1,22 @@
-"""LangChain ReAct runtime with explicit file capabilities and separate test/judge contexts."""
+"""Tool loop for direct Chat Completions with separate test and scoring contexts."""
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol
 
+from pydantic import StrictStr, ValidationError
+
+from .chat_completions import Tool, function_definition, request_completion
 from .materials import atomic_json, digest, read_snapshot
 from .models import (
     Analysis,
     Assessment,
+    Contract,
     FeedbackExtraction,
     InvalidState,
     ModelOutputError,
@@ -28,7 +33,19 @@ class Runtime(Protocol):
     def assess(self, context, files, trace_path): ...
 
 
-class LangChainRuntime:
+class ReadEvidenceArgs(Contract):
+    locator: StrictStr
+
+
+class ReadOutputArgs(Contract):
+    path: StrictStr
+
+
+class WriteOutputArgs(ReadOutputArgs):
+    content: StrictStr
+
+
+class ChatRuntime:
     def __init__(self, client, owner, check_alive):
         self.client, self.owner, self.check_alive = client, owner, check_alive
 
@@ -62,32 +79,15 @@ class LangChainRuntime:
         schema=None,
         workspace=None,
     ):
-        import json
-
-        from langchain.agents import create_agent
-        from langchain.agents.structured_output import ToolStrategy
-        from langchain_core.messages import HumanMessage, ToolMessage
-        from langchain_core.tools import tool
-        from langchain_openai import ChatOpenAI
-
         settings = self.client.config.model
         key = os.environ.get(settings.api_key_env)
         if not key:
             raise InvalidState(
                 "configured model credential environment variable is missing"
             )
-        model = ChatOpenAI(
-            model=settings.model,
-            api_key=key,
-            base_url=settings.base_url,
-            timeout=settings.timeout,
-            max_tokens=settings.max_tokens,
-            max_retries=0,
-        )
         by_locator = {f["locator"]: f for f in files}
         reads = []
 
-        @tool
         def read_evidence(locator: str) -> str:
             """Read a declared immutable evidence file by its exact catalog locator."""
             self.check_alive()
@@ -97,7 +97,11 @@ class LangChainRuntime:
             reads.append({k: result[k] for k in ("locator", "sha256", "truncated")})
             return json.dumps(result, ensure_ascii=False)
 
-        tools = [read_evidence]
+        tools = [
+            Tool(
+                "read_evidence", read_evidence.__doc__, ReadEvidenceArgs, read_evidence
+            )
+        ]
         if schema is RecipeContent:
             from .web_search import create_web_search
 
@@ -122,7 +126,6 @@ class LangChainRuntime:
                     raise ValueError("output path must stay inside the test workspace")
                 return candidate
 
-            @tool
             def write_output(path: str, content: str) -> str:
                 """Write a UTF-8 test deliverable within the isolated workspace; no host files or shell."""
                 self.check_alive()
@@ -130,7 +133,11 @@ class LangChainRuntime:
                 data = content.encode("utf-8")
                 if len(data) > self.client.config.max_file_bytes:
                     raise ValueError("output file exceeds max_file_bytes")
-                current = sum(p.stat().st_size for p in root.rglob("*") if p.is_file())
+                current = sum(
+                    p.stat().st_size
+                    for p in root.rglob("*")
+                    if p.is_file() and p != target
+                )
                 if current + len(data) > self.client.config.max_bundle_bytes:
                     raise ValueError("test workspace exceeds max_bundle_bytes")
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -139,13 +146,24 @@ class LangChainRuntime:
                     {"path": path, "sha256": digest(data), "bytes": len(data)}
                 )
 
-            @tool
             def read_output(path: str) -> str:
                 """Read a previously written test deliverable inside the test workspace."""
                 self.check_alive()
                 return output_path(path).read_text(encoding="utf-8")[:100000]
 
-            tools.extend([write_output, read_output])
+            tools.extend(
+                [
+                    Tool(
+                        "write_output",
+                        write_output.__doc__,
+                        WriteOutputArgs,
+                        write_output,
+                    ),
+                    Tool(
+                        "read_output", read_output.__doc__, ReadOutputArgs, read_output
+                    ),
+                ]
+            )
 
         catalog = [
             {
@@ -168,78 +186,125 @@ class LangChainRuntime:
             "For evidence references copy material_id and locator as separate catalog fields; material_id never includes a slash. "
             + instruction
         )
-        agent = create_agent(
-            model=model,
-            tools=tools,
-            system_prompt=prompt,
-            response_format=ToolStrategy(schema) if schema is not None else None,
-            # Test tool results belong to the current attempt's workspace.
-            checkpointer=False
-            if workspace is not None or schema is Assessment
-            else None,
-        )
         messages = [
+            {"role": "system", "content": prompt},
             {
                 "role": "user",
                 "content": json.dumps(
                     {"context": context, "evidence_catalog": catalog},
                     ensure_ascii=False,
                 ),
-            }
-        ]
-        with self.model_slot():
-            for attempt in range(3):
-                self.check_alive()
-                result = agent.invoke(
-                    {"messages": messages},
-                    {"recursion_limit": self.client.config.recursion_limit},
-                )
-                if schema is None or result.get("structured_response") is not None:
-                    break
-                # Some compatible gateways end the tool loop on malformed JSON
-                # instead of producing a structured response. Keep the evidence
-                # already read and let the model correct its call, at most twice.
-                messages = list(result["messages"])
-                for call in getattr(messages[-1], "invalid_tool_calls", []):
-                    if call.get("id"):
-                        messages.append(
-                            ToolMessage(
-                                tool_call_id=call["id"],
-                                name=call.get("name"),
-                                content="Invalid tool arguments: return valid JSON matching the tool schema.",
-                            )
-                        )
-                messages.append(
-                    HumanMessage(
-                        content=f"Return the final result by calling {schema.__name__} with valid JSON arguments matching its schema. "
-                        "Do not return prose or malformed JSON. Use null for absent optional values; quote all string values."
-                    )
-                )
-        self.check_alive()
-        atomic_json(
-            trace_path,
-            {
-                "stage": stage,
-                "model": settings.model,
-                "system_prompt": prompt,
-                "reads": reads,
-                "structured_output_attempts": attempt + 1,
-                "messages": [m.model_dump(mode="json") for m in result["messages"]],
             },
-        )
-        if schema is not None:
-            if result.get("structured_response") is None:
-                raise ModelOutputError(
-                    "model did not produce schema-validated output after bounded correction"
+        ]
+        final_name = schema.__name__ if schema is not None else None
+        by_name = {tool.name: tool for tool in tools}
+        definitions = [tool.definition() for tool in tools]
+        if final_name:
+            definitions.append(
+                function_definition(
+                    final_name,
+                    "Submit the final structured result after reading the relevant evidence.",
+                    schema,
                 )
-            return schema.model_validate(result["structured_response"]).model_dump()
-        last = result["messages"][-1].content
-        return {
-            "summary": last
-            if isinstance(last, str)
-            else json.dumps(last, ensure_ascii=False),
-            "reads": reads,
-        }
+            )
+
+        corrections = 0
+
+        def correct():
+            nonlocal corrections
+            corrections += 1
+            if corrections > 2:
+                raise ModelOutputError("model output failed verification")
+
+        def tool_message(call, content):
+            messages.append(
+                {"role": "tool", "tool_call_id": call.id, "content": content}
+            )
+
+        with self.model_slot():
+            try:
+                for _ in range(self.client.config.recursion_limit):
+                    self.check_alive()
+                    reply = request_completion(settings, key, messages, definitions)
+                    self.check_alive()
+                    messages.append(reply.model_dump(mode="json", exclude_unset=True))
+                    calls = reply.tool_calls or []
+                    result = next(
+                        (c for c in calls if c.function.name == final_name), None
+                    )
+                    if result and schema:
+                        if len(calls) == 1:
+                            try:
+                                parsed = schema.model_validate_json(
+                                    result.function.arguments
+                                )
+                            except ValidationError:
+                                pass
+                            else:
+                                tool_message(result, "Structured result accepted.")
+                                return parsed.model_dump()
+                        correct()
+                        for call in calls:
+                            tool_message(
+                                call,
+                                "Submit one final result with valid JSON arguments matching its schema, in a separate call.",
+                            )
+                    elif calls:
+                        for call in calls:
+                            self.check_alive()
+                            tool = by_name.get(call.function.name)
+                            output = "Unknown or unauthorized tool."
+                            if tool is not None:
+                                try:
+                                    args = json.loads(call.function.arguments)
+                                except ValueError:
+                                    output = "Invalid JSON tool arguments."
+                                else:
+                                    try:
+                                        output = tool.invoke(args)
+                                    except ValidationError:
+                                        output = "Invalid arguments for this tool."
+                                    except (OSError, ValueError):
+                                        self.check_alive()
+                                        output = (
+                                            "Tool could not complete the operation."
+                                        )
+                            tool_message(
+                                call,
+                                output
+                                if isinstance(output, str)
+                                else json.dumps(output, ensure_ascii=False),
+                            )
+                    elif schema is None:
+                        return {"summary": reply.content or "", "reads": reads}
+                    else:
+                        correct()
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": f"Return the final result by calling {final_name} with valid JSON arguments.",
+                            }
+                        )
+                raise ModelOutputError("model tool loop reached its step limit")
+            finally:
+                atomic_json(
+                    trace_path,
+                    {
+                        "stage": stage,
+                        "model": settings.model,
+                        "system_prompt": prompt,
+                        "reads": reads,
+                        "structured_output_attempts": min(corrections + 1, 3),
+                        "messages": [
+                            {
+                                k: v
+                                for k, v in message.items()
+                                if k != "reasoning_content"
+                            }
+                            for message in messages
+                        ],
+                    },
+                )
 
     def extract_feedback(self, files, trace_path):
         return self._call(

@@ -74,7 +74,10 @@ class Engine:
                 for f in self.files(source)
                 if f["locator"] not in authorized
             )
-        return LearningLiterals(files.values())
+        task = execution["policy"].get("test_task") or {}
+        allowed_paths = [f["path"] for f in self.files(execution, test=True)]
+        allowed_paths.extend(check["path"] for check in task.get("checks", []))
+        return LearningLiterals(files.values(), allowed_paths)
 
     def directory(self, state):
         directory = (
@@ -162,7 +165,7 @@ class Engine:
                 )
             context["portability_feedback"] = (
                 "Rewrite the Rubric as reusable rules for any future input. "
-                "Express the requirements without copying details or references specific to past executions. "
+                "Express the requirements without copying details or references specific to past executions. Refer to input roles instead of naming learning source files. "
                 "Use an evidence reference from an extracted rule for every user_feedback criterion."
             )
         locators = {file["locator"] for file in files}
@@ -244,7 +247,7 @@ class Engine:
                 raise ModelOutputError("Recipe rules contain learning-only literals")
             context["portability_feedback"] = (
                 "Rewrite the Recipe as reusable rules for any future input. "
-                "Express the procedure without copying details or references specific to past executions."
+                "Express the procedure without copying details or references specific to past executions. Refer to input roles instead of naming learning source files."
             )
         version = self.store.publish_candidate(
             self.execution_id,
