@@ -1,6 +1,12 @@
 # CoSens TypeScript Local RSI SDK
 
-Use Node.js 22 or later. Build the package with `npm ci`. Use the built package from the host with `import { RSIClient } from 'cosens-sdk/rsi'`.
+Use Node.js 22 or later. Install the tarball from your Agent project and import the ESM entry point.
+
+```sh
+npm install /path/to/cosens-sdk-<version>.tgz
+```
+
+Use `import { RSIClient } from 'cosens-sdk/rsi'` in the host. To work from the SDK source, run `npm ci` in this directory.
 
 The model must support Chat Completions and tool calling. Set `RSI_MODEL_API_KEY` in the host process environment. The example assumes a local model endpoint. For packaging, include `dist/rsi/worker.js` and the matching `better-sqlite3` native dependency. The worker defaults to the current Node executable. A host with a bundled standalone Node can set `node_executable`.
 
