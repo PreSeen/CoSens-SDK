@@ -334,6 +334,58 @@ print(json.dumps({'id': run['id']}))
                 client.execution_cancel(execution_id)
 
 
+def test_recover_once_waits_for_a_stopped_workers_lease(tmp_path, gateway, monkeypatch):
+    monkeypatch.setenv("RSI_MODEL_API_KEY", "fixture-not-a-live-secret")
+    client = RSIClient(
+        data_dir=tmp_path / "rsi",
+        config={
+            "model": {
+                "model": "local-test",
+                "base_url": f"http://127.0.0.1:{gateway.server_port}/v1",
+            },
+            "max_executions": 1,
+        },
+        auto_start=False,
+    )
+    context = tmp_path / "context.md"
+    context.write_text("Write the answer 42 into answer.txt")
+    material = client.material_create(manifest={"context_path": str(context)})
+    execution = client.execution_create(
+        material_ids=[material["id"]],
+        policy={
+            "artifact_confirmed": True,
+            "confirmation_ref": "recovery",
+            "test_task": {
+                "instruction": "Write 42 into answer.txt",
+                "checks": [
+                    {"kind": "text_equals", "path": "answer.txt", "value": "42"}
+                ],
+            },
+        },
+    )
+    assert client.store.reserve("worker", "stopped-worker", 1, 3)
+    assert client.store.claim("stopped-worker", 3, 1) == (execution["id"], 1)
+    script = """
+import json, sys
+from cosens.rsi import RSIClient
+
+print(json.dumps(RSIClient(data_dir=sys.argv[1]).recover()))
+"""
+    hook = subprocess.run(
+        [sys.executable, "-c", script, str(client.data_dir)],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    assert json.loads(hook.stdout) == {"started": 0, "scheduled": True}
+
+    run = client.wait(execution["id"], timeout=20)
+    assert run["status"] == "completed", run
+    assert run["result"]["test_status"] == "passed"
+    assert "lease-2" in run["test_results"][0]["trace_path"]
+
+
 @pytest.mark.parametrize(
     "bad_output,budget",
     [("malformed", 1), ("prose", 1), ("malformed", 10), ("bad_material", 1)],

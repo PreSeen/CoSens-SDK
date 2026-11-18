@@ -45,18 +45,21 @@ export async function drain(
       if (!active) {
         if (Date.now() - idleSince >= 1000) {
           const emptied = store.tx(() => {
-            const pending = store.db
-              .prepare(
-                "SELECT 1 FROM jobs WHERE status='queued' OR (status='running' AND lease_until<?) LIMIT 1",
-              )
-              .get(now());
+            // A detached worker can pick up an interrupted job once its lease expires.
+            const pending = reservedSlot
+              ? store.has_pending()
+              : store.db
+                  .prepare(
+                    "SELECT 1 FROM jobs WHERE status='queued' OR (status='running' AND lease_until<?) LIMIT 1",
+                  )
+                  .get(now());
             if (!pending) store.release(slot);
             return !pending;
           });
           if (emptied) break;
           idleSince = Date.now();
         }
-        await sleep(50);
+        await sleep(reservedSlot ? 200 : 50);
         continue;
       }
       const { id, fence } = active;
@@ -97,6 +100,41 @@ export async function drain(
   }
 }
 
+async function waitForWorkerSlot(
+  client: RSIClient,
+  owner: string,
+  waitingSlot: string,
+) {
+  const { store, config } = client;
+  let nextHeartbeat = 0;
+  try {
+    for (;;) {
+      if (now() >= nextHeartbeat) {
+        store.heartbeat(owner, config.lease_seconds, waitingSlot);
+        nextHeartbeat = now() + config.lease_seconds / 3;
+      }
+      const pending = store.tx(() => {
+        if (store.has_pending()) return true;
+        store.release(waitingSlot);
+        return false;
+      });
+      if (!pending) return null;
+
+      const slot = store.reserve(
+        'worker',
+        owner,
+        config.max_executions,
+        config.lease_seconds,
+        true,
+      );
+      if (slot) return slot;
+      await sleep(250);
+    }
+  } finally {
+    store.release(waitingSlot);
+  }
+}
+
 function failureDetails(error: unknown, stage: string) {
   const status =
     error && typeof error === 'object' && 'status' in error
@@ -123,13 +161,21 @@ if (
   process.argv[1] &&
   pathToFileURL(process.argv[1]).href === import.meta.url
 ) {
-  const [data_dir, owner, slot] = process.argv.slice(2);
+  const [data_dir, owner, slot, mode] = process.argv.slice(2);
   try {
-    if (!data_dir || Boolean(owner) !== Boolean(slot))
+    if (
+      !data_dir ||
+      Boolean(owner) !== Boolean(slot) ||
+      (mode && (mode !== '--wait-for-slot' || !owner || !slot))
+    )
       throw new Error('worker expects a data directory and optional lease');
     const client = new RSIClient({ data_dir, auto_start: false });
     try {
-      await drain(client, undefined, owner, slot);
+      const workerSlot = mode
+        ? await waitForWorkerSlot(client, owner, slot)
+        : slot;
+      if (workerSlot !== null)
+        await drain(client, undefined, owner, workerSlot);
     } finally {
       client.close();
     }

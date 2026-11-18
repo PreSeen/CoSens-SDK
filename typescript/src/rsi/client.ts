@@ -649,7 +649,7 @@ export class RSIClient {
         'configured model credential environment variable is missing',
       );
   }
-  async recover(): Promise<{ started: number }> {
+  async recover(): Promise<{ started: number; scheduled?: true }> {
     this.check_runtime();
     if (!this.store.has_pending()) return { started: 0 };
     const worker = fileURLToPath(new URL('./worker.js', import.meta.url));
@@ -658,45 +658,57 @@ export class RSIClient {
         'invalid_state',
         'build the TypeScript SDK before starting detached workers',
       );
-    let started = 0;
-    // Spawn only as many workers as pending executions, with global process slots.
-    for (let i = 0; i < this.config.max_executions; i++) {
-      const owner = uid('worker'),
-        slot = this.store.reserve(
-          'worker',
-          owner,
-          this.config.max_executions,
-          this.config.lease_seconds,
-          true,
-        );
-      if (!slot) break;
+
+    const launch = async (owner: string, slot: string, deferred = false) => {
       try {
-        const child = spawn(
-          this.node_executable,
-          [worker, this.data_dir, owner, slot],
-          {
-            detached: true,
-            stdio: 'ignore',
-            env: {
-              ...process.env,
-              LANGSMITH_TRACING: 'false',
-              LANGCHAIN_TRACING_V2: 'false',
-              LANGCHAIN_VERBOSE: 'false',
-            },
+        const args = [worker, this.data_dir, owner, slot];
+        if (deferred) args.push('--wait-for-slot');
+        const child = spawn(this.node_executable, args, {
+          detached: true,
+          stdio: 'ignore',
+          env: {
+            ...process.env,
+            LANGSMITH_TRACING: 'false',
+            LANGCHAIN_TRACING_V2: 'false',
+            LANGCHAIN_VERBOSE: 'false',
           },
-        );
+        });
         await new Promise<void>((resolve, reject) => {
           child.once('spawn', resolve);
           child.once('error', reject);
         });
         child.unref();
-        started++;
       } catch (error) {
         this.store.release(slot);
         throw error;
       }
+    };
+
+    let started = 0;
+    for (let i = 0; i < this.config.max_executions; i++) {
+      const owner = uid('worker');
+      const slot = this.store.reserve(
+        'worker',
+        owner,
+        this.config.max_executions,
+        this.config.lease_seconds,
+        true,
+      );
+      if (!slot) break;
+      await launch(owner, slot);
+      started++;
     }
-    return { started };
+    if (started) return { started };
+
+    const owner = uid('worker');
+    const deferred = this.store.tx(() =>
+      this.store.has_pending()
+        ? this.store.reserve('recovery', owner, 1, this.config.lease_seconds)
+        : null,
+    );
+    if (!deferred) return { started: 0 };
+    await launch(owner, deferred, true);
+    return { started: 0, scheduled: true };
   }
   async run_pending({ runtime }: { runtime?: Runtime } = {}): Promise<{
     processed: number;

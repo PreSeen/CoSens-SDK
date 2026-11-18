@@ -244,10 +244,10 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       client.close();
       process.stdout.write(execution.id);
     `;
-    const launch = async (key: string) => {
+    const runHook = async (source: string, args: string[]) => {
       const child = spawn(
         process.execPath,
-        ['--input-type=module', '-e', script, data_dir, material.id, key],
+        ['--input-type=module', '-e', source, ...args],
         {
           cwd: new URL('..', import.meta.url),
           env: { ...process.env, RSI_MODEL_API_KEY: 'fixture' },
@@ -265,7 +265,11 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       assert.equal(code, 0, stderr);
       return stdout;
     };
-    const ids = await Promise.all(['a', 'b', 'c', 'a'].map(launch));
+    const ids = await Promise.all(
+      ['a', 'b', 'c', 'a'].map((key) =>
+        runHook(script, [data_dir, material.id, key]),
+      ),
+    );
     assert.equal(ids[0], ids[3]);
     for (const id of new Set(ids)) {
       const run = await client.wait(id, { timeout: 25, poll_interval: 0.05 });
@@ -326,6 +330,49 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       );
     } finally {
       db.close();
+    }
+
+    const recovery = new RSIClient({
+      data_dir: join(directory, 'recover-once'),
+      config: { ...client.config, max_executions: 1 },
+      auto_start: false,
+    });
+    try {
+      const source = recovery.material_create({ manifest: material.manifest });
+      const execution = await recovery.execution_create({
+        material_ids: [source.id],
+        policy: {
+          artifact_confirmed: true,
+          confirmation_ref: 'recovery',
+          test_task: {
+            instruction: 'Create answer.txt',
+            checks: [{ kind: 'text_equals', path: 'answer.txt', value: '42' }],
+          },
+        },
+      });
+      assert.ok(recovery.store.reserve('worker', 'stopped-worker', 1, 3));
+      assert.equal(recovery.store.claim('stopped-worker', 3, 1)?.fence, 1);
+      const reply = await runHook(
+        `
+        import { RSIClient } from 'cosens-sdk/rsi';
+        const client = new RSIClient({ data_dir: process.argv[1] });
+        console.log(JSON.stringify(await client.recover()));
+        client.close();
+      `,
+        [recovery.data_dir],
+      );
+      assert.deepEqual(JSON.parse(reply), { started: 0, scheduled: true });
+
+      const run = await recovery.wait(execution.id, { timeout: 20 });
+      assert.equal(run.status, 'completed', JSON.stringify(run.error));
+      assert.equal(run.result?.test_status, 'passed');
+      assert.ok(run.test_results[0].trace_path?.includes('lease-2'));
+    } finally {
+      for (const run of recovery.execution_list()) {
+        if (run.status === 'running' || run.status === 'queued')
+          recovery.execution_cancel(run.id);
+      }
+      recovery.close();
     }
   } finally {
     for (const run of client.execution_list()) {

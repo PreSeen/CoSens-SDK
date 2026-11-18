@@ -40,6 +40,7 @@ def drain(client, *, runtime=None, owner=None, slot=None):
 
     store, config = client.store, client.config
     owner = owner or uid("worker")
+    detached = slot is not None
     slot = slot or store.reserve(
         "worker", owner, config.max_executions, config.lease_seconds
     )
@@ -80,15 +81,17 @@ def drain(client, *, runtime=None, owner=None, slot=None):
                     # Release under the same write lock as the final empty check: an
                     # enqueue after this check can reserve our released slot and spawn.
                     with store.transaction() as conn:
+                        # Detached workers can take over a running job after its lease expires.
                         pending = conn.execute(
-                            "SELECT 1 FROM jobs WHERE status='queued' OR (status='running' AND lease_until<?) LIMIT 1",
-                            (time.time(),),
+                            "SELECT 1 FROM jobs WHERE status='queued' "
+                            "OR (status='running' AND (? OR lease_until<?)) LIMIT 1",
+                            (detached, time.time()),
                         ).fetchone()
                         if not pending:
                             conn.execute("DELETE FROM slots WHERE token=?", (slot,))
                             break
                     idle_since = time.monotonic()
-                time.sleep(0.05)
+                time.sleep(0.2 if detached else 0.05)
                 continue
             idle_since = time.monotonic()
             execution_id, fence = claim
@@ -126,6 +129,31 @@ def drain(client, *, runtime=None, owner=None, slot=None):
     return {"processed": processed}
 
 
+def wait_for_worker_slot(client, owner, waiting_slot):
+    store, config = client.store, client.config
+    next_heartbeat = 0
+    try:
+        while True:
+            if time.monotonic() >= next_heartbeat:
+                store.heartbeat(owner, config.lease_seconds, worker_slot=waiting_slot)
+                next_heartbeat = time.monotonic() + config.lease_seconds / 3
+            with store.transaction() as conn:
+                if not conn.execute(
+                    "SELECT 1 FROM jobs WHERE status IN ('queued','running') LIMIT 1"
+                ).fetchone():
+                    conn.execute("DELETE FROM slots WHERE token=?", (waiting_slot,))
+                    return None
+
+            slot = store.reserve(
+                "worker", owner, config.max_executions, config.lease_seconds
+            )
+            if slot:
+                return slot
+            time.sleep(0.25)
+    finally:
+        store.release(waiting_slot)
+
+
 def main():
     from .client import RSIClient
 
@@ -135,11 +163,17 @@ def main():
     parser.add_argument("--data-dir", required=True)
     parser.add_argument("--owner")
     parser.add_argument("--slot")
+    parser.add_argument("--wait-for-slot", action="store_true")
     args = parser.parse_args()
-    if bool(args.owner) != bool(args.slot):
+    if bool(args.owner) != bool(args.slot) or (args.wait_for_slot and not args.slot):
         parser.error("owner and slot must be supplied together")
     client = RSIClient(data_dir=args.data_dir, auto_start=False)
-    drain(client, owner=args.owner, slot=args.slot)
+    slot = args.slot
+    if args.wait_for_slot:
+        slot = wait_for_worker_slot(client, args.owner, slot)
+        if slot is None:
+            return
+    drain(client, owner=args.owner, slot=slot)
 
 
 if __name__ == "__main__":

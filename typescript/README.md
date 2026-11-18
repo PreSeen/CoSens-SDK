@@ -58,7 +58,7 @@ async function onConfirmedDelivery(delivery: {
 }
 ```
 
-The Hook returns after the task is queued and a worker is dispatched. The host queries `execution_get(id)` for stage, questions and results. Display required questions in the host UI and pass answers to `execution_clarification_answer`. Call `recover()` on host startup to pick up queued or expired work. Call `close()` when the host is done with the client.
+The Hook returns after the task is queued and a worker is dispatched. The host queries `execution_get(id)` for stage, questions and results. Display required questions in the host UI and pass answers to `execution_clarification_answer`. Call `recover()` once on host startup to pick up unfinished work. If worker leases still occupy all slots, `scheduled: true` indicates that a detached process will wait for a slot and take over after expiry. Call `close()` when the host is done with the client.
 
 | Object | Atomic functions |
 | --- | --- |

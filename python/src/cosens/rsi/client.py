@@ -601,14 +601,42 @@ class RSIClient:
             )
 
     def recover(self):
-        """Start bounded, detached workers; also reclaims expired runs after a crash.
-
-        Call at host startup, after reboot, or from a scheduled local command.
-        A stopped machine cannot automatically execute a SQLite checkpoint.
-        """
+        """Dispatch detached workers, or schedule one to wait for an expired lease."""
         self._check_runtime()
         if not self.store.has_pending():
             return {"started": 0}
+
+        def launch(owner, slot, *, deferred=False):
+            env = dict(os.environ)
+            # Editable installs and host launchers must reach the same package.
+            env["PYTHONPATH"] = os.pathsep.join(str(p) for p in sys.path if p)
+            command = [
+                sys.executable,
+                "-m",
+                "cosens.rsi.worker",
+                "--data-dir",
+                str(self.data_dir),
+                "--owner",
+                owner,
+                "--slot",
+                slot,
+            ]
+            if deferred:
+                command.append("--wait-for-slot")
+            try:
+                subprocess.Popen(
+                    command,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                    start_new_session=True,
+                )
+            except BaseException:
+                self.store.release(slot)
+                raise
+
         started = 0
         for _ in range(self.config.max_executions):
             owner = uid("worker")
@@ -617,34 +645,17 @@ class RSIClient:
             )
             if not slot:
                 break
-            try:
-                env = dict(os.environ)
-                # Editable installs and host launchers must reach the same package.
-                env["PYTHONPATH"] = os.pathsep.join(str(p) for p in sys.path if p)
-                subprocess.Popen(
-                    [
-                        sys.executable,
-                        "-m",
-                        "cosens.rsi.worker",
-                        "--data-dir",
-                        str(self.data_dir),
-                        "--owner",
-                        owner,
-                        "--slot",
-                        slot,
-                    ],
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    close_fds=True,
-                    start_new_session=True,
-                )
-                started += 1
-            except BaseException:
-                self.store.release(slot)
-                raise
-        return {"started": started}
+            launch(owner, slot)
+            started += 1
+        if started:
+            return {"started": started}
+
+        owner = uid("worker")
+        deferred = self.store.reserve("recovery", owner, 1, self.config.lease_seconds)
+        if not deferred:
+            return {"started": 0}
+        launch(owner, deferred, deferred=True)
+        return {"started": 0, "scheduled": True}
 
     def run_pending(self, *, runtime=None):
         """Foreground worker for embedding/tests; same queue, graph and lease limits."""

@@ -221,7 +221,7 @@ export class Store {
         .run(scope, key, encode(request), encode(result));
   }
   reserve(
-    kind: 'model' | 'worker',
+    kind: 'model' | 'worker' | 'recovery',
     owner: string,
     limit: number,
     ttl: number,
