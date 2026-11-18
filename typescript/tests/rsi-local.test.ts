@@ -801,3 +801,99 @@ test('an expired worker lease resumes the graph without regenerating the candida
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('recipe_list shows first-time learning and preserves the usable version during revision', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'cosens-rsi-recipe-list-'));
+  const client = new RSIClient({
+    data_dir: join(root, 'db'),
+    config: { model: { model: 'fixture', base_url: 'http://127.0.0.1:1/v1' } },
+    auto_start: false,
+  });
+  try {
+    const context_path = join(root, 'task.md');
+    writeFileSync(context_path, 'Prepare the task output');
+    const material = client.material_create({ manifest: { context_path } });
+    const execution = await client.execution_create({
+      material_ids: [material.id],
+      policy: { artifact_confirmed: true, confirmation_ref: 'fixture' },
+    });
+    let [row] = client.recipe_list();
+    assert.equal(row.kind, 'learning');
+    assert.equal(row.recipe_id, null);
+    assert.equal(row.execution_id, execution.id);
+    assert.equal(row.name, 'task.md');
+    assert.equal(row.status, 'queued');
+    assert.deepEqual(client.recipe_list({ active_only: true }), []);
+
+    const content = {
+      title: 'Output',
+      applicability: 'Sample',
+      instructions: 'Write the output',
+    };
+    const recipe = client.recipe_create({ name: 'Output Recipe', content });
+    const active = recipe.latest_version_id!;
+    client.store.save({ ...recipe, active_version_id: active });
+    const candidate = client.recipe_version_create(recipe.id, { content });
+    client.store.save({
+      ...client.execution_get(execution.id),
+      base_recipe_version_id: active,
+      status: 'running',
+      stage: 'generate',
+    });
+
+    [row] = client.recipe_list({ q: 'output recipe' });
+    assert.equal(client.recipe_list().length, 1);
+    assert.equal(row.kind, 'recipe');
+    assert.equal(row.status, 'generating');
+    assert.equal(row.active_version_id, active);
+    assert.equal(row.candidate_version_id, null);
+
+    client.store.save({
+      ...client.execution_get(execution.id),
+      recipe_id: recipe.id,
+      recipe_version_id: candidate.id,
+      status: 'completed',
+      questions: [
+        {
+          id: 'format',
+          revision: 1,
+          question: 'Which format?',
+          assumption: 'Text',
+          options: [
+            { id: 'text', label: 'Text' },
+            { id: 'csv', label: 'CSV' },
+          ],
+        },
+      ],
+      result: {
+        recipe_id: recipe.id,
+        recipe_version_id: candidate.id,
+        rubrics_version_id: 'fixture',
+        test_status: 'failed',
+        provisional: true,
+        activated: false,
+      },
+    });
+    [row] = client.recipe_list({ active_only: true });
+    assert.equal(row.status, 'needs_clarification');
+    assert.equal(row.pending_question_count, 1);
+    assert.equal(row.active_version_number, 1);
+    assert.equal(row.latest_version_number, 2);
+    assert.equal(row.candidate_version_number, 2);
+    assert.equal(Object.hasOwn(row, 'runtime_config'), false);
+
+    await client.execution_clarification_answer(execution.id, {
+      question_id: 'format',
+      question_revision: 1,
+      selected_option_ids: ['text'],
+    });
+    [row] = client.recipe_list();
+    assert.equal(row.status, 'queued');
+    assert.notEqual(row.execution_id, execution.id);
+    assert.equal(row.pending_question_count, 0);
+    assert.equal(row.active_version_id, active);
+  } finally {
+    client.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

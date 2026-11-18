@@ -21,3 +21,8 @@ export type {
   Version,
   Versioned,
 } from './models.js';
+export type {
+  RecipeListEntry,
+  RecipeListRecipeEntry,
+  RecipeListStatus,
+} from './recipe-list.js';

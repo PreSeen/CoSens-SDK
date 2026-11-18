@@ -173,12 +173,14 @@ execution = rsi.execution_create(
 |---|---|---|
 | `recipe_create` | `name`, `content=None` | 新建独立 Recipe，初始不启用；通常由学习流程创建 |
 | `recipe_get` | `recipe_id`, `version_id=None`, `version_selector=None`, `include_content=True` | 返回对象及 `selected_version`；默认启用版本，无启用版本时为 `None`，不回退到最新候选；`version_selector="latest"` 查看候选 |
-| `recipe_list` | `q=None`, `active_only=False` 和分页参数 | 名称、说明、启用版本内容的本地文本搜索；宿主开始任务时选用 |
+| `recipe_list` | `q=None`, `active_only=False` 和分页参数 | 返回带状态的同一数组，包含已关联 Recipe 和首次学习记录；任务开始时可用 `active_only=True` 检索可用 Recipe |
 | `recipe_update` | `recipe_id` 和元数据更新参数 | 更新名称、说明，归档/恢复 |
 | `recipe_version_create` | `recipe_id`, `content`, `expected_revision=None`, `idempotency_key=None` | 追加候选版本，不绕过测试启用 |
 | `recipe_version_list` | `recipe_id` 和分页参数 | 查看历史版本 |
 | `recipe_test` | `execution_id`, `recipe_id`, `version_id`, `rubrics_version_id`, `material_ids=None` | 在活动 Execution 内请求实际测试已有版本，返回排队信息；不新建 Execution；结果在 `execution_get.test_results` |
 | `recipe_activate` | `recipe_id`, `version_id`, `expected_revision` | 启用已通过测试、无未决必要问题的版本；CAS 防覆盖；`version_id=None` 清空启用指针 |
+
+直接调用 `recipe_list()` 即可展示 Recipe 列表。首次学习记录的 `kind="learning"`、`recipe_id=None`，可用 `execution_id` 查看详情。关联到 Recipe 后，同一执行的进度归入 `kind="recipe"` 的记录。每个 Recipe 优先展示最近开始且仍在处理的执行，其次是最近开始的已结束执行。用 `status` 展示进度，用 `active_version_id` 和 `active_version_number` 展示可用版本，用 `candidate_version_id` 和 `pending_question_count` 展示候选和待确认问题数。没有关联执行时，`status` 为 `active` 或 `inactive`。列表现有的检索和分页选项可继续使用。
 
 `recipe_test` 指定测试请求后，该 Execution 测试所选现有版本，不再自动修改它；修订需另一次学习流程。重复相同测试请求不重复递增输入版本。默认学习流程内部调用同一测试阶段，失败时可生成新版本重测，不需要宿主逐步驱动。
 

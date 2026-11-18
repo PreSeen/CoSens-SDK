@@ -791,3 +791,49 @@ def test_model_payment_error_is_actionable_without_persisting_body(client, tmp_p
     assert result["error"]["code"] == "model_payment_required"
     assert result["error"]["upstream_status"] == 402
     assert "secret-provider-body" not in json.dumps(result)
+
+
+def test_recipe_list_includes_learning_and_revision_status(client, tmp_path):
+    source = material(client, tmp_path)
+    learning = run(client, source["id"], auto_activate=True)
+    [row] = client.recipe_list()
+    assert (row["kind"], row["recipe_id"], row["status"]) == (
+        "learning",
+        None,
+        "queued",
+    )
+    assert row["execution_id"] == learning["id"]
+    assert row["name"] == source["name"]
+    assert client.recipe_list(active_only=True) == []
+    with client.store.connect() as conn:
+        assert (
+            conn.execute("SELECT id FROM objects WHERE kind='recipe'").fetchall() == []
+        )
+
+    client.run_pending(runtime=FileRuntime())
+    [row] = client.recipe_list()
+    assert (row["kind"], row["status"]) == ("recipe", "passed")
+    assert row["active_version_number"] == 1
+    assert row["execution_id"] == learning["id"]
+    assert "runtime_config" not in row
+
+    revision = client.execution_create(
+        material_ids=[source["id"]],
+        policy=policy(),
+        base_recipe_version_id=row["active_version_id"],
+    )
+    [working] = client.recipe_list(active_only=True, q="answer", limit=1)
+    assert working["recipe_id"] == row["recipe_id"]
+    assert working["active_version_id"] == row["active_version_id"]
+    assert working["execution_id"] == revision["id"]
+    assert working["status"] == "queued"
+    assert working["candidate_version_id"] is None
+    assert client.recipe_list(offset=1) == []
+
+    client.execution_cancel(revision["id"])
+    [cancelled] = client.recipe_list()
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["active_version_id"] == row["active_version_id"]
+    client.execution_update(revision["id"], archived=True)
+    [restored] = client.recipe_list()
+    assert restored["status"] == "passed"

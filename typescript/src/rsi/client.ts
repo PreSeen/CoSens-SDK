@@ -6,6 +6,11 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { authorizedTestFiles, snapshot } from './materials.js';
 import { Store, uid, now, encode, pagination } from './store.js';
 import {
+  readRecipeList,
+  type RecipeListEntry,
+  type RecipeListRecipeEntry,
+} from './recipe-list.js';
+import {
   LocalConfigSchema,
   PolicySchema,
   RecipeSchema,
@@ -229,27 +234,15 @@ export class RSIClient {
     return this.store.list('rubrics', options);
   }
   recipe_list(
+    options: Pagination & { q?: string; active_only: true },
+  ): RecipeListRecipeEntry[];
+  recipe_list(
+    options?: Pagination & { q?: string; active_only?: boolean },
+  ): RecipeListEntry[];
+  recipe_list(
     options: Pagination & { q?: string; active_only?: boolean } = {},
-  ): Versioned<RecipeContent>[] {
-    const { limit, offset } = pagination(options),
-      q = options.q ?? null;
-    return (
-      this.store.db
-        .prepare(
-          `SELECT o.data FROM objects o LEFT JOIN versions v ON v.id=json_extract(o.data,'$.active_version_id')
-      WHERE o.kind='recipe' AND ((json_extract(o.data,'$.archived_at') IS NOT NULL)=?) AND (?=0 OR v.id IS NOT NULL)
-      AND (? IS NULL OR instr(lower(COALESCE(json_extract(o.data,'$.name'),'')||' '||COALESCE(json_extract(o.data,'$.description'),'')||' '||COALESCE(v.data,'')),lower(?))>0)
-      ORDER BY o.created,o.id LIMIT ? OFFSET ?`,
-        )
-        .all(
-          Number(options.archived ?? false),
-          Number(options.active_only ?? false),
-          q,
-          q,
-          limit,
-          offset,
-        ) as { data: string }[]
-    ).map((row) => JSON.parse(row.data));
+  ): RecipeListEntry[] {
+    return readRecipeList(this.store, options);
   }
   rubrics_update(
     id: string,

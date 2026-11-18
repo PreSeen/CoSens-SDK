@@ -20,6 +20,7 @@ from .models import (
     RecipeContent,
     RubricsContent,
 )
+from .recipe_list import read_recipe_list
 from .store import Store, uid
 
 
@@ -181,23 +182,18 @@ class RSIClient:
     def recipe_list(
         self, *, q=None, active_only=False, archived=False, limit=50, offset=0
     ):
-        """Local name/description/instructions search; no remote embeddings are sent."""
+        """Return Recipe and learning entries with their current status."""
         if not 1 <= limit <= 200 or offset < 0:
             raise ValueError("invalid pagination")
         with self.store.connect() as conn:
-            rows = conn.execute(
-                """SELECT o.data FROM objects o LEFT JOIN versions v
-                ON v.id=json_extract(o.data,'$.active_version_id')
-                WHERE o.kind='recipe' AND ((json_extract(o.data,'$.archived_at') IS NOT NULL)=?)
-                AND (?=0 OR v.id IS NOT NULL)
-                AND (? IS NULL OR instr(lower(COALESCE(json_extract(o.data,'$.name'),'') || ' ' ||
-                    COALESCE(json_extract(o.data,'$.description'),'') || ' ' || COALESCE(v.data,'')),lower(?))>0)
-                ORDER BY o.created,o.id LIMIT ? OFFSET ?""",
-                (int(archived), int(active_only), q, q, limit, offset),
-            ).fetchall()
-            import json
-
-            return [json.loads(row["data"]) for row in rows]
+            return read_recipe_list(
+                conn,
+                q=q,
+                active_only=active_only,
+                archived=archived,
+                limit=limit,
+                offset=offset,
+            )
 
     def rubrics_update(self, rubrics_id, **metadata):
         return self._update(rubrics_id, "rubrics", **metadata)

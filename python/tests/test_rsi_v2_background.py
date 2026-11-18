@@ -515,7 +515,10 @@ def test_structured_output_correction_is_bounded(
     if budget > 3:
         assert result["status"] == "failed"
         assert result["error"]["code"] == "invalid_model_output"
-        assert client.recipe_list() == []
+        [entry] = client.recipe_list()
+        assert entry["execution_id"] == execution["id"]
+        assert entry["recipe_id"] is None
+        assert entry["status"] == "failed"
         assert (
             gateway.requests == 6
         )  # two extraction calls + analysis read and three malformed outputs

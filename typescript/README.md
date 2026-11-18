@@ -73,6 +73,8 @@ The Hook returns after the task is queued and a worker is dispatched. The host q
 | Rubrics | `rubrics_create`, `rubrics_get`, `rubrics_list`, `rubrics_update`, `rubrics_version_create`, `rubrics_version_list` |
 | Recipe | `recipe_create`, `recipe_get`, `recipe_list`, `recipe_update`, `recipe_version_create`, `recipe_version_list`, `recipe_test`, `recipe_activate` |
 
+Call `rsi.recipe_list()` for the Recipe panel. Each row has a `status` and a stable list key in `id`. A first-time learning row has `kind: 'learning'`, `recipe_id: null` and an `execution_id`. Once the execution is associated with a Recipe, its status appears on the `kind: 'recipe'` row. The list uses the most recently started ongoing execution per Recipe, then the most recently started terminal one. `active_version_id` and `active_version_number` show what can be used while `status`, `candidate_version_id` and `pending_question_count` track the selected execution. A Recipe with no associated execution has status `active` or `inactive`. `recipe_list({ active_only: true })` returns enabled Recipes for task-time selection.
+
 Use `archived` with update functions to archive or restore records. Recipe retrieval defaults to the active version. Test results live on the Execution. A missing test task yields `unverifiable`. Activation requires a passing test and no unresolved clarification. The host owns task boundary selection and the learning confirmation UI.
 
 Each client can supply its own `config` when using the same `data_dir`. Execution creation saves that configuration on the Execution, and the Worker reads it from there. Opening a client for reads or recovery can omit `config`.
