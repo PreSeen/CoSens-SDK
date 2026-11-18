@@ -1145,7 +1145,7 @@ async def test_a_local_version_followed_as_the_service_current_version_is_record
     server.rollback(v1.recipe_id, 2)
     y = await learn(rsi, task, "y")  # records V3 as uploaded and follows the rollback
     gate["go"].set()
-    assert (await waiting).publish_state == "failed"  # the lost reply overwrites the publish state
+    assert (await waiting).publish_state == "published"  # the late failure reply leaves the recorded upload alone
     assert (await rsi.wait_workflow_job("recipe_candidate", y.recipe_candidate_id)).publish_state == "published"
     server.rollback(v1.recipe_id, 3)  # forward again to V3
     job = await improve(rsi, task, "five")
@@ -1156,6 +1156,93 @@ async def test_a_local_version_followed_as_the_service_current_version_is_record
     assert await chain_flags(rsi, v1.recipe_id) == [
         (1, "candidate", "published", False), (2, "candidate", "published", False), (3, "candidate", "published", True),
         (4, "candidate", "published", True), (5, "candidate", "published", True), (6, "candidate", "published", False)]
+
+
+async def test_a_late_failure_reply_leaves_a_version_recorded_as_uploaded_uploaded(tmp_path):
+    server = FakeService()
+    gate = {"armed": False, "stored": asyncio.Event(), "go": asyncio.Event()}
+
+    async def handler(request):
+        response = server(request)
+        if gate["armed"] and request.method == "PUT":
+            gate["armed"] = False
+            gate["stored"].set()  # V3 is stored on the service; its reply is slow and then lost
+            await gate["go"].wait()
+            return httpx.Response(502, json={"detail": "gateway lost the response"})
+        return response
+
+    client = CoSensClient(api_key="k", _http_transport=httpx.MockTransport(handler))
+    rsi, model = make_rsi(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 7)), client=client, name="s.sqlite3")
+    task, _, done = await first_revision(rsi)
+    v1 = await generate(rsi, task, done.revision_id)
+    v2 = await improve(rsi, task, "two")
+    v3 = await learn(rsi, task, "three")
+    gate["armed"] = True
+    waiting = asyncio.create_task(rsi.wait_workflow_job("recipe_candidate", v3.recipe_candidate_id))
+    await gate["stored"].wait()
+    server.rollback(v1.recipe_id, 2)
+    y = await learn(rsi, task, "y")  # records V3 as uploaded and follows the rollback
+    gate["go"].set()
+    assert (await waiting).publish_state == "published"  # the late failure reply does not undo that record
+    y = await rsi.wait_workflow_job("recipe_candidate", y.recipe_candidate_id)
+    assert (y.version, y.parent_candidate_id, y.publish_state) == (4, v2.recipe_candidate_id, "published")
+    server.rollback(v1.recipe_id, 2)  # back from V4
+    job = await improve(rsi, task, "five")
+    assert (job.version, job.parent_candidate_id, uploaded(server)[-1]) == (5, v2.recipe_candidate_id, (5, 2))
+    server.rollback(v1.recipe_id, 3)  # forward again to V3, which this machine uploaded
+    job = await improve(rsi, task, "six")
+    assert (job.version, job.parent_candidate_id, job.publish_state) == (6, v3.recipe_candidate_id, "published")
+    assert model.calls[-1]["context"]["base_recipe"]["recipe"]["title"] == "V3"
+    assert uploaded(server)[-1] == (6, 3)
+    assert await chain_flags(rsi, v1.recipe_id) == [
+        (1, "candidate", "published", False), (2, "candidate", "published", False), (3, "candidate", "published", False),
+        (4, "candidate", "published", True), (5, "candidate", "published", True), (6, "candidate", "published", False)]
+
+
+async def test_an_upload_landing_between_the_check_listing_and_reading_the_current_version_is_not_a_move(tmp_path):
+    server = FakeService()
+    gate = {"armed": False, "watch": False, "sent": asyncio.Event(), "listed": asyncio.Event(),
+            "landed": asyncio.Event(), "go": asyncio.Event()}
+
+    async def handler(request):
+        if gate["armed"] and request.method == "PUT":
+            gate["armed"] = False
+            gate["sent"].set()
+            await gate["listed"].wait()
+            response = server(request)  # V3 is stored after V5's check listed the stored versions
+            gate["landed"].set()
+            await gate["go"].wait()
+            return response
+        if gate["watch"] and request.url.path.endswith("/versions") and not gate["listed"].is_set():
+            response = server(request)
+            gate["listed"].set()
+            await gate["landed"].wait()  # the check reads the current version only after V3 is stored
+            return response
+        return server(request)
+
+    client = CoSensClient(api_key="k", _http_transport=httpx.MockTransport(handler))
+    rsi, model = make_rsi(tmp_path, *(recipe_reply(f"V{n}") for n in range(1, 6)), client=client, name="s.sqlite3")
+    task, _, done = await first_revision(rsi)
+    v1 = await generate(rsi, task, done.revision_id)
+    await improve(rsi, task, "two")
+    v3 = await learn(rsi, task, "three")
+    await rsi._settling_task(v3.recipe_candidate_id)
+    gate["armed"] = True
+    waiting = asyncio.create_task(rsi.wait_workflow_job("recipe_candidate", v3.recipe_candidate_id))
+    await gate["sent"].wait()
+    v4 = await learn(rsi, task, "four")  # built on V3 while its upload is in flight
+    await rsi._settling_task(v4.recipe_candidate_id)
+    gate["watch"] = True
+    v5 = await learn(rsi, task, "five")
+    assert (v5.version, v5.parent_candidate_id) == (5, v4.recipe_candidate_id)
+    gate["go"].set()
+    assert (await waiting).publish_state == "published"
+    job = await rsi.wait_workflow_job("recipe_candidate", v5.recipe_candidate_id)
+    assert (job.status, job.publish_state) == ("candidate", "published")
+    assert model.calls[-1]["context"]["base_recipe"]["recipe"]["title"] == "V4"
+    assert uploaded(server) == [(1, None), (2, 1), (3, 2), (5, 3)]
+    assert (await chain_flags(rsi, v1.recipe_id))[2:] == [
+        (3, "candidate", "published", False), (4, "candidate", "pending", False), (5, "candidate", "published", False)]
 
 
 async def test_an_upload_reply_after_another_learning_failed_the_candidate_changes_nothing(tmp_path):

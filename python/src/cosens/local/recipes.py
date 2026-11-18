@@ -376,10 +376,17 @@ class LocalRecipeLifecycle:
         to a version this machine lacks, or to a local version other than the current one that is known to be the
         service's copy (``_service_copy``). The local current version with the service's number is an upload whose
         response was lost; it is not followed, and neither is a local version that is not the service's copy, so
-        uploading stays a ``publish_conflict``."""
+        uploading stays a ``publish_conflict``.
+
+        A local version above the last one uploaded from here that the local current version builds on is not followed
+        either: its upload reached the service after the check before learning listed the stored versions, too late for
+        ``_lost_upload`` to record it, so the service being on it is not a move."""
         if head["remote_version"] in (None, view["version"]):
             return False
         row = self._numbered(db, head["recipe_id"], view["version"])
+        if row is not None and view["version"] > head["remote_version"] and (
+                row["id"] in self._line(db, head["current_candidate_id"])):
+            return False
         return row is None or (row["id"] != head["current_candidate_id"] and self._service_copy(row, view))
 
     def _follow_server(self, db, recipe_id, view, stored, previous):
@@ -902,9 +909,9 @@ class LocalRecipeLifecycle:
             state = "failed"
             _LOG.warning("Uploading Recipe candidate %s failed: %s", candidate_id, type(exc).__name__)
         with self._store.transaction() as db:
-            recorded = self._record_upload(db, candidate_id, recipe_id, state,
-                                           lineage["version"] if state == "published" else None)
-        return state if recorded else None
+            if not self._record_upload(db, candidate_id, recipe_id, state, lineage["version"] if state == "published" else None):
+                return None
+            return db.execute("SELECT publish_state FROM recipe_candidates WHERE id=?", (candidate_id,)).fetchone()["publish_state"]
 
     def _record_upload(self, db, candidate_id, recipe_id, state, stored):
         """Set a finished candidate's publish state and, when ``stored`` is a version the service is now known to store
@@ -913,9 +920,11 @@ class LocalRecipeLifecycle:
         Another learning may have followed a move of the service's current version meanwhile, failing this candidate and
         setting the last version uploaded from here; those writes stand. A version the local current version does not
         build on, such as one that move rolled back, leaves the last uploaded version alone. Replies of overlapping
-        uploads arrive in any order, so an older one never moves that version back."""
-        updated = db.execute("UPDATE recipe_candidates SET publish_state=? WHERE id=? AND state='candidate'",
-                             (state, candidate_id))
+        uploads arrive in any order, so an older one never moves that version back. A version known to be uploaded
+        stays uploaded: a failure reply of its upload that arrives after another learning recorded the upload as reaching
+        the service leaves its publish state alone."""
+        updated = db.execute("UPDATE recipe_candidates SET publish_state=CASE WHEN publish_state='published' THEN "
+                             "'published' ELSE ? END WHERE id=? AND state='candidate'", (state, candidate_id))
         if updated.rowcount == 1 and stored is not None:
             current = db.execute("SELECT current_candidate_id FROM recipe_heads WHERE recipe_id=?", (recipe_id,)).fetchone()
             if candidate_id in self._line(db, current["current_candidate_id"]):
