@@ -68,7 +68,7 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 | `base_execution_id` | 澄清等流程自动续接的父 Execution ID。通过 `execution_create` 直接创建时为 `null`。 |
 | `status`, `stage`, `progress_percent`, `input_revision` | 执行状态、阶段、进度和输入版本。状态为 `queued`、`running`、`completed`、`failed` 或 `cancelled`。 |
 | `evidence[]` | 每条包含 `path`、`role`、`locator`、`sha256` 和 `size`（字节）。 |
-| `questions[]`, `answers` | 问题和按 `问题ID:问题版本` 键控的答案。迟到答案触发子执行时，对应答案带 `continuation_execution_id`。 |
+| `questions[]`, `answers` | 问题和按 `问题ID:问题版本` 键控的答案。最后一道答案触发子执行时，该答案带 `continuation_execution_id`。 |
 | `recipe_id`, `recipe_version_id`, `rubrics_version_id` | 关联的 Recipe、候选版本和实际采用的评分标准版本，相应阶段完成前为 `null`。 |
 | `test_results[]` | 所有测试轮次的记录，可按 `input_revision` 选择本轮评分。 |
 | `result` | 流程结束后包含 `test_status`、`provisional` 和 `published`。`published` 表示完成时的发布结果，当前可用版本以 `recipe_list()` 为准。未完成时为 `null`。 |
@@ -80,7 +80,7 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 
 `execution_get` 和 `execution_list` 返回整数 `progress_percent`（0–100）。排队为 0%，分析为 10%。默认两轮设置下，首轮生成、测试和评分为 25%、40%、55%，第二轮为 65%、75%、90%。进度表示工作阶段，最终结果保存后为 100%。测试结果见 `result.test_status`。
 
-执行失败或取消时保留已记录的进度。Worker 恢复同一输入版本时，进度保持单调。追加证据、接受澄清或安排重测使 `input_revision` 递增时，新一轮进度随该输入版本重新计算。界面可在存在待回答的澄清问题时优先显示「待澄清」。
+执行失败或取消时保留已记录的进度。Worker 恢复同一输入版本时，进度保持单调。追加证据或安排重测使 `input_revision` 递增时，新一轮进度随该输入版本重新计算。界面可在存在待回答的澄清问题时优先显示「待澄清」。
 
 ### Execution 证据和测试
 
@@ -95,7 +95,9 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 ### 更新和澄清参数
 
 - `execution_append_evidence` 使用与创建相同的 `evidence` 结构，只提交新增内容。新证据递增输入版本并触发重新分析，测试继续使用创建时的输入范围。重试相同证据批次会复用原快照。
-- `question_id` 和 `question_revision` 来自 `execution_get().questions`。 `answer` 为选中的选项 ID 数组或非空文本。已完成执行如果返回 `continuation_execution_id`，宿主应跟踪该子执行。
+- `question_id` 和 `question_revision` 来自 `execution_get().questions`。`answer` 为同一道题选中的选项 ID 数组或非空文本。多道题逐题提交到原 Execution。只要还有待回答的问题，SDK 就只保存答案，返回 `continuation_execution_id: null`。
+- 最后一道题回答后，SDK 创建一个继承全部答案的子 Execution，并返回 `continuation_execution_id`。原执行尚在排队或运行时，会停止并标记为 `cancelled`。原执行已经完成时，保留已有测试结果。重试最后一道相同答案将复用同一个子 Execution。
+- 宿主从返回的子 Execution ID 跟踪重新分析、生成和测试。子执行后续再次提出澄清问题时，按同样流程回答。
 
 ## 本地 SQLite 存储
 

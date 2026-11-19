@@ -224,6 +224,8 @@ export class RSIClient {
     request: Omit<ExecutionCreate, 'idempotency_key'> & {
       answers?: Record<string, ExecutionAnswer>;
       name?: string;
+      test_request?: Execution['test_request'];
+      input_revision?: number;
     },
     config = this.config,
   ): Execution {
@@ -262,7 +264,7 @@ export class RSIClient {
       status: 'queued',
       stage: 'queued',
       progress_percent: 0,
-      input_revision: 1,
+      input_revision: request.input_revision ?? 1,
       questions: [],
       answers: request.answers ?? {},
       recipe_id: null,
@@ -486,16 +488,21 @@ export class RSIClient {
       if (obj.status === 'completed')
         fail('invalid_state', 'completed execution cannot be cancelled');
       if (TERMINAL.has(obj.status)) return obj;
-      obj.status = 'cancelled';
-      obj.stage = 'cancelled';
-      const result = this.store.save(obj);
-      this.store.db
-        .prepare(
-          'UPDATE executions SET fence=fence+1,owner=NULL,lease_until=NULL WHERE id=?',
-        )
-        .run(id);
-      return result;
+      return this.cancelExecution(obj);
     });
+  }
+  private cancelExecution(execution: Execution): Execution {
+    const result = this.store.save<Execution>({
+      ...execution,
+      status: 'cancelled',
+      stage: 'cancelled',
+    });
+    this.store.db
+      .prepare(
+        'UPDATE executions SET fence=fence+1,owner=NULL,lease_until=NULL WHERE id=?',
+      )
+      .run(execution.id);
+    return result;
   }
   async execution_clarification_answer(
     id: string,
@@ -552,32 +559,53 @@ export class RSIClient {
           continuation_execution_id: continuation_execution_id ?? null,
         };
       }
-      obj.answers[key] = answer;
+      const answers = { ...obj.answers, [key]: answer };
       let child_id: string | null = null;
-      if (obj.status === 'completed') {
+      const active = !TERMINAL.has(obj.status);
+      const allAnswered = obj.questions.every(
+        (question) => `${question.id}:${question.revision}` in answers,
+      );
+      if (allAnswered && (active || obj.status === 'completed')) {
+        const parent = active ? this.cancelExecution(obj) : obj;
         child_id = this.execution_insert(
           {
-            material_ids: obj.material_ids,
-            policy: obj.policy,
+            material_ids: parent.material_ids,
+            policy: parent.policy,
             base_execution_id: id,
-            base_recipe_version_id: obj.recipe_version_id,
-            answers: obj.answers,
-            name: this.store.executionRecipeName(obj),
+            base_recipe_version_id:
+              parent.recipe_version_id ?? parent.base_recipe_version_id,
+            // Keep newly generated questions distinct from inherited answers.
+            input_revision:
+              Math.max(
+                parent.input_revision,
+                ...Object.values(answers).map(
+                  (answer) => answer.question_revision,
+                ),
+              ) + 1,
+            answers,
+            name: this.store.executionRecipeName(parent),
+            ...(active && parent.test_request
+              ? { test_request: parent.test_request }
+              : {}),
           },
-          this.suppliedConfig ?? obj.runtime_config,
+          this.suppliedConfig ?? parent.runtime_config,
         ).id;
-        obj.answers[key] = { ...answer, continuation_execution_id: child_id };
-      } else if (!TERMINAL.has(obj.status)) restartExecution(obj);
-      this.store.save(obj);
+        this.store.save({
+          ...parent,
+          answers: {
+            ...answers,
+            [key]: { ...answer, continuation_execution_id: child_id },
+          },
+        });
+      } else this.store.save({ ...obj, answers });
       const result = { execution_id: id, continuation_execution_id: child_id };
       this.store.remember('clarification', idempotency_key, request, result);
       return result;
     });
     if (
       this.auto_start &&
-      !TERMINAL.has(
-        this.execution_get(result.continuation_execution_id ?? id).status,
-      )
+      result.continuation_execution_id &&
+      !TERMINAL.has(this.execution_get(result.continuation_execution_id).status)
     )
       await this.recover();
     return result;

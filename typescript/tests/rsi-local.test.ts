@@ -623,7 +623,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
   }
 });
 
-test('new clarification restarts the input revision and only the corrected version is tested', async () => {
+test('all clarification answers create one continuation and only the corrected version is tested', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'cosens-rsi-revision-'));
   const client = new RSIClient({
     data_dir: join(directory, 'rsi'),
@@ -683,6 +683,7 @@ test('new clarification restarts the input revision and only the corrected versi
     },
   });
   let generationCalls = 0;
+  let continuationId: string | null = null;
   try {
     await client.run_pending({
       runtime: {
@@ -702,6 +703,15 @@ test('new clarification restarts the input revision and only the corrected versi
                     options: [
                       { id: 'decimal', label: 'Decimal' },
                       { id: 'hex', label: 'Hexadecimal' },
+                    ],
+                  },
+                  {
+                    id: 'precision',
+                    question: 'Which precision?',
+                    assumption: 'exact',
+                    options: [
+                      { id: 'exact', label: 'Exact' },
+                      { id: 'rounded', label: 'Rounded' },
                     ],
                   },
                 ],
@@ -748,12 +758,33 @@ test('new clarification restarts the input revision and only the corrected versi
           }
           generationCalls++;
           if (generationCalls === 1) {
-            await client.execution_clarification_answer(execution.id, {
-              question_id: 'format',
+            const first = await client.execution_clarification_answer(
+              execution.id,
+              {
+                question_id: 'format',
+                question_revision: 1,
+                selected_option_ids: ['hex'],
+                idempotency_key: 'format-answer',
+              },
+            );
+            assert.equal(first.continuation_execution_id, null);
+            assert.equal(client.execution_get(execution.id).input_revision, 1);
+            assert.equal(client.execution_get(execution.id).status, 'running');
+            assert.equal(client.execution_list().length, 1);
+            const last = {
+              question_id: 'precision',
               question_revision: 1,
-              selected_option_ids: ['hex'],
-              idempotency_key: 'format-answer',
-            });
+              selected_option_ids: ['exact'],
+              idempotency_key: 'precision-answer',
+            };
+            const [done, replay] = await Promise.all([
+              client.execution_clarification_answer(execution.id, last),
+              client.execution_clarification_answer(execution.id, last),
+            ]);
+            assert.deepEqual(done, replay);
+            continuationId = done.continuation_execution_id;
+            assert.ok(continuationId);
+            assert.equal(client.execution_list().length, 2);
           }
           return {
             title: 'Number format',
@@ -807,12 +838,22 @@ test('new clarification restarts the input revision and only the corrected versi
         },
       },
     });
-    const result = client.execution_get(execution.id);
+    const parent = client.execution_get(execution.id);
+    assert.equal(parent.status, 'cancelled');
+    assert.equal(parent.input_revision, 1);
+    assert.deepEqual(parent.test_results, []);
+    assert.ok(continuationId);
+    const result = client.execution_get(continuationId!);
     assert.equal(generationCalls, 2);
-    assert.equal(result.input_revision, 2);
+    assert.equal(result.base_execution_id, parent.id);
+    assert.equal(result.input_revision, parent.input_revision + 1);
+    assert.deepEqual(Object.keys(result.answers).sort(), [
+      'format:1',
+      'precision:1',
+    ]);
     assert.equal(result.status, 'completed', JSON.stringify(result.error));
     assert.equal(result.test_results.length, 1);
-    assert.equal(result.test_results[0].input_revision, 2);
+    assert.equal(result.test_results[0].input_revision, result.input_revision);
     assert.equal(result.result?.published, true);
     assert.equal(result.name, 'Format numbers');
     const recipe = client.recipe_get(result.recipe_id!);

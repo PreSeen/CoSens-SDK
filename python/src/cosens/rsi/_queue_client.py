@@ -224,7 +224,7 @@ class RSIClient:
                 "status": "queued",
                 "stage": "queued",
                 "progress_percent": 0,
-                "input_revision": 1,
+                "input_revision": request.get("input_revision", 1),
                 "questions": [],
                 "answers": request.get("answers", {}),
                 "recipe_id": None,
@@ -459,13 +459,17 @@ class RSIClient:
                 raise InvalidState("completed execution cannot be cancelled")
             if obj["status"] in {"failed", "cancelled"}:
                 return obj
-            obj.update(status="cancelled", stage="cancelled")
-            result = self.store.save(conn, obj)
-            conn.execute(
-                "UPDATE executions SET fence=fence+1,owner=NULL,lease_until=NULL WHERE id=?",
-                (execution_id,),
-            )
-            return result
+            return self._cancel_execution(conn, obj)
+
+    def _cancel_execution(self, conn, execution):
+        result = self.store.save(
+            conn, {**execution, "status": "cancelled", "stage": "cancelled"}
+        )
+        conn.execute(
+            "UPDATE executions SET fence=fence+1,owner=NULL,lease_until=NULL WHERE id=?",
+            (execution["id"],),
+        )
+        return result
 
     def execution_clarification_answer(
         self,
@@ -485,8 +489,12 @@ class RSIClient:
             text=text,
             idempotency_key=idempotency_key,
         )
-        target_id = result["continuation_execution_id"] or execution_id
-        if self.auto_start and self.execution_get(target_id)["status"] not in TERMINAL:
+        target_id = result["continuation_execution_id"]
+        if (
+            self.auto_start
+            and target_id
+            and self.execution_get(target_id)["status"] not in TERMINAL
+        ):
             # A replay must also repair a failed dispatch after the durable answer.
             self.recover()
         return result
@@ -550,34 +558,45 @@ class RSIClient:
                     "execution_id": execution_id,
                     "continuation_execution_id": continuation_id,
                 }
-            obj["answers"][key] = answer
+            answers = {**obj["answers"], key: answer}
             child_id = None
-            if obj["status"] == "completed":
+            active = obj["status"] not in TERMINAL
+            all_answered = all(
+                f"{q['id']}:{q['revision']}" in answers for q in obj["questions"]
+            )
+            if all_answered and (active or obj["status"] == "completed"):
+                parent = self._cancel_execution(conn, obj) if active else obj
                 inherited = {
-                    k: obj.get(k)
-                    for k in (
-                        "material_ids",
-                        "policy",
+                    "material_ids": parent["material_ids"],
+                    "policy": parent["policy"],
+                    "base_execution_id": execution_id,
+                    "base_recipe_version_id": parent["recipe_version_id"]
+                    or parent.get("base_recipe_version_id"),
+                    # Keep newly generated questions distinct from inherited answers.
+                    "input_revision": max(
+                        parent["input_revision"],
+                        *(answer["question_revision"] for answer in answers.values()),
                     )
+                    + 1,
+                    "answers": answers,
                 }
-                name = self.store.execution_recipe_name(conn, obj)
+                name = self.store.execution_recipe_name(conn, parent)
                 if name:
                     inherited["name"] = name
-                inherited.update(
-                    base_execution_id=execution_id,
-                    base_recipe_version_id=obj["recipe_version_id"],
-                    answers=obj["answers"],
-                )
+                if active and parent.get("test_request"):
+                    inherited["test_request"] = parent["test_request"]
                 child_id = self._execution_insert(
                     conn,
                     inherited,
                     config=self._supplied_config
-                    or LocalConfig.model_validate(obj["runtime_config"]),
+                    or LocalConfig.model_validate(parent["runtime_config"]),
                 )["id"]
-                obj["answers"][key] = {**answer, "continuation_execution_id": child_id}
-            elif obj["status"] not in TERMINAL:
-                restart_execution(obj)
-            self.store.save(conn, obj)
+                answers = {
+                    **answers,
+                    key: {**answer, "continuation_execution_id": child_id},
+                }
+                obj = parent
+            self.store.save(conn, {**obj, "answers": answers})
             result = {
                 "execution_id": execution_id,
                 "continuation_execution_id": child_id,

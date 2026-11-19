@@ -511,42 +511,86 @@ def test_uncovered_criteria_excluded_from_scoring_and_iteration(
         assert test["scores"][1]["score"] is None
 
 
-def test_late_clarification_creates_child_once(client, tmp_path):
+class TwoQuestionRuntime(FileRuntime):
+    def analyze(self, context, files, trace_path):
+        result = super().analyze(context, files, trace_path)
+        if result["questions"]:
+            result["questions"].append(
+                {
+                    "id": "precision",
+                    "question": "Which precision?",
+                    "assumption": "exact",
+                    "options": [
+                        {"id": "exact", "label": "Exact"},
+                        {"id": "rounded", "label": "Rounded"},
+                    ],
+                }
+            )
+        return result
+
+
+def test_late_clarification_waits_for_all_answers_and_creates_child_once(
+    client, tmp_path
+):
     execution = run(client, material(client, tmp_path)["id"])
-    client.run_pending(runtime=FileRuntime(questions=True))
+    client.run_pending(runtime=TwoQuestionRuntime(questions=True))
     parent = client.execution_get(execution["id"])
     assert parent["result"]["provisional"]
     assert not parent["result"]["published"]
-    args = {
+    first = {
         "question_id": "format",
         "question_revision": 1,
         "selected_option_ids": ["decimal"],
         "idempotency_key": "answer-1",
     }
-    answer = client.execution_clarification_answer(parent["id"], **args)
-    assert client.execution_clarification_answer(parent["id"], **args) == answer
+    partial = {"execution_id": parent["id"], "continuation_execution_id": None}
+    assert client.execution_clarification_answer(parent["id"], **first) == partial
+    assert client.execution_clarification_answer(parent["id"], **first) == partial
+    assert len(client.execution_list()) == 1
+    assert (
+        client.execution_get(parent["id"])["input_revision"] == parent["input_revision"]
+    )
+    last = {
+        **first,
+        "question_id": "precision",
+        "selected_option_ids": ["exact"],
+        "idempotency_key": "answer-2",
+    }
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        calls = [
+            pool.submit(client.execution_clarification_answer, parent["id"], **last)
+            for _ in range(2)
+        ]
+        answer, replay = [call.result() for call in calls]
+    assert answer == replay
+    assert len(client.execution_list()) == 2
     saved = client.execution_get(parent["id"])
-    recorded = saved["answers"]["format:1"]
+    recorded = saved["answers"]["precision:1"]
     assert recorded["continuation_execution_id"] == answer["continuation_execution_id"]
     child = client.execution_get(answer["continuation_execution_id"])
     assert child["base_execution_id"] == parent["id"]
+    assert child["input_revision"] == parent["input_revision"] + 1
     assert child["base_recipe_version_id"] == parent["recipe_version_id"]
     assert child["answers"]["format:1"]["selected_options"][0]["label"] == "Decimal"
-    client.run_pending(runtime=FileRuntime(questions=True))
+    assert child["answers"]["precision:1"]["selected_options"][0]["label"] == "Exact"
+    client.run_pending(runtime=TwoQuestionRuntime(questions=True))
     child = client.execution_get(child["id"])
+    assert child["recipe_id"] == parent["recipe_id"]
     assert child["result"]["published"]
     assert client.execution_get(parent["id"])["result"] == parent["result"]
     with pytest.raises(Conflict):
         client.execution_clarification_answer(
             parent["id"],
-            **{**args, "selected_option_ids": ["hex"], "idempotency_key": "other"},
+            **{**first, "selected_option_ids": ["hex"], "idempotency_key": "other"},
         )
 
 
-def test_answer_during_generation_restarts_revision(client, tmp_path):
+def test_last_answer_during_generation_creates_one_child(client, tmp_path):
     execution = run(client, material(client, tmp_path)["id"])
 
-    class AnsweringRuntime(FileRuntime):
+    class AnsweringRuntime(TwoQuestionRuntime):
+        child_id = None
+
         def analyze(self, context, *args):
             return {
                 **super().analyze(context, *args),
@@ -557,27 +601,43 @@ def test_answer_during_generation_restarts_revision(client, tmp_path):
 
         def generate(self, context, *args):
             assert context["recipe_name"] == "Format numbers"
-            assert client.execution_get(execution["id"])["name"] == "Format numbers"
-            assert client.recipe_list()[0]["name"] == "Format numbers"
             if not self.generation_count:
-                client.execution_clarification_answer(
+                first = client.execution_clarification_answer(
                     execution["id"],
                     question_id="format",
                     question_revision=1,
                     selected_option_ids=["decimal"],
                 )
+                assert first["continuation_execution_id"] is None
+                assert client.execution_get(execution["id"])["status"] == "running"
+                assert client.execution_get(execution["id"])["input_revision"] == 1
+                assert len(client.execution_list()) == 1
+                last = client.execution_clarification_answer(
+                    execution["id"],
+                    question_id="precision",
+                    question_revision=1,
+                    selected_option_ids=["exact"],
+                )
+                self.child_id = last["continuation_execution_id"]
+            else:
+                assert set(context["answers"]) == {"format:1", "precision:1"}
             return super().generate(context, *args)
 
     runtime = AnsweringRuntime(questions=True)
     client.run_pending(runtime=runtime)
-    final = client.execution_get(execution["id"])
+    parent = client.execution_get(execution["id"])
+    assert parent["status"] == "cancelled"
+    assert parent["input_revision"] == 1
+    assert parent["test_results"] == []
+    final = client.execution_get(runtime.child_id)
     assert final["status"] == "completed", final
-    assert final["input_revision"] == 2
+    assert final["base_execution_id"] == parent["id"]
+    assert final["input_revision"] == parent["input_revision"] + 1
     assert runtime.generation_count == 2
     recipe = client.recipe_get(final["recipe_id"])
     assert final["name"] == recipe["name"] == "Format numbers"
     assert recipe["selected_version"]["content"]["title"] == final["name"]
-    assert all(t["input_revision"] == 2 for t in final["test_results"])
+    assert len(final["test_results"]) == 1
     assert final["result"]["published"]
 
 
