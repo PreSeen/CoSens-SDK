@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cosens-sdk"
-version = "0.8.2"
+version = "0.8.3"
 description = "CoSens Python SDK for local RSI and reusable Recipes"
 readme = "README.md"
 license = "Apache-2.0"

@@ -92,3 +92,20 @@ test('an invalid result names the fields to fix', () => {
   assert.match(parsed.problem ?? '', /criteria\.0\.required/);
   assert.match(parseStructured(Result, '{not json').problem ?? '', /not valid JSON/);
 });
+
+test('null spelled as text is decoded and remaining errors are reported', () => {
+  const Analysis = z.object({
+    hypothesis: z.string().nullable(),
+    criteria: z.array(z.object({ id: z.string(), required: z.boolean() })),
+  });
+  const ok = parseStructured(
+    Analysis,
+    JSON.stringify({ hypothesis: 'None', criteria: JSON.stringify([{ id: 'c', required: true }]) }),
+  );
+  assert.equal(ok.problem, undefined);
+  const bad = parseStructured(
+    Analysis,
+    JSON.stringify({ hypothesis: 'None', criteria: JSON.stringify([{ id: 'c' }]) }),
+  );
+  assert.match(bad.problem ?? '', /criteria\.0\.required/);
+});
