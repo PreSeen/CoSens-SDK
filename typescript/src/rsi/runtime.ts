@@ -75,11 +75,15 @@ function decodeNested(value: unknown): unknown {
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [key, decodeNested(item)]),
     );
-  if (typeof value === 'string' && /^\s*[[{]/.test(value)) {
-    try {
-      return decodeNested(JSON.parse(value));
-    } catch {
-      return value;
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (text === 'None' || text === 'null') return null;
+    if (/^[[{]/.test(text)) {
+      try {
+        return decodeNested(JSON.parse(text));
+      } catch {
+        return value;
+      }
     }
   }
   return value;
@@ -104,7 +108,8 @@ export function parseStructured(
   if (direct.success) return { data: direct.data };
   const decoded = schema.safeParse(decodeNested(raw));
   if (decoded.success) return { data: decoded.data };
-  const issues = direct.error.issues
+  // Report what is still wrong after decoding nested JSON strings.
+  const issues = decoded.error.issues
     .slice(0, 8)
     .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`);
   return { problem: `Fix these fields: ${issues.join('; ')}.` };

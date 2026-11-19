@@ -110,3 +110,19 @@ def test_invalid_result_names_the_fields_to_fix():
     assert "name" in problem and "criteria.0.required" in problem
     parsed, problem = parse_structured(Result, "{not json")
     assert parsed is None and "not valid JSON" in problem
+
+
+class Analysis(BaseModel):
+    hypothesis: str | None
+    criteria: list[Criterion]
+
+
+def test_null_spelled_as_text_is_decoded_and_remaining_errors_are_reported():
+    parsed, problem = parse_structured(
+        Analysis, json.dumps({"hypothesis": "None", "criteria": json.dumps([{"id": "c", "required": True}])})
+    )
+    assert problem is None and parsed.hypothesis is None
+    parsed, problem = parse_structured(
+        Analysis, json.dumps({"hypothesis": "None", "criteria": json.dumps([{"id": "c"}])})
+    )
+    assert "criteria.0.required" in problem and "valid list" not in problem

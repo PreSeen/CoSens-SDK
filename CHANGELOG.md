@@ -2,6 +2,11 @@
 
 Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned separately.
 
+## Python 0.8.3
+
+- A final structured result whose fields arrive as the text `"None"` or `"null"` is read as null, and objects sent as JSON strings are decoded leniently, so models that stringify nested results (seen with qwen3.8-27b) no longer fail analysis after three attempts.
+- The retry message lists what is still wrong after that decoding, not the original type errors.
+
 ## Python 0.8.2
 
 - `config` accepts optional `max_tokens` and `timeout` (seconds). `max_tokens` is no longer fixed at 4096: when unset, requests leave the completion budget to the model endpoint, so reasoning models are not cut off.

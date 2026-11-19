@@ -40,11 +40,15 @@ def _decode_nested(value):
         return {key: _decode_nested(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_decode_nested(item) for item in value]
-    if isinstance(value, str) and value.strip()[:1] in ("{", "["):
-        try:
-            return _decode_nested(json.loads(value))
-        except ValueError:
-            return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text in ("None", "null"):
+            return None
+        if text[:1] in ("{", "["):
+            try:
+                return _decode_nested(json.loads(text, strict=False))
+            except ValueError:
+                return value
     return value
 
 
@@ -56,11 +60,12 @@ def parse_structured(schema, arguments):
         return None, f"The arguments are not valid JSON: {error.msg}."
     try:
         return schema.model_validate(data), None
+    except ValidationError:
+        pass
+    try:
+        return schema.model_validate(_decode_nested(data)), None
     except ValidationError as error:
-        try:
-            return schema.model_validate(_decode_nested(data)), None
-        except ValidationError:
-            pass
+        # Report what is still wrong after decoding nested JSON strings.
         issues = [
             f"{'.'.join(str(part) for part in issue['loc']) or '(root)'}: {issue['msg']}"
             for issue in error.errors()[:8]
