@@ -30,12 +30,7 @@ CREATE TABLE IF NOT EXISTS recipes (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
     archived_at REAL,
-    revision INTEGER NOT NULL,
-    name TEXT,
-    active_version_id TEXT,
-    latest_version_id TEXT,
-    latest_qualified_version_id TEXT,
-    details TEXT NOT NULL
+    name TEXT
 );
 CREATE INDEX IF NOT EXISTS recipes_created ON recipes(created_at,id);
 CREATE TABLE IF NOT EXISTS evidence_snapshots (
@@ -55,6 +50,7 @@ CREATE TABLE IF NOT EXISTS versions (
     number INTEGER NOT NULL,
     data TEXT NOT NULL,
     operation_key TEXT UNIQUE,
+    status TEXT CHECK (status IS NULL OR (recipe_id IS NOT NULL AND status IN ('candidate', 'available', 'archived'))),
     CHECK ((recipe_id IS NULL) <> (rubrics_id IS NULL)),
     CHECK ((rubrics_metadata IS NULL) = (rubrics_id IS NULL)),
     UNIQUE(object_id,number)
@@ -77,7 +73,60 @@ CREATE TABLE IF NOT EXISTS idempotency (
 );
 """
 
-_COMMON = ("id", "created_at", "updated_at", "archived_at", "revision")
+LEGACY_RECIPES = """
+CREATE TABLE recipes (
+    id TEXT PRIMARY KEY,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    archived_at REAL,
+    revision INTEGER NOT NULL,
+    name TEXT,
+    active_version_id TEXT,
+    latest_version_id TEXT,
+    latest_qualified_version_id TEXT,
+    details TEXT NOT NULL
+);
+"""
+
+MIGRATE_RECIPE_VERSIONS = """
+UPDATE versions AS v
+SET status = CASE
+        WHEN v.id = r.active_version_id AND r.archived_at IS NULL THEN 'available'
+        WHEN v.number <= (
+            SELECT number FROM versions WHERE id = COALESCE(
+                r.latest_qualified_version_id, r.active_version_id
+            )
+        ) THEN 'archived'
+        ELSE 'candidate'
+    END
+FROM recipes r WHERE r.id = v.recipe_id;
+ALTER TABLE recipes DROP COLUMN revision;
+ALTER TABLE recipes DROP COLUMN active_version_id;
+ALTER TABLE recipes DROP COLUMN latest_version_id;
+ALTER TABLE recipes DROP COLUMN latest_qualified_version_id;
+ALTER TABLE recipes DROP COLUMN details;
+"""
+
+RECIPE_PROJECTION = """
+CREATE INDEX IF NOT EXISTS versions_recipe_number
+    ON versions(recipe_id, number DESC) WHERE recipe_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS versions_recipe_available
+    ON versions(recipe_id) WHERE status = 'available';
+CREATE VIEW IF NOT EXISTS recipe_records AS
+SELECT r.*,
+    (SELECT id FROM versions
+        WHERE recipe_id = r.id ORDER BY number DESC LIMIT 1) AS latest_version_id,
+    active.id AS active_version_id,
+    (SELECT id FROM versions
+        WHERE recipe_id = r.id AND status IN ('available', 'archived')
+        ORDER BY number DESC LIMIT 1) AS latest_qualified_version_id
+FROM recipes r
+LEFT JOIN versions active
+    ON active.recipe_id = r.id AND active.status = 'available' AND r.archived_at IS NULL;
+"""
+
+_IDENTITY = ("id", "created_at", "updated_at", "archived_at")
+_COMMON = (*_IDENTITY, "revision")
 
 STORAGE = {
     "execution": (
@@ -96,15 +145,6 @@ STORAGE = {
             "input_revision",
         ),
     ),
-    "recipe": (
-        "recipes",
-        _COMMON
-        + (
-            "name",
-            "active_version_id",
-            "latest_version_id",
-            "latest_qualified_version_id",
-        ),
-    ),
+    "recipe": ("recipes", (*_IDENTITY, "name")),
     "material": ("evidence_snapshots", _COMMON),
 }

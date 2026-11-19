@@ -21,27 +21,43 @@ const versionArchive = z.strictObject({
   version_id: text,
   archived: z.boolean(),
 });
+const evidenceFile = z.strictObject({
+  path: text,
+  role: z.enum(['input', 'artifact', 'reference', 'feedback']),
+});
 const evidence = z.strictObject({
   context_path: text,
+  files: z.array(evidenceFile).max(1000),
+});
+const creationEvidence = evidence.extend({
   files: z
     .array(
-      z.strictObject({
-        path: text,
-        role: z.enum(['input', 'artifact', 'reference', 'feedback']),
-      }),
+      z.union([
+        evidenceFile,
+        z.strictObject({
+          path: text,
+          role: z.literal('recipe'),
+          recipe_id: text.optional(),
+        }),
+      ]),
     )
-    .max(1000),
+    .max(1000)
+    .refine(
+      (files) => files.filter((file) => file.role === 'recipe').length <= 1,
+      'evidence can contain at most one recipe file',
+    ),
 });
 const executionCreate = z.strictObject({
-  evidence,
+  evidence: creationEvidence,
   idempotency_key: text,
-  base_recipe_id: text.nullable(),
 });
 const answer = z.strictObject({
   question_id: text,
   question_revision: revision,
   answer: z.union([z.array(text).min(1), text]),
 });
+const executionListQuery = z.strictObject({ execution_ids: z.array(text) });
+const recipeListQuery = z.strictObject({ recipe_ids: z.array(text) });
 const recipeTest = z.strictObject({
   execution_id: text,
   recipe_id: text,
@@ -50,7 +66,7 @@ const recipeTest = z.strictObject({
 });
 
 export type RSIConfig = z.input<typeof config>;
-export type ExecutionEvidence = z.input<typeof evidence>;
+export type ExecutionEvidence = z.input<typeof creationEvidence>;
 export type Execution = Pick<
   StoredExecution,
   | 'id'
@@ -78,9 +94,11 @@ export type Execution = Pick<
 };
 export type ExecutionCreate = z.input<typeof executionCreate>;
 export type Page = z.input<typeof page>;
+export type ExecutionListQuery = z.input<typeof executionListQuery>;
+export type RecipeListQuery = z.input<typeof recipeListQuery>;
 export type RecipeListEntry = {
   recipe_id: string | null;
-  execution_id: string | null;
+  execution_ids: string[];
   name: string;
   status: RecipeListStatus;
   available_version_id: string | null;
@@ -165,27 +183,43 @@ export class RSIClient {
   }
 
   async execution_create(request: ExecutionCreate) {
-    const { base_recipe_id, ...submission } = executionCreate.parse(request);
-    return this.#presentExecution(
-      await this.#queue.execution_create_with_evidence({
-        ...submission,
-        confirmation_ref: submission.idempotency_key,
-        base: base_recipe_id ? { kind: 'recipe', id: base_recipe_id } : null,
-      }),
-    );
+    const {
+      evidence: { context_path, files },
+      idempotency_key,
+    } = executionCreate.parse(request);
+    const recipeId = files.find((file) => file.role === 'recipe')?.recipe_id;
+    const execution = await this.#queue.execution_create_with_evidence({
+      evidence: {
+        context_path,
+        files: files.map(({ path, role }) => ({ path, role })),
+      },
+      idempotency_key,
+      confirmation_ref: idempotency_key,
+      base: recipeId ? { kind: 'recipe', id: recipeId } : null,
+    });
+    return {
+      ...this.#presentExecution(execution),
+      recipe_id: execution.recipe_id!,
+    };
   }
 
   execution_get(id: string) {
     return this.#presentExecution(this.#queue.execution_get(id));
   }
 
-  execution_list(query: Page) {
+  execution_list(query?: ExecutionListQuery): Execution[] {
+    const executionIds = executionListQuery
+      .optional()
+      .parse(query)?.execution_ids;
     return this.#queue
-      .execution_list(page.parse(query))
+      .execution_list_all(executionIds)
       .map((row) => this.#presentExecution(row));
   }
 
-  async execution_append_evidence(id: string, submission: ExecutionEvidence) {
+  async execution_append_evidence(
+    id: string,
+    submission: z.input<typeof evidence>,
+  ) {
     return this.#presentExecution(
       await this.#queue.execution_append_evidence(
         id,
@@ -219,10 +253,11 @@ export class RSIClient {
     );
   }
 
-  recipe_list(): RecipeListEntry[] {
-    return this.#queue.recipe_list_all().map((row) => ({
+  recipe_list(query?: RecipeListQuery): RecipeListEntry[] {
+    const recipeIds = recipeListQuery.optional().parse(query)?.recipe_ids;
+    return this.#queue.recipe_list_all(recipeIds).map((row) => ({
       recipe_id: row.recipe_id,
-      execution_id: row.execution_id,
+      execution_ids: row.execution_ids,
       name: row.name ?? '',
       status: row.status,
       available_version_id: row.available_version_id,

@@ -1,5 +1,11 @@
 import { upgradeExecution } from './execution-data.js';
-import { schema, storage } from './store-schema.js';
+import {
+  legacyRecipes,
+  migrateRecipeVersions,
+  recipeProjection,
+  schema,
+  storage,
+} from './store-schema.js';
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, chmodSync } from 'node:fs';
@@ -12,7 +18,7 @@ import {
   type Pagination,
   type Execution,
   type Versioned,
-  type RecipeContent,
+  type Recipe,
 } from './models.js';
 
 export const uid = (prefix: string) =>
@@ -95,11 +101,17 @@ export class Store {
     chmodSync(path, 0o600);
   }
   private initialize() {
-    if (this.db.pragma('user_version', { simple: true }) === 3) return;
+    if (this.db.pragma('user_version', { simple: true }) === 5) return;
     this.tx(() => {
       const version = this.db.pragma('user_version', { simple: true });
-      if (version === 3) return;
-      if (version !== 0 && version !== 1 && version !== 2)
+      if (version === 5) return;
+      if (
+        version !== 0 &&
+        version !== 1 &&
+        version !== 2 &&
+        version !== 3 &&
+        version !== 4
+      )
         fail('invalid_state', 'unsupported RSI SQLite schema version');
       const legacy = this.db
         .prepare(
@@ -129,6 +141,7 @@ export class Store {
         }
         this.db.exec(initializeRecipeAvailability);
         this.db.exec('ALTER TABLE versions RENAME TO previous_versions;');
+        this.db.exec(legacyRecipes);
       }
       if (version === 2)
         this.db.exec(`
@@ -137,17 +150,32 @@ export class Store {
           ALTER TABLE executions ADD COLUMN fence INTEGER NOT NULL DEFAULT 0;
           ALTER TABLE versions RENAME TO previous_versions;
         `);
+      if (version === 3)
+        this.db.exec(`
+          ALTER TABLE versions ADD COLUMN status TEXT
+          CHECK (status IS NULL OR (recipe_id IS NOT NULL AND status IN ('candidate', 'available', 'archived')));
+        `);
       this.db.exec(schema);
       if (legacy) {
         const rows = this.db
-          .prepare("SELECT kind,data FROM objects WHERE kind<>'rubrics'")
+          .prepare(
+            "SELECT kind,data FROM objects WHERE kind IN ('execution','material')",
+          )
           .all() as {
-          kind: Exclude<Kind, 'rubrics'>;
+          kind: 'execution' | 'material';
           data: string;
         }[];
         for (const { kind, data } of rows)
           this.writeRecord(kind, JSON.parse(data), false);
         this.db.exec(`
+          INSERT INTO recipes (id,created_at,updated_at,archived_at,name,revision,
+              active_version_id,latest_version_id,latest_qualified_version_id,details)
+          SELECT id, json_extract(data,'$.created_at'), json_extract(data,'$.updated_at'),
+              json_extract(data,'$.archived_at'), json_extract(data,'$.name'),
+              1, json_extract(data,'$.active_version_id'),
+              json_extract(data,'$.latest_version_id'), json_extract(data,'$.latest_qualified_version_id'),
+              '{}'
+          FROM objects WHERE kind='recipe';
           INSERT INTO versions (id,recipe_id,rubrics_id,rubrics_metadata,number,data,operation_key)
           SELECT v.id, CASE WHEN o.kind='recipe' THEN o.id END,
               CASE WHEN o.kind='rubrics' THEN o.id END,
@@ -178,7 +206,15 @@ export class Store {
           DROP TABLE IF EXISTS objects;
           DROP TABLE IF EXISTS settings;
         `);
-      this.db.pragma('user_version = 3');
+      if (legacy || version === 2 || version === 3)
+        this.db.exec(migrateRecipeVersions);
+      if (version === 4)
+        this.db.exec(`
+          DROP VIEW IF EXISTS recipe_records;
+          DROP TABLE IF EXISTS recipe_api_metadata;
+        `);
+      this.db.exec(recipeProjection);
+      this.db.pragma('user_version = 5');
     });
   }
   tx<T>(fn: () => T): T {
@@ -201,7 +237,7 @@ export class Store {
   }
   private writeRecord(
     kind: Exclude<Kind, 'rubrics'>,
-    record: ObjectMetadata,
+    record: ObjectMetadata | Recipe,
     update: boolean,
   ) {
     const { table, columns } = storage[kind];
@@ -211,21 +247,26 @@ export class Store {
       delete details[column];
       return value;
     });
+    const names = [...columns];
+    if (kind !== 'recipe') {
+      names.push('details');
+      fields.push(encode(details));
+    }
     if (update)
       this.db
         .prepare(
-          `UPDATE ${table} SET ${columns
+          `UPDATE ${table} SET ${names
             .slice(1)
             .map((column) => column + '=?')
-            .join(',')},details=? WHERE id=?`,
+            .join(',')} WHERE id=?`,
         )
-        .run(...fields.slice(1), encode(details), record.id);
+        .run(...fields.slice(1), record.id);
     else
       this.db
         .prepare(
-          `INSERT INTO ${table} (${columns.join(',')},details) VALUES (${columns.map(() => '?').join(',')},?)`,
+          `INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map(() => '?').join(',')})`,
         )
-        .run(...fields, encode(details));
+        .run(...fields);
   }
   private rubricMetadata<T>(row: { id: string; rubrics_metadata: string }): T {
     return {
@@ -233,7 +274,10 @@ export class Store {
       latest_version_id: row.id,
     } as T;
   }
-  get<T extends ObjectMetadata>(id: string, kind: Kind = this.kind(id)): T {
+  get<T extends ObjectMetadata | Recipe>(
+    id: string,
+    kind: Kind = this.kind(id),
+  ): T {
     if (kind === 'rubrics') {
       const row = this.db
         .prepare(
@@ -243,11 +287,12 @@ export class Store {
       if (!row) return fail('not_found', 'rubrics not found');
       return this.rubricMetadata<T>(row);
     }
-    const row = this.db
-      .prepare(`SELECT * FROM ${storage[kind].table} WHERE id=?`)
-      .get(id) as Record<string, unknown> | undefined;
+    const table = kind === 'recipe' ? 'recipe_records' : storage[kind].table;
+    const row = this.db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id) as
+      | Record<string, unknown>
+      | undefined;
     if (!row) fail('not_found', `${kind} not found`);
-    return this.record<T>(row!);
+    return kind === 'recipe' ? (row as T) : this.record<T>(row!);
   }
   executionRecipeName(execution: Execution): string | undefined {
     const recipeId =
@@ -262,14 +307,22 @@ export class Store {
       .get(recipeId, baseId) as { name: string | null } | undefined;
     return recipe?.name ?? execution.name;
   }
-  insert<T extends ObjectMetadata>(
+  createRecipe(name?: string) {
+    return this.insert<Recipe>('recipe', {
+      name,
+      latest_version_id: null,
+      active_version_id: null,
+      latest_qualified_version_id: null,
+    });
+  }
+  insert<T extends ObjectMetadata | Recipe>(
     kind: Kind,
     data: Record<string, unknown>,
   ): T {
     const obj = {
       ...data,
       id: data.id ?? uid(kind),
-      revision: 1,
+      ...(kind === 'recipe' ? {} : { revision: 1 }),
       created_at: now(),
       updated_at: now(),
       archived_at: null,
@@ -277,18 +330,22 @@ export class Store {
     if (kind !== 'rubrics') this.writeRecord(kind, { ...obj }, false);
     return obj;
   }
-  save<T extends ObjectMetadata>(obj: T): T {
-    const saved = { ...obj, revision: obj.revision + 1, updated_at: now() };
+  save<T extends ObjectMetadata | Recipe>(obj: T): T {
     const kind = this.kind(obj.id);
     if (kind === 'rubrics')
       return fail(
         'invalid_state',
         'rubrics metadata is written with its version',
       );
-    this.writeRecord(kind, { ...saved }, true);
+    const saved = { ...obj, updated_at: now() };
+    if (kind !== 'recipe' && 'revision' in saved) saved.revision++;
+    this.writeRecord(kind, saved, true);
     return saved;
   }
-  list<T extends ObjectMetadata>(kind: Kind, options: Pagination = {}): T[] {
+  list<T extends ObjectMetadata | Recipe>(
+    kind: Kind,
+    options: Pagination = {},
+  ): T[] {
     const { limit, offset } = pagination(options);
     if (kind === 'rubrics') {
       const rows = this.db
@@ -310,15 +367,31 @@ export class Store {
       }[];
       return rows.map((row) => this.rubricMetadata<T>(row));
     }
+    const table = kind === 'recipe' ? 'recipe_records' : storage[kind].table;
     const rows = this.db
       .prepare(
-        `SELECT * FROM ${storage[kind].table} WHERE (archived_at IS NOT NULL)=? ORDER BY created_at,id LIMIT ? OFFSET ?`,
+        `SELECT * FROM ${table} WHERE (archived_at IS NOT NULL)=? ORDER BY created_at,id LIMIT ? OFFSET ?`,
       )
       .all(Number(options.archived ?? false), limit, offset) as Record<
       string,
       unknown
     >[];
-    return rows.map((row) => this.record<T>(row));
+    return rows.map((row) =>
+      kind === 'recipe' ? (row as T) : this.record<T>(row),
+    );
+  }
+  listExecutions(executionIds?: string[]): Execution[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM executions
+       WHERE (@ids IS NULL AND archived_at IS NULL)
+          OR id IN (SELECT value FROM json_each(@ids))
+       ORDER BY created_at, id`,
+      )
+      .all({
+        ids: executionIds === undefined ? null : encode(executionIds),
+      }) as Record<string, unknown>[];
+    return rows.map((row) => this.record<Execution>(row));
   }
   version<C = unknown>(object_id: string, version_id: string): Version<C> {
     const row = this.db
@@ -332,7 +405,7 @@ export class Store {
     return JSON.parse(row!.data);
   }
   publishRecipeVersion(recipeId: string, versionId: string): boolean {
-    const recipe = this.get<Versioned<RecipeContent>>(recipeId, 'recipe');
+    const recipe = this.get<Recipe>(recipeId, 'recipe');
     if (recipe.archived_at) return false;
     const version = this.version(recipeId, versionId);
     const latest = recipe.latest_qualified_version_id
@@ -340,12 +413,25 @@ export class Store {
       : null;
     if (latest && version.number <= latest.number)
       return recipe.active_version_id === versionId;
-    this.save({
-      ...recipe,
-      latest_qualified_version_id: versionId,
-      active_version_id: versionId,
-    });
+    this.db
+      .prepare(
+        "UPDATE versions SET status='archived' WHERE recipe_id=? AND number<? AND status<>'archived'",
+      )
+      .run(recipeId, version.number);
+    this.setRecipeVersionStatus(recipe, versionId, 'available');
     return true;
+  }
+  setRecipeVersionStatus(
+    recipe: Recipe,
+    versionId: string,
+    status: 'available' | 'archived',
+  ) {
+    const result = this.db
+      .prepare(
+        'UPDATE versions SET status=? WHERE recipe_id=? AND id=? AND status<>?',
+      )
+      .run(status, recipe.id, versionId, status);
+    if (result.changes) this.save(recipe);
   }
   version_by_id<C = unknown>(id: string, kind: Kind): Version<C> {
     const row = this.db
@@ -362,7 +448,7 @@ export class Store {
     return row ? JSON.parse(row.data) : undefined;
   }
   append<C>(
-    obj: ObjectMetadata,
+    obj: ObjectMetadata | Recipe,
     content: C,
     operation_key?: string,
     provenance: Record<string, unknown> = {},
@@ -388,7 +474,7 @@ export class Store {
     const { latest_version_id: _latest, ...metadata } = obj as Versioned;
     this.db
       .prepare(
-        'INSERT INTO versions (id,recipe_id,rubrics_id,rubrics_metadata,number,data,operation_key) VALUES (?,?,?,?,?,?,?)',
+        'INSERT INTO versions (id,recipe_id,rubrics_id,rubrics_metadata,number,data,operation_key,status) VALUES (?,?,?,?,?,?,?,?)',
       )
       .run(
         version.id,
@@ -397,15 +483,16 @@ export class Store {
         kind === 'rubrics'
           ? encode({
               ...metadata,
-              revision: obj.revision + 1,
+              revision: metadata.revision + 1,
               updated_at: now(),
             })
           : null,
         number,
         encode(version),
         operation_key ?? null,
+        kind === 'recipe' ? 'candidate' : null,
       );
-    if (kind === 'recipe') this.save({ ...obj, latest_version_id: version.id });
+    if (kind === 'recipe') this.save(obj);
     return version;
   }
   replay<T>(

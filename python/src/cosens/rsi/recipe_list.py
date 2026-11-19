@@ -3,11 +3,12 @@
 import json
 
 
-def read_recipe_list(conn, *, q, active_only, archived, limit, offset):
+def read_recipe_list(conn, *, q, active_only, archived, limit, offset, recipe_ids=None):
     rows = conn.execute(
         RECIPE_LIST_QUERY,
         {
             "q": q,
+            "recipe_ids": json.dumps(recipe_ids) if recipe_ids is not None else None,
             "active_only": int(active_only),
             "archived": int(archived),
             "limit": limit,
@@ -18,6 +19,7 @@ def read_recipe_list(conn, *, q, active_only, archived, limit, offset):
     for row in rows:
         entry = dict(row)
         metadata = entry.pop("metadata")
+        entry["execution_ids"] = json.loads(entry["execution_ids"])
         if entry["kind"] == "learning":
             entry.update(active_version_id=None, latest_version_id=None)
         else:
@@ -32,7 +34,10 @@ def read_recipe_list(conn, *, q, active_only, archived, limit, offset):
 
 
 RECIPE_LIST_QUERY = """
-WITH execution_activity AS (
+WITH requested_recipes AS (
+    SELECT value AS id FROM json_each(:recipe_ids)
+),
+execution_activity AS (
     SELECT e.id AS execution_id, e.created_at AS created,
         COALESCE(
             e.recipe_id,
@@ -90,43 +95,51 @@ latest_by_recipe AS (
     ) AS position
     FROM activities
     WHERE recipe_id IS NOT NULL AND archived_at IS NULL
+        AND (:recipe_ids IS NULL OR recipe_id IN (SELECT id FROM requested_recipes))
+),
+execution_ids_by_recipe AS (
+    SELECT recipe_id, json_group_array(execution_id) AS execution_ids
+    FROM (SELECT recipe_id, execution_id FROM latest_by_recipe ORDER BY recipe_id, position)
+    GROUP BY recipe_id
 ),
 list_rows AS (
     SELECT r.id, 'recipe' AS kind, r.id AS recipe_id,
-        r.name AS name,
-        json_set(r.details,
-            '$.id', r.id, '$.name', r.name, '$.revision', r.revision,
-            '$.created_at', r.created_at, '$.updated_at', r.updated_at, '$.archived_at', r.archived_at,
-            '$.active_version_id', r.active_version_id, '$.latest_version_id', r.latest_version_id,
-            '$.latest_qualified_version_id', r.latest_qualified_version_id) AS metadata,
+        COALESCE(r.name, a.name, '首次学习') AS name,
+        json_object('id', r.id, 'name', r.name,
+            'created_at', r.created_at, 'updated_at', r.updated_at, 'archived_at', r.archived_at,
+            'active_version_id', r.active_version_id,
+            'latest_version_id', r.latest_version_id,
+            'latest_qualified_version_id', r.latest_qualified_version_id) AS metadata,
         r.created_at AS created, r.updated_at AS updated_at,
         r.archived_at AS archived_at,
         active.number AS active_version_number, latest.number AS latest_version_number,
         a.execution_id,
+        COALESCE(ids.execution_ids, '[]') AS execution_ids,
         COALESCE(a.status, CASE WHEN active.id IS NULL THEN 'inactive' ELSE 'active' END) AS status,
         a.candidate_version_id, candidate.number AS candidate_version_number,
         CASE WHEN a.status = 'needs_clarification' THEN a.unanswered ELSE 0 END AS pending_question_count,
         a.activity_updated_at,
         COALESCE(r.name, '') || ' ' ||
-        COALESCE(json_extract(r.details, '$.description'), '') || ' ' ||
         COALESCE(active.data, '') AS search_text,
         active.id IS NOT NULL AS is_active
-    FROM recipes r
+    FROM recipe_records r
     LEFT JOIN latest_by_recipe a ON a.recipe_id = r.id AND a.position = 1
+    LEFT JOIN execution_ids_by_recipe ids ON ids.recipe_id = r.id
     LEFT JOIN versions active ON active.id = r.active_version_id
     LEFT JOIN versions latest ON latest.id = r.latest_version_id
     LEFT JOIN versions candidate ON candidate.id = a.candidate_version_id
+    WHERE :recipe_ids IS NULL OR r.id IN (SELECT id FROM requested_recipes)
 
     UNION ALL
 
     SELECT execution_id, 'learning', NULL, name, NULL, created, activity_updated_at, archived_at,
-        NULL, NULL, execution_id, status, NULL, NULL,
+        NULL, NULL, execution_id, json_array(execution_id), status, NULL, NULL,
         CASE WHEN status = 'needs_clarification' THEN unanswered ELSE 0 END,
         activity_updated_at, name, 0
     FROM activities
-    WHERE recipe_id IS NULL AND :active_only = 0
+    WHERE recipe_id IS NULL AND :active_only = 0 AND :recipe_ids IS NULL
 )
-SELECT id, kind, recipe_id, name, metadata, status, execution_id, activity_updated_at,
+SELECT id, kind, recipe_id, name, metadata, status, execution_id, execution_ids, activity_updated_at,
     created AS created_at, updated_at,
     active_version_number, latest_version_number, candidate_version_id,
     candidate_version_number, pending_question_count

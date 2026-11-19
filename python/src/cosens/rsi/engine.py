@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TypedDict
 
-from .materials import atomic_json, authorized_test_files, digest
+from .materials import atomic_json, authorized_test_files, digest, read_snapshot
 from .models import (
     Analysis,
     Assessment,
@@ -243,8 +243,6 @@ class Engine:
         }
         base_id = state.get("version_id") or execution.get("base_recipe_version_id")
         base = self.store.version_by_id(base_id, "recipe") if base_id else None
-        if base:
-            context["base_recipe"] = base["content"]
         request = execution.get("test_request")
         if request:
             return {
@@ -261,6 +259,11 @@ class Engine:
                 "round": round_number,
             }
         files = self.files(execution)
+        recipe_file = next((file for file in files if file["role"] == "recipe"), None)
+        if base:
+            context["base_recipe"] = base["content"]
+        elif recipe_file:
+            context["base_recipe"] = read_snapshot(recipe_file)["text"]
         literals = self.learning_literals(
             execution, base["provenance"].get("execution_id") if base else None
         )

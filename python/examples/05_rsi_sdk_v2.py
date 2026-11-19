@@ -62,7 +62,6 @@ def main():
             ],
         },
         idempotency_key="execution:" + args.session_id + ":" + args.delivery_id,
-        base_recipe_id=None,
     )
     print(
         json.dumps(

@@ -66,7 +66,7 @@ export const ManifestSchema = z.strictObject({
       z.strictObject({
         path: text,
         role: z
-          .enum(['input', 'artifact', 'reference', 'feedback'])
+          .enum(['input', 'artifact', 'reference', 'feedback', 'recipe'])
           .default('input'),
         description: z.string().default(''),
       }),
@@ -279,6 +279,7 @@ export interface Versioned<C = unknown> extends ObjectMetadata {
   latest_qualified_version_id?: string | null;
   selected_version?: Version<C> | null;
 }
+export type Recipe = Omit<Versioned<RecipeContent>, 'revision' | 'description'>;
 export interface TestResult {
   id: string;
   execution_id: string;

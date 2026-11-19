@@ -2,7 +2,14 @@
 
 from typing import Annotated, Literal
 
-from pydantic import Field, StrictBool, StrictInt, StringConstraints, TypeAdapter
+from pydantic import (
+    Field,
+    StrictBool,
+    StrictInt,
+    StringConstraints,
+    TypeAdapter,
+    field_validator,
+)
 
 from ._queue_client import RSIClient as QueueClient
 from .models import Contract
@@ -28,9 +35,35 @@ class ExecutionEvidence(Contract):
     files: list[File] = Field(max_length=1000)
 
 
+class RecipeFile(Contract):
+    path: Text
+    role: Literal["recipe"]
+    recipe_id: Text | None = None
+
+
+class CreationEvidence(Contract):
+    context_path: Text
+    files: list[File | RecipeFile] = Field(max_length=1000)
+
+    @field_validator("files")
+    @classmethod
+    def single_recipe(cls, files):
+        if sum(file.role == "recipe" for file in files) > 1:
+            raise ValueError("evidence can contain at most one recipe file")
+        return files
+
+
 class Page(Contract):
     offset: Offset
     archived: StrictBool
+
+
+class ExecutionListQuery(Contract):
+    execution_ids: list[Text]
+
+
+class RecipeListQuery(Contract):
+    recipe_ids: list[Text]
 
 
 _TEXT = TypeAdapter(Text)
@@ -85,25 +118,40 @@ class RSIClient:
             ],
         }
 
-    def execution_create(self, *, evidence, base_recipe_id, idempotency_key):
+    def execution_create(self, *, evidence, idempotency_key):
         submission_id = _TEXT.validate_python(idempotency_key)
+        submission = CreationEvidence.model_validate(evidence)
+        recipe_id = next(
+            (
+                file.recipe_id
+                for file in submission.files
+                if isinstance(file, RecipeFile)
+            ),
+            None,
+        )
         execution = self._queue.execution_create_with_evidence(
-            evidence=ExecutionEvidence.model_validate(evidence).model_dump(),
+            evidence={
+                "context_path": submission.context_path,
+                "files": [
+                    {"path": file.path, "role": file.role} for file in submission.files
+                ],
+            },
             confirmation_ref=submission_id,
             idempotency_key=submission_id,
-            base={"kind": "recipe", "id": _TEXT.validate_python(base_recipe_id)}
-            if base_recipe_id is not None
-            else None,
+            base={"kind": "recipe", "id": recipe_id} if recipe_id else None,
         )
         return self._present_execution(execution)
 
     def execution_get(self, execution_id):
         return self._present_execution(self._queue.execution_get(execution_id))
 
-    def execution_list(self, *, offset, archived):
-        rows = self._queue.execution_list(
-            **Page(offset=offset, archived=archived).model_dump()
+    def execution_list(self, *, query=None):
+        execution_ids = (
+            ExecutionListQuery.model_validate(query).execution_ids
+            if query is not None
+            else None
         )
+        rows = self._queue.execution_list_all(execution_ids=execution_ids)
         return [self._present_execution(row) for row in rows]
 
     def execution_append_evidence(self, execution_id, *, evidence):
@@ -139,18 +187,23 @@ class RSIClient:
             rubrics_id, version_id=None if version == "latest" else version
         )
 
-    def recipe_list(self):
+    def recipe_list(self, *, query=None):
+        recipe_ids = (
+            RecipeListQuery.model_validate(query).recipe_ids
+            if query is not None
+            else None
+        )
         return [
             {
                 "recipe_id": row["recipe_id"],
-                "execution_id": row["execution_id"],
+                "execution_ids": row["execution_ids"],
                 "name": row["name"] or "",
                 "status": row["status"],
                 "available_version_id": row["available_version_id"],
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
             }
-            for row in self._queue.recipe_list_all()
+            for row in self._queue.recipe_list_all(recipe_ids=recipe_ids)
         ]
 
     def recipe_get(self, recipe_id, *, version):

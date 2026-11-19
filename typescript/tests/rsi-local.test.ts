@@ -20,6 +20,141 @@ import { RSIClient as PublicRSIClient } from '../src/rsi/index.js';
 import type { Runtime } from '../src/rsi/models.js';
 import { Engine } from '../src/rsi/engine.js';
 import { ChatRuntime } from '../src/rsi/runtime.js';
+import { legacyRecipes, schema } from '../src/rsi/store-schema.js';
+
+for (const version of [3, 4]) {
+  test(`schema v${version} migration preserves the archived restoration target and the newer candidate`, () => {
+    const data_dir = mkdtempSync(join(tmpdir(), 'cosens-rsi-migrate-'));
+    const recipeId = 'recipe_legacy';
+    try {
+      const db = new Database(join(data_dir, 'rsi-ts.sqlite3'));
+      try {
+        if (version === 3) {
+          db.exec(legacyRecipes);
+          db.exec(`
+        CREATE TABLE versions (
+          id TEXT PRIMARY KEY, recipe_id TEXT REFERENCES recipes(id), rubrics_id TEXT,
+          rubrics_metadata TEXT,
+          object_id TEXT GENERATED ALWAYS AS (coalesce(recipe_id,rubrics_id)) VIRTUAL,
+          number INTEGER NOT NULL, data TEXT NOT NULL, operation_key TEXT UNIQUE,
+          UNIQUE(object_id, number)
+        );
+        INSERT INTO recipes VALUES ('recipe_legacy', 1, 2, NULL, 8, 'Legacy Recipe',
+          NULL, 'version_second', 'version_first', '{"description":"Retained description"}');
+        INSERT INTO recipes VALUES ('recipe_unversioned', 2, 3, NULL, 5, 'Waiting Recipe',
+          NULL, NULL, NULL, '{"description":"Description without a version"}');
+        `);
+        } else {
+          db.exec(schema);
+          db.exec(`
+          INSERT INTO recipes VALUES ('recipe_legacy', 1, 2, NULL, 'Legacy Recipe');
+          INSERT INTO recipes VALUES ('recipe_unversioned', 2, 3, NULL, 'Waiting Recipe');
+          CREATE TABLE recipe_api_metadata (
+            recipe_id TEXT PRIMARY KEY REFERENCES recipes(id),
+            revision INTEGER NOT NULL, description TEXT NOT NULL
+          );
+          INSERT INTO recipe_api_metadata VALUES ('recipe_legacy', 8, 'Retired description');
+          INSERT INTO recipe_api_metadata VALUES ('recipe_unversioned', 5, 'Retired description');
+          CREATE VIEW recipe_records AS SELECT r.*, m.revision, m.description
+            FROM recipes r LEFT JOIN recipe_api_metadata m ON m.recipe_id = r.id;
+        `);
+        }
+        db.pragma(`user_version = ${version}`);
+        const insert = db.prepare(
+          'INSERT INTO versions (id,recipe_id,number,data) VALUES (?,?,?,?)',
+        );
+        for (const [id, number] of [
+          ['version_first', 1],
+          ['version_second', 2],
+        ] as const)
+          insert.run(
+            id,
+            recipeId,
+            number,
+            JSON.stringify({
+              id,
+              object_id: recipeId,
+              number,
+              content: {
+                title: 'Legacy Recipe',
+                applicability: 'Fixture',
+                instructions: 'Produce output',
+              },
+              provenance: {},
+              created_at: 1,
+            }),
+          );
+        if (version === 4)
+          db.exec(
+            "UPDATE versions SET status=CASE WHEN number=1 THEN 'archived' ELSE 'candidate' END",
+          );
+      } finally {
+        db.close();
+      }
+      const host = new PublicRSIClient({ data_dir, config: null });
+      try {
+        const recipe = host.recipe_get(recipeId, 'latest');
+        assert.equal(recipe.latest_version_id, 'version_second');
+        assert.equal(recipe.latest_qualified_version_id, 'version_first');
+        assert.equal(recipe.active_version_id, null);
+        assert.equal('revision' in recipe, false);
+        assert.equal('description' in recipe, false);
+        assert.equal(recipe.selected_version?.id, 'version_second');
+        const unversioned = host.recipe_get('recipe_unversioned', 'latest');
+        assert.equal('revision' in unversioned, false);
+        assert.equal('description' in unversioned, false);
+        assert.equal(unversioned.selected_version, null);
+        host.recipe_version_set_archived(recipeId, {
+          version_id: 'version_first',
+          archived: false,
+        });
+        assert.equal(
+          host.recipe_list()[0].available_version_id,
+          'version_first',
+        );
+        assert.equal(
+          host.recipe_get(recipeId, 'active').selected_version?.id,
+          'version_first',
+        );
+        const migrated = new Database(join(data_dir, 'rsi-ts.sqlite3'), {
+          readonly: true,
+        });
+        try {
+          assert.deepEqual(
+            migrated
+              .pragma('table_info(recipes)')
+              .map((column) => (column as { name: string }).name)
+              .sort(),
+            ['archived_at', 'created_at', 'id', 'name', 'updated_at'],
+          );
+          assert.deepEqual(
+            migrated
+              .prepare('SELECT status FROM versions ORDER BY number')
+              .pluck()
+              .all(),
+            ['available', 'candidate'],
+          );
+          assert.equal(migrated.pragma('user_version', { simple: true }), 5);
+          assert.equal(
+            migrated
+              .prepare(
+                "SELECT name FROM sqlite_schema WHERE name='recipe_api_metadata'",
+              )
+              .get(),
+            undefined,
+          );
+          assert.deepEqual(migrated.pragma('foreign_key_check'), []);
+        } finally {
+          migrated.close();
+        }
+      } finally {
+        host.close();
+      }
+    } finally {
+      rmSync(data_dir, { recursive: true, force: true });
+    }
+  });
+}
 
 test('independent Node hooks enqueue work that persists and passes a file test after the hooks exit', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'cosens-rsi-ts-'));
@@ -311,15 +446,16 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       const { model, base_url } = JSON.parse(configText).model;
       const client = new RSIClient({ data_dir, config: { model: model + '-' + key, base_url, auto_start: true } });
       const execution = await client.execution_create({
-        evidence: JSON.parse(evidenceText), idempotency_key: key, base_recipe_id: null,
+        evidence: JSON.parse(evidenceText), idempotency_key: key,
       });
       assert.equal('material_create' in client, false);
       assert.equal('run_pending' in client, false);
       assert.equal('wait' in client, false);
       assert.equal('material_ids' in execution, false);
       assert.equal(execution.evidence.length, 4);
+      assert.match(execution.recipe_id, /^recipe_/);
       client.close();
-      process.stdout.write(execution.id);
+      process.stdout.write(JSON.stringify({id:execution.id,recipe_id:execution.recipe_id}));
     `;
     const runHook = async (source: string, args: string[]) => {
       const child = spawn(
@@ -346,7 +482,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       assert.equal(code, 0, stderr);
       return stdout;
     };
-    const ids = await Promise.all(
+    const hookResults = await Promise.all(
       ['a', 'b', 'c', 'a'].map((key) =>
         runHook(script, [
           data_dir,
@@ -363,7 +499,11 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         ]),
       ),
     );
-    assert.equal(ids[0], ids[3]);
+    const created = hookResults.map(
+      (value) => JSON.parse(value) as { id: string; recipe_id: string },
+    );
+    const ids = created.map((item) => item.id);
+    assert.deepEqual(created[0], created[3]);
     assert.equal(readdirSync(join(data_dir, 'materials')).length, 4);
 
     for (const id of new Set(ids)) {
@@ -378,6 +518,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         run.runtime_config.model.model,
       );
       assert.equal(run.status, 'completed', JSON.stringify(run.error));
+      assert.equal(run.recipe_id, created[ids.indexOf(id)].recipe_id);
       assert.equal(run.result?.test_status, 'passed');
       assert.equal(run.test_results.length, 1);
       assert.equal(run.test_results[0].score, 1);
@@ -415,9 +556,19 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           .find((row) => row.recipe_id === run.recipe_id);
         assert.equal('recipe_activate' in host, false);
         const detail = host.recipe_get(run.recipe_id!, 'latest');
+        const allRecipes = host.recipe_list();
+        const requested = allRecipes.slice(0, 2);
+        assert.equal(requested.length, 2);
+        const selectedIds = requested.map((row) => row.recipe_id!);
+        assert.deepEqual(
+          host
+            .recipe_list({ recipe_ids: [...selectedIds].reverse() })
+            .map((row) => row.recipe_id),
+          selectedIds,
+        );
         assert.deepEqual(available, {
           recipe_id: run.recipe_id,
-          execution_id: run.id,
+          execution_ids: [run.id],
           name: run.name,
           status: 'passed',
           available_version_id: run.recipe_version_id,
@@ -970,21 +1121,44 @@ test('an expired worker lease resumes the graph without regenerating the candida
       },
     });
     try {
+      const recipePath = join(directory, 'prior-recipe.md');
+      const recipeText = 'Write the response as a plain text file.';
+      writeFileSync(recipePath, recipeText);
+      const recipeFile = {
+        path: recipePath,
+        role: 'recipe' as const,
+        recipe_id: after.recipe_id!,
+      };
       const submission = {
-        evidence: { context_path: path, files: [] },
-        base_recipe_id: after.recipe_id!,
+        evidence: { context_path: path, files: [recipeFile] },
         idempotency_key: 'follow-up',
       };
       await assert.rejects(
-        host.execution_create({ ...submission, base_recipe_id: after.id }),
+        host.execution_create({
+          ...submission,
+          evidence: {
+            context_path: path,
+            files: [{ ...recipeFile, recipe_id: after.id }],
+          },
+        }),
         /recipe not found/,
       );
+      await assert.rejects(
+        host.execution_create({
+          ...submission,
+          evidence: { context_path: path, files: [recipeFile, recipeFile] },
+        }),
+        /at most one recipe file/,
+      );
       const followUp = await host.execution_create(submission);
+      assert.equal(followUp.recipe_id, after.recipe_id);
       assert.equal(followUp.base_execution_id, null);
       assert.equal(
         client.execution_get(followUp.id).base_recipe_version_id,
-        after.recipe_version_id,
+        null,
       );
+      assert.ok(followUp.evidence.some((file) => file.role === 'recipe'));
+      writeFileSync(recipePath, 'Modified after submission.');
       assert.equal((await host.execution_create(submission)).id, followUp.id);
       assert.equal('execution_update' in host, false);
       assert.equal('rubrics_update' in host, false);
@@ -1027,8 +1201,19 @@ test('an expired worker lease resumes the graph without regenerating the candida
       await client.run_pending({
         runtime: {
           ...runtime,
-          async execute(_context, _files, workspace) {
+          async generate(context) {
+            assert.equal(context.base_recipe, recipeText);
+            return runtime.generate();
+          },
+          async execute(context, files, workspace) {
+            assert.ok(!files.some((file) => file.role === 'recipe'));
+            assert.ok(!JSON.stringify(context).includes(recipeText));
             writeFileSync(join(workspace, 'answer.txt'), '42');
+          },
+          async assess(context, files) {
+            assert.ok(!files.some((file) => file.role === 'recipe'));
+            assert.ok(!JSON.stringify(context).includes(recipeText));
+            return runtime.assess();
           },
         },
       });
@@ -1038,12 +1223,12 @@ test('an expired worker lease resumes the graph without regenerating the candida
       assert.equal((await host.execution_create(submission)).id, followUp.id);
       assert.equal(
         client.execution_get(followUp.id).base_recipe_version_id,
-        after.recipe_version_id,
+        null,
       );
       assert.equal(next.progress_percent, 100);
       assert.equal(
         host
-          .execution_list({ offset: 0, archived: false })
+          .execution_list({ execution_ids: [next.id] })
           .find((row) => row.id === next.id)?.progress_percent,
         100,
       );
@@ -1108,7 +1293,7 @@ test('recipe_list shows first-time learning and preserves the usable version dur
       assert.deepEqual(learningHost.recipe_list(), [
         {
           recipe_id: null,
-          execution_id: execution.id,
+          execution_ids: [execution.id],
           name: '首次学习',
           status: 'queued',
           available_version_id: null,
@@ -1140,9 +1325,38 @@ test('recipe_list shows first-time learning and preserves the usable version dur
       latest_version_id: null,
       active_version_id: null,
     });
+    const learningOnlyHost = new PublicRSIClient({
+      data_dir: client.data_dir,
+      config: null,
+    });
+    try {
+      const unassociated = learningOnlyHost
+        .recipe_list()
+        .find((entry) => entry.recipe_id === seed.id);
+      assert.deepEqual(unassociated?.execution_ids, []);
+      assert.ok(
+        learningOnlyHost
+          .recipe_list()
+          .some((entry) => entry.recipe_id === null),
+      );
+      assert.deepEqual(
+        learningOnlyHost.recipe_list({
+          recipe_ids: [seed.id, 'recipe_missing', seed.id],
+        }),
+        [unassociated],
+      );
+      assert.deepEqual(learningOnlyHost.recipe_list({ recipe_ids: [] }), []);
+    } finally {
+      learningOnlyHost.close();
+    }
     const active = client.store.append(seed, content).id;
     const recipe = client.recipe_get(seed.id);
-    client.store.save({ ...recipe, active_version_id: active });
+    assert.equal(
+      client.store.tx(() =>
+        client.store.publishRecipeVersion(recipe.id, active),
+      ),
+      true,
+    );
     const candidate = client.store.append(
       client.recipe_get(recipe.id),
       content,
@@ -1205,7 +1419,8 @@ test('recipe_list shows first-time learning and preserves the usable version dur
     assert.notEqual(row.execution_id, execution.id);
     assert.equal(row.pending_question_count, 0);
     assert.equal(row.active_version_id, active);
-    client.execution_cancel(row.execution_id!);
+    const previousContinuationId = row.execution_id!;
+    client.execution_cancel(previousContinuationId);
     const host = new PublicRSIClient({
       data_dir: client.data_dir,
       config: {
@@ -1216,18 +1431,28 @@ test('recipe_list shows first-time learning and preserves the usable version dur
     });
     try {
       const submission = {
-        evidence: { context_path, files: [] },
-        base_recipe_id: recipe.id,
+        evidence: {
+          context_path,
+          files: [
+            {
+              path: context_path,
+              role: 'recipe' as const,
+              recipe_id: recipe.id,
+            },
+          ],
+        },
         idempotency_key: 'revise-available-version',
       };
       const revision = await host.execution_create(submission);
+      assert.equal(revision.recipe_id, recipe.id);
+      assert.equal(revision.recipe_version_id, null);
       const detail = host.recipe_get(recipe.id, 'latest');
       assert.deepEqual(
         host.recipe_list().filter((entry) => entry.recipe_id === recipe.id),
         [
           {
             recipe_id: recipe.id,
-            execution_id: revision.id,
+            execution_ids: [revision.id, previousContinuationId, execution.id],
             name: 'Output Recipe',
             status: 'queued',
             available_version_id: active,
@@ -1238,17 +1463,41 @@ test('recipe_list shows first-time learning and preserves the usable version dur
       );
       assert.equal(
         client.execution_get(revision.id).base_recipe_version_id,
-        active,
+        null,
       );
-      assert.notEqual(
-        client.execution_get(revision.id).base_recipe_version_id,
-        candidate.id,
+      await client.execution_update(previousContinuationId, { archived: true });
+      assert.ok(
+        !host.execution_list().some((row) => row.id === previousContinuationId),
+      );
+      assert.deepEqual(
+        host
+          .execution_list({
+            execution_ids: [
+              previousContinuationId,
+              'execution_missing',
+              previousContinuationId,
+            ],
+          })
+          .map((row) => row.id),
+        [previousContinuationId],
+      );
+      assert.deepEqual(
+        host
+          .execution_list({ execution_ids: [revision.id, execution.id] })
+          .map((row) => row.id),
+        [execution.id, revision.id],
+      );
+      assert.deepEqual(host.execution_list({ execution_ids: [] }), []);
+      assert.deepEqual(
+        host.recipe_list().find((entry) => entry.recipe_id === recipe.id)
+          ?.execution_ids,
+        [revision.id, execution.id],
       );
 
       // An archived recipe has no available version.
-      client.store.save({
-        ...client.recipe_get(recipe.id),
-        active_version_id: null,
+      host.recipe_version_set_archived(recipe.id, {
+        version_id: active,
+        archived: true,
       });
       await assert.rejects(
         host.execution_create({
