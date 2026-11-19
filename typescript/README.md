@@ -32,7 +32,6 @@ async function onConfirmedDelivery(
       files: [{ path: currentInputPath, role: 'input' }],
     },
     idempotency_key: confirmationRef,
-    base_recipe_id: null,
   });
   return run.id;
 }

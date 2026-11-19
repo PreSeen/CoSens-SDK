@@ -1,5 +1,5 @@
 import { pagination, type Store } from './store.js';
-import type { Pagination, RecipeContent, Versioned } from './models.js';
+import type { Pagination, Recipe } from './models.js';
 
 export type RecipeListStatus =
   | 'active'
@@ -19,6 +19,7 @@ export type RecipeListStatus =
 interface RecipeListProgress {
   status: RecipeListStatus;
   execution_id: string | null;
+  execution_ids: string[];
   activity_updated_at: number | null;
   created_at: number;
   updated_at: number;
@@ -31,7 +32,7 @@ interface RecipeListProgress {
   archived: boolean;
 }
 
-export type RecipeListRecipeEntry = Versioned<RecipeContent> &
+export type RecipeListRecipeEntry = Recipe &
   RecipeListProgress & { kind: 'recipe'; recipe_id: string };
 
 export type RecipeListEntry =
@@ -48,56 +49,81 @@ export type RecipeListEntry =
 
 type RecipeListRow = Omit<
   RecipeListProgress,
-  'available_version_id' | 'archived'
+  'available_version_id' | 'archived' | 'execution_ids'
 > & {
   id: string;
   kind: RecipeListEntry['kind'];
   name: string;
   metadata: string | null;
+  execution_ids: string;
 };
 
 export function readRecipeList(
   store: Store,
-  options: Pagination & { q?: string; active_only?: boolean },
+  options: Pagination & {
+    q?: string;
+    active_only?: boolean;
+    recipe_ids?: string[];
+  },
   all = false,
 ): RecipeListEntry[] {
   const rows = store.db.prepare(recipeListQuery).all({
     ...(all ? { limit: -1, offset: 0 } : pagination(options)),
     q: options.q ?? null,
+    recipe_ids:
+      options.recipe_ids === undefined
+        ? null
+        : JSON.stringify(options.recipe_ids),
     archived: Number(options.archived ?? false),
     active_only: Number(options.active_only ?? false),
   }) as RecipeListRow[];
-  return rows.map(({ metadata, id, name, kind, execution_id, ...progress }) => {
-    if (kind === 'learning') {
+  return rows.map(
+    ({
+      metadata,
+      id,
+      name,
+      kind,
+      execution_id,
+      execution_ids,
+      ...progress
+    }) => {
+      if (kind === 'learning') {
+        return {
+          ...progress,
+          id,
+          name,
+          kind,
+          recipe_id: null,
+          execution_id: id,
+          execution_ids: [id],
+          active_version_id: null,
+          available_version_id: null,
+          archived: false,
+          latest_version_id: null,
+        };
+      }
+      const recipe = JSON.parse(metadata!) as Recipe;
       return {
+        ...recipe,
         ...progress,
-        id,
         name,
         kind,
-        recipe_id: null,
-        execution_id: id,
-        active_version_id: null,
-        available_version_id: null,
-        archived: false,
-        latest_version_id: null,
+        recipe_id: id,
+        execution_id,
+        execution_ids: JSON.parse(execution_ids) as string[],
+        available_version_id: recipe.active_version_id ?? null,
+        archived:
+          !!recipe.latest_qualified_version_id && !recipe.active_version_id,
       };
-    }
-    const recipe = JSON.parse(metadata!) as Versioned<RecipeContent>;
-    return {
-      ...recipe,
-      ...progress,
-      kind,
-      recipe_id: id,
-      execution_id,
-      available_version_id: recipe.active_version_id ?? null,
-      archived:
-        !!recipe.latest_qualified_version_id && !recipe.active_version_id,
-    };
-  });
+    },
+  );
 }
 
 const recipeListQuery = `
-WITH execution_activity AS (
+WITH requested_recipes AS (
+    SELECT value AS id FROM json_each(:recipe_ids)
+),
+execution_activity AS (
     SELECT e.id AS execution_id, e.created_at AS created,
         COALESCE(
             e.recipe_id,
@@ -155,43 +181,51 @@ latest_by_recipe AS (
     ) AS position
     FROM activities
     WHERE recipe_id IS NOT NULL AND archived_at IS NULL
+        AND (:recipe_ids IS NULL OR recipe_id IN (SELECT id FROM requested_recipes))
+),
+execution_ids_by_recipe AS (
+    SELECT recipe_id, json_group_array(execution_id) AS execution_ids
+    FROM (SELECT recipe_id, execution_id FROM latest_by_recipe ORDER BY recipe_id, position)
+    GROUP BY recipe_id
 ),
 list_rows AS (
     SELECT r.id, 'recipe' AS kind, r.id AS recipe_id,
-        r.name AS name,
-        json_set(r.details,
-            '$.id', r.id, '$.name', r.name, '$.revision', r.revision,
-            '$.created_at', r.created_at, '$.updated_at', r.updated_at, '$.archived_at', r.archived_at,
-            '$.active_version_id', r.active_version_id, '$.latest_version_id', r.latest_version_id,
-            '$.latest_qualified_version_id', r.latest_qualified_version_id) AS metadata,
+        COALESCE(r.name, a.name, '首次学习') AS name,
+        json_object('id', r.id, 'name', r.name,
+            'created_at', r.created_at, 'updated_at', r.updated_at, 'archived_at', r.archived_at,
+            'active_version_id', r.active_version_id,
+            'latest_version_id', r.latest_version_id,
+            'latest_qualified_version_id', r.latest_qualified_version_id) AS metadata,
         r.created_at AS created, r.updated_at AS updated_at,
         r.archived_at AS archived_at,
         active.number AS active_version_number, latest.number AS latest_version_number,
         a.execution_id,
+        COALESCE(ids.execution_ids, '[]') AS execution_ids,
         COALESCE(a.status, CASE WHEN active.id IS NULL THEN 'inactive' ELSE 'active' END) AS status,
         a.candidate_version_id, candidate.number AS candidate_version_number,
         CASE WHEN a.status = 'needs_clarification' THEN a.unanswered ELSE 0 END AS pending_question_count,
         a.activity_updated_at,
         COALESCE(r.name, '') || ' ' ||
-        COALESCE(json_extract(r.details, '$.description'), '') || ' ' ||
         COALESCE(active.data, '') AS search_text,
         active.id IS NOT NULL AS is_active
-    FROM recipes r
+    FROM recipe_records r
     LEFT JOIN latest_by_recipe a ON a.recipe_id = r.id AND a.position = 1
+    LEFT JOIN execution_ids_by_recipe ids ON ids.recipe_id = r.id
     LEFT JOIN versions active ON active.id = r.active_version_id
     LEFT JOIN versions latest ON latest.id = r.latest_version_id
     LEFT JOIN versions candidate ON candidate.id = a.candidate_version_id
+    WHERE :recipe_ids IS NULL OR r.id IN (SELECT id FROM requested_recipes)
 
     UNION ALL
 
     SELECT execution_id, 'learning', NULL, name, NULL, created, activity_updated_at, archived_at,
-        NULL, NULL, execution_id, status, NULL, NULL,
+        NULL, NULL, execution_id, json_array(execution_id), status, NULL, NULL,
         CASE WHEN status = 'needs_clarification' THEN unanswered ELSE 0 END,
         activity_updated_at, name, 0
     FROM activities
-    WHERE recipe_id IS NULL AND :active_only = 0
+    WHERE recipe_id IS NULL AND :active_only = 0 AND :recipe_ids IS NULL
 )
-SELECT id, kind, recipe_id, name, metadata, status, execution_id, activity_updated_at,
+SELECT id, kind, recipe_id, name, metadata, status, execution_id, execution_ids, activity_updated_at,
     created AS created_at, updated_at,
     active_version_number, latest_version_number, candidate_version_id,
     candidate_version_number, pending_question_count

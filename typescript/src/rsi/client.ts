@@ -30,6 +30,7 @@ import {
   type ObjectMetadata,
   type Versioned,
   type Version,
+  type Recipe,
   type RecipeContent,
   type ClarificationAnswer,
   type Runtime,
@@ -149,7 +150,7 @@ export class RSIClient {
   material_update(id: string, changes: MetadataUpdate): Material {
     return this.update(id, 'material', changes);
   }
-  private get_versioned<C>(
+  private get_versioned<C, T extends Versioned<C> | Recipe = Versioned<C>>(
     id: string,
     kind: 'recipe' | 'rubrics',
     {
@@ -161,13 +162,13 @@ export class RSIClient {
       version_selector?: 'active' | 'latest';
       include_content?: boolean;
     } = {},
-  ): Versioned<C> {
+  ): T {
     if (version_id && version_selector)
       fail(
         'invalid_argument',
         'version_id and version_selector are mutually exclusive',
       );
-    const obj = this.store.get<Versioned<C>>(id, kind),
+    const obj = this.store.get<T>(id, kind),
       selected =
         version_id ??
         (kind === 'recipe' && version_selector !== 'latest'
@@ -194,8 +195,8 @@ export class RSIClient {
       version_selector?: 'active' | 'latest';
       include_content?: boolean;
     } = {},
-  ): Versioned<RecipeContent> {
-    return this.get_versioned(id, 'recipe', options);
+  ): Recipe {
+    return this.get_versioned<RecipeContent, Recipe>(id, 'recipe', options);
   }
   rubrics_get(
     id: string,
@@ -217,14 +218,15 @@ export class RSIClient {
   ): RecipeListEntry[] {
     return readRecipeList(this.store, options);
   }
-  recipe_list_all(): RecipeListEntry[] {
-    return readRecipeList(this.store, {}, true);
+  recipe_list_all(recipe_ids?: string[]): RecipeListEntry[] {
+    return readRecipeList(this.store, { recipe_ids }, true);
   }
   private execution_insert(
     request: Omit<ExecutionCreate, 'idempotency_key'> & {
       answers?: Record<string, ExecutionAnswer>;
       name?: string;
       test_request?: Execution['test_request'];
+      recipe_id?: string | null;
       input_revision?: number;
     },
     config = this.config,
@@ -267,7 +269,7 @@ export class RSIClient {
       input_revision: request.input_revision ?? 1,
       questions: [],
       answers: request.answers ?? {},
-      recipe_id: null,
+      recipe_id: request.recipe_id ?? null,
       recipe_version_id: null,
       test_results: [],
       result: null,
@@ -323,6 +325,20 @@ export class RSIClient {
     }
   }
 
+  private bindRecipeOnReplay(id: string): Execution {
+    const execution = this.store.get<Execution>(id, 'execution');
+    if (!execution.recipe_id) {
+      const baseId = execution.base_recipe_version_id;
+      const recipeId =
+        execution.test_request?.recipe_id ??
+        (baseId
+          ? this.store.version_by_id(baseId, 'recipe').object_id
+          : this.store.createRecipe(execution.name).id);
+      this.store.save({ ...execution, recipe_id: recipeId });
+    }
+    return this.execution_get(id);
+  }
+
   async execution_create_with_evidence(
     request: EvidenceExecutionCreate,
   ): Promise<Execution> {
@@ -333,16 +349,16 @@ export class RSIClient {
     const previous = replay();
     if (!previous && this.auto_start) this.check_runtime();
     const execution = previous
-      ? this.execution_get(previous.id)
+      ? this.store.tx(() => this.bindRecipeOnReplay(previous.id))
       : this.writeExecutionEvidence(evidence, this.config, (data) => {
           const existing = replay();
           if (existing)
             return {
-              execution: this.execution_get(existing.id),
+              execution: this.bindRecipeOnReplay(existing.id),
               attached: false,
             };
           const recipe = base
-            ? this.store.get<Versioned<RecipeContent>>(base.id, 'recipe')
+            ? this.store.get<Recipe>(base.id, 'recipe')
             : null;
           if (
             recipe &&
@@ -363,7 +379,8 @@ export class RSIClient {
             );
           const created = this.execution_insert({
             material_ids: [material.id],
-            base_recipe_version_id: recipe?.active_version_id,
+            recipe_id: recipe?.id ?? this.store.createRecipe().id,
+            name: recipe?.name,
             policy: {
               artifact_confirmed: true,
               confirmation_ref,
@@ -444,6 +461,9 @@ export class RSIClient {
   }
   execution_list(options: Pagination = {}): Execution[] {
     return this.store.list('execution', options);
+  }
+  execution_list_all(executionIds?: string[]): Execution[] {
+    return this.store.listExecutions(executionIds);
   }
   async execution_update(
     id: string,
@@ -572,6 +592,7 @@ export class RSIClient {
             material_ids: parent.material_ids,
             policy: parent.policy,
             base_execution_id: id,
+            recipe_id: parent.recipe_id,
             base_recipe_version_id:
               parent.recipe_version_id ?? parent.base_recipe_version_id,
             // Keep newly generated questions distinct from inherited answers.
@@ -616,7 +637,7 @@ export class RSIClient {
     archived: boolean,
   ) {
     return this.store.tx(() => {
-      const recipe = this.store.get<Versioned<RecipeContent>>(id, 'recipe');
+      const recipe = this.store.get<Recipe>(id, 'recipe');
       const version = this.store.version(id, versionId);
       const latest = recipe.latest_qualified_version_id
         ? this.store.version(id, recipe.latest_qualified_version_id)
@@ -635,9 +656,11 @@ export class RSIClient {
       } else {
         if (!archived && recipe.archived_at)
           fail('invalid_state', 'recipe is archived');
-        const active = archived ? null : versionId;
-        if (recipe.active_version_id !== active)
-          this.store.save({ ...recipe, active_version_id: active });
+        this.store.setRecipeVersionStatus(
+          recipe,
+          versionId,
+          archived ? 'archived' : 'available',
+        );
       }
       return { recipe_id: id, version_id: versionId, archived };
     });
@@ -674,6 +697,22 @@ export class RSIClient {
         fail('conflict', 'test materials must match execution snapshot');
       const request = { recipe_id, version_id, rubrics_version_id };
       if (encode(obj.test_request) !== encode(request)) {
+        if (obj.recipe_id && obj.recipe_id !== recipe_id) {
+          const time = now();
+          this.store.db
+            .prepare(
+              `UPDATE recipes SET archived_at=?, updated_at=?
+               WHERE id=? AND archived_at IS NULL
+                 AND NOT EXISTS (
+                   SELECT 1 FROM versions WHERE recipe_id=recipes.id
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM executions WHERE recipe_id=recipes.id AND id<>?
+                 )`,
+            )
+            .run(time, time, obj.recipe_id, obj.id);
+          obj.recipe_id = recipe_id;
+        }
         obj.test_request = request;
         restartExecution(obj);
         this.store.save(obj);
