@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { RSIClient as QueueClient } from './client.js';
 import type { EvidenceFile, Execution as StoredExecution } from './models.js';
+import type { RecipeListStatus } from './recipe-list.js';
 
 const text = z.string().min(1);
 const page = z.strictObject({
@@ -34,7 +35,7 @@ const evidence = z.strictObject({
 const executionCreate = z.strictObject({
   evidence,
   idempotency_key: text,
-  base_execution_id: text.nullable(),
+  base_recipe_id: text.nullable(),
 });
 const answer = z.strictObject({
   question_id: text,
@@ -77,6 +78,16 @@ export type Execution = Pick<
 };
 export type ExecutionCreate = z.input<typeof executionCreate>;
 export type Page = z.input<typeof page>;
+export type RecipeListEntry = {
+  recipe_id: string | null;
+  execution_id: string | null;
+  name: string;
+  status: RecipeListStatus;
+  available_version_id: string | null;
+  created_at: number;
+  updated_at: number;
+};
+export type RecipeListRecipeEntry = RecipeListEntry & { recipe_id: string };
 export type ClarificationAnswer = z.input<typeof answer>;
 export type RecipeTest = z.input<typeof recipeTest>;
 
@@ -154,14 +165,12 @@ export class RSIClient {
   }
 
   async execution_create(request: ExecutionCreate) {
-    const { base_execution_id, ...submission } = executionCreate.parse(request);
+    const { base_recipe_id, ...submission } = executionCreate.parse(request);
     return this.#presentExecution(
       await this.#queue.execution_create_with_evidence({
         ...submission,
         confirmation_ref: submission.idempotency_key,
-        base: base_execution_id
-          ? { kind: 'execution', id: base_execution_id }
-          : null,
+        base: base_recipe_id ? { kind: 'recipe', id: base_recipe_id } : null,
       }),
     );
   }
@@ -210,8 +219,16 @@ export class RSIClient {
     );
   }
 
-  recipe_list() {
-    return this.#queue.recipe_list_all();
+  recipe_list(): RecipeListEntry[] {
+    return this.#queue.recipe_list_all().map((row) => ({
+      recipe_id: row.recipe_id,
+      execution_id: row.execution_id,
+      name: row.name ?? '',
+      status: row.status,
+      available_version_id: row.available_version_id,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    }));
   }
 
   recipe_get(id: string, version: string) {

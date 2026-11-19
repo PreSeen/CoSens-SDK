@@ -313,11 +313,15 @@ class RSIClient:
             existing = self.store.replay(conn, scope, idempotency_key, request)
             if existing:
                 return self.store.get_in(conn, existing["id"], "execution"), False
-            parent = (
-                self.store.get_in(conn, base["id"], "execution")
+            recipe = (
+                self.store.get_in(conn, base["id"], "recipe")
                 if base is not None
                 else None
             )
+            if recipe and (
+                recipe["archived_at"] is not None or not recipe["active_version_id"]
+            ):
+                raise InvalidState("base Recipe has no available version")
             material = self.store.insert(conn, "material", data)
             learning_paths = {
                 file["path"] for file in data["files"] if file["role"] != "input"
@@ -345,8 +349,9 @@ class RSIClient:
                 conn,
                 {
                     "material_ids": [material["id"]],
-                    "base_recipe_version_id": (parent or {}).get("recipe_version_id"),
-                    "base_execution_id": parent["id"] if parent else None,
+                    "base_recipe_version_id": recipe["active_version_id"]
+                    if recipe
+                    else None,
                     "policy": policy,
                 },
             )

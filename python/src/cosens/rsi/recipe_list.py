@@ -99,7 +99,7 @@ list_rows AS (
             '$.created_at', r.created_at, '$.updated_at', r.updated_at, '$.archived_at', r.archived_at,
             '$.active_version_id', r.active_version_id, '$.latest_version_id', r.latest_version_id,
             '$.latest_qualified_version_id', r.latest_qualified_version_id) AS metadata,
-        r.created_at AS created,
+        r.created_at AS created, r.updated_at AS updated_at,
         r.archived_at AS archived_at,
         active.number AS active_version_number, latest.number AS latest_version_number,
         a.execution_id,
@@ -119,7 +119,7 @@ list_rows AS (
 
     UNION ALL
 
-    SELECT execution_id, 'learning', NULL, name, NULL, created, archived_at,
+    SELECT execution_id, 'learning', NULL, name, NULL, created, activity_updated_at, archived_at,
         NULL, NULL, execution_id, status, NULL, NULL,
         CASE WHEN status = 'needs_clarification' THEN unanswered ELSE 0 END,
         activity_updated_at, name, 0
@@ -127,6 +127,7 @@ list_rows AS (
     WHERE recipe_id IS NULL AND :active_only = 0
 )
 SELECT id, kind, recipe_id, name, metadata, status, execution_id, activity_updated_at,
+    created AS created_at, updated_at,
     active_version_number, latest_version_number, candidate_version_id,
     candidate_version_number, pending_question_count
 FROM list_rows

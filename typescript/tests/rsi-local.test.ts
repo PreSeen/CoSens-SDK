@@ -311,7 +311,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       const { model, base_url } = JSON.parse(configText).model;
       const client = new RSIClient({ data_dir, config: { model: model + '-' + key, base_url, auto_start: true } });
       const execution = await client.execution_create({
-        evidence: JSON.parse(evidenceText), idempotency_key: key, base_execution_id: null,
+        evidence: JSON.parse(evidenceText), idempotency_key: key, base_recipe_id: null,
       });
       assert.equal('material_create' in client, false);
       assert.equal('run_pending' in client, false);
@@ -414,8 +414,16 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           .recipe_list()
           .find((row) => row.recipe_id === run.recipe_id);
         assert.equal('recipe_activate' in host, false);
-        assert.equal(available?.available_version_id, run.recipe_version_id);
-        assert.equal(available?.archived, false);
+        const detail = host.recipe_get(run.recipe_id!, 'latest');
+        assert.deepEqual(available, {
+          recipe_id: run.recipe_id,
+          execution_id: run.id,
+          name: run.name,
+          status: 'passed',
+          available_version_id: run.recipe_version_id,
+          created_at: detail.created_at,
+          updated_at: detail.updated_at,
+        });
         const version_id = run.recipe_version_id!;
         host.recipe_version_set_archived(run.recipe_id!, {
           version_id,
@@ -425,7 +433,6 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           .recipe_list()
           .find((row) => row.recipe_id === run.recipe_id);
         assert.equal(archived?.available_version_id, null);
-        assert.equal(archived?.archived, true);
         assert.equal(
           host.recipe_get(run.recipe_id!, version_id).selected_version
             ?.archived,
@@ -440,8 +447,10 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           version_id,
         );
         assert.equal(
-          host.recipe_get(available!.recipe_id!, available!.active_version_id!)
-            .selected_version?.id,
+          host.recipe_get(
+            available!.recipe_id!,
+            available!.available_version_id!,
+          ).selected_version?.id,
           run.recipe_version_id,
         );
       } finally {
@@ -922,11 +931,15 @@ test('an expired worker lease resumes the graph without regenerating the candida
     try {
       const submission = {
         evidence: { context_path: path, files: [] },
-        base_execution_id: after.id,
+        base_recipe_id: after.recipe_id!,
         idempotency_key: 'follow-up',
       };
+      await assert.rejects(
+        host.execution_create({ ...submission, base_recipe_id: after.id }),
+        /recipe not found/,
+      );
       const followUp = await host.execution_create(submission);
-      assert.equal(followUp.base_execution_id, after.id);
+      assert.equal(followUp.base_execution_id, null);
       assert.equal(
         client.execution_get(followUp.id).base_recipe_version_id,
         after.recipe_version_id,
@@ -980,6 +993,12 @@ test('an expired worker lease resumes the graph without regenerating the candida
       });
       const next = host.execution_get(followUp.id);
       assert.equal(next.result?.test_status, 'passed');
+      assert.equal(next.recipe_id, after.recipe_id);
+      assert.equal((await host.execution_create(submission)).id, followUp.id);
+      assert.equal(
+        client.execution_get(followUp.id).base_recipe_version_id,
+        after.recipe_version_id,
+      );
       assert.equal(next.progress_percent, 100);
       assert.equal(
         host
@@ -1040,6 +1059,25 @@ test('recipe_list shows first-time learning and preserves the usable version dur
     assert.deepEqual(client.recipe_list({ q: 'task.md' }), []);
     assert.equal(row.status, 'queued');
     assert.deepEqual(client.recipe_list({ active_only: true }), []);
+    const learningHost = new PublicRSIClient({
+      data_dir: client.data_dir,
+      config: null,
+    });
+    try {
+      assert.deepEqual(learningHost.recipe_list(), [
+        {
+          recipe_id: null,
+          execution_id: execution.id,
+          name: '首次学习',
+          status: 'queued',
+          available_version_id: null,
+          created_at: execution.created_at,
+          updated_at: execution.updated_at,
+        },
+      ]);
+    } finally {
+      learningHost.close();
+    }
 
     const content = {
       title: 'Output',
@@ -1126,6 +1164,62 @@ test('recipe_list shows first-time learning and preserves the usable version dur
     assert.notEqual(row.execution_id, execution.id);
     assert.equal(row.pending_question_count, 0);
     assert.equal(row.active_version_id, active);
+    client.execution_cancel(row.execution_id!);
+    const host = new PublicRSIClient({
+      data_dir: client.data_dir,
+      config: {
+        model: 'fixture',
+        base_url: 'http://127.0.0.1:1/v1',
+        auto_start: false,
+      },
+    });
+    try {
+      const submission = {
+        evidence: { context_path, files: [] },
+        base_recipe_id: recipe.id,
+        idempotency_key: 'revise-available-version',
+      };
+      const revision = await host.execution_create(submission);
+      const detail = host.recipe_get(recipe.id, 'latest');
+      assert.deepEqual(
+        host.recipe_list().filter((entry) => entry.recipe_id === recipe.id),
+        [
+          {
+            recipe_id: recipe.id,
+            execution_id: revision.id,
+            name: 'Output Recipe',
+            status: 'queued',
+            available_version_id: active,
+            created_at: detail.created_at,
+            updated_at: detail.updated_at,
+          },
+        ],
+      );
+      assert.equal(
+        client.execution_get(revision.id).base_recipe_version_id,
+        active,
+      );
+      assert.notEqual(
+        client.execution_get(revision.id).base_recipe_version_id,
+        candidate.id,
+      );
+
+      // An archived recipe has no available version.
+      client.store.save({
+        ...client.recipe_get(recipe.id),
+        active_version_id: null,
+      });
+      await assert.rejects(
+        host.execution_create({
+          ...submission,
+          idempotency_key: 'unavailable',
+        }),
+        /base Recipe has no available version/,
+      );
+      assert.equal((await host.execution_create(submission)).id, revision.id);
+    } finally {
+      host.close();
+    }
   } finally {
     client.close();
     rmSync(root, { recursive: true, force: true });

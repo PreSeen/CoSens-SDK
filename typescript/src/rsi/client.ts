@@ -39,7 +39,7 @@ type EvidenceExecutionCreate = {
   evidence: MaterialManifest;
   confirmation_ref: string;
   idempotency_key: string;
-  base: { kind: 'execution'; id: string } | null;
+  base: { kind: 'recipe'; id: string } | null;
 };
 
 export class RSIClient {
@@ -339,7 +339,14 @@ export class RSIClient {
               execution: this.execution_get(existing.id),
               attached: false,
             };
-          const parent = base ? this.execution_get(base.id) : null;
+          const recipe = base
+            ? this.store.get<Versioned<RecipeContent>>(base.id, 'recipe')
+            : null;
+          if (
+            recipe &&
+            (recipe.archived_at !== null || !recipe.active_version_id)
+          )
+            fail('invalid_state', 'base Recipe has no available version');
           const material = this.store.insert<Material>('material', data);
           const learningPaths = new Set(
             data.files
@@ -354,8 +361,7 @@ export class RSIClient {
             );
           const created = this.execution_insert({
             material_ids: [material.id],
-            base_recipe_version_id: parent?.recipe_version_id,
-            base_execution_id: parent?.id,
+            base_recipe_version_id: recipe?.active_version_id,
             policy: {
               artifact_confirmed: true,
               confirmation_ref,

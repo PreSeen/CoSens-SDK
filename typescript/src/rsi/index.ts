@@ -7,6 +7,8 @@ export type {
   Page,
   ClarificationAnswer,
   RecipeTest,
+  RecipeListEntry,
+  RecipeListRecipeEntry,
 } from './public-client.js';
 export { RSIError } from './models.js';
 export type {
@@ -20,8 +22,4 @@ export type {
   Version,
   Versioned,
 } from './models.js';
-export type {
-  RecipeListEntry,
-  RecipeListRecipeEntry,
-  RecipeListStatus,
-} from './recipe-list.js';
+export type { RecipeListStatus } from './recipe-list.js';

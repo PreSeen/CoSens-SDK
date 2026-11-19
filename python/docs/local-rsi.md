@@ -23,7 +23,7 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 
 | 对象 | 方法 | 必填参数 | 返回与用途 |
 | --- | --- | --- | --- |
-| Execution | `execution_create` | `evidence`, `base_execution_id`, `idempotency_key` | 排队创建 Execution。 |
+| Execution | `execution_create` | `evidence`, `base_recipe_id`, `idempotency_key` | 排队创建 Execution。 |
 | Execution | `execution_get` | `execution_id` | 读取名称、阶段、进度、问题、测试结果和错误。 |
 | Execution | `execution_list` | `offset`, `archived` | 分页列出 Execution 历史及各自进度。 |
 | Execution | `execution_append_evidence` | `execution_id`, `evidence` | 给进行中的 Execution 追加证据并重新分析。 |
@@ -31,16 +31,32 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 | Execution | `execution_clarification_answer` | `execution_id`, `question_id`, `question_revision`, `answer` | 提交澄清。返回 Execution ID 及可空的子 Execution ID。 |
 | Rubrics | `rubrics_list` | `offset`, `archived` | 分页列出各套评分标准及最新版本 ID。 |
 | Rubrics | `rubrics_get` | `rubrics_id`, `version` | `version` 传 `"latest"` 或版本 ID，返回选中的版本和评分项。 |
-| Recipe | `recipe_list` | 无 | 返回首次学习、可用版本和可以恢复的归档条目。 |
+| Recipe | `recipe_list` | 无 | 返回首次学习条目和现有 Recipe 的摘要。 |
 | Recipe | `recipe_get` | `recipe_id`, `version` | `version` 传 `"active"`、`"latest"` 或版本 ID，返回选中版本。 |
 | Recipe | `recipe_test` | `execution_id`, `recipe_id`, `version_id`, `rubrics_version_id` | 在活动 Execution 内安排指定版本测试。 |
 | Recipe | `recipe_version_set_archived` | `recipe_id`, `version_id`, `archived` | `true` 归档指定版本，`false` 恢复最新通过验证的版本。返回 `recipe_id`、`version_id`、`archived`。 |
 
-`recipe_list()` 中的 `available_version_id` 指向当前可用版本。Agent 将 `recipe_id` 和 `available_version_id` 传给 `recipe_get`。手动归档当前版本时，条目保留，`archived=true`、`available_version_id=null`，可用 `latest_qualified_version_id` 恢复。首次学习或验证未通过时，`available_version_id` 也可能为空，此时用 `archived` 区分。
+### Recipe 列表返回结构
+
+`recipe_list()` 无参数，直接返回数组。还未生成 Recipe 的执行单独显示，已有 Recipe 即使有多个版本也只显示一行。
+
+| 字段 | 类型 | 含义 |
+| --- | --- | --- |
+| `recipe_id` | 字符串或 `null` | Recipe ID。首次学习尚未创建 Recipe 时为 `null`。 |
+| `execution_id` | 字符串或 `null` | 列表当前展示的关联执行。通过 `execution_get` 获取进度、澄清问题和候选版本 ID。 |
+| `name` | 字符串 | 条目显示名称。 |
+| `status` | 字符串 | 当前展示状态，例如 `testing`、`needs_clarification` 或 `passed`。 |
+| `available_version_id` | 字符串或 `null` | 当前可用版本，可和 `recipe_id` 一起传给 `recipe_get`。 |
+| `created_at` | 数字 | 创建时间，Unix 秒。已有 Recipe 取 Recipe 记录，首次学习取 Execution 记录。 |
+| `updated_at` | 数字 | 更新时间，Unix 秒，取同一条 Recipe 或 Execution 记录。 |
+
+状态取值为 `active`、`inactive`、`queued`、`analyzing`、`generating`、`testing`、`needs_clarification`、`passed`、`test_failed`、`unverifiable`、`completed`、`failed`、`cancelled`。
+
+例如 v2 待回答而 v1 仍可用时，`status` 为 `needs_clarification`，`available_version_id` 仍指向 v1。手动归档后条目仍在列表，可用版本 ID 变为 `null`。恢复时可用 `recipe_get(recipe_id, "latest")`（Python 用 `version="latest"`）读取 `latest_qualified_version_id`，再调用 `recipe_version_set_archived`。
 
 在没有未决澄清时，上一个可用版本保留到编号更高的版本验证通过。切换和旧版归档在同一个事务完成。旧版可按 ID 读取，`selected_version.archived` 表示所查版本的归档状态。恢复仅支持最新通过验证的版本。手动归档只作用于指定版本，更新的版本通过验证后仍会自动可用。
 
-对象分页固定每页 50 条。`offset` 从 0 开始，`archived=false` 查未归档对象，`true` 查已归档对象。
+`execution_list()` 和 `rubrics_list()` 固定每页 50 条。`offset` 从 0 开始，`archived=false` 查未归档对象，`true` 查已归档对象。
 
 ### Execution 返回结构
 
@@ -49,7 +65,7 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 | 字段 | 含义 |
 | --- | --- |
 | `id`, `name`, `created_at`, `updated_at` | ID、显示名称和 Unix 秒时间戳。 |
-| `base_execution_id` | 续接的历史执行 ID，首次学习为 `null`。 |
+| `base_execution_id` | 澄清等流程自动续接的父 Execution ID。通过 `execution_create` 直接创建时为 `null`。 |
 | `status`, `stage`, `progress_percent`, `input_revision` | 执行状态、阶段、进度和输入版本。状态为 `queued`、`running`、`completed`、`failed` 或 `cancelled`。 |
 | `evidence[]` | 每条包含 `path`、`role`、`locator`、`sha256` 和 `size`（字节）。 |
 | `questions[]`, `answers` | 问题和按 `问题ID:问题版本` 键控的答案。迟到答案触发子执行时，对应答案带 `continuation_execution_id`。 |
@@ -72,7 +88,7 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 - SDK 在创建 Execution 时复制文件快照。详情的 `evidence[]` 返回文件列表，包含角色、哈希和定位符。旧记录沿用原快照读取。
 - 宿主在取得用户交付确认后调用接口。SDK 使用 `idempotency_key` 记录本次提交。
 - SDK 自动用 Recipe 重跑当前任务。创建时标为 `input` 的文件同时用于学习和测试。测试在独立工作区生成新产物，再按 Rubric 评分。上下文、历史参考（`reference`）、确认产物（`artifact`）和反馈只用于学习。该得分衡量当前任务能否复现。
-- 首次学习或独立学习时，`base_execution_id` 传 `null`（Python 为 `None`）。要续接时，填已结束的 Execution ID。SDK 创建一条新 Execution，锁定原执行当时生成的 Recipe 版本作为基线，并使用本次提交的 `evidence` 学习和测试。原执行没有生成版本时只记录续接关系。原执行仍在进行时，使用 `execution_append_evidence` 补充材料。
+- 首次学习时，`base_recipe_id` 传 `null`（Python 为 `None`）。要修订已有 Recipe 时传它的 ID，可从 `recipe_list()` 取得。SDK 在创建时锁定该 Recipe 的当前可用版本，使用本次提交的 `evidence` 学习和测试。找不到 Recipe 或 Recipe 当前没有可用版本时返回错误。要给进行中的 Execution 补充材料，调用 `execution_append_evidence`。
 - `idempotency_key` 是本次提交的稳定非空字符串。同一操作重试保留原键和输入。旧接口已经提交的执行可按 ID 查询或恢复，使用旧提交的幂等键提交新格式会报冲突。
 - Worker 自动提炼并锁定 Recipe 名称、生成 Rubrics、保存候选及测试结果。自动学习最多两轮。
 

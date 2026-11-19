@@ -262,7 +262,7 @@ from cosens.rsi import RSIClient
 config = json.loads(sys.argv[4])["model"]
 config["model"] += "-" + sys.argv[3]
 c = RSIClient(data_dir=sys.argv[1], config={**config, "auto_start": True})
-run = c.execution_create(evidence=json.loads(sys.argv[2]), base_execution_id=None,
+run = c.execution_create(evidence=json.loads(sys.argv[2]), base_recipe_id=None,
     idempotency_key='hook-' + sys.argv[3])
 print(json.dumps({'id': run['id']}))
 """

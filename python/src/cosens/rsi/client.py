@@ -85,14 +85,14 @@ class RSIClient:
             ],
         }
 
-    def execution_create(self, *, evidence, base_execution_id, idempotency_key):
+    def execution_create(self, *, evidence, base_recipe_id, idempotency_key):
         submission_id = _TEXT.validate_python(idempotency_key)
         execution = self._queue.execution_create_with_evidence(
             evidence=ExecutionEvidence.model_validate(evidence).model_dump(),
             confirmation_ref=submission_id,
             idempotency_key=submission_id,
-            base={"kind": "execution", "id": _TEXT.validate_python(base_execution_id)}
-            if base_execution_id is not None
+            base={"kind": "recipe", "id": _TEXT.validate_python(base_recipe_id)}
+            if base_recipe_id is not None
             else None,
         )
         return self._present_execution(execution)
@@ -140,7 +140,18 @@ class RSIClient:
         )
 
     def recipe_list(self):
-        return self._queue.recipe_list_all()
+        return [
+            {
+                "recipe_id": row["recipe_id"],
+                "execution_id": row["execution_id"],
+                "name": row["name"] or "",
+                "status": row["status"],
+                "available_version_id": row["available_version_id"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+            for row in self._queue.recipe_list_all()
+        ]
 
     def recipe_get(self, recipe_id, *, version):
         version = _TEXT.validate_python(version)

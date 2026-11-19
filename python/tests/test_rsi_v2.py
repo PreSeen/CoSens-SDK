@@ -9,7 +9,7 @@ import pytest
 
 pytest.importorskip("langgraph")
 
-from cosens.rsi import Conflict, InvalidState
+from cosens.rsi import Conflict, InvalidState, NotFound
 from cosens.rsi._queue_client import RSIClient
 from cosens.rsi.materials import atomic_json, read_snapshot
 from cosens.rsi.models import LeaseLost, RubricsContent
@@ -366,15 +366,19 @@ def test_version_availability_archive_and_restore(client, tmp_path):
     host = PublicClient(data_dir=client.data_dir, config=None)
     assert not hasattr(host, "recipe_activate")
     assert host.recipe_list()[0]["available_version_id"] == version_id
-    assert not host.recipe_list()[0]["archived"]
+    assert not host.recipe_get(recipe_id, version=version_id)["selected_version"][
+        "archived"
+    ]
     assert host.recipe_version_set_archived(
         recipe_id, version_id=version_id, archived=True
     ) == {"recipe_id": recipe_id, "version_id": version_id, "archived": True}
     reopened = PublicClient(data_dir=client.data_dir, config=None)
     [row] = reopened.recipe_list()
     assert row["available_version_id"] is None
-    assert row["archived"]
-    assert row["latest_qualified_version_id"] == version_id
+    assert (
+        reopened.recipe_get(recipe_id, version="latest")["latest_qualified_version_id"]
+        == version_id
+    )
     assert reopened.recipe_get(recipe_id, version=version_id)["selected_version"][
         "archived"
     ]
@@ -1015,7 +1019,7 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
     )
     payload = {
         "evidence": manifest,
-        "base_execution_id": None,
+        "base_recipe_id": None,
         "idempotency_key": "delivery",
     }
     queue = RSIClient(data_dir=client.data_dir, config=settings(), auto_start=False)
@@ -1037,9 +1041,17 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
     assert created["progress_percent"] == 0
     assert client.execution_create(**payload)["id"] == created["id"]
     assert len(queue.material_list()) == 1
-    [learning] = client.recipe_list()
-    assert learning["execution_id"] == created["id"]
-    assert learning["active_version_id"] is None
+    assert client.recipe_list() == [
+        {
+            "recipe_id": None,
+            "execution_id": created["id"],
+            "name": "首次学习",
+            "status": "queued",
+            "available_version_id": None,
+            "created_at": created["created_at"],
+            "updated_at": created["updated_at"],
+        }
+    ]
     assert not hasattr(client, "recipe_search")
     files = {f["role"]: f["locator"] for f in created["evidence"]}
     stored = queue.execution_get(created["id"])
@@ -1083,23 +1095,69 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
         == recipe["selected_version"]
     )
     [available] = [row for row in client.recipe_list() if row["available_version_id"]]
-    assert available["recipe_id"] == recipe["id"]
-    assert available["active_version_id"] == recipe["latest_version_id"]
+    assert available == {
+        "recipe_id": recipe["id"],
+        "execution_id": finished["id"],
+        "name": recipe["name"],
+        "status": "passed",
+        "available_version_id": recipe["latest_version_id"],
+        "created_at": recipe["created_at"],
+        "updated_at": recipe["updated_at"],
+    }
     assert (
         client.recipe_get(
-            available["recipe_id"], version=available["active_version_id"]
+            available["recipe_id"], version=available["available_version_id"]
         )["selected_version"]
         == recipe["selected_version"]
     )
 
-    revised = client.execution_create(
-        **{
-            **payload,
-            "idempotency_key": "same-delivery-revision",
-            "base_execution_id": created["id"],
-        }
+    submission = {
+        **payload,
+        "idempotency_key": "same-delivery-revision",
+        "base_recipe_id": recipe["id"],
+    }
+    with pytest.raises(NotFound, match="recipe not found"):
+        client.execution_create(**{**submission, "base_recipe_id": finished["id"]})
+    with queue.store.transaction() as conn:
+        stored_recipe = queue.store.get_in(conn, recipe["id"], "recipe")
+        candidate = queue.store.append_version(
+            conn, stored_recipe, recipe["selected_version"]["content"]
+        )
+    assert (
+        client.recipe_get(recipe["id"], version="latest")["selected_version"]["id"]
+        == candidate["id"]
     )
-    assert revised["base_execution_id"] == created["id"]
+
+    revised = client.execution_create(**submission)
+    detail = client.recipe_get(recipe["id"], version="latest")
+    assert client.recipe_list() == [
+        {
+            "recipe_id": recipe["id"],
+            "execution_id": revised["id"],
+            "name": recipe["name"],
+            "status": "queued",
+            "available_version_id": finished["recipe_version_id"],
+            "created_at": detail["created_at"],
+            "updated_at": detail["updated_at"],
+        }
+    ]
+    assert revised["base_execution_id"] is None
+    assert (
+        queue.execution_get(revised["id"])["base_recipe_version_id"]
+        == finished["recipe_version_id"]
+    )
+    queue.run_pending(runtime=FileRuntime())
+    revision_result = client.execution_get(revised["id"])
+    assert revision_result["result"]["published"]
+    assert revision_result["recipe_id"] == recipe["id"]
+    assert revision_result["recipe_version_id"] != finished["recipe_version_id"]
+
+    client.recipe_version_set_archived(
+        recipe["id"], version_id=revision_result["recipe_version_id"], archived=True
+    )
+    with pytest.raises(InvalidState, match="base Recipe has no available version"):
+        client.execution_create(**{**submission, "idempotency_key": "unavailable"})
+    assert client.execution_create(**submission)["id"] == revised["id"]
     assert (
         queue.execution_get(revised["id"])["base_recipe_version_id"]
         == finished["recipe_version_id"]
