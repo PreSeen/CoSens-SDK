@@ -1,6 +1,6 @@
-# CoSens 本地 RSI SDK 接口文档
+# CoSens RSI SDK 接口文档
 
-适用于 `RSI_SDK_v2` 本地实现。TS 从 `cosens-sdk/rsi` 导入，Python 从 `cosens.rsi` 导入。`null`（Python 为 `None`）用于明确表示首次学习。
+适用于云端模式（默认）和本地模式，两种模式方法和返回结构相同。TS 从 `cosens-sdk/rsi` 导入，Python 从 `cosens.rsi` 导入。`null`（Python 为 `None`）用于明确表示首次学习。
 
 ```text
 Agent 启动 → recover()
@@ -12,10 +12,10 @@ Agent 启动 → recover()
 
 ## 初始化
 
-- TS：`new RSIClient({ data_dir, config })`
-- Python：`RSIClient(data_dir=data_dir, config=config)`
+- 云端（默认）：TS `new RSIClient()`，Python `RSIClient()`。读取 `COSENS_API_KEY`，学习在 CoSens 服务端用 CoSens 的模型完成。只上传 `evidence` 里列出的文件。可传 `api_key`、`base_url`（TS 为 `{ mode: 'cloud', api_key, base_url }`）。云端的 `recover()` 直接返回 `{ started: 0 }`，服务端自行恢复。
+- 本地：TS `new RSIClient({ data_dir, config })`，Python `RSIClient(data_dir=data_dir, config=config)`。TS 两种模式的方法都是 async。
 
-`data_dir` 是本地数据目录。`config` 为 `{ model, base_url, auto_start }`，创建 Execution 时提供，查询和恢复已有工作时可以传 `null`。三项均必填。可选 `max_tokens`（每次模型调用的输出上限，默认不设，由模型服务决定；推理模型建议 16384 以上）和 `timeout`（单次请求秒数，默认 120）。`base_url` 是模型 API 基地址，支持 Chat Completions 和工具调用。请求的 User-Agent 为 `cosens-sdk-python/<版本>`（TS 为 `cosens-sdk-typescript/<版本>`）。`auto_start=true` 在入队后自动派发 Worker，`false` 时由宿主调用 `recover()`。模型密钥从 `RSI_MODEL_API_KEY` 读取。TS 如需覆盖启动 Worker 的 Node 路径，设置 `RSI_NODE_EXECUTABLE`。
+本地模式下，`data_dir` 是本地数据目录。`config` 为 `{ model, base_url, auto_start }`，创建 Execution 时提供，查询和恢复已有工作时可以传 `null`。三项均必填。可选 `max_tokens`（每次模型调用的输出上限，默认不设，由模型服务决定；推理模型建议 16384 以上）和 `timeout`（单次请求秒数，默认 120）。`base_url` 是模型 API 基地址，支持 Chat Completions 和工具调用。请求的 User-Agent 为 `cosens-sdk-python/<版本>`（TS 为 `cosens-sdk-typescript/<版本>`）。`auto_start=true` 在入队后自动派发 Worker，`false` 时由宿主调用 `recover()`。模型密钥从 `RSI_MODEL_API_KEY` 读取。TS 如需覆盖启动 Worker 的 Node 路径，设置 `RSI_NODE_EXECUTABLE`。
 
 ## 业务接口
 

@@ -75,7 +75,33 @@ _ARCHIVED = TypeAdapter(StrictBool)
 
 
 class RSIClient:
-    def __init__(self, *, data_dir, config: dict | None):
+    """RSI atoms in cloud mode (default) or local mode.
+
+    `RSIClient()` uses the CoSens service with `COSENS_API_KEY`.
+    `RSIClient(data_dir=..., config=...)` (or `mode="local"`) runs the local
+    Worker with your own model. Both return the same shapes.
+    """
+
+    def __new__(cls, *, mode=None, data_dir=None, config=None, api_key=None, base_url=None):
+        if mode is None:
+            mode = "local" if data_dir is not None or config is not None else "cloud"
+        if mode == "cloud":
+            if data_dir is not None or config is not None:
+                raise ValueError("data_dir and config are for mode='local'")
+            from .cloud import CloudRSIClient
+
+            return CloudRSIClient(api_key=api_key, base_url=base_url)
+        if mode != "local":
+            raise ValueError("mode must be 'cloud' or 'local'")
+        if api_key is not None or base_url is not None:
+            raise ValueError("api_key and base_url are for mode='cloud'")
+        if data_dir is None:
+            raise ValueError("mode='local' needs data_dir")
+        return super().__new__(cls)
+
+    mode = "local"
+
+    def __init__(self, *, mode=None, data_dir, config: dict | None = None, api_key=None, base_url=None):
         settings = ModelEndpoint.model_validate(config) if config is not None else None
         self._queue = QueueClient(
             data_dir=data_dir,

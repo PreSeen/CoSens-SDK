@@ -1,9 +1,12 @@
-# CoSens Local RSI SDK
+# CoSens RSI SDK
 
-CoSens turns confirmed task evidence into reusable Recipes. The local SDK is available in TypeScript and Python. Both provide Execution, Rubrics, and Recipe atomic functions.
+CoSens turns confirmed task evidence into reusable Recipes. The SDK is available in TypeScript and Python. Both provide Execution, Rubrics, and Recipe atomic functions in two modes with the same methods and results:
+
+- **Cloud (default)**: `RSIClient()` sends the evidence files you name to CoSens, which learns with CoSens models. Set `COSENS_API_KEY`.
+- **Local**: `RSIClient(data_dir=..., config=...)` runs the Worker on your machine with your own tool-calling model (`RSI_MODEL_API_KEY`). Nothing leaves the machine except your model calls.
 
 ```text
-Host Hook → local SDK → SQLite queue → on-demand worker
+Host Hook → SDK → (cloud service | local SQLite queue) → worker
 → extract user feedback → analyze evidence → generate candidate → execute test → score → save result
 ```
 

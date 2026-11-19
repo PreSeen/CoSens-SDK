@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { RSIClient as QueueClient } from './client.js';
+import { CloudClient, type CloudOptions } from './cloud.js';
 import type { EvidenceFile, Execution as StoredExecution } from './models.js';
 import type { RecipeListStatus } from './recipe-list.js';
 
@@ -112,11 +113,31 @@ export type ClarificationAnswer = z.input<typeof answer>;
 export type RecipeTest = z.input<typeof recipeTest>;
 
 /** Host API for the local RSI worker. Persisted records retain their storage format. */
-export class RSIClient {
-  readonly #queue: QueueClient;
-  readonly data_dir: string;
+export type LocalOptions = { data_dir: string; config: RSIConfig };
+export type RSIClientOptions = LocalOptions | ({ mode: 'cloud' } & CloudOptions);
 
-  constructor(options: { data_dir: string; config: RSIConfig }) {
+/**
+ * RSI atoms in cloud mode (default) or local mode.
+ *
+ * `new RSIClient()` uses the CoSens service with `COSENS_API_KEY`.
+ * `new RSIClient({ data_dir, config })` runs the local Worker with your own
+ * model. Methods and results are the same in both modes, and all are async.
+ */
+export class RSIClient {
+  readonly #queue!: QueueClient;
+  readonly #cloud?: CloudClient;
+  readonly data_dir: string | null;
+  readonly mode: 'cloud' | 'local';
+
+  constructor(options?: RSIClientOptions) {
+    if (options === undefined || 'mode' in options) {
+      const { mode: _mode, ...cloud } = options ?? { mode: 'cloud' as const };
+      this.#cloud = new CloudClient(cloud);
+      this.data_dir = null;
+      this.mode = 'cloud';
+      return;
+    }
+    this.mode = 'local';
     const { data_dir, config: settings } = clientOptions.parse(options);
     this.#queue = new QueueClient({
       data_dir,
@@ -193,7 +214,8 @@ export class RSIClient {
     };
   }
 
-  async execution_create(request: ExecutionCreate) {
+  async execution_create(request: ExecutionCreate): Promise<Execution> {
+    if (this.#cloud) return this.#cloud.execution_create(request);
     const {
       evidence: { context_path, files },
       idempotency_key,
@@ -214,11 +236,13 @@ export class RSIClient {
     };
   }
 
-  execution_get(id: string) {
+  async execution_get(id: string): Promise<Execution> {
+    if (this.#cloud) return this.#cloud.execution_get(id);
     return this.#presentExecution(this.#queue.execution_get(id));
   }
 
-  execution_list(query?: ExecutionListQuery): Execution[] {
+  async execution_list(query?: ExecutionListQuery): Promise<Execution[]> {
+    if (this.#cloud) return this.#cloud.execution_list(query);
     const executionIds = executionListQuery
       .optional()
       .parse(query)?.execution_ids;
@@ -230,7 +254,8 @@ export class RSIClient {
   async execution_append_evidence(
     id: string,
     submission: z.input<typeof evidence>,
-  ) {
+  ): Promise<Execution> {
+    if (this.#cloud) return this.#cloud.execution_append_evidence(id, submission);
     return this.#presentExecution(
       await this.#queue.execution_append_evidence(
         id,
@@ -239,11 +264,13 @@ export class RSIClient {
     );
   }
 
-  execution_cancel(id: string) {
+  async execution_cancel(id: string): Promise<Execution> {
+    if (this.#cloud) return this.#cloud.execution_cancel(id);
     return this.#presentExecution(this.#queue.execution_cancel(id));
   }
 
-  execution_clarification_answer(id: string, response: ClarificationAnswer) {
+  async execution_clarification_answer(id: string, response: ClarificationAnswer) {
+    if (this.#cloud) return this.#cloud.execution_clarification_answer(id, response);
     const { answer: value, ...question } = answer.parse(response);
     return this.#queue.execution_clarification_answer(id, {
       ...question,
@@ -253,18 +280,21 @@ export class RSIClient {
     });
   }
 
-  rubrics_list(query: Page) {
+  async rubrics_list(query: Page) {
+    if (this.#cloud) return this.#cloud.rubrics_list(query);
     return this.#queue.rubrics_list(page.parse(query));
   }
 
-  rubrics_get(id: string, version: string) {
+  async rubrics_get(id: string, version: string) {
+    if (this.#cloud) return this.#cloud.rubrics_get(id, version);
     return this.#queue.rubrics_get(
       id,
       version === 'latest' ? {} : { version_id: text.parse(version) },
     );
   }
 
-  recipe_list(query?: RecipeListQuery): RecipeListEntry[] {
+  async recipe_list(query?: RecipeListQuery): Promise<RecipeListEntry[]> {
+    if (this.#cloud) return this.#cloud.recipe_list(query);
     const recipeIds = recipeListQuery.optional().parse(query)?.recipe_ids;
     return this.#queue.recipe_list_all(recipeIds).map((row) => ({
       recipe_id: row.recipe_id,
@@ -277,7 +307,8 @@ export class RSIClient {
     }));
   }
 
-  recipe_get(id: string, version: string) {
+  async recipe_get(id: string, version: string) {
+    if (this.#cloud) return this.#cloud.recipe_get(id, version);
     return this.#queue.recipe_get(
       id,
       version === 'active' || version === 'latest'
@@ -286,14 +317,16 @@ export class RSIClient {
     );
   }
 
-  recipe_test(request: RecipeTest) {
+  async recipe_test(request: RecipeTest) {
+    if (this.#cloud) return this.#cloud.recipe_test(request);
     return this.#queue.recipe_test(recipeTest.parse(request));
   }
 
-  recipe_version_set_archived(
+  async recipe_version_set_archived(
     id: string,
     request: { version_id: string; archived: boolean },
   ) {
+    if (this.#cloud) return this.#cloud.recipe_version_set_archived(id, request);
     const { version_id, archived } = versionArchive.parse(request);
     return this.#queue.recipe_version_set_archived(
       text.parse(id),
@@ -302,11 +335,12 @@ export class RSIClient {
     );
   }
 
-  recover() {
+  async recover() {
+    if (this.#cloud) return { started: 0 };
     return this.#queue.recover();
   }
 
   close() {
-    this.#queue.close();
+    if (!this.#cloud) this.#queue.close();
   }
 }
