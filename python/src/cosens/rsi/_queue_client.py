@@ -174,7 +174,7 @@ class RSIClient:
                 offset=offset,
             )
 
-    def recipe_list_all(self):
+    def recipe_list_all(self, *, recipe_ids=None):
         with self.store.connect() as conn:
             return read_recipe_list(
                 conn,
@@ -183,6 +183,7 @@ class RSIClient:
                 archived=False,
                 limit=-1,
                 offset=0,
+                recipe_ids=recipe_ids,
             )
 
     def _execution_insert(self, conn, request, *, config=None):
@@ -227,7 +228,7 @@ class RSIClient:
                 "input_revision": request.get("input_revision", 1),
                 "questions": [],
                 "answers": request.get("answers", {}),
-                "recipe_id": None,
+                "recipe_id": request.get("recipe_id"),
                 "recipe_version_id": None,
                 "test_results": [],
                 "result": None,
@@ -297,6 +298,28 @@ class RSIClient:
             if not attached:
                 shutil.rmtree(self.data_dir / "materials" / data["id"])
 
+    def _bind_recipe_on_replay(self, conn, execution_id):
+        execution = self.store.get_in(conn, execution_id, "execution")
+        if not execution["recipe_id"]:
+            recipe_id = (execution.get("test_request") or {}).get("recipe_id")
+            if not recipe_id and execution.get("base_recipe_version_id"):
+                base = conn.execute(
+                    "SELECT recipe_id FROM versions WHERE id=?",
+                    (execution["base_recipe_version_id"],),
+                ).fetchone()
+                if base is None:
+                    raise NotFound("base recipe version not found")
+                recipe_id = base["recipe_id"]
+            if not recipe_id:
+                recipe_id = self.store.create_recipe(conn, name=execution.get("name"))[
+                    "id"
+                ]
+            execution = self.store.save(conn, {**execution, "recipe_id": recipe_id})
+        return {
+            **execution,
+            "name": self.store.execution_recipe_name(conn, execution) or "首次学习",
+        }
+
     def execution_create_with_evidence(
         self, *, evidence, confirmation_ref, idempotency_key, base
     ):
@@ -312,7 +335,7 @@ class RSIClient:
         def create(conn, data):
             existing = self.store.replay(conn, scope, idempotency_key, request)
             if existing:
-                return self.store.get_in(conn, existing["id"], "execution"), False
+                return self._bind_recipe_on_replay(conn, existing["id"]), False
             recipe = (
                 self.store.get_in(conn, base["id"], "recipe")
                 if base is not None
@@ -349,9 +372,10 @@ class RSIClient:
                 conn,
                 {
                     "material_ids": [material["id"]],
-                    "base_recipe_version_id": recipe["active_version_id"]
+                    "recipe_id": recipe["id"]
                     if recipe
-                    else None,
+                    else self.store.create_recipe(conn)["id"],
+                    "name": recipe["name"] if recipe else None,
                     "policy": policy,
                 },
             )
@@ -361,7 +385,8 @@ class RSIClient:
             return execution, True
 
         if previous:
-            execution = self.execution_get(previous["id"])
+            with self.store.transaction() as conn:
+                execution = self._bind_recipe_on_replay(conn, previous["id"])
         else:
             if self.auto_start:
                 self._check_runtime()
@@ -422,6 +447,9 @@ class RSIClient:
 
     def execution_list(self, **pagination):
         return self.store.list("execution", **pagination)
+
+    def execution_list_all(self, *, execution_ids=None):
+        return self.store.list_executions(execution_ids=execution_ids)
 
     def execution_update(
         self, execution_id, *, material_ids=None, archived=None, expected_revision=None
@@ -570,6 +598,7 @@ class RSIClient:
                     "material_ids": parent["material_ids"],
                     "policy": parent["policy"],
                     "base_execution_id": execution_id,
+                    "recipe_id": parent["recipe_id"],
                     "base_recipe_version_id": parent["recipe_version_id"]
                     or parent.get("base_recipe_version_id"),
                     # Keep newly generated questions distinct from inherited answers.
@@ -624,10 +653,9 @@ class RSIClient:
             else:
                 if not archived and recipe["archived_at"]:
                     raise InvalidState("recipe is archived")
-                active = None if archived else version_id
-                if recipe.get("active_version_id") != active:
-                    recipe["active_version_id"] = active
-                    self.store.save(conn, recipe)
+                self.store.set_recipe_version_status(
+                    conn, recipe, version_id, "archived" if archived else "available"
+                )
             return {
                 "recipe_id": recipe_id,
                 "version_id": version_id,
@@ -670,6 +698,20 @@ class RSIClient:
                 "rubrics_version_id": rubrics_version_id,
             }
             if obj.get("test_request") != request:
+                if obj["recipe_id"] and obj["recipe_id"] != recipe_id:
+                    timestamp = time.time()
+                    conn.execute(
+                        """UPDATE recipes SET archived_at=?, updated_at=?
+                           WHERE id=? AND archived_at IS NULL
+                             AND NOT EXISTS (
+                               SELECT 1 FROM versions WHERE recipe_id=recipes.id
+                             )
+                             AND NOT EXISTS (
+                               SELECT 1 FROM executions WHERE recipe_id=recipes.id AND id<>?
+                             )""",
+                        (timestamp, timestamp, obj["recipe_id"], execution_id),
+                    )
+                    obj["recipe_id"] = recipe_id
                 obj["test_request"] = request
                 restart_execution(obj)
                 self.store.save(conn, obj)

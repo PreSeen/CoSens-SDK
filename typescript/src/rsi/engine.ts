@@ -11,6 +11,7 @@ import {
   authorizedTestFiles,
   digest,
   inside,
+  read_snapshot,
   workspace_files,
 } from './materials.js';
 import { LearningLiterals, rubricRuleText } from './portability.js';
@@ -31,7 +32,7 @@ import {
   type RecipeContent,
   type Runtime,
   type TestResult,
-  type Versioned,
+  type Recipe,
 } from './models.js';
 
 interface Candidate {
@@ -315,6 +316,7 @@ export class Engine {
       ? this.store.version_by_id<RecipeContent>(baseId, 'recipe')
       : undefined;
     const files = this.evidence(execution);
+    const recipeFile = files.find((file) => file.role === 'recipe');
     const literals = this.learningLiterals(
       execution,
       base?.provenance.execution_id,
@@ -324,7 +326,9 @@ export class Engine {
       recipe_name: this.store.executionRecipeName(execution),
       analysis: state.analysis,
       previous_test: state.test,
-      base_recipe: base?.content,
+      base_recipe:
+        base?.content ??
+        (recipeFile ? read_snapshot(recipeFile).text : undefined),
     };
     let content: RecipeContent;
     for (let attempt = 0; ; attempt++) {
@@ -352,19 +356,14 @@ export class Engine {
       const recipeId =
         state.candidate?.recipe_id ?? current.recipe_id ?? base?.object_id;
       const recipe = recipeId
-        ? this.store.get<Versioned<RecipeContent>>(recipeId, 'recipe')
-        : this.store.insert<Versioned<RecipeContent>>('recipe', {
-            name: current.name ?? content.title,
-            description: '',
-            latest_version_id: null,
-            active_version_id: null,
-            latest_qualified_version_id: null,
-          });
+        ? this.store.get<Recipe>(recipeId, 'recipe')
+        : this.store.createRecipe(current.name ?? content.title);
       if (recipe.archived_at)
         fail('invalid_state', 'recipe was archived during learning');
+      const name = recipe.name ?? current.name ?? content.title;
       const version = this.store.append(
-        recipe,
-        { ...content, title: recipe.name ?? content.title },
+        { ...recipe, name },
+        { ...content, title: name },
         key,
         {
           execution_id: this.id,
@@ -373,7 +372,7 @@ export class Engine {
       );
       this.store.save({
         ...current,
-        name: recipe.name ?? content.title,
+        name,
         recipe_id: recipe.id,
         recipe_version_id: version.id,
       });

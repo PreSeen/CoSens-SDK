@@ -4,10 +4,12 @@ export type {
   ExecutionEvidence,
   Execution,
   ExecutionCreate,
+  ExecutionListQuery,
   Page,
   ClarificationAnswer,
   RecipeTest,
   RecipeListEntry,
+  RecipeListQuery,
   RecipeListRecipeEntry,
 } from './public-client.js';
 export { RSIError } from './models.js';
@@ -16,6 +18,7 @@ export type {
   ExecutionResult,
   LocalConfig,
   Question,
+  Recipe,
   RecipeContent,
   RubricsContent,
   TestResult,

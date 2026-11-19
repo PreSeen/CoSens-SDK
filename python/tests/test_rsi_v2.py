@@ -1,6 +1,7 @@
 """Local RSI contracts, real graph, concurrency, clarification and recovery."""
 
 import json
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +14,7 @@ from cosens.rsi import Conflict, InvalidState, NotFound
 from cosens.rsi._queue_client import RSIClient
 from cosens.rsi.materials import atomic_json, read_snapshot
 from cosens.rsi.models import LeaseLost, RubricsContent
+from cosens.rsi.store_schema import LEGACY_RECIPES, SCHEMA
 
 
 def settings(**overrides):
@@ -396,6 +398,7 @@ def test_version_availability_archive_and_restore(client, tmp_path):
     client.run_pending(runtime=FileRuntime())
     new_id = client.execution_get(revision["id"])["recipe_version_id"]
     assert reopened.recipe_list()[0]["available_version_id"] == new_id
+
     assert reopened.recipe_get(recipe_id, version=version_id)["selected_version"][
         "archived"
     ]
@@ -407,6 +410,122 @@ def test_version_availability_archive_and_restore(client, tmp_path):
         reopened.recipe_version_set_archived(
             recipe_id, version_id=version_id, archived=False
         )
+
+
+@pytest.mark.parametrize("schema_version", [3, 4])
+def test_recipe_migration_preserves_archived_target_and_candidate(
+    tmp_path, schema_version
+):
+    from cosens.rsi import RSIClient as PublicClient
+
+    recipe_id = "recipe_legacy"
+    path = tmp_path / "rsi.sqlite3"
+    conn = sqlite3.connect(path)
+    try:
+        if schema_version == 3:
+            conn.executescript(
+                LEGACY_RECIPES
+                + """
+                CREATE TABLE versions (
+                  id TEXT PRIMARY KEY, recipe_id TEXT REFERENCES recipes(id), rubrics_id TEXT,
+                  rubrics_metadata TEXT,
+                  object_id TEXT GENERATED ALWAYS AS (coalesce(recipe_id,rubrics_id)) VIRTUAL,
+                  number INTEGER NOT NULL, data TEXT NOT NULL, operation_key TEXT UNIQUE,
+                  UNIQUE(object_id, number)
+                );
+                INSERT INTO recipes VALUES ('recipe_legacy', 1, 2, NULL, 8, 'Legacy Recipe',
+                  NULL, 'version_second', 'version_first', '{"description":"Retained description"}');
+                INSERT INTO recipes VALUES ('recipe_unversioned', 2, 3, NULL, 5, 'Waiting Recipe',
+                  NULL, NULL, NULL, '{"description":"Description without a version"}');
+                """
+            )
+        else:
+            conn.executescript(
+                SCHEMA
+                + """
+                INSERT INTO recipes VALUES ('recipe_legacy', 1, 2, NULL, 'Legacy Recipe');
+                INSERT INTO recipes VALUES ('recipe_unversioned', 2, 3, NULL, 'Waiting Recipe');
+                CREATE TABLE recipe_api_metadata (
+                    recipe_id TEXT PRIMARY KEY REFERENCES recipes(id),
+                    revision INTEGER NOT NULL, description TEXT NOT NULL
+                );
+                INSERT INTO recipe_api_metadata VALUES ('recipe_legacy', 8, 'Retired description');
+                INSERT INTO recipe_api_metadata VALUES ('recipe_unversioned', 5, 'Retired description');
+                CREATE VIEW recipe_records AS SELECT r.*, m.revision, m.description
+                    FROM recipes r LEFT JOIN recipe_api_metadata m ON m.recipe_id = r.id;
+                """
+            )
+        conn.execute(f"PRAGMA user_version = {schema_version}")
+        for version_id, number in (("version_first", 1), ("version_second", 2)):
+            version = {
+                "id": version_id,
+                "object_id": recipe_id,
+                "number": number,
+                "content": {
+                    "title": "Legacy Recipe",
+                    "applicability": "Fixture",
+                    "instructions": "Produce output",
+                },
+                "provenance": {},
+                "created_at": 1,
+            }
+            conn.execute(
+                "INSERT INTO versions (id,recipe_id,number,data) VALUES (?,?,?,?)",
+                (version_id, recipe_id, number, json.dumps(version)),
+            )
+        if schema_version == 4:
+            conn.execute(
+                "UPDATE versions SET status=CASE WHEN number=1 THEN 'archived' ELSE 'candidate' END"
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    host = PublicClient(data_dir=tmp_path, config=None)
+    recipe = host.recipe_get(recipe_id, version="latest")
+    assert recipe["latest_version_id"] == "version_second"
+    assert recipe["latest_qualified_version_id"] == "version_first"
+    assert recipe["active_version_id"] is None
+    assert "revision" not in recipe
+    assert "description" not in recipe
+    assert recipe["selected_version"]["id"] == "version_second"
+    unversioned = host.recipe_get("recipe_unversioned", version="latest")
+    assert "revision" not in unversioned
+    assert "description" not in unversioned
+    assert unversioned["selected_version"] is None
+    host.recipe_version_set_archived(
+        recipe_id, version_id="version_first", archived=False
+    )
+    assert host.recipe_list()[0]["available_version_id"] == "version_first"
+    assert (
+        host.recipe_get(recipe_id, version="active")["selected_version"]["id"]
+        == "version_first"
+    )
+    with host._queue.store.connect() as migrated:
+        assert {
+            row["name"] for row in migrated.execute("PRAGMA table_info(recipes)")
+        } == {
+            "id",
+            "name",
+            "created_at",
+            "updated_at",
+            "archived_at",
+        }
+        assert [
+            row[0]
+            for row in migrated.execute("SELECT status FROM versions ORDER BY number")
+        ] == [
+            "available",
+            "candidate",
+        ]
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert (
+            migrated.execute(
+                "SELECT name FROM sqlite_schema WHERE name='recipe_api_metadata'"
+            ).fetchone()
+            is None
+        )
+        assert migrated.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
 @pytest.mark.parametrize(
@@ -1079,7 +1198,6 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
     )
     payload = {
         "evidence": manifest,
-        "base_recipe_id": None,
         "idempotency_key": "delivery",
     }
     queue = RSIClient(data_dir=client.data_dir, config=settings(), auto_start=False)
@@ -1099,19 +1217,37 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
     created = client.execution_create(**payload)
     assert "material_ids" not in created
     assert created["progress_percent"] == 0
-    assert client.execution_create(**payload)["id"] == created["id"]
+    assert created["recipe_id"]
+    assert created["recipe_version_id"] is None
+    draft = client.recipe_get(created["recipe_id"], version="latest")
+    assert draft["selected_version"] is None
+    assert client.execution_create(**payload)["recipe_id"] == created["recipe_id"]
     assert len(queue.material_list()) == 1
     assert client.recipe_list() == [
         {
-            "recipe_id": None,
-            "execution_id": created["id"],
+            "recipe_id": created["recipe_id"],
+            "execution_ids": [created["id"]],
             "name": "首次学习",
             "status": "queued",
             "available_version_id": None,
-            "created_at": created["created_at"],
-            "updated_at": created["updated_at"],
+            "created_at": draft["created_at"],
+            "updated_at": draft["updated_at"],
         }
     ]
+    assert (
+        client.recipe_list(
+            query={
+                "recipe_ids": [
+                    created["recipe_id"],
+                    "recipe_missing",
+                    created["recipe_id"],
+                ]
+            }
+        )
+        == client.recipe_list()
+    )
+    assert client.recipe_list(query={"recipe_ids": []}) == []
+    assert client.recipe_list(query={"recipe_ids": ["recipe_missing"]}) == []
     assert not hasattr(client, "recipe_search")
     files = {f["role"]: f["locator"] for f in created["evidence"]}
     stored = queue.execution_get(created["id"])
@@ -1141,9 +1277,15 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
         [files["input"]]
     ]
     finished = client.execution_get(created["id"])
+    assert finished["recipe_id"] == created["recipe_id"]
     assert finished["result"]["test_status"] == "passed"
     assert finished["progress_percent"] == 100
-    assert client.execution_list(offset=0, archived=False)[0]["progress_percent"] == 100
+    assert (
+        client.execution_list(query={"execution_ids": [created["id"]]})[0][
+            "progress_percent"
+        ]
+        == 100
+    )
     with pytest.raises(InvalidState, match="terminal inputs are immutable"):
         client.execution_append_evidence(created["id"], evidence=extra)
     recipe = client.recipe_get(finished["recipe_id"], version="latest")
@@ -1157,7 +1299,7 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
     [available] = [row for row in client.recipe_list() if row["available_version_id"]]
     assert available == {
         "recipe_id": recipe["id"],
-        "execution_id": finished["id"],
+        "execution_ids": [finished["id"]],
         "name": recipe["name"],
         "status": "passed",
         "available_version_id": recipe["latest_version_id"],
@@ -1171,13 +1313,31 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
         == recipe["selected_version"]
     )
 
+    recipe_path = tmp_path / "prior-recipe.md"
+    recipe_text = "Write the response as a plain text file."
+    recipe_path.write_text(recipe_text)
+    recipe_file = {
+        "path": str(recipe_path),
+        "role": "recipe",
+        "recipe_id": recipe["id"],
+    }
     submission = {
-        **payload,
+        "evidence": {**manifest, "files": [*manifest["files"], recipe_file]},
         "idempotency_key": "same-delivery-revision",
-        "base_recipe_id": recipe["id"],
     }
     with pytest.raises(NotFound, match="recipe not found"):
-        client.execution_create(**{**submission, "base_recipe_id": finished["id"]})
+        client.execution_create(
+            evidence={
+                **manifest,
+                "files": [{**recipe_file, "recipe_id": finished["id"]}],
+            },
+            idempotency_key=submission["idempotency_key"],
+        )
+    with pytest.raises(ValueError, match="at most one recipe file"):
+        client.execution_create(
+            evidence={**manifest, "files": [recipe_file, recipe_file]},
+            idempotency_key=submission["idempotency_key"],
+        )
     with queue.store.transaction() as conn:
         stored_recipe = queue.store.get_in(conn, recipe["id"], "recipe")
         candidate = queue.store.append_version(
@@ -1189,11 +1349,15 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
     )
 
     revised = client.execution_create(**submission)
+    assert revised["recipe_id"] == recipe["id"]
+    assert revised["recipe_version_id"] is None
+    assert any(file["role"] == "recipe" for file in revised["evidence"])
+    recipe_path.write_text("Modified after submission.")
     detail = client.recipe_get(recipe["id"], version="latest")
     assert client.recipe_list() == [
         {
             "recipe_id": recipe["id"],
-            "execution_id": revised["id"],
+            "execution_ids": [revised["id"], finished["id"]],
             "name": recipe["name"],
             "status": "queued",
             "available_version_id": finished["recipe_version_id"],
@@ -1202,15 +1366,43 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
         }
     ]
     assert revised["base_execution_id"] is None
-    assert (
-        queue.execution_get(revised["id"])["base_recipe_version_id"]
-        == finished["recipe_version_id"]
-    )
-    queue.run_pending(runtime=FileRuntime())
+    assert queue.execution_get(revised["id"]).get("base_recipe_version_id") is None
+
+    class RevisionRuntime(FileRuntime):
+        def generate(self, context, files, trace_path):
+            assert context["base_recipe"] == recipe_text
+            return super().generate(context, files, trace_path)
+
+        def execute(self, context, files, workspace, trace_path):
+            assert not any(file["role"] == "recipe" for file in files)
+            assert recipe_text not in json.dumps(context)
+            return super().execute(context, files, workspace, trace_path)
+
+        def assess(self, context, files, trace_path):
+            assert not any(file["role"] == "recipe" for file in files)
+            assert recipe_text not in json.dumps(context)
+            return super().assess(context, files, trace_path)
+
+    queue.run_pending(runtime=RevisionRuntime())
     revision_result = client.execution_get(revised["id"])
     assert revision_result["result"]["published"]
     assert revision_result["recipe_id"] == recipe["id"]
     assert revision_result["recipe_version_id"] != finished["recipe_version_id"]
+    queue.execution_update(finished["id"], archived=True)
+    assert [row["id"] for row in client.execution_list()] == [revised["id"]]
+    selected = client.execution_list(
+        query={
+            "execution_ids": [
+                revised["id"],
+                finished["id"],
+                "execution_missing",
+                finished["id"],
+            ]
+        }
+    )
+    assert [row["id"] for row in selected] == [finished["id"], revised["id"]]
+    assert client.execution_list(query={"execution_ids": []}) == []
+    assert client.recipe_list()[0]["execution_ids"] == [revised["id"]]
 
     client.recipe_version_set_archived(
         recipe["id"], version_id=revision_result["recipe_version_id"], archived=True
@@ -1218,10 +1410,7 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
     with pytest.raises(InvalidState, match="base Recipe has no available version"):
         client.execution_create(**{**submission, "idempotency_key": "unavailable"})
     assert client.execution_create(**submission)["id"] == revised["id"]
-    assert (
-        queue.execution_get(revised["id"])["base_recipe_version_id"]
-        == finished["recipe_version_id"]
-    )
+    assert queue.execution_get(revised["id"]).get("base_recipe_version_id") is None
 
     context.unlink()
     replayed = client.execution_create(**payload)
@@ -1237,3 +1426,11 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
     assert [
         file["locator"] for file in client.execution_get(legacy["id"])["evidence"]
     ] == [file["locator"] for file in legacy_material["files"]]
+    with queue.store.transaction() as conn:
+        another = queue.store.create_recipe(conn, name="Unrelated Recipe")
+    all_entries = client.recipe_list()
+    assert any(row["recipe_id"] is None for row in all_entries)
+    selected_ids = {created["recipe_id"], another["id"]}
+    expected = [row for row in all_entries if row["recipe_id"] in selected_ids]
+    recipe_ids = [row["recipe_id"] for row in reversed(expected)]
+    assert client.recipe_list(query={"recipe_ids": recipe_ids}) == expected

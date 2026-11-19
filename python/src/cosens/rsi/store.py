@@ -17,7 +17,13 @@ from pathlib import Path
 from .execution_data import compact_analysis, upgrade_execution
 from .models import Conflict, InputChanged, InvalidState, LeaseLost, NotFound
 from .progress import stage_progress
-from .store_schema import SCHEMA, STORAGE
+from .store_schema import (
+    LEGACY_RECIPES,
+    MIGRATE_RECIPE_VERSIONS,
+    RECIPE_PROJECTION,
+    SCHEMA,
+    STORAGE,
+)
 
 
 def uid(prefix):
@@ -76,13 +82,13 @@ class Store:
 
     def _initialize(self):
         with self.connect() as conn:
-            if conn.execute("PRAGMA user_version").fetchone()[0] == 3:
+            if conn.execute("PRAGMA user_version").fetchone()[0] == 5:
                 return
         with self.transaction() as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version == 3:
+            if version == 5:
                 return
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3, 4):
                 raise InvalidState("unsupported RSI SQLite schema version")
             legacy = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='objects'"
@@ -111,6 +117,7 @@ class Store:
                     )
                 conn.execute(INITIALIZE_RECIPE_AVAILABILITY)
                 conn.execute("ALTER TABLE versions RENAME TO previous_versions")
+                conn.execute(LEGACY_RECIPES)
             if version == 2:
                 conn.execute("ALTER TABLE executions ADD COLUMN owner TEXT")
                 conn.execute("ALTER TABLE executions ADD COLUMN lease_until REAL")
@@ -118,16 +125,31 @@ class Store:
                     "ALTER TABLE executions ADD COLUMN fence INTEGER NOT NULL DEFAULT 0"
                 )
                 conn.execute("ALTER TABLE versions RENAME TO previous_versions")
+            if version == 3:
+                conn.execute("""
+                    ALTER TABLE versions ADD COLUMN status TEXT
+                    CHECK (status IS NULL OR (recipe_id IS NOT NULL AND status IN ('candidate', 'available', 'archived')))
+                """)
             for statement in SCHEMA.split(";"):
                 if statement.strip():
                     conn.execute(statement)
             if legacy:
                 for row in conn.execute(
-                    "SELECT kind,data FROM objects WHERE kind<>'rubrics'"
+                    "SELECT kind,data FROM objects WHERE kind IN ('execution','material')"
                 ):
                     self._write_record(
                         conn, row["kind"], json.loads(row["data"]), update=False
                     )
+                conn.execute("""
+                    INSERT INTO recipes (id,created_at,updated_at,archived_at,name,revision,
+                        active_version_id,latest_version_id,latest_qualified_version_id,details)
+                    SELECT id, json_extract(data,'$.created_at'), json_extract(data,'$.updated_at'),
+                        json_extract(data,'$.archived_at'), json_extract(data,'$.name'),
+                        1, json_extract(data,'$.active_version_id'),
+                        json_extract(data,'$.latest_version_id'), json_extract(data,'$.latest_qualified_version_id'),
+                        '{}'
+                    FROM objects WHERE kind='recipe'
+                """)
                 conn.execute("""
                     INSERT INTO versions (id,recipe_id,rubrics_id,rubrics_metadata,number,data,operation_key)
                     SELECT v.id, CASE WHEN o.kind='recipe' THEN o.id END,
@@ -158,7 +180,14 @@ class Store:
                 conn.execute("DROP TABLE IF EXISTS rubrics")
                 conn.execute("DROP TABLE IF EXISTS objects")
                 conn.execute("DROP TABLE IF EXISTS settings")
-            conn.execute("PRAGMA user_version = 3")
+            if version == 4:
+                conn.execute("DROP VIEW IF EXISTS recipe_records")
+                conn.execute("DROP TABLE IF EXISTS recipe_api_metadata")
+            upgrade = MIGRATE_RECIPE_VERSIONS if legacy or version in (2, 3) else ""
+            for statement in (upgrade + RECIPE_PROJECTION).split(";"):
+                if statement.strip():
+                    conn.execute(statement)
+            conn.execute("PRAGMA user_version = 5")
 
     @contextmanager
     def connect(self):
@@ -194,18 +223,21 @@ class Store:
         table, columns = STORAGE[kind]
         details = dict(record)
         fields = [details.pop(column, None) for column in columns]
+        if kind != "recipe":
+            columns = (*columns, "details")
+            fields.append(encode(details))
         if update:
             assignments = ",".join(column + "=?" for column in columns[1:])
             conn.execute(
-                f"UPDATE {table} SET {assignments},details=? WHERE id=?",
-                (*fields[1:], encode(details), record["id"]),
+                f"UPDATE {table} SET {assignments} WHERE id=?",
+                (*fields[1:], record["id"]),
             )
         else:
-            names = ",".join((*columns, "details"))
-            placeholders = ",".join("?" for _ in range(len(columns) + 1))
+            names = ",".join(columns)
+            placeholders = ",".join("?" for _ in columns)
             conn.execute(
                 f"INSERT INTO {table} ({names}) VALUES ({placeholders})",
-                (*fields, encode(details)),
+                fields,
             )
 
     @staticmethod
@@ -226,11 +258,11 @@ class Store:
             return Store._rubrics_metadata(row)
         if kind not in STORAGE:
             raise NotFound(f"object not found: {object_id}")
-        table, _ = STORAGE[kind]
+        table = "recipe_records" if kind == "recipe" else STORAGE[kind][0]
         row = conn.execute(f"SELECT * FROM {table} WHERE id=?", (object_id,)).fetchone()
         if row is None:
             raise NotFound(f"{kind} not found: {object_id}")
-        return Store._record(row)
+        return dict(row) if kind == "recipe" else Store._record(row)
 
     def get(self, object_id, kind=None):
         with self.connect() as conn:
@@ -252,27 +284,42 @@ class Store:
                 return row[0]
         return execution.get("name")
 
+    def create_recipe(self, conn, *, name=None):
+        return self.insert(
+            conn,
+            "recipe",
+            {
+                "name": name,
+                "latest_version_id": None,
+                "active_version_id": None,
+                "latest_qualified_version_id": None,
+            },
+        )
+
     @staticmethod
     def insert(conn, kind, data):
         now = time.time()
         data = {
             **data,
             "id": data.get("id", uid(kind)),
-            "revision": 1,
             "created_at": now,
             "updated_at": now,
             "archived_at": None,
         }
+        if kind != "recipe":
+            data["revision"] = 1
         if kind != "rubrics":
             Store._write_record(conn, kind, data, update=False)
         return data
 
     @staticmethod
     def save(conn, data):
-        data = {**data, "revision": data["revision"] + 1, "updated_at": time.time()}
         kind = data["id"].partition("_")[0]
         if kind == "rubrics":
             raise InvalidState("rubrics metadata is written with its version")
+        data = {**data, "updated_at": time.time()}
+        if kind != "recipe":
+            data["revision"] += 1
         Store._write_record(conn, kind, data, update=True)
         return data
 
@@ -293,12 +340,25 @@ class Store:
                     (int(archived), limit, offset),
                 )
                 return [self._rubrics_metadata(row) for row in rows]
-            table, _ = STORAGE[kind]
+            table = "recipe_records" if kind == "recipe" else STORAGE[kind][0]
             rows = conn.execute(
                 f"""SELECT * FROM {table} WHERE (archived_at IS NOT NULL)=?
                 ORDER BY created_at,id LIMIT ? OFFSET ?""",
                 (int(archived), limit, offset),
             ).fetchall()
+            return [
+                dict(row) if kind == "recipe" else self._record(row) for row in rows
+            ]
+
+    def list_executions(self, *, execution_ids=None):
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT * FROM executions
+                WHERE (:ids IS NULL AND archived_at IS NULL)
+                   OR id IN (SELECT value FROM json_each(:ids))
+                ORDER BY created_at, id""",
+                {"ids": encode(execution_ids) if execution_ids is not None else None},
+            )
             return [self._record(row) for row in rows]
 
     @staticmethod
@@ -411,24 +471,17 @@ class Store:
             recipe = (
                 self.get_in(conn, recipe_id, "recipe")
                 if recipe_id
-                else self.insert(
-                    conn,
-                    "recipe",
-                    {
-                        "name": execution.get("name") or content["title"],
-                        "description": "",
-                        "latest_version_id": None,
-                        "active_version_id": None,
-                        "latest_qualified_version_id": None,
-                    },
+                else self.create_recipe(
+                    conn, name=execution.get("name") or content["title"]
                 )
             )
             if recipe["archived_at"]:
                 raise InvalidState("recipe was archived during learning")
+            name = recipe.get("name") or execution.get("name") or content["title"]
             version = self.append_version(
                 conn,
-                recipe,
-                {**content, "title": recipe["name"]},
+                {**recipe, "name": name},
+                {**content, "title": name},
                 operation_key=operation_key,
                 provenance={
                     "execution_id": execution_id,
@@ -436,7 +489,7 @@ class Store:
                 },
             )
             execution.update(
-                name=recipe["name"],
+                name=name,
                 recipe_id=recipe["id"],
                 recipe_version_id=version["id"],
             )
@@ -489,18 +542,28 @@ class Store:
             latest = self.version_in(conn, recipe_id, latest_id)
             if version["number"] <= latest["number"]:
                 return recipe["active_version_id"] == version_id
-        recipe.update(
-            active_version_id=version_id,
-            latest_qualified_version_id=version_id,
+        conn.execute(
+            "UPDATE versions SET status='archived' WHERE recipe_id=? AND number<? AND status<>'archived'",
+            (recipe_id, version["number"]),
         )
-        self.save(conn, recipe)
+        self.set_recipe_version_status(conn, recipe, version_id, "available")
         return True
+
+    @staticmethod
+    def set_recipe_version_status(conn, recipe, version_id, status):
+        result = conn.execute(
+            "UPDATE versions SET status=? WHERE recipe_id=? AND id=? AND status<>?",
+            (status, recipe["id"], version_id, status),
+        )
+        if result.rowcount:
+            Store.save(conn, recipe)
 
     @staticmethod
     def append_version(conn, obj, content, *, operation_key=None, provenance=None):
         if operation_key:
             row = conn.execute(
-                "SELECT data FROM versions WHERE operation_key=?", (operation_key,)
+                "SELECT data FROM versions WHERE operation_key=?",
+                (operation_key,),
             ).fetchone()
             if row:
                 return json.loads(row["data"])
@@ -523,7 +586,7 @@ class Store:
             fields.pop("latest_version_id", None)
             metadata = encode(fields)
         conn.execute(
-            "INSERT INTO versions (id,recipe_id,rubrics_id,rubrics_metadata,number,data,operation_key) VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO versions (id,recipe_id,rubrics_id,rubrics_metadata,number,data,operation_key,status) VALUES (?,?,?,?,?,?,?,?)",
             (
                 version["id"],
                 obj["id"] if kind == "recipe" else None,
@@ -532,6 +595,7 @@ class Store:
                 number,
                 encode(version),
                 operation_key,
+                "candidate" if kind == "recipe" else None,
             ),
         )
         obj["latest_version_id"] = version["id"]

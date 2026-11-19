@@ -81,7 +81,7 @@ class LocalConfig(Contract):
 
 class FileRef(Contract):
     path: str
-    role: Literal["input", "artifact", "reference", "feedback"] = "input"
+    role: Literal["input", "artifact", "reference", "feedback", "recipe"] = "input"
     description: str = ""
 
 

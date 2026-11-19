@@ -2,6 +2,16 @@
 
 Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned separately.
 
+## Python 0.8.1
+
+### Breaking
+
+- `execution_create(evidence=..., idempotency_key=...)` no longer takes `base_recipe_id`. To revise a Recipe, add one evidence file with `role: "recipe"`; with `recipe_id` the new version joins that Recipe (which must exist and have an available version), without it a new Recipe is created. The returned execution carries `recipe_id` from the moment it is queued.
+- `execution_list(query=None)` replaces paging: it returns the unarchived executions, or with `query={"execution_ids": [...]}` the matching ones (archived included), oldest first.
+- `recipe_list(query=None)` accepts `query={"recipe_ids": [...]}`. Each item has `execution_ids` (most active first) in place of `execution_id`.
+- `recipe_get` returns `id`, `name`, `created_at`, `updated_at`, `archived_at`, the three version IDs and `selected_version`; `revision` and `description` are gone.
+- The local SQLite store upgrades to schema v5 in one transaction on start. Stop Workers of older versions that use the same data directory first.
+
 ## Python 0.8.0
 
 ### Breaking
