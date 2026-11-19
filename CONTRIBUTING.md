@@ -1,10 +1,10 @@
 # Contributing
 
-Thanks for helping with the CoSens SDK. The repository holds two packages that follow one contract: `python/` (`cosens-sdk` on PyPI) and `typescript/` (`cosens-sdk` on npm). `contract/` holds the shared definitions both must match.
+Thanks for helping with the CoSens SDK. The repository holds the local RSI SDK in two languages with the same atomic API: `python/` (`cosens-sdk` on PyPI) and `typescript/` (`cosens-sdk` on npm).
 
 ## Before you start
 
-For anything larger than a fix, open an issue first so we can agree on the shape. A change to a public method or a request/response field touches both packages and `contract/`; keep them in step in one pull request.
+For anything larger than a fix, open an issue first so we can agree on the shape. A change to a public method or field touches both packages; keep them in step in one pull request.
 
 ## Develop and test
 

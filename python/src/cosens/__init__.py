@@ -1,11 +1,21 @@
-"""CoSens Python SDK public API."""
+"""CoSens SDK for local RSI and access to the Memory service."""
 
-from .atoms import CoSensClient
-from .auto_learning import AutoLearning
-from .errors import (RSIError, RSIFeedbackRequired, RSIHTTPError, RSILearningFailed, RSILearningStopped,
-                     RSIRecoveryRequired, RSITransportError)
-from .factory import cosens
-from .task_runner import TaskWorkflowRunner
+from .memory import (
+    MemoryError,
+    get_memory,
+    get_memory_experience,
+    get_memory_items,
+    get_memory_job,
+    memory_ingest,
+    memory_recall,
+)
 
-__all__ = ["AutoLearning", "CoSensClient", "RSIError", "RSIFeedbackRequired", "RSIHTTPError", "RSILearningFailed",
-           "RSILearningStopped", "RSIRecoveryRequired", "RSITransportError", "TaskWorkflowRunner", "cosens"]
+__all__ = [
+    "MemoryError",
+    "get_memory",
+    "get_memory_experience",
+    "get_memory_items",
+    "get_memory_job",
+    "memory_ingest",
+    "memory_recall",
+]
