@@ -4,6 +4,8 @@ import { USER_AGENT } from './chat-completions.js';
 import { RSIError } from './models.js';
 
 export const DEFAULT_CLOUD_BASE_URL = 'https://rsi.cosens.ai/api';
+/** The CoSens gateway accepts request bodies up to 10 MiB. */
+export const MAX_CLOUD_REQUEST_BYTES = 10 * 1024 * 1024;
 
 export type CloudOptions = { api_key?: string; base_url?: string };
 
@@ -84,6 +86,11 @@ export class CloudClient {
     path: string,
     { body, params }: { body?: unknown; params?: Record<string, string> } = {},
   ): Promise<any> {
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+    if (payload !== undefined && Buffer.byteLength(payload) > MAX_CLOUD_REQUEST_BYTES)
+      throw new TypeError(
+        'evidence upload exceeds the 10 MiB cloud request limit; send fewer or smaller files, or use local mode',
+      );
     const url = new URL(this.#base + path);
     for (const [key, value] of Object.entries(params ?? {}))
       url.searchParams.set(key, value);
@@ -97,7 +104,7 @@ export class CloudClient {
           'user-agent': USER_AGENT,
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
         },
-        body: body === undefined ? undefined : JSON.stringify(body),
+        body: payload,
         redirect: 'error',
         signal: AbortSignal.timeout(60_000),
       });
@@ -107,9 +114,9 @@ export class CloudClient {
         'CoSens RSI service could not be reached',
       );
     }
-    const payload = await response.json().catch(() => undefined);
-    if (response.ok) return payload;
-    const detail = (payload as { error?: { code?: string; message?: string } })
+    const answer = await response.json().catch(() => undefined);
+    if (response.ok) return answer;
+    const detail = (answer as { error?: { code?: string; message?: string } })
       ?.error;
     const code = detail?.code ?? `http_${response.status}`;
     const message =

@@ -106,3 +106,16 @@ def test_service_errors_keep_their_codes():
         client.execution_cancel("e1")
     with pytest.raises(ValueError, match="bad version"):
         client.recipe_get("bad", version="x")
+
+
+def test_uploads_over_the_gateway_limit_fail_before_sending(tmp_path):
+    (tmp_path / "context.txt").write_text("c")
+    (tmp_path / "big.bin").write_bytes(b"\xff" * (8 * 1024 * 1024))
+    transport, seen = recording()
+    client = CloudRSIClient(api_key="k", base_url="https://rsi.example/api", transport=transport)
+    with pytest.raises(ValueError, match="10 MiB"):
+        client.execution_create(
+            evidence={"context_path": str(tmp_path / "context.txt"), "files": [{"path": str(tmp_path / "big.bin"), "role": "input"}]},
+            idempotency_key="k1",
+        )
+    assert seen == []

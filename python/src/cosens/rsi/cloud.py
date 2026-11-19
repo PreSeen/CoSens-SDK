@@ -19,6 +19,8 @@ from .chat_completions import USER_AGENT
 from .models import Conflict, InvalidState, NotFound, RSIError
 
 DEFAULT_BASE_URL = "https://rsi.cosens.ai/api"
+# The CoSens gateway accepts request bodies up to 10 MiB.
+MAX_REQUEST_BYTES = 10 * 1024 * 1024
 _ERRORS = {"not_found": NotFound, "conflict": Conflict, "invalid_state": InvalidState}
 
 
@@ -79,8 +81,23 @@ class CloudRSIClient:
         self._http.close()
 
     def _request(self, method, path, *, json=None, params=None):
+        content = None
+        if json is not None:
+            import json as _json
+
+            content = _json.dumps(json, ensure_ascii=False).encode("utf-8")
+            if len(content) > MAX_REQUEST_BYTES:
+                raise ValueError(
+                    "evidence upload exceeds the 10 MiB cloud request limit; send fewer or smaller files, or use local mode"
+                )
         try:
-            response = self._http.request(method, path, json=json, params=params)
+            response = self._http.request(
+                method,
+                path,
+                content=content,
+                params=params,
+                headers={"Content-Type": "application/json"} if content is not None else None,
+            )
         except httpx.HTTPError:
             error = RSIError("CoSens RSI service could not be reached")
             error.code = "service_unavailable"
