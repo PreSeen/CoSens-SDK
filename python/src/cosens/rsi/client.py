@@ -23,6 +23,8 @@ class ModelEndpoint(Contract):
     model: Text
     base_url: Text
     auto_start: StrictBool
+    max_tokens: Positive | None = None
+    timeout: Annotated[float, Field(gt=0, le=3600)] | None = None
 
 
 class File(Contract):
@@ -77,7 +79,15 @@ class RSIClient:
         settings = ModelEndpoint.model_validate(config) if config is not None else None
         self._queue = QueueClient(
             data_dir=data_dir,
-            config={"model": {"model": settings.model, "base_url": settings.base_url}}
+            config={
+                "model": {
+                    "model": settings.model,
+                    "base_url": settings.base_url,
+                    **settings.model_dump(
+                        include={"max_tokens", "timeout"}, exclude_none=True
+                    ),
+                }
+            }
             if settings
             else None,
             auto_start=settings.auto_start if settings else True,

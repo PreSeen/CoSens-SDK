@@ -15,7 +15,7 @@ Agent 启动 → recover()
 - TS：`new RSIClient({ data_dir, config })`
 - Python：`RSIClient(data_dir=data_dir, config=config)`
 
-`data_dir` 是本地数据目录。`config` 为 `{ model, base_url, auto_start }`，创建 Execution 时提供，查询和恢复已有工作时可以传 `null`。三项均必填。`base_url` 是模型 API 基地址，支持 Chat Completions 和工具调用。`auto_start=true` 在入队后自动派发 Worker，`false` 时由宿主调用 `recover()`。模型密钥从 `RSI_MODEL_API_KEY` 读取。TS 如需覆盖启动 Worker 的 Node 路径，设置 `RSI_NODE_EXECUTABLE`。
+`data_dir` 是本地数据目录。`config` 为 `{ model, base_url, auto_start }`，创建 Execution 时提供，查询和恢复已有工作时可以传 `null`。三项均必填。可选 `max_tokens`（每次模型调用的输出上限，默认不设，由模型服务决定；推理模型建议 16384 以上）和 `timeout`（单次请求秒数，默认 120）。`base_url` 是模型 API 基地址，支持 Chat Completions 和工具调用。请求的 User-Agent 为 `cosens-sdk-python/<版本>`（TS 为 `cosens-sdk-typescript/<版本>`）。`auto_start=true` 在入队后自动派发 Worker，`false` 时由宿主调用 `recover()`。模型密钥从 `RSI_MODEL_API_KEY` 读取。TS 如需覆盖启动 Worker 的 Node 路径，设置 `RSI_NODE_EXECUTABLE`。
 
 ## 业务接口
 

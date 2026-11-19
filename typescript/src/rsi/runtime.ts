@@ -68,6 +68,48 @@ function decodeArguments(value: string): unknown {
   }
 }
 
+/** Decode object and array fields that a model sent as JSON strings. */
+function decodeNested(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(decodeNested);
+  if (value && typeof value === 'object')
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, decodeNested(item)]),
+    );
+  if (typeof value === 'string' && /^\s*[[{]/.test(value)) {
+    try {
+      return decodeNested(JSON.parse(value));
+    } catch {
+      return value;
+    }
+  }
+  return value;
+}
+
+/** Parse a final structured result, or describe what the model must fix. */
+export function parseStructured(
+  schema: z.ZodType,
+  argumentsText: string,
+):
+  | { data: unknown; problem?: undefined }
+  | { data?: undefined; problem: string } {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(argumentsText);
+  } catch (error) {
+    return {
+      problem: `The arguments are not valid JSON: ${(error as Error).message}.`,
+    };
+  }
+  const direct = schema.safeParse(raw);
+  if (direct.success) return { data: direct.data };
+  const decoded = schema.safeParse(decodeNested(raw));
+  if (decoded.success) return { data: decoded.data };
+  const issues = direct.error.issues
+    .slice(0, 8)
+    .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`);
+  return { problem: `Fix these fields: ${issues.join('; ')}.` };
+}
+
 export class ChatRuntime implements Runtime {
   constructor(
     private client: RSIClient,
@@ -247,16 +289,18 @@ export class ChatRuntime implements Runtime {
         const calls = reply.tool_calls ?? [];
         const result = calls.find((call) => call.function.name === finalName);
         if (result && schema) {
-          const parsed = schema.safeParse(
-            decodeArguments(result.function.arguments),
-          );
-          if (calls.length === 1 && parsed.success) {
-            messages.push({
-              role: 'tool',
-              tool_call_id: result.id,
-              content: 'Structured result accepted.',
-            });
-            return parsed.data;
+          let problem = 'Submit the final result alone, in a separate call.';
+          if (calls.length === 1) {
+            const parsed = parseStructured(schema, result.function.arguments);
+            if (parsed.problem === undefined) {
+              messages.push({
+                role: 'tool',
+                tool_call_id: result.id,
+                content: 'Structured result accepted.',
+              });
+              return parsed.data;
+            }
+            problem = parsed.problem;
           }
           correct();
           for (const call of calls) {
@@ -264,7 +308,8 @@ export class ChatRuntime implements Runtime {
               role: 'tool',
               tool_call_id: call.id,
               content:
-                'Submit one final result with valid JSON arguments matching its schema, in a separate call.',
+                'Submit one final result with valid JSON arguments matching its schema, in a separate call. ' +
+                problem,
             });
           }
         } else if (calls.length) {
