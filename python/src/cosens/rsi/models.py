@@ -47,7 +47,8 @@ class ModelConfig(Contract):
     base_url: str | None = None
     api_key_env: str = "RSI_MODEL_API_KEY"
     timeout: float = Field(default=120, gt=0, le=3600)
-    max_tokens: int = Field(default=4096, gt=0)
+    # None leaves the completion budget to the endpoint; reasoning models need more than a fixed 4096.
+    max_tokens: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def public_endpoint(self):

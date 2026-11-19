@@ -1,5 +1,22 @@
+import { createRequire } from 'node:module';
 import { z } from 'zod';
 import { fail, RSIError, type LocalConfig } from './models.js';
+
+function userAgent(): string {
+  try {
+    const pkg = createRequire(import.meta.url)('../../package.json') as {
+      name?: string;
+      version?: string;
+    };
+    if (pkg.name === 'cosens-sdk' && pkg.version)
+      return `cosens-sdk-typescript/${pkg.version}`;
+  } catch {
+    // Bundled without package.json.
+  }
+  return 'cosens-sdk-typescript/source';
+}
+
+export const USER_AGENT = userAgent();
 
 const toolCallSchema = z.object({
   id: z.string().min(1),
@@ -79,10 +96,13 @@ export async function requestCompletion(
       headers: {
         authorization: 'Bearer ' + key,
         'content-type': 'application/json',
+        'user-agent': USER_AGENT,
       },
       body: JSON.stringify({
         model: config.model,
-        max_tokens: config.max_tokens,
+        ...(config.max_tokens === undefined
+          ? {}
+          : { max_tokens: config.max_tokens }),
         messages,
         tools: tools.map((definition) => ({
           type: 'function',

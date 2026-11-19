@@ -6,6 +6,8 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from http.client import HTTPException
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _package_version
 from typing import Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -13,6 +15,17 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from pydantic import BaseModel, Field, ValidationError
 
 from .models import ModelOutputError, RSIError
+
+
+def _user_agent():
+    try:
+        release = _package_version("cosens-sdk")
+    except PackageNotFoundError:
+        release = "source"
+    return f"cosens-sdk-python/{release}"
+
+
+USER_AGENT = _user_agent()
 
 
 class ModelStatusError(Exception):
@@ -91,12 +104,20 @@ def request_completion(config, key, messages, tools):
     base = config.base_url or "https://api.openai.com/v1"
     request = Request(
         base.rstrip("/") + "/chat/completions",
-        headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+        headers={
+            "Authorization": "Bearer " + key,
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        },
         method="POST",
         data=json.dumps(
             {
                 "model": config.model,
-                "max_tokens": config.max_tokens,
+                **(
+                    {"max_tokens": config.max_tokens}
+                    if config.max_tokens is not None
+                    else {}
+                ),
                 "messages": messages,
                 "tools": tools,
                 "tool_choice": "auto",

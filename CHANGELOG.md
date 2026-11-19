@@ -2,6 +2,12 @@
 
 Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned separately.
 
+## Python 0.8.2
+
+- `config` accepts optional `max_tokens` and `timeout` (seconds). `max_tokens` is no longer fixed at 4096: when unset, requests leave the completion budget to the model endpoint, so reasoning models are not cut off.
+- Model requests name the SDK in the User-Agent (`cosens-sdk-python/<version>`, TypeScript `cosens-sdk-typescript/<version>`), which endpoints behind bot filters accept.
+- When the model's final structured result does not validate, the retry message names the fields to fix, and objects or arrays sent as JSON strings are decoded before validation.
+
 ## Python 0.8.1
 
 ### Breaking

@@ -34,6 +34,40 @@ class Runtime(Protocol):
     def assess(self, context, files, trace_path): ...
 
 
+def _decode_nested(value):
+    """Decode object and array fields that a model sent as JSON strings."""
+    if isinstance(value, dict):
+        return {key: _decode_nested(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_decode_nested(item) for item in value]
+    if isinstance(value, str) and value.strip()[:1] in ("{", "["):
+        try:
+            return _decode_nested(json.loads(value))
+        except ValueError:
+            return value
+    return value
+
+
+def parse_structured(schema, arguments):
+    """Return (result, None) or (None, a short description of what was wrong)."""
+    try:
+        data = json.loads(arguments)
+    except ValueError as error:
+        return None, f"The arguments are not valid JSON: {error.msg}."
+    try:
+        return schema.model_validate(data), None
+    except ValidationError as error:
+        try:
+            return schema.model_validate(_decode_nested(data)), None
+        except ValidationError:
+            pass
+        issues = [
+            f"{'.'.join(str(part) for part in issue['loc']) or '(root)'}: {issue['msg']}"
+            for issue in error.errors()[:8]
+        ]
+        return None, "Fix these fields: " + "; ".join(issues) + "."
+
+
 class ReadEvidenceArgs(Contract):
     locator: StrictStr
 
@@ -236,21 +270,20 @@ class ChatRuntime:
                         (c for c in calls if c.function.name == final_name), None
                     )
                     if result and schema:
+                        problem = "Submit the final result alone, in a separate call."
                         if len(calls) == 1:
-                            try:
-                                parsed = schema.model_validate_json(
-                                    result.function.arguments
-                                )
-                            except ValidationError:
-                                pass
-                            else:
+                            parsed, problem = parse_structured(
+                                schema, result.function.arguments
+                            )
+                            if parsed is not None:
                                 tool_message(result, "Structured result accepted.")
                                 return parsed.model_dump()
                         correct()
                         for call in calls:
                             tool_message(
                                 call,
-                                "Submit one final result with valid JSON arguments matching its schema, in a separate call.",
+                                "Submit one final result with valid JSON arguments matching its schema, in a separate call. "
+                                + problem,
                             )
                     elif calls:
                         for call in calls:

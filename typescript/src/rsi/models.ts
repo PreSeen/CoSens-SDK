@@ -38,7 +38,8 @@ export const ModelConfigSchema = z.strictObject({
     .regex(/^[A-Za-z_][A-Za-z0-9_]*$/)
     .default('RSI_MODEL_API_KEY'),
   timeout: z.number().positive().max(3600).default(120),
-  max_tokens: z.number().int().positive().default(4096),
+  // Unset leaves the completion budget to the endpoint; reasoning models need more than a fixed 4096.
+  max_tokens: z.number().int().positive().optional(),
 });
 export const LocalConfigSchema = z.strictObject({
   model: ModelConfigSchema,

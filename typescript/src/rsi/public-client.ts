@@ -14,6 +14,8 @@ const config = z
     model: text,
     base_url: text,
     auto_start: z.boolean(),
+    max_tokens: z.number().int().positive().optional(),
+    timeout: z.number().positive().max(3600).optional(),
   })
   .nullable();
 const clientOptions = z.strictObject({ data_dir: text, config });
@@ -121,7 +123,16 @@ export class RSIClient {
       ...(settings
         ? {
             config: {
-              model: { model: settings.model, base_url: settings.base_url },
+              model: {
+                model: settings.model,
+                base_url: settings.base_url,
+                ...(settings.max_tokens === undefined
+                  ? {}
+                  : { max_tokens: settings.max_tokens }),
+                ...(settings.timeout === undefined
+                  ? {}
+                  : { timeout: settings.timeout }),
+              },
             },
             auto_start: settings.auto_start,
           }
