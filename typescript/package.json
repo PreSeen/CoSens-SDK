@@ -1,7 +1,7 @@
 {
   "name": "cosens-sdk",
-  "version": "0.6.0",
-  "description": "CoSens TypeScript SDK: record OpenAI and OpenAI Agents executions and generate reusable Recipes",
+  "version": "0.5.4-rsi.24",
+  "description": "CoSens TypeScript SDK for local RSI and reusable Recipes",
   "keywords": [
     "cosens",
     "openai",
@@ -9,7 +9,6 @@
     "llm",
     "recipes"
   ],
-  "license": "Apache-2.0",
   "homepage": "https://cosens.ai/docs/",
   "repository": {
     "type": "git",
@@ -24,8 +23,7 @@
     "dist/",
     "README.md",
     "LICENSE",
-    "NOTICE",
-    "tests/fixtures/openai-public-methods.json"
+    "NOTICE"
   ],
   "engines": {
     "node": ">=22"
@@ -34,24 +32,33 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./memory": {
+      "types": "./dist/memory.d.ts",
+      "import": "./dist/memory.js"
+    },
+    "./rsi": {
+      "types": "./dist/rsi/index.d.ts",
+      "import": "./dist/rsi/index.js"
     }
   },
   "scripts": {
     "prepare": "npm run build",
-    "build": "tsc -p tsconfig.json",
+    "build": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
     "test": "node --import tsx --test tests/*.test.ts",
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "check": "npm run build && npm run typecheck && npm test"
   },
   "dependencies": {
-    "@openai/agents": "0.21.0",
+    "@langchain/langgraph": "1.7.5",
+    "@langchain/langgraph-checkpoint-sqlite": "1.1.1",
+    "@types/better-sqlite3": "7.6.13",
     "better-sqlite3": "13.0.3",
-    "openai": "7.45.0",
+    "fflate": "0.8.3",
+    "langsmith": "0.13.0",
     "zod": "4.6.7"
   },
   "devDependencies": {
-    "@openai/agents-core": "0.21.0",
-    "@types/better-sqlite3": "7.6.13",
     "@types/node": "22.19.15",
     "tsx": "4.20.6",
     "typescript": "6.0.3"

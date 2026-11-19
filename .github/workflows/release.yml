@@ -39,7 +39,7 @@ jobs:
           test "python-v${version}" = "${GITHUB_REF_NAME}" || { echo "Tag ${GITHUB_REF_NAME} does not match version ${version}"; exit 1; }
       - name: Test
         run: |
-          python -m pip install '.[test,agents]'
+          python -m pip install '.[test]'
           PYTHONPATH=src python -m pytest tests
       - name: Build
         run: |

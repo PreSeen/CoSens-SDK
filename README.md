@@ -1,45 +1,31 @@
-# CoSens SDK
+# CoSens Local RSI SDK
 
-[![PyPI](https://img.shields.io/pypi/v/cosens-sdk?label=PyPI)](https://pypi.org/project/cosens-sdk/)
-[![Python](https://img.shields.io/pypi/pyversions/cosens-sdk)](https://pypi.org/project/cosens-sdk/)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+CoSens turns confirmed task evidence into reusable Recipes. The local SDK is available in TypeScript and Python. Both provide Execution, Rubrics, and Recipe atomic functions.
 
-Python and TypeScript clients for the current CoSens Task → Execution → Recipe API. All three entry points record execution without learning a Recipe:
+```text
+Host Hook → local SDK → SQLite queue → on-demand worker
+→ extract user feedback → analyze evidence → generate candidate → execute test → score → save result
+```
 
-| Entry | Python | TypeScript |
+| Host | Import | Guide |
 | --- | --- | --- |
-| Transparent OpenAI | `cosens(model_client)` | `cosens(modelClient)` |
-| Explicit Agent execution | `cosens(agent).run(agent, input)` | `cosens(agent).run(agent, input)` |
-| Atomic HTTP operations | `client.atoms` / `client.sync_atoms` | `client.atoms` |
+| Node.js / TypeScript | `import { RSIClient } from 'cosens-sdk/rsi'` | [TypeScript](typescript/README.md) |
+| Python | `from cosens.rsi import RSIClient` | [Python](python/docs/local-rsi.md) |
 
-The SDK does not create model clients. Build the standard OpenAI client for your model gateway and pass it in:
+The host confirms the deliverable and selects the task trajectory. It submits the context and file paths to `execution_create`, then uses the returned ID to read status or answer clarification questions. The worker continues after the Hook returns.
 
-```python
-model_client = OpenAI(base_url=os.environ["COSENS_MODEL_BASE_URL"], api_key=os.environ["COSENS_API_KEY"])
-client = cosens(model_client, mode="auto")
-```
+Before deriving new Rubrics, the worker reads context and files with the `feedback` role in a dedicated pass. It extracts reusable, explicit user requirements and corrections with their evidence references. The analysis combines them with task requirements and execution evidence. The extracted rules are available in `execution_get` → `analysis.feedback`. Supplying a fixed Rubrics version skips extraction for Rubric generation.
 
-```ts
-const modelClient = new OpenAI({ baseURL: process.env.COSENS_MODEL_BASE_URL, apiKey: process.env.COSENS_API_KEY });
-const client = cosens(modelClient, { mode: 'auto' });
-```
+When the learning evidence includes a correction, the worker records likely causes and their source references in `execution_get` → `analysis.attribution`. Recipe generation uses those findings to write reusable steps or checks. A successful `recipe_test` shows that the Recipe met the Rubrics on the test input.
 
-A Task is a capability, such as writing the weekly management report, that many executions reuse; each execution carries its own input, and each Recipe belongs to one Task. Learning needs feedback: record the user's words about the artifact as `human` feedback (`feedback` on the wrappers, `record_feedback` / `recordFeedback` on the atoms), then call `generate_recipe` / `generateRecipe` (or the atomic `learn`) to learn V1 or the next version of the Recipe the execution followed, once per execution. Without feedback on the execution or an earlier draft of it, learning is refused with `RSIFeedbackRequired` and nothing is created; a later version comes from learning another execution that followed the Recipe, either a new execution of the task or a correction of one (`previous_execution_id` / `previousExecutionId`). The `auto` mode only records and selects context; it never authorizes learning, and the [Python](python/README.md) and [TypeScript](typescript/README.md) READMEs describe the rest, including where the two SDKs differ.
+Recipe and Rubric rules generalize historical examples into conditions, transformations and checks. The worker retries generation when it detects copied learning records. The evaluator receives only criteria, required flags and the pass threshold from the Rubric. Evidence references remain available for learning audits.
 
-See [Python](python/README.md), [TypeScript](typescript/README.md), and the three examples in each package. This is a breaking protocol change: Run, Revision, Recipe candidate, Session, standalone attribution, acceptance and learning-job APIs have been removed.
+During Recipe analysis the worker asks for clarification only when the evidence leaves multiple plausible interpretations of a reusable rule and the choice changes a future outcome or the rule's applicability. The worker applies rules supported by the evidence directly and expresses differences that future inputs or established conditions can resolve as parameters or branches.
 
-Tests: `PYTHONPATH=python/src pytest python/tests` and `npm --prefix typescript run check`. Optional real local HTTP integration: set `COSENS_TEST_ALGORITHM_HTTP_URL=http://127.0.0.1:18149` against the algorithm repository's `tests/support/explicit_http_server.py` fixture. It uses PostgreSQL and deterministic model substitutes, not a production model or production data.
+Rubric criteria whose conditions are absent from a test are recorded as `status: "unverified"` with `score: null`. Only verified criteria contribute to the score or required-criterion threshold. A test with no verified criteria and passing objective checks stays unverifiable. A scenario left unverified does not trigger a new Recipe round.
 
-## One API Key
+Optional public web search is available during Recipe generation in both SDKs. Set `COSENS_RSI_WEB_SEARCH_API_KEY` to an Exa key in the host or worker environment. `COSENS_RSI_WEB_SEARCH_ALLOWED_DOMAINS` and `COSENS_RSI_WEB_SEARCH_BLOCKED_DOMAINS` accept comma-separated hostnames. The worker sends the query to Exa and records the returned excerpts and URLs in the generation trace. It can issue up to three queries per generation attempt. Test execution and assessment keep their authorized file catalogs.
 
-Set `COSENS_API_KEY` to your CoSens API Key. The SDK uses the US CoSens API; `COSENS_REGION` defaults to `us` and accepts only `us`. Your application passes the same key as the model client's `api_key` and sets `COSENS_MODEL_BASE_URL` to `https://llm.cosens.ai/v1`. The SDK itself reads only `COSENS_API_KEY` and `COSENS_REGION`; `RSI_API_KEY*`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, `COSENS_MODE` and `COSENS_INPUT` are not SDK configuration. The application loads any `.env` file.
+Use separate data directories for the two runtimes. Each owns its local SQLite queue, files and checkpoints.
 
-Pass a public model ID in the model call. Algorithm operations accept only `model`, never a second API Key, base URL, auth type or provider settings. Model credentials are carried in Authorization. The algorithm gateway must forward that header alongside the authenticated user ID. Recipe generation still requires external artifact confirmation.
-
-## Contributing and security
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
-
-## License
-
-Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Run the checks from each package directory with `npm ci && npm run check` or `python -m pip install '.[test]' && python -m pytest`.
