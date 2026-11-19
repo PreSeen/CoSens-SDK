@@ -96,7 +96,7 @@ def drain(client, *, runtime=None, owner=None, slot=None):
                             store.has_pending(credentials)
                             if detached
                             else conn.execute(
-                                "SELECT 1 FROM jobs WHERE status='queued' "
+                                "SELECT 1 FROM executions WHERE status='queued' "
                                 "OR (status='running' AND lease_until<?) LIMIT 1",
                                 (time.time(),),
                             ).fetchone()

@@ -1,3 +1,5 @@
+import { upgradeExecution } from './execution-data.js';
+import { schema, storage } from './store-schema.js';
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, chmodSync } from 'node:fs';
@@ -51,9 +53,9 @@ eligible AS (
     SELECT id AS recipe_id, json_extract(data, '$.active_version_id') AS version_id
     FROM legacy
     UNION
-    SELECT json_extract(e.data, '$.result.recipe_id'),
+    SELECT r.id,
         json_extract(t.value, '$.version_id')
-    FROM objects e JOIN legacy r ON r.id=json_extract(e.data, '$.result.recipe_id')
+    FROM objects e JOIN legacy r ON r.id=json_extract(e.data, '$.recipe_id')
     JOIN json_each(e.data, '$.test_results') t
     WHERE e.kind='execution' AND json_extract(e.data, '$.status')='completed'
         AND json_extract(e.data, '$.result.provisional')=0
@@ -89,66 +91,173 @@ export class Store {
     this.db.pragma('journal_mode=WAL');
     this.db.pragma('busy_timeout=20000');
     this.db.pragma('foreign_keys=ON');
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS objects (id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL,created REAL NOT NULL,revision INTEGER NOT NULL);
-      CREATE INDEX IF NOT EXISTS objects_kind ON objects(kind,created,id);
-      CREATE TABLE IF NOT EXISTS versions (id TEXT PRIMARY KEY,object_id TEXT NOT NULL REFERENCES objects(id),number INTEGER NOT NULL,data TEXT NOT NULL,operation_key TEXT UNIQUE,UNIQUE(object_id,number));
-      CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY REFERENCES objects(id),status TEXT NOT NULL,owner TEXT,lease_until REAL,fence INTEGER NOT NULL DEFAULT 0,created REAL NOT NULL);
-      CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(status,created,id);
-      CREATE TABLE IF NOT EXISTS slots (token TEXT PRIMARY KEY,kind TEXT NOT NULL,owner TEXT NOT NULL,expires REAL NOT NULL);
-      CREATE INDEX IF NOT EXISTS slots_kind ON slots(kind,expires);
-      CREATE TABLE IF NOT EXISTS idempotency (scope TEXT NOT NULL,key TEXT NOT NULL,request TEXT NOT NULL,result TEXT NOT NULL,PRIMARY KEY(scope,key));
-    `);
-    const legacy = this.db
-      .prepare(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'",
-      )
-      .get();
-    if (legacy) {
-      const row = this.db
-        .prepare('SELECT data FROM settings WHERE id=1')
-        .get() as { data: string } | undefined;
-      const saved = row && JSON.parse(row.data);
-      if (saved?.runtime === 'typescript-v2')
-        this.db
-          .prepare(
-            "UPDATE objects SET data=json_set(data, '$.runtime_config', json(?)) WHERE kind='execution' AND json_type(data, '$.runtime_config') IS NULL",
-          )
-          .run(encode(saved.config));
-    }
-    if (
-      this.db
-        .prepare(
-          "SELECT 1 FROM objects WHERE kind='recipe' AND json_type(data, '$.latest_qualified_version_id') IS NULL LIMIT 1",
-        )
-        .get()
-    )
-      this.db.exec(initializeRecipeAvailability);
+    this.initialize();
     chmodSync(path, 0o600);
+  }
+  private initialize() {
+    if (this.db.pragma('user_version', { simple: true }) === 3) return;
+    this.tx(() => {
+      const version = this.db.pragma('user_version', { simple: true });
+      if (version === 3) return;
+      if (version !== 0 && version !== 1 && version !== 2)
+        fail('invalid_state', 'unsupported RSI SQLite schema version');
+      const legacy = this.db
+        .prepare(
+          "SELECT 1 FROM sqlite_master WHERE type='table' AND name='objects'",
+        )
+        .get();
+      if (legacy) {
+        const rows = this.db
+          .prepare("SELECT id,data FROM objects WHERE kind='execution'")
+          .all() as { id: string; data: string }[];
+        const settings = this.db
+          .prepare(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'",
+          )
+          .get();
+        const previousConfig = settings
+          ? (this.db.prepare('SELECT data FROM settings WHERE id=1').get() as
+              | { data: string }
+              | undefined)
+          : undefined;
+        const write = this.db.prepare('UPDATE objects SET data=? WHERE id=?');
+        for (const { id, data } of rows) {
+          const execution = upgradeExecution(JSON.parse(data));
+          if (!execution.runtime_config && previousConfig)
+            execution.runtime_config = JSON.parse(previousConfig.data).config;
+          write.run(encode(execution), id);
+        }
+        this.db.exec(initializeRecipeAvailability);
+        this.db.exec('ALTER TABLE versions RENAME TO previous_versions;');
+      }
+      if (version === 2)
+        this.db.exec(`
+          ALTER TABLE executions ADD COLUMN owner TEXT;
+          ALTER TABLE executions ADD COLUMN lease_until REAL;
+          ALTER TABLE executions ADD COLUMN fence INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE versions RENAME TO previous_versions;
+        `);
+      this.db.exec(schema);
+      if (legacy) {
+        const rows = this.db
+          .prepare("SELECT kind,data FROM objects WHERE kind<>'rubrics'")
+          .all() as {
+          kind: Exclude<Kind, 'rubrics'>;
+          data: string;
+        }[];
+        for (const { kind, data } of rows)
+          this.writeRecord(kind, JSON.parse(data), false);
+        this.db.exec(`
+          INSERT INTO versions (id,recipe_id,rubrics_id,rubrics_metadata,number,data,operation_key)
+          SELECT v.id, CASE WHEN o.kind='recipe' THEN o.id END,
+              CASE WHEN o.kind='rubrics' THEN o.id END,
+              CASE WHEN o.kind='rubrics' THEN json_remove(o.data, '$.latest_version_id') END,
+              v.number,v.data,v.operation_key
+          FROM previous_versions v JOIN objects o ON o.id=v.object_id;
+        `);
+      }
+      if (version === 2)
+        this.db.exec(`
+          INSERT INTO versions (id,recipe_id,rubrics_id,rubrics_metadata,number,data,operation_key)
+          SELECT v.id, v.recipe_id, v.rubrics_id,
+              CASE WHEN v.rubrics_id IS NOT NULL THEN json_set(
+                json_remove(r.details, '$.latest_version_id'),
+                '$.id', r.id, '$.created_at', r.created_at, '$.updated_at', r.updated_at,
+                '$.archived_at', r.archived_at, '$.revision', r.revision
+              ) END,
+              v.number,v.data,v.operation_key
+          FROM previous_versions v LEFT JOIN rubrics r ON r.id=v.rubrics_id;
+        `);
+      if (legacy || version === 2)
+        this.db.exec(`
+          UPDATE executions SET owner=j.owner, lease_until=j.lease_until, fence=j.fence
+          FROM jobs j WHERE j.id=executions.id;
+          DROP TABLE jobs;
+          DROP TABLE previous_versions;
+          DROP TABLE IF EXISTS rubrics;
+          DROP TABLE IF EXISTS objects;
+          DROP TABLE IF EXISTS settings;
+        `);
+      this.db.pragma('user_version = 3');
+    });
   }
   tx<T>(fn: () => T): T {
     return this.db.transaction(fn).immediate();
   }
-  get<T extends ObjectMetadata>(id: string, kind?: Kind): T {
+  private kind(id: string): Kind {
+    const kind = id.split('_', 1)[0];
+    if (kind !== 'rubrics' && !Object.hasOwn(storage, kind))
+      fail('not_found', 'object not found');
+    return kind as Kind;
+  }
+  private record<T>({
+    details,
+    owner: _owner,
+    lease_until: _lease,
+    fence: _fence,
+    ...fields
+  }: Record<string, unknown>): T {
+    return { ...JSON.parse(details as string), ...fields } as T;
+  }
+  private writeRecord(
+    kind: Exclude<Kind, 'rubrics'>,
+    record: ObjectMetadata,
+    update: boolean,
+  ) {
+    const { table, columns } = storage[kind];
+    const details: Record<string, unknown> = { ...record };
+    const fields = columns.map((column) => {
+      const value = details[column] ?? null;
+      delete details[column];
+      return value;
+    });
+    if (update)
+      this.db
+        .prepare(
+          `UPDATE ${table} SET ${columns
+            .slice(1)
+            .map((column) => column + '=?')
+            .join(',')},details=? WHERE id=?`,
+        )
+        .run(...fields.slice(1), encode(details), record.id);
+    else
+      this.db
+        .prepare(
+          `INSERT INTO ${table} (${columns.join(',')},details) VALUES (${columns.map(() => '?').join(',')},?)`,
+        )
+        .run(...fields, encode(details));
+  }
+  private rubricMetadata<T>(row: { id: string; rubrics_metadata: string }): T {
+    return {
+      ...JSON.parse(row.rubrics_metadata),
+      latest_version_id: row.id,
+    } as T;
+  }
+  get<T extends ObjectMetadata>(id: string, kind: Kind = this.kind(id)): T {
+    if (kind === 'rubrics') {
+      const row = this.db
+        .prepare(
+          'SELECT id,rubrics_metadata FROM versions WHERE rubrics_id=? ORDER BY number DESC LIMIT 1',
+        )
+        .get(id) as { id: string; rubrics_metadata: string } | undefined;
+      if (!row) return fail('not_found', 'rubrics not found');
+      return this.rubricMetadata<T>(row);
+    }
     const row = this.db
-      .prepare('SELECT kind,data FROM objects WHERE id=?')
-      .get(id) as { kind: string; data: string } | undefined;
-    if (!row || (kind && row.kind !== kind))
-      fail('not_found', `${kind ?? 'object'} not found`);
-    return JSON.parse(row!.data) as T;
+      .prepare(`SELECT * FROM ${storage[kind].table} WHERE id=?`)
+      .get(id) as Record<string, unknown> | undefined;
+    if (!row) fail('not_found', `${kind} not found`);
+    return this.record<T>(row!);
   }
   executionRecipeName(execution: Execution): string | undefined {
     const recipeId =
-      execution.recipe_id ??
-      execution.result?.recipe_id ??
-      execution.test_request?.recipe_id ??
-      null;
+      execution.recipe_id ?? execution.test_request?.recipe_id ?? null;
     const baseId = execution.base_recipe_version_id ?? null;
     if (!recipeId && !baseId) return execution.name;
     const recipe = this.db
       .prepare(
-        `SELECT json_extract(data, '$.name') AS name FROM objects
-       WHERE kind='recipe' AND id=COALESCE(?, (SELECT object_id FROM versions WHERE id=?))`,
+        `SELECT name FROM recipes
+       WHERE id=COALESCE(?, (SELECT object_id FROM versions WHERE id=?))`,
       )
       .get(recipeId, baseId) as { name: string | null } | undefined;
     return recipe?.name ?? execution.name;
@@ -165,37 +274,51 @@ export class Store {
       updated_at: now(),
       archived_at: null,
     } as unknown as T;
-    this.db
-      .prepare('INSERT INTO objects VALUES (?,?,?,?,?)')
-      .run(obj.id, kind, encode(obj), obj.created_at, 1);
-    if (kind === 'execution')
-      this.db
-        .prepare('INSERT INTO jobs(id,status,created) VALUES (?,?,?)')
-        .run(obj.id, (obj as unknown as Execution).status, obj.created_at);
+    if (kind !== 'rubrics') this.writeRecord(kind, { ...obj }, false);
     return obj;
   }
   save<T extends ObjectMetadata>(obj: T): T {
     const saved = { ...obj, revision: obj.revision + 1, updated_at: now() };
-    this.db
-      .prepare('UPDATE objects SET data=?,revision=? WHERE id=?')
-      .run(encode(saved), saved.revision, obj.id);
-    if (obj.id.startsWith('execution_'))
-      this.db
-        .prepare('UPDATE jobs SET status=? WHERE id=?')
-        .run((saved as unknown as Execution).status, obj.id);
+    const kind = this.kind(obj.id);
+    if (kind === 'rubrics')
+      return fail(
+        'invalid_state',
+        'rubrics metadata is written with its version',
+      );
+    this.writeRecord(kind, { ...saved }, true);
     return saved;
   }
   list<T extends ObjectMetadata>(kind: Kind, options: Pagination = {}): T[] {
     const { limit, offset } = pagination(options);
-    return (
-      this.db
+    if (kind === 'rubrics') {
+      const rows = this.db
         .prepare(
-          "SELECT data FROM objects WHERE kind=? AND ((json_extract(data,'$.archived_at') IS NOT NULL)=?) ORDER BY created,id LIMIT ? OFFSET ?",
+          `
+        WITH current AS (
+          SELECT id,rubrics_id,rubrics_metadata,
+                 row_number() OVER (PARTITION BY rubrics_id ORDER BY number DESC) AS position
+          FROM versions WHERE rubrics_id IS NOT NULL
         )
-        .all(kind, Number(options.archived ?? false), limit, offset) as {
-        data: string;
-      }[]
-    ).map((r) => JSON.parse(r.data));
+        SELECT id,rubrics_metadata FROM current
+        WHERE position=1 AND (json_extract(rubrics_metadata,'$.archived_at') IS NOT NULL)=?
+        ORDER BY json_extract(rubrics_metadata,'$.created_at'),rubrics_id LIMIT ? OFFSET ?
+      `,
+        )
+        .all(Number(options.archived ?? false), limit, offset) as {
+        id: string;
+        rubrics_metadata: string;
+      }[];
+      return rows.map((row) => this.rubricMetadata<T>(row));
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM ${storage[kind].table} WHERE (archived_at IS NOT NULL)=? ORDER BY created_at,id LIMIT ? OFFSET ?`,
+      )
+      .all(Number(options.archived ?? false), limit, offset) as Record<
+      string,
+      unknown
+    >[];
+    return rows.map((row) => this.record<T>(row));
   }
   version<C = unknown>(object_id: string, version_id: string): Version<C> {
     const row = this.db
@@ -261,10 +384,28 @@ export class Store {
       provenance,
       created_at: now(),
     };
+    const kind = this.kind(obj.id);
+    const { latest_version_id: _latest, ...metadata } = obj as Versioned;
     this.db
-      .prepare('INSERT INTO versions VALUES (?,?,?,?,?)')
-      .run(version.id, obj.id, number, encode(version), operation_key ?? null);
-    this.save({ ...obj, latest_version_id: version.id });
+      .prepare(
+        'INSERT INTO versions (id,recipe_id,rubrics_id,rubrics_metadata,number,data,operation_key) VALUES (?,?,?,?,?,?,?)',
+      )
+      .run(
+        version.id,
+        kind === 'recipe' ? obj.id : null,
+        kind === 'rubrics' ? obj.id : null,
+        kind === 'rubrics'
+          ? encode({
+              ...metadata,
+              revision: obj.revision + 1,
+              updated_at: now(),
+            })
+          : null,
+        number,
+        encode(version),
+        operation_key ?? null,
+      );
+    if (kind === 'recipe') this.save({ ...obj, latest_version_id: version.id });
     return version;
   }
   replay<T>(
@@ -307,7 +448,7 @@ export class Store {
       if (kind === 'worker' && onlyIfPending) {
         const { pending } = this.db
           .prepare(
-            "SELECT COUNT(*) AS pending FROM jobs WHERE status IN ('queued','running')",
+            "SELECT COUNT(*) AS pending FROM executions WHERE status IN ('queued','running')",
           )
           .get() as { pending: number };
         if (count >= pending) return null;
@@ -338,7 +479,7 @@ export class Store {
         .run(time + ttl, owner, time);
       this.db
         .prepare(
-          "UPDATE jobs SET lease_until=? WHERE owner=? AND lease_until>=? AND status='running'",
+          "UPDATE executions SET lease_until=? WHERE owner=? AND lease_until>=? AND status='running'",
         )
         .run(time + ttl, owner, time);
     });
@@ -353,17 +494,17 @@ export class Store {
       const time = now();
       const { count } = this.db
         .prepare(
-          "SELECT COUNT(*) AS count FROM jobs WHERE status='running' AND lease_until>=?",
+          "SELECT COUNT(*) AS count FROM executions WHERE status='running' AND lease_until>=?",
         )
         .get(time) as { count: number };
       if (count >= limit) return null;
       const row = this.db
         .prepare(
-          `SELECT jobs.id, jobs.fence FROM jobs JOIN objects ON objects.id = jobs.id
-           WHERE (jobs.status='queued' OR (jobs.status='running' AND jobs.lease_until<?))
-           AND COALESCE(json_extract(objects.data, '$.runtime_config.max_executions'), ?) > ?
-           AND (? IS NULL OR json_extract(objects.data, '$.runtime_config.model.api_key_env') IN (SELECT value FROM json_each(?)))
-           ORDER BY jobs.created,jobs.id LIMIT 1`,
+          `SELECT executions.id, executions.fence FROM executions
+           WHERE (executions.status='queued' OR (executions.status='running' AND executions.lease_until<?))
+           AND COALESCE(json_extract(executions.details, '$.runtime_config.max_executions'), ?) > ?
+           AND (? IS NULL OR json_extract(executions.details, '$.runtime_config.model.api_key_env') IN (SELECT value FROM json_each(?)))
+           ORDER BY executions.created_at,executions.id LIMIT 1`,
         )
         .get(
           time,
@@ -375,7 +516,7 @@ export class Store {
       if (!row) return null;
       this.db
         .prepare(
-          "UPDATE jobs SET owner=?,lease_until=?,fence=fence+1,status='running' WHERE id=?",
+          'UPDATE executions SET owner=?,lease_until=?,fence=fence+1 WHERE id=?',
         )
         .run(owner, time + ttl, row.id);
       this.save({
@@ -391,13 +532,18 @@ export class Store {
     fence: number,
     revision?: number,
   ): Execution {
-    const job = this.db.prepare('SELECT * FROM jobs WHERE id=?').get(id) as
+    const job = this.db
+      .prepare(
+        'SELECT owner,lease_until,fence,status FROM executions WHERE id=?',
+      )
+      .get(id) as
       | { owner: string; fence: number; lease_until: number; status: string }
       | undefined;
     if (
       !job ||
       job.owner !== owner ||
       job.fence !== fence ||
+      job.lease_until == null ||
       job.lease_until < now() ||
       job.status !== 'running'
     )
@@ -410,11 +556,11 @@ export class Store {
   pending_execution(credentials?: string[]) {
     return this.db
       .prepare(
-        `SELECT jobs.id AS id, json_extract(objects.data, '$.runtime_config') AS config
-       FROM jobs JOIN objects ON objects.id = jobs.id
-       WHERE jobs.status IN ('queued','running')
-       AND (? IS NULL OR json_extract(objects.data, '$.runtime_config.model.api_key_env') IN (SELECT value FROM json_each(?)))
-       ORDER BY jobs.created, jobs.id LIMIT 1`,
+        `SELECT executions.id AS id, json_extract(executions.details, '$.runtime_config') AS config
+       FROM executions
+       WHERE executions.status IN ('queued','running')
+       AND (? IS NULL OR json_extract(executions.details, '$.runtime_config.model.api_key_env') IN (SELECT value FROM json_each(?)))
+       ORDER BY executions.created_at, executions.id LIMIT 1`,
       )
       .get(
         credentials ? encode(credentials) : null,

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { authorizedTestFiles, snapshot } from './materials.js';
-import { executionProgress, restartExecution } from './progress.js';
+import { restartExecution } from './progress.js';
 import { Store, uid, now, encode } from './store.js';
 import {
   readRecipeList,
@@ -23,6 +23,7 @@ import {
   type MaterialManifest,
   type Execution,
   type ExecutionCreate,
+  type ExecutionAnswer,
   type MetadataUpdate,
   type Pagination,
   type Kind,
@@ -221,7 +222,7 @@ export class RSIClient {
   }
   private execution_insert(
     request: Omit<ExecutionCreate, 'idempotency_key'> & {
-      answers?: Record<string, unknown>;
+      answers?: Record<string, ExecutionAnswer>;
       name?: string;
     },
     config = this.config,
@@ -236,19 +237,17 @@ export class RSIClient {
       materials.flatMap((material) => material.files),
       request.policy.test_task,
     );
-    for (const [id, kind] of [
-      [request.rubrics_version_id, 'rubrics'],
-      [request.base_recipe_version_id, 'recipe'],
-    ] as const) {
-      if (id) {
-        const v = this.store.version_by_id(id, kind);
-        if (this.store.get(v.object_id, kind).archived_at)
-          fail('invalid_state', 'archived version owner cannot be used');
-      }
+    if (request.base_recipe_version_id) {
+      const base = this.store.version_by_id(
+        request.base_recipe_version_id,
+        'recipe',
+      );
+      if (this.store.get(base.object_id, 'recipe').archived_at)
+        fail('invalid_state', 'archived recipe cannot be used');
     }
     if (
-      request.parent_execution_id &&
-      !TERMINAL.has(this.execution_get(request.parent_execution_id).status)
+      request.base_execution_id &&
+      !TERMINAL.has(this.execution_get(request.base_execution_id).status)
     )
       fail(
         'invalid_state',
@@ -256,6 +255,8 @@ export class RSIClient {
       );
     return this.store.insert<Execution>('execution', {
       ...request,
+      base_execution_id: request.base_execution_id ?? null,
+      rubrics_version_id: null,
       runtime_config: config,
       policy: PolicySchema.parse(request.policy),
       status: 'queued',
@@ -354,7 +355,7 @@ export class RSIClient {
           const created = this.execution_insert({
             material_ids: [material.id],
             base_recipe_version_id: parent?.recipe_version_id,
-            parent_execution_id: parent?.id,
+            base_execution_id: parent?.id,
             policy: {
               artifact_confirmed: true,
               confirmation_ref,
@@ -479,13 +480,12 @@ export class RSIClient {
       if (obj.status === 'completed')
         fail('invalid_state', 'completed execution cannot be cancelled');
       if (TERMINAL.has(obj.status)) return obj;
-      obj.progress_percent = executionProgress(obj);
       obj.status = 'cancelled';
       obj.stage = 'cancelled';
       const result = this.store.save(obj);
       this.store.db
         .prepare(
-          'UPDATE jobs SET fence=fence+1,owner=NULL,lease_until=NULL WHERE id=?',
+          'UPDATE executions SET fence=fence+1,owner=NULL,lease_until=NULL WHERE id=?',
         )
         .run(id);
       return result;
@@ -535,14 +535,15 @@ export class RSIClient {
           text: args.text ?? null,
         };
       if (obj.answers[key]) {
-        if (encode(obj.answers[key]) !== encode(answer))
+        const { continuation_execution_id, ...recorded } = obj.answers[key];
+        if (encode(recorded) !== encode(answer))
           fail(
             'conflict',
             'answer already accepted; submit correction as feedback Material',
           );
         return {
           execution_id: id,
-          continuation_execution_id: obj.answer_children?.[key] ?? null,
+          continuation_execution_id: continuation_execution_id ?? null,
         };
       }
       obj.answers[key] = answer;
@@ -552,16 +553,14 @@ export class RSIClient {
           {
             material_ids: obj.material_ids,
             policy: obj.policy,
-            rubrics_version_id: obj.rubrics_version_id,
-            source_session_id: obj.source_session_id,
-            parent_execution_id: id,
+            base_execution_id: id,
             base_recipe_version_id: obj.recipe_version_id,
             answers: obj.answers,
             name: this.store.executionRecipeName(obj),
           },
           this.suppliedConfig ?? obj.runtime_config,
         ).id;
-        obj.answer_children = { ...obj.answer_children, [key]: child_id };
+        obj.answers[key] = { ...answer, continuation_execution_id: child_id };
       } else if (!TERMINAL.has(obj.status)) restartExecution(obj);
       this.store.save(obj);
       const result = { execution_id: id, continuation_execution_id: child_id };

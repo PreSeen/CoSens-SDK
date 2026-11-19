@@ -13,12 +13,6 @@ const retryOffsets: Record<string, number> = {
   evaluate: 35,
 };
 
-export function executionProgress(execution: Execution): number {
-  if (execution.status === 'completed') return 100;
-  const stage = execution.error?.stage ?? execution.stage;
-  return execution.progress_percent ?? firstRound[stage] ?? 0;
-}
-
 export function stageProgress(
   stage: string,
   round: number,
@@ -32,6 +26,7 @@ export function stageProgress(
 
 export function restartExecution(execution: Execution) {
   execution.input_revision++;
+  execution.rubrics_version_id = null;
   execution.stage = execution.status === 'running' ? 'analyze' : 'queued';
   execution.progress_percent = stageProgress(execution.stage, 1, 1);
 }

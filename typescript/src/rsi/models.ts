@@ -210,7 +210,6 @@ export const PolicySchema = z.strictObject({
   artifact_confirmed: z.literal(true),
   confirmation_ref: text,
   max_rounds: z.number().int().min(1).max(10).default(2),
-  auto_activate: z.boolean().default(false),
   test_task: z
     .strictObject({
       instruction: text,
@@ -299,29 +298,31 @@ export interface TestResult {
   evaluator_trace_path?: string;
 }
 export interface ExecutionResult {
-  recipe_id: string;
-  recipe_version_id: string;
-  rubrics_version_id: string;
   test_status: TestResult['status'];
   provisional: boolean;
-  activated: boolean;
-  activation_conflict?: boolean;
+  published: boolean;
+}
+export interface ExecutionAnswer {
+  selected_option_ids: string[];
+  question: string;
+  question_revision: number;
+  selected_options: Question['options'];
+  text: string | null;
+  continuation_execution_id?: string;
 }
 export interface Execution extends ObjectMetadata {
   runtime_config: LocalConfig;
   material_ids: string[];
   policy: z.output<typeof PolicySchema>;
-  source_session_id?: string | null;
-  parent_execution_id?: string | null;
-  rubrics_version_id?: string | null;
+  base_execution_id: string | null;
+  rubrics_version_id: string | null;
   base_recipe_version_id?: string | null;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
   stage: string;
-  progress_percent?: number;
+  progress_percent: number;
   input_revision: number;
   questions: Question[];
-  answers: Record<string, unknown>;
-  answer_children?: Record<string, string>;
+  answers: Record<string, ExecutionAnswer>;
   recipe_id: string | null;
   recipe_version_id: string | null;
   result: ExecutionResult | null;
@@ -332,10 +333,8 @@ export interface Execution extends ObjectMetadata {
     stage: string;
     upstream_status?: number;
   } | null;
-  hypothesis?: string | null;
-  analysis?: Analysis;
+  analysis?: Omit<Analysis, 'questions' | 'rubrics'>;
   analyzed_input_revision?: number;
-  resolved_rubrics_version_id?: string;
   test_request?: {
     recipe_id: string;
     version_id: string;
@@ -356,10 +355,8 @@ export interface MetadataUpdate {
 export interface ExecutionCreate {
   material_ids: string[];
   policy: ExecutionPolicy;
-  rubrics_version_id?: string | null;
   base_recipe_version_id?: string | null;
-  parent_execution_id?: string | null;
-  source_session_id?: string | null;
+  base_execution_id?: string | null;
   idempotency_key?: string;
 }
 export interface ClarificationAnswer {

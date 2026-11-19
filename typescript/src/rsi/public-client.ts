@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { RSIClient as QueueClient } from './client.js';
-import { executionProgress } from './progress.js';
 import type { EvidenceFile, Execution as StoredExecution } from './models.js';
 
 const text = z.string().min(1);
@@ -51,12 +50,30 @@ const recipeTest = z.strictObject({
 
 export type RSIConfig = z.input<typeof config>;
 export type ExecutionEvidence = z.input<typeof evidence>;
-export type Execution = Omit<
+export type Execution = Pick<
   StoredExecution,
-  'material_ids' | 'progress_percent'
+  | 'id'
+  | 'base_execution_id'
+  | 'status'
+  | 'stage'
+  | 'input_revision'
+  | 'progress_percent'
+  | 'questions'
+  | 'answers'
+  | 'recipe_id'
+  | 'recipe_version_id'
+  | 'rubrics_version_id'
+  | 'test_results'
+  | 'result'
+  | 'error'
+  | 'created_at'
+  | 'updated_at'
 > & {
-  evidence: EvidenceFile[];
-  progress_percent: number;
+  name: string;
+  evidence: Pick<
+    EvidenceFile,
+    'path' | 'locator' | 'role' | 'sha256' | 'size'
+  >[];
 };
 export type ExecutionCreate = z.input<typeof executionCreate>;
 export type Page = z.input<typeof page>;
@@ -87,11 +104,52 @@ export class RSIClient {
     this.data_dir = this.#queue.data_dir;
   }
 
-  #presentExecution({ material_ids, ...rest }: StoredExecution): Execution {
+  #presentExecution(execution: StoredExecution): Execution {
+    const {
+      id,
+      name,
+      base_execution_id,
+      status,
+      stage,
+      input_revision,
+      questions,
+      answers,
+      recipe_id,
+      recipe_version_id,
+      rubrics_version_id,
+      test_results,
+      result,
+      error,
+      created_at,
+      updated_at,
+    } = execution;
     return {
-      ...rest,
-      progress_percent: executionProgress({ ...rest, material_ids }),
-      evidence: this.#queue.execution_evidence({ ...rest, material_ids }),
+      id,
+      name: name ?? '首次学习',
+      base_execution_id,
+      status,
+      stage,
+      progress_percent: execution.progress_percent,
+      input_revision,
+      evidence: this.#queue
+        .execution_evidence(execution)
+        .map(({ path, locator, role, sha256, size }) => ({
+          path,
+          locator,
+          role,
+          sha256,
+          size,
+        })),
+      questions,
+      answers,
+      recipe_id,
+      recipe_version_id,
+      rubrics_version_id,
+      test_results,
+      result,
+      error,
+      created_at,
+      updated_at,
     };
   }
 

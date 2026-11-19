@@ -399,7 +399,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         run.analysis?.feedback?.map((item) => item.evidence_refs[0].locator),
         [captured.files[0].locator, captured.files[1].locator],
       );
-      assert.equal(run.result?.activated, true);
+      assert.equal(run.result?.published, true);
       assert.equal(
         readFileSync(run.test_results[0].artifacts[0].path, 'utf8'),
         '42',
@@ -473,7 +473,10 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       assert.deepEqual(
         db
           .prepare(
-            'SELECT kind, count(*) AS n FROM objects GROUP BY kind ORDER BY kind',
+            `SELECT 'execution' AS kind, count(*) AS n FROM executions
+             UNION ALL SELECT 'material', count(*) FROM evidence_snapshots
+             UNION ALL SELECT 'recipe', count(*) FROM recipes
+             UNION ALL SELECT 'rubrics', count(DISTINCT rubrics_id) FROM versions WHERE rubrics_id IS NOT NULL`,
           )
           .all(),
         [
@@ -662,7 +665,6 @@ test('new clarification restarts the input revision and only the corrected versi
     policy: {
       artifact_confirmed: true,
       confirmation_ref: 'test',
-      auto_activate: true,
       test_task: {
         instruction: 'Generate result.txt',
         input_locators: [current],
@@ -802,7 +804,7 @@ test('new clarification restarts the input revision and only the corrected versi
     assert.equal(result.status, 'completed', JSON.stringify(result.error));
     assert.equal(result.test_results.length, 1);
     assert.equal(result.test_results[0].input_revision, 2);
-    assert.equal(result.result?.activated, true);
+    assert.equal(result.result?.published, true);
     assert.equal(result.name, 'Format numbers');
     const recipe = client.recipe_get(result.recipe_id!);
     assert.equal(recipe.name, result.name);
@@ -888,7 +890,7 @@ test('an expired worker lease resumes the graph without regenerating the candida
     assert.equal(before.name, 'Write an answer file');
     assert.equal(generated, 1);
     client.store.db
-      .prepare('UPDATE jobs SET lease_until = 0 WHERE id = ?')
+      .prepare('UPDATE executions SET lease_until = 0 WHERE id = ?')
       .run(execution.id);
     await client.run_pending({
       runtime: {
@@ -903,6 +905,8 @@ test('an expired worker lease resumes the graph without regenerating the candida
     assert.equal(after.result?.test_status, 'passed');
     assert.equal(after.progress_percent, 100);
     assert.equal(after.recipe_version_id, before.recipe_version_id);
+    assert.equal(after.rubrics_version_id, before.rubrics_version_id);
+    assert.ok(!('rubrics' in after.analysis!));
     assert.equal(after.name, before.name);
     assert.equal(client.recipe_list()[0].name, before.name);
     assert.equal(generated, 1);
@@ -922,8 +926,11 @@ test('an expired worker lease resumes the graph without regenerating the candida
         idempotency_key: 'follow-up',
       };
       const followUp = await host.execution_create(submission);
-      assert.equal(followUp.parent_execution_id, after.id);
-      assert.equal(followUp.base_recipe_version_id, after.recipe_version_id);
+      assert.equal(followUp.base_execution_id, after.id);
+      assert.equal(
+        client.execution_get(followUp.id).base_recipe_version_id,
+        after.recipe_version_id,
+      );
       assert.equal((await host.execution_create(submission)).id, followUp.id);
       assert.equal('execution_update' in host, false);
       assert.equal('rubrics_update' in host, false);
@@ -949,7 +956,8 @@ test('an expired worker lease resumes the graph without regenerating the candida
       assert.equal(appended.input_revision, followUp.input_revision + 1);
       assert.equal(appended.evidence.length, followUp.evidence.length + 1);
       assert.equal(appended.progress_percent, 0);
-      assert.deepEqual(appended.policy.test_task, followUp.policy.test_task);
+      assert.ok(!('policy' in appended));
+      assert.ok(!('snapshot' in appended.evidence[0]));
       assert.deepEqual(
         await host.execution_append_evidence(followUp.id, extra),
         appended,
@@ -1091,13 +1099,13 @@ test('recipe_list shows first-time learning and preserves the usable version dur
           ],
         },
       ],
+      recipe_id: recipe.id,
+      recipe_version_id: candidate.id,
+      rubrics_version_id: 'fixture',
       result: {
-        recipe_id: recipe.id,
-        recipe_version_id: candidate.id,
-        rubrics_version_id: 'fixture',
         test_status: 'failed',
         provisional: true,
-        activated: false,
+        published: false,
       },
     });
     [row] = client.recipe_list({ active_only: true });

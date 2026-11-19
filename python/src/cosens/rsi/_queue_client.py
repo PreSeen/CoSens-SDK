@@ -18,7 +18,7 @@ from .models import (
     LocalConfig,
     NotFound,
 )
-from .progress import execution_progress, restart_execution
+from .progress import restart_execution
 from .recipe_list import read_recipe_list
 from .store import Store, uid
 
@@ -197,23 +197,18 @@ class RSIClient:
             [file for material in materials for file in material["files"]],
             request["policy"].get("test_task"),
         )
-        for field, kind in [
-            ("rubrics_version_id", "rubrics"),
-            ("base_recipe_version_id", "recipe"),
-        ]:
-            if request.get(field):
-                row = conn.execute(
-                    "SELECT object_id FROM versions WHERE id=?", (request[field],)
-                ).fetchone()
-                if not row:
-                    raise NotFound(field + " not found")
-                obj = self.store.get_in(conn, row[0], kind)
-                if obj["archived_at"]:
-                    raise InvalidState("archived version owner cannot be used")
-        if request.get("parent_execution_id"):
-            parent = self.store.get_in(
-                conn, request["parent_execution_id"], "execution"
-            )
+        base_id = request.get("base_recipe_version_id")
+        if base_id:
+            row = conn.execute(
+                "SELECT object_id FROM versions WHERE id=?", (base_id,)
+            ).fetchone()
+            if row is None:
+                raise NotFound("base_recipe_version_id not found")
+            recipe = self.store.get_in(conn, row["object_id"], "recipe")
+            if recipe["archived_at"]:
+                raise InvalidState("archived recipe cannot be used")
+        if request.get("base_execution_id"):
+            parent = self.store.get_in(conn, request["base_execution_id"], "execution")
             if parent["status"] not in TERMINAL:
                 raise InvalidState(
                     "continue an active execution with execution_append_evidence"
@@ -223,6 +218,8 @@ class RSIClient:
             "execution",
             {
                 **request,
+                "base_execution_id": request.get("base_execution_id"),
+                "rubrics_version_id": None,
                 "runtime_config": (config or self.config).model_dump(),
                 "status": "queued",
                 "stage": "queued",
@@ -243,10 +240,8 @@ class RSIClient:
         *,
         material_ids,
         policy,
-        rubrics_version_id=None,
         base_recipe_version_id=None,
-        parent_execution_id=None,
-        source_session_id=None,
+        base_execution_id=None,
         idempotency_key=None,
     ):
         policy = ExecutionPolicy.model_validate(policy).model_dump()
@@ -268,10 +263,8 @@ class RSIClient:
         request = {
             "material_ids": material_ids,
             "policy": policy,
-            "rubrics_version_id": rubrics_version_id,
             "base_recipe_version_id": base_recipe_version_id,
-            "parent_execution_id": parent_execution_id,
-            "source_session_id": source_session_id,
+            "base_execution_id": base_execution_id,
         }
         with self.store.transaction() as conn:
             previous = self.store.replay(
@@ -353,7 +346,7 @@ class RSIClient:
                 {
                     "material_ids": [material["id"]],
                     "base_recipe_version_id": (parent or {}).get("recipe_version_id"),
-                    "parent_execution_id": parent["id"] if parent else None,
+                    "base_execution_id": parent["id"] if parent else None,
                     "policy": policy,
                 },
             )
@@ -461,14 +454,10 @@ class RSIClient:
                 raise InvalidState("completed execution cannot be cancelled")
             if obj["status"] in {"failed", "cancelled"}:
                 return obj
-            obj.update(
-                status="cancelled",
-                stage="cancelled",
-                progress_percent=execution_progress(obj),
-            )
+            obj.update(status="cancelled", stage="cancelled")
             result = self.store.save(conn, obj)
             conn.execute(
-                "UPDATE jobs SET fence=fence+1,owner=NULL,lease_until=NULL WHERE id=?",
+                "UPDATE executions SET fence=fence+1,owner=NULL,lease_until=NULL WHERE id=?",
                 (execution_id,),
             )
             return result
@@ -546,15 +535,15 @@ class RSIClient:
             }
             previous_answer = obj["answers"].get(key)
             if previous_answer:
-                if previous_answer != answer:
+                recorded = dict(previous_answer)
+                continuation_id = recorded.pop("continuation_execution_id", None)
+                if recorded != answer:
                     raise Conflict(
                         "answer already accepted; submit correction as new feedback Material"
                     )
                 return {
                     "execution_id": execution_id,
-                    "continuation_execution_id": obj.get("answer_children", {}).get(
-                        key
-                    ),
+                    "continuation_execution_id": continuation_id,
                 }
             obj["answers"][key] = answer
             child_id = None
@@ -564,15 +553,13 @@ class RSIClient:
                     for k in (
                         "material_ids",
                         "policy",
-                        "rubrics_version_id",
-                        "source_session_id",
                     )
                 }
                 name = self.store.execution_recipe_name(conn, obj)
                 if name:
                     inherited["name"] = name
                 inherited.update(
-                    parent_execution_id=execution_id,
+                    base_execution_id=execution_id,
                     base_recipe_version_id=obj["recipe_version_id"],
                     answers=obj["answers"],
                 )
@@ -582,7 +569,7 @@ class RSIClient:
                     config=self._supplied_config
                     or LocalConfig.model_validate(obj["runtime_config"]),
                 )["id"]
-                obj.setdefault("answer_children", {})[key] = child_id
+                obj["answers"][key] = {**answer, "continuation_execution_id": child_id}
             elif obj["status"] not in TERMINAL:
                 restart_execution(obj)
             self.store.save(conn, obj)

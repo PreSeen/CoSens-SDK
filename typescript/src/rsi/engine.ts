@@ -1,3 +1,4 @@
+import { compactAnalysis } from './execution-data.js';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import Database from 'better-sqlite3';
@@ -14,7 +15,7 @@ import {
 } from './materials.js';
 import { LearningLiterals, rubricRuleText } from './portability.js';
 import { uid } from './store.js';
-import { executionProgress, stageProgress } from './progress.js';
+import { stageProgress } from './progress.js';
 import {
   AnalysisSchema,
   FeedbackExtractionSchema,
@@ -71,7 +72,7 @@ export class Engine {
         ...execution,
         stage,
         progress_percent: Math.max(
-          executionProgress(execution),
+          execution.progress_percent,
           stageProgress(stage, round, execution.policy.max_rounds),
         ),
       });
@@ -127,9 +128,15 @@ export class Engine {
   private context(execution: Execution) {
     const { test_task: _testTask, ...policy } = execution.policy;
     return {
-      answers: execution.answers,
+      answers: Object.fromEntries(
+        Object.entries(execution.answers).map(
+          ([key, { continuation_execution_id: _child, ...answer }]) => [
+            key,
+            answer,
+          ],
+        ),
+      ),
       policy,
-      source_session_id: execution.source_session_id,
     };
   }
 
@@ -137,13 +144,18 @@ export class Engine {
     const execution = this.inStage(state.revision, 'analyze');
     if (execution.analyzed_input_revision === state.revision) {
       return {
-        analysis: execution.analysis!,
-        rubric: execution.resolved_rubrics_version_id!,
+        analysis: {
+          ...execution.analysis!,
+          questions: execution.questions,
+          rubrics: RubricsSchema.parse(
+            this.store.version_by_id(execution.rubrics_version_id!, 'rubrics')
+              .content,
+          ),
+        },
+        rubric: execution.rubrics_version_id!,
       };
     }
-    const fixed =
-      execution.test_request?.rubrics_version_id ??
-      execution.rubrics_version_id;
+    const fixed = execution.test_request?.rubrics_version_id;
     const fixedRubrics = fixed
       ? RubricsSchema.parse(this.store.version_by_id(fixed, 'rubrics').content)
       : undefined;
@@ -265,10 +277,9 @@ export class Engine {
         ...current,
         name: this.store.executionRecipeName(current) ?? analysis.recipe_name,
         questions: analysis.questions,
-        hypothesis: analysis.hypothesis,
-        analysis,
+        analysis: compactAnalysis(analysis),
         analyzed_input_revision: state.revision,
-        resolved_rubrics_version_id: rubric,
+        rubrics_version_id: rubric,
       });
       return { analysis, rubric };
     });
@@ -601,15 +612,12 @@ export class Engine {
           !(`${question.id}:${question.revision}` in execution.answers),
       );
       const result: ExecutionResult = {
-        recipe_id: candidate.recipe_id,
-        recipe_version_id: candidate.version_id,
-        rubrics_version_id: state.rubric,
         test_status: state.test!.status,
         provisional,
-        activated: false,
+        published: false,
       };
       if (result.test_status === 'passed' && !provisional)
-        result.activated = this.store.publishRecipeVersion(
+        result.published = this.store.publishRecipeVersion(
           candidate.recipe_id,
           candidate.version_id,
         );
@@ -619,6 +627,7 @@ export class Engine {
         stage: 'done',
         progress_percent: 100,
         result,
+        rubrics_version_id: state.rubric,
         recipe_id: candidate.recipe_id,
         recipe_version_id: candidate.version_id,
       });

@@ -1,6 +1,6 @@
 {
   "name": "cosens-sdk",
-  "version": "0.5.4-rsi.21",
+  "version": "0.5.4-rsi.24",
   "description": "CoSens TypeScript SDK for local RSI and reusable Recipes",
   "keywords": [
     "cosens",
@@ -30,6 +30,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./memory": {
+      "types": "./dist/memory.d.ts",
+      "import": "./dist/memory.js"
     },
     "./rsi": {
       "types": "./dist/rsi/index.d.ts",

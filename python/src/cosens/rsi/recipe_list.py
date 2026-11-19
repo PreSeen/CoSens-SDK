@@ -33,38 +33,35 @@ def read_recipe_list(conn, *, q, active_only, archived, limit, offset):
 
 RECIPE_LIST_QUERY = """
 WITH execution_activity AS (
-    SELECT e.id AS execution_id, e.created,
+    SELECT e.id AS execution_id, e.created_at AS created,
         COALESCE(
-            json_extract(e.data, '$.recipe_id'),
-            json_extract(e.data, '$.result.recipe_id'),
-            json_extract(e.data, '$.test_request.recipe_id'),
-            base.object_id
+            e.recipe_id,
+            json_extract(e.details, '$.test_request.recipe_id'),
+            base.recipe_id
         ) AS recipe_id,
         COALESCE(
-            NULLIF(json_extract(e.data, '$.name'), ''),
+            NULLIF(e.name, ''),
             '首次学习'
         ) AS name,
-        json_extract(e.data, '$.status') AS execution_status,
-        json_extract(e.data, '$.stage') AS stage,
-        json_extract(e.data, '$.result.test_status') AS test_status,
-        json_extract(e.data, '$.updated_at') AS activity_updated_at,
-        json_extract(e.data, '$.archived_at') AS archived_at,
+        e.status AS execution_status,
+        e.stage AS stage,
+        json_extract(e.details, '$.result.test_status') AS test_status,
+        e.updated_at AS activity_updated_at,
+        e.archived_at AS archived_at,
         COALESCE(
-            json_extract(e.data, '$.recipe_version_id'),
-            json_extract(e.data, '$.result.recipe_version_id'),
-            json_extract(e.data, '$.test_request.version_id')
+            e.recipe_version_id,
+            json_extract(e.details, '$.test_request.version_id')
         ) AS candidate_version_id,
         (
-            SELECT count(*) FROM json_each(e.data, '$.questions') q
+            SELECT count(*) FROM json_each(e.details, '$.questions') q
             WHERE NOT EXISTS (
-                SELECT 1 FROM json_each(e.data, '$.answers') a
+                SELECT 1 FROM json_each(e.details, '$.answers') a
                 WHERE a.key = json_extract(q.value, '$.id') || ':' ||
                     json_extract(q.value, '$.revision')
             )
         ) AS unanswered
-    FROM objects e
-    LEFT JOIN versions base ON base.id = json_extract(e.data, '$.base_recipe_version_id')
-    WHERE e.kind = 'execution'
+    FROM executions e
+    LEFT JOIN versions base ON base.id = e.base_recipe_version_id
 ),
 activities AS (
     SELECT *,
@@ -96,25 +93,29 @@ latest_by_recipe AS (
 ),
 list_rows AS (
     SELECT r.id, 'recipe' AS kind, r.id AS recipe_id,
-        json_extract(r.data, '$.name') AS name,
-        r.data AS metadata, r.created,
-        json_extract(r.data, '$.archived_at') AS archived_at,
+        r.name AS name,
+        json_set(r.details,
+            '$.id', r.id, '$.name', r.name, '$.revision', r.revision,
+            '$.created_at', r.created_at, '$.updated_at', r.updated_at, '$.archived_at', r.archived_at,
+            '$.active_version_id', r.active_version_id, '$.latest_version_id', r.latest_version_id,
+            '$.latest_qualified_version_id', r.latest_qualified_version_id) AS metadata,
+        r.created_at AS created,
+        r.archived_at AS archived_at,
         active.number AS active_version_number, latest.number AS latest_version_number,
         a.execution_id,
         COALESCE(a.status, CASE WHEN active.id IS NULL THEN 'inactive' ELSE 'active' END) AS status,
         a.candidate_version_id, candidate.number AS candidate_version_number,
         CASE WHEN a.status = 'needs_clarification' THEN a.unanswered ELSE 0 END AS pending_question_count,
         a.activity_updated_at,
-        COALESCE(json_extract(r.data, '$.name'), '') || ' ' ||
-        COALESCE(json_extract(r.data, '$.description'), '') || ' ' ||
+        COALESCE(r.name, '') || ' ' ||
+        COALESCE(json_extract(r.details, '$.description'), '') || ' ' ||
         COALESCE(active.data, '') AS search_text,
         active.id IS NOT NULL AS is_active
-    FROM objects r
+    FROM recipes r
     LEFT JOIN latest_by_recipe a ON a.recipe_id = r.id AND a.position = 1
-    LEFT JOIN versions active ON active.id = json_extract(r.data, '$.active_version_id')
-    LEFT JOIN versions latest ON latest.id = json_extract(r.data, '$.latest_version_id')
+    LEFT JOIN versions active ON active.id = r.active_version_id
+    LEFT JOIN versions latest ON latest.id = r.latest_version_id
     LEFT JOIN versions candidate ON candidate.id = a.candidate_version_id
-    WHERE r.kind = 'recipe'
 
     UNION ALL
 

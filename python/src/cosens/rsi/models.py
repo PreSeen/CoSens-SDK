@@ -251,7 +251,6 @@ class ExecutionPolicy(Contract):
     artifact_confirmed: Literal[True]
     confirmation_ref: str = Field(min_length=1)
     max_rounds: int = Field(default=2, ge=1, le=10)
-    auto_activate: bool = False
     test_task: TestTask | None = None
 
 

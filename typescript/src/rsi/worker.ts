@@ -58,7 +58,7 @@ export async function drain(
               ? store.has_pending(credentials)
               : store.db
                   .prepare(
-                    "SELECT 1 FROM jobs WHERE status='queued' OR (status='running' AND lease_until<?) LIMIT 1",
+                    "SELECT 1 FROM executions WHERE status='queued' OR (status='running' AND lease_until<?) LIMIT 1",
                   )
                   .get(now());
             if (!pending) store.release(slot);

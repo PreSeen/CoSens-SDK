@@ -96,19 +96,32 @@ class Engine:
 
     def context(self, execution):
         return {
-            "answers": execution.get("answers"),
+            "answers": {
+                key: {
+                    field: value
+                    for field, value in answer.items()
+                    if field != "continuation_execution_id"
+                }
+                for key, answer in execution["answers"].items()
+            },
             "policy": {
                 k: v for k, v in execution["policy"].items() if k != "test_task"
             },
-            "source_session_id": execution.get("source_session_id"),
         }
 
     def analyze(self, state):
         execution = self.begin(state, "analyze")
         if execution.get("analyzed_input_revision") == state["input_revision"]:
+            rubrics_version_id = execution["rubrics_version_id"]
             return {
-                "analysis": execution["analysis"],
-                "rubrics_version_id": execution["resolved_rubrics_version_id"],
+                "analysis": {
+                    **execution["analysis"],
+                    "questions": execution["questions"],
+                    "rubrics": self.store.version_by_id(rubrics_version_id, "rubrics")[
+                        "content"
+                    ],
+                },
+                "rubrics_version_id": rubrics_version_id,
             }
         context = self.context(execution)
         with self.store.connect() as conn:
@@ -116,7 +129,7 @@ class Engine:
         context["recipe_name"] = recipe_name
         fixed_rubrics_id = (execution.get("test_request") or {}).get(
             "rubrics_version_id"
-        ) or execution.get("rubrics_version_id")
+        )
         if fixed_rubrics_id:
             context["fixed_rubrics"] = self.store.version_by_id(
                 fixed_rubrics_id, "rubrics"

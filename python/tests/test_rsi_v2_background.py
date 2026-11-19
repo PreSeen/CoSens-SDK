@@ -302,7 +302,7 @@ print(json.dumps({'id': run['id']}))
                 break
             time.sleep(0.1)
         assert all(r["status"] == "completed" for r in runs), runs
-        assert all(r["result"]["activated"] for r in runs), runs
+        assert all(r["result"]["published"] for r in runs), runs
         assert peak_running == 2
         assert gateway.peak == 2  # Shared default model budget across processes.
         assert gateway.requests >= 40  # 5 stages, tool call + result, 4 runs.

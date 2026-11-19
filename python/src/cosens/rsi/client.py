@@ -6,7 +6,6 @@ from pydantic import Field, StrictBool, StrictInt, StringConstraints, TypeAdapte
 
 from ._queue_client import RSIClient as QueueClient
 from .models import Contract
-from .progress import execution_progress
 
 Text = Annotated[str, StringConstraints(min_length=1)]
 Positive = Annotated[StrictInt, Field(gt=0)]
@@ -56,11 +55,35 @@ class RSIClient:
         return self._queue.data_dir
 
     def _present_execution(self, execution):
-        result = dict(execution)
-        result.pop("material_ids")
-        result["progress_percent"] = execution_progress(execution)
-        result["evidence"] = self._queue.execution_evidence(execution)
-        return result
+        fields = (
+            "id",
+            "base_execution_id",
+            "status",
+            "stage",
+            "input_revision",
+            "questions",
+            "answers",
+            "recipe_id",
+            "recipe_version_id",
+            "rubrics_version_id",
+            "test_results",
+            "result",
+            "error",
+            "created_at",
+            "updated_at",
+        )
+        return {
+            **{field: execution[field] for field in fields},
+            "name": execution.get("name") or "首次学习",
+            "progress_percent": execution["progress_percent"],
+            "evidence": [
+                {
+                    key: file[key]
+                    for key in ("path", "locator", "role", "sha256", "size")
+                }
+                for file in self._queue.execution_evidence(execution)
+            ],
+        }
 
     def execution_create(self, *, evidence, base_execution_id, idempotency_key):
         submission_id = _TEXT.validate_python(idempotency_key)

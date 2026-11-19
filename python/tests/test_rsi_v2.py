@@ -184,13 +184,13 @@ def test_material_snapshot_immutable_and_deduplicated(client, tmp_path):
 
 def test_complete_learning_test_and_activation(client, tmp_path):
     m = material(client, tmp_path)
-    execution = run(client, m["id"], auto_activate=True)
+    execution = run(client, m["id"])
     runtime = FileRuntime()
     assert client.run_pending(runtime=runtime)["processed"] == 1
     result = client.execution_get(execution["id"])
     assert result["status"] == "completed", result
     assert result["result"]["test_status"] == "passed"
-    assert result["result"]["activated"]
+    assert result["result"]["published"]
     assert result["analysis"]["attribution"] is None
     assert result["test_results"][0]["artifacts"][0]["sha256"]
     assert runtime.test_catalogs == [[]]  # host context/output is excluded
@@ -355,7 +355,7 @@ def test_feedback_extraction_rejects_refs_outside_context_and_feedback(
     assert client.rubrics_list() == []
 
 
-def test_version_availability_archive_restore_and_legacy_database(client, tmp_path):
+def test_version_availability_archive_and_restore(client, tmp_path):
     from cosens.rsi import RSIClient as PublicClient
 
     source = material(client, tmp_path)
@@ -363,13 +363,6 @@ def test_version_availability_archive_restore_and_legacy_database(client, tmp_pa
     client.run_pending(runtime=FileRuntime())
     result = client.execution_get(execution["id"])
     recipe_id, version_id = result["recipe_id"], result["recipe_version_id"]
-    with client.store.transaction() as conn:
-        conn.execute(
-            """UPDATE objects SET data=json_set(json_remove(data,
-               '$.latest_qualified_version_id'), '$.active_version_id', NULL) WHERE id=?""",
-            (recipe_id,),
-        )
-
     host = PublicClient(data_dir=client.data_dir, config=None)
     assert not hasattr(host, "recipe_activate")
     assert host.recipe_list()[0]["available_version_id"] == version_id
@@ -422,16 +415,14 @@ def test_version_availability_archive_restore_and_legacy_database(client, tmp_pa
 def test_missing_task_or_failed_objective_check_cannot_publish(
     client, tmp_path, changes, expected, rounds
 ):
-    execution = run(
-        client, material(client, tmp_path)["id"], auto_activate=True, **changes
-    )
+    execution = run(client, material(client, tmp_path)["id"], **changes)
     runtime = FileRuntime(output="wrong")
     client.run_pending(runtime=runtime)
     result = client.execution_get(execution["id"])
     assert result["status"] == "completed", result
     assert result["result"]["test_status"] == expected
     assert len(result["test_results"]) == rounds
-    assert not result["result"]["activated"]
+    assert not result["result"]["published"]
     recipe = client.recipe_get(result["recipe_id"])
     with pytest.raises(InvalidState):
         client.recipe_version_set_archived(
@@ -488,7 +479,7 @@ def test_uncovered_criteria_excluded_from_scoring_and_iteration(
             )
             return result
 
-    execution = run(client, material(client, tmp_path)["id"], auto_activate=True)
+    execution = run(client, material(client, tmp_path)["id"])
     runtime = CoverageRuntime()
     client.run_pending(runtime=runtime)
     result = client.execution_get(execution["id"])
@@ -499,7 +490,7 @@ def test_uncovered_criteria_excluded_from_scoring_and_iteration(
     assert milestones == expected_progress
     assert result["progress_percent"] == 100
     assert result["result"]["test_status"] == expected_status
-    assert result["result"]["activated"] == (expected_status == "passed")
+    assert result["result"]["published"] == (expected_status == "passed")
     assert runtime.generation_count == expected_rounds
     assert len(result["test_results"]) == expected_rounds
     assert result["name"] == client.recipe_list()[0]["name"] == "Format signed answers"
@@ -517,11 +508,11 @@ def test_uncovered_criteria_excluded_from_scoring_and_iteration(
 
 
 def test_late_clarification_creates_child_once(client, tmp_path):
-    execution = run(client, material(client, tmp_path)["id"], auto_activate=True)
+    execution = run(client, material(client, tmp_path)["id"])
     client.run_pending(runtime=FileRuntime(questions=True))
     parent = client.execution_get(execution["id"])
     assert parent["result"]["provisional"]
-    assert not parent["result"]["activated"]
+    assert not parent["result"]["published"]
     args = {
         "question_id": "format",
         "question_revision": 1,
@@ -530,13 +521,16 @@ def test_late_clarification_creates_child_once(client, tmp_path):
     }
     answer = client.execution_clarification_answer(parent["id"], **args)
     assert client.execution_clarification_answer(parent["id"], **args) == answer
+    saved = client.execution_get(parent["id"])
+    recorded = saved["answers"]["format:1"]
+    assert recorded["continuation_execution_id"] == answer["continuation_execution_id"]
     child = client.execution_get(answer["continuation_execution_id"])
-    assert child["parent_execution_id"] == parent["id"]
+    assert child["base_execution_id"] == parent["id"]
     assert child["base_recipe_version_id"] == parent["recipe_version_id"]
     assert child["answers"]["format:1"]["selected_options"][0]["label"] == "Decimal"
     client.run_pending(runtime=FileRuntime(questions=True))
     child = client.execution_get(child["id"])
-    assert child["result"]["activated"]
+    assert child["result"]["published"]
     assert client.execution_get(parent["id"])["result"] == parent["result"]
     with pytest.raises(Conflict):
         client.execution_clarification_answer(
@@ -546,7 +540,7 @@ def test_late_clarification_creates_child_once(client, tmp_path):
 
 
 def test_answer_during_generation_restarts_revision(client, tmp_path):
-    execution = run(client, material(client, tmp_path)["id"], auto_activate=True)
+    execution = run(client, material(client, tmp_path)["id"])
 
     class AnsweringRuntime(FileRuntime):
         def analyze(self, context, *args):
@@ -580,7 +574,7 @@ def test_answer_during_generation_restarts_revision(client, tmp_path):
     assert final["name"] == recipe["name"] == "Format numbers"
     assert recipe["selected_version"]["content"]["title"] == final["name"]
     assert all(t["input_revision"] == 2 for t in final["test_results"])
-    assert final["result"]["activated"]
+    assert final["result"]["published"]
 
 
 def test_lease_fencing_and_cancellation(client, tmp_path):
@@ -588,7 +582,7 @@ def test_lease_fencing_and_cancellation(client, tmp_path):
     first = client.store.claim("old", 10, 2)
     with client.store.transaction() as conn:
         conn.execute(
-            "UPDATE jobs SET lease_until=? WHERE id=?",
+            "UPDATE executions SET lease_until=? WHERE id=?",
             (time.time() - 1, execution["id"]),
         )
     second = client.store.claim("new", 10, 2)
@@ -691,8 +685,13 @@ def test_recipe_test_uses_existing_execution(client, tmp_path, leaked_from):
         assert final["error"]["code"] == "invalid_model_output"
         assert runtime.test_catalogs == []
         return
-    assert final["result"]["recipe_version_id"] == recipe["latest_version_id"]
-    assert final["analysis"]["rubrics"]["criteria"][0]["id"] == "fixed-standard"
+    assert final["recipe_version_id"] == recipe["latest_version_id"]
+    assert (
+        client.store.version_by_id(final["rubrics_version_id"], "rubrics")["content"][
+            "criteria"
+        ][0]["id"]
+        == "fixed-standard"
+    )
     assert runtime.generation_count == 0
     assert len(client.execution_list()) == 1
 
@@ -707,9 +706,9 @@ def test_failed_run_redacts_provider_errors_and_terminal_updates(client, tmp_pat
     with pytest.raises(InvalidState):
         client.execution_update(execution["id"], material_ids=[m["id"]])
     child = client.execution_create(
-        material_ids=[m["id"]], policy=policy(), parent_execution_id=execution["id"]
+        material_ids=[m["id"]], policy=policy(), base_execution_id=execution["id"]
     )
-    assert child["parent_execution_id"] == execution["id"]
+    assert child["base_execution_id"] == execution["id"]
 
 
 def test_execution_idempotency_and_unapproved_generation(client, tmp_path):
@@ -722,7 +721,7 @@ def test_execution_idempotency_and_unapproved_generation(client, tmp_path):
     first = client.execution_create(**args)
     assert client.execution_create(**args)["id"] == first["id"]
     with pytest.raises(Conflict):
-        client.execution_create(**{**args, "policy": policy(auto_activate=True)})
+        client.execution_create(**{**args, "policy": policy(max_rounds=3)})
     with pytest.raises(ValueError):
         client.execution_create(
             material_ids=[m["id"]],
@@ -786,7 +785,7 @@ def test_crash_reclaims_expired_run_and_resumes_checkpoint(client, tmp_path):
     assert before["progress_percent"] == 40
     with client.store.transaction() as conn:
         conn.execute(
-            "UPDATE jobs SET lease_until=? WHERE id=?",
+            "UPDATE executions SET lease_until=? WHERE id=?",
             (time.time() - 1, execution["id"]),
         )
     recovered_runtime = FileRuntime()
@@ -829,7 +828,7 @@ def test_concurrent_revisions_cannot_overwrite_active_pointer(client, tmp_path):
     runs = [
         client.execution_create(
             material_ids=[m["id"]],
-            policy=policy(auto_activate=True),
+            policy=policy(),
             base_recipe_version_id=recipe["latest_version_id"],
         )
         for _ in range(2)
@@ -933,7 +932,7 @@ def test_recipe_list_includes_learning_and_revision_status(client, tmp_path):
     ):
         assert not hasattr(client, method)
     source = material(client, tmp_path)
-    learning = run(client, source["id"], auto_activate=True)
+    learning = run(client, source["id"])
     [row] = client.recipe_list()
     assert (row["kind"], row["recipe_id"], row["status"]) == (
         "learning",
@@ -945,9 +944,7 @@ def test_recipe_list_includes_learning_and_revision_status(client, tmp_path):
     assert client.recipe_list(q=source["name"]) == []
     assert client.recipe_list(active_only=True) == []
     with client.store.connect() as conn:
-        assert (
-            conn.execute("SELECT id FROM objects WHERE kind='recipe'").fetchall() == []
-        )
+        assert conn.execute("SELECT id FROM recipes").fetchall() == []
 
     client.run_pending(runtime=FileRuntime())
     [row] = client.recipe_list()
@@ -1045,8 +1042,11 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
     assert learning["active_version_id"] is None
     assert not hasattr(client, "recipe_search")
     files = {f["role"]: f["locator"] for f in created["evidence"]}
-    assert created["policy"]["confirmation_ref"] == payload["idempotency_key"]
-    task = created["policy"]["test_task"]
+    stored = queue.execution_get(created["id"])
+    assert stored["policy"]["confirmation_ref"] == payload["idempotency_key"]
+    assert "policy" not in created
+    assert "snapshot" not in created["evidence"][0]
+    task = stored["policy"]["test_task"]
     assert task["input_locators"] == [files["input"]]
     assert task["replay_current_case"]
     assert task["shared_reference_locators"] is None
@@ -1062,7 +1062,7 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
     assert client.execution_append_evidence(created["id"], evidence=extra) == updated
     assert updated["input_revision"] == 2
     assert len(updated["evidence"]) == len(created["evidence"]) + 1
-    assert updated["policy"]["test_task"] == task
+    assert queue.execution_get(updated["id"])["policy"]["test_task"] == task
     runtime = FileRuntime()
     queue.run_pending(runtime=runtime)
     assert [[f["locator"] for f in catalog] for catalog in runtime.test_catalogs] == [
@@ -1099,8 +1099,11 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
             "base_execution_id": created["id"],
         }
     )
-    assert revised["parent_execution_id"] == created["id"]
-    assert revised["base_recipe_version_id"] == finished["recipe_version_id"]
+    assert revised["base_execution_id"] == created["id"]
+    assert (
+        queue.execution_get(revised["id"])["base_recipe_version_id"]
+        == finished["recipe_version_id"]
+    )
 
     context.unlink()
     replayed = client.execution_create(**payload)
@@ -1113,4 +1116,6 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
     )
     with pytest.raises(Conflict):
         client.execution_create(**{**payload, "idempotency_key": "legacy"})
-    assert client.execution_get(legacy["id"])["evidence"] == legacy_material["files"]
+    assert [
+        file["locator"] for file in client.execution_get(legacy["id"])["evidence"]
+    ] == [file["locator"] for file in legacy_material["files"]]

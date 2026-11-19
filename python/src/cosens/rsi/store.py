@@ -14,8 +14,10 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+from .execution_data import compact_analysis, upgrade_execution
 from .models import Conflict, InputChanged, InvalidState, LeaseLost, NotFound
-from .progress import execution_progress, stage_progress
+from .progress import stage_progress
+from .store_schema import SCHEMA, STORAGE
 
 
 def uid(prefix):
@@ -35,9 +37,9 @@ eligible AS (
     SELECT id AS recipe_id, json_extract(data, '$.active_version_id') AS version_id
     FROM legacy
     UNION
-    SELECT json_extract(e.data, '$.result.recipe_id'),
+    SELECT r.id,
         json_extract(t.value, '$.version_id')
-    FROM objects e JOIN legacy r ON r.id=json_extract(e.data, '$.result.recipe_id')
+    FROM objects e JOIN legacy r ON r.id=json_extract(e.data, '$.recipe_id')
     JOIN json_each(e.data, '$.test_results') t
     WHERE e.kind='execution' AND json_extract(e.data, '$.status')='completed'
         AND json_extract(e.data, '$.result.provisional')=0
@@ -69,44 +71,94 @@ class Store:
         self.path = self.root / "rsi.sqlite3"
         with self.connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
-            conn.executescript("""
-                CREATE TABLE IF NOT EXISTS objects (
-                    id TEXT PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL,
-                    created REAL NOT NULL, revision INTEGER NOT NULL DEFAULT 1);
-                CREATE INDEX IF NOT EXISTS objects_kind ON objects(kind,created,id);
-                CREATE TABLE IF NOT EXISTS versions (
-                    id TEXT PRIMARY KEY, object_id TEXT NOT NULL REFERENCES objects(id),
-                    number INTEGER NOT NULL, data TEXT NOT NULL, operation_key TEXT UNIQUE,
-                    UNIQUE(object_id,number));
-                CREATE TABLE IF NOT EXISTS jobs (
-                    id TEXT PRIMARY KEY REFERENCES objects(id), status TEXT NOT NULL,
-                    owner TEXT, lease_until REAL, fence INTEGER NOT NULL DEFAULT 0,
-                    created REAL NOT NULL);
-                CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(status,created,id);
-                CREATE TABLE IF NOT EXISTS slots (
-                    token TEXT PRIMARY KEY, kind TEXT NOT NULL, owner TEXT NOT NULL, expires REAL NOT NULL);
-                CREATE INDEX IF NOT EXISTS slots_kind ON slots(kind,expires);
-                CREATE TABLE IF NOT EXISTS idempotency (
-                    scope TEXT NOT NULL, key TEXT NOT NULL, request TEXT NOT NULL, result TEXT NOT NULL,
-                    PRIMARY KEY(scope,key));
-            """)
-            if conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'"
-            ).fetchone():
-                legacy = conn.execute("SELECT data FROM settings WHERE id=1").fetchone()
-                if legacy:
-                    conn.execute(
-                        """UPDATE objects
-                           SET data=json_set(data, '$.runtime_config', json(?))
-                           WHERE kind='execution' AND json_type(data, '$.runtime_config') IS NULL""",
-                        (legacy["data"],),
-                    )
-            if conn.execute(
-                """SELECT 1 FROM objects WHERE kind='recipe'
-                   AND json_type(data, '$.latest_qualified_version_id') IS NULL LIMIT 1"""
-            ).fetchone():
-                conn.execute(INITIALIZE_RECIPE_AVAILABILITY)
+        self._initialize()
         os.chmod(self.path, 0o600)
+
+    def _initialize(self):
+        with self.connect() as conn:
+            if conn.execute("PRAGMA user_version").fetchone()[0] == 3:
+                return
+        with self.transaction() as conn:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version == 3:
+                return
+            if version not in (0, 1, 2):
+                raise InvalidState("unsupported RSI SQLite schema version")
+            legacy = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='objects'"
+            ).fetchone()
+            if legacy:
+                settings = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'"
+                ).fetchone()
+                previous_config = (
+                    conn.execute("SELECT data FROM settings WHERE id=1").fetchone()
+                    if settings
+                    else None
+                )
+                rows = conn.execute(
+                    "SELECT id,data FROM objects WHERE kind='execution'"
+                ).fetchall()
+                for row in rows:
+                    execution = upgrade_execution(json.loads(row["data"]))
+                    if "runtime_config" not in execution and previous_config:
+                        execution["runtime_config"] = json.loads(
+                            previous_config["data"]
+                        )
+                    conn.execute(
+                        "UPDATE objects SET data=? WHERE id=?",
+                        (encode(execution), row["id"]),
+                    )
+                conn.execute(INITIALIZE_RECIPE_AVAILABILITY)
+                conn.execute("ALTER TABLE versions RENAME TO previous_versions")
+            if version == 2:
+                conn.execute("ALTER TABLE executions ADD COLUMN owner TEXT")
+                conn.execute("ALTER TABLE executions ADD COLUMN lease_until REAL")
+                conn.execute(
+                    "ALTER TABLE executions ADD COLUMN fence INTEGER NOT NULL DEFAULT 0"
+                )
+                conn.execute("ALTER TABLE versions RENAME TO previous_versions")
+            for statement in SCHEMA.split(";"):
+                if statement.strip():
+                    conn.execute(statement)
+            if legacy:
+                for row in conn.execute(
+                    "SELECT kind,data FROM objects WHERE kind<>'rubrics'"
+                ):
+                    self._write_record(
+                        conn, row["kind"], json.loads(row["data"]), update=False
+                    )
+                conn.execute("""
+                    INSERT INTO versions (id,recipe_id,rubrics_id,rubrics_metadata,number,data,operation_key)
+                    SELECT v.id, CASE WHEN o.kind='recipe' THEN o.id END,
+                        CASE WHEN o.kind='rubrics' THEN o.id END,
+                        CASE WHEN o.kind='rubrics' THEN json_remove(o.data, '$.latest_version_id') END,
+                        v.number,v.data,v.operation_key
+                    FROM previous_versions v JOIN objects o ON o.id=v.object_id
+                """)
+            if version == 2:
+                conn.execute("""
+                    INSERT INTO versions (id,recipe_id,rubrics_id,rubrics_metadata,number,data,operation_key)
+                    SELECT v.id, v.recipe_id, v.rubrics_id,
+                        CASE WHEN v.rubrics_id IS NOT NULL THEN json_set(
+                            json_remove(r.details, '$.latest_version_id'),
+                            '$.id', r.id, '$.created_at', r.created_at, '$.updated_at', r.updated_at,
+                            '$.archived_at', r.archived_at, '$.revision', r.revision
+                        ) END,
+                        v.number,v.data,v.operation_key
+                    FROM previous_versions v LEFT JOIN rubrics r ON r.id=v.rubrics_id
+                """)
+            if legacy or version == 2:
+                conn.execute("""
+                    UPDATE executions SET owner=j.owner, lease_until=j.lease_until, fence=j.fence
+                    FROM jobs j WHERE j.id=executions.id
+                """)
+                conn.execute("DROP TABLE jobs")
+                conn.execute("DROP TABLE previous_versions")
+                conn.execute("DROP TABLE IF EXISTS rubrics")
+                conn.execute("DROP TABLE IF EXISTS objects")
+                conn.execute("DROP TABLE IF EXISTS settings")
+            conn.execute("PRAGMA user_version = 3")
 
     @contextmanager
     def connect(self):
@@ -131,13 +183,54 @@ class Store:
                 raise
 
     @staticmethod
+    def _record(row):
+        fields = dict(row)
+        for field in ("owner", "lease_until", "fence"):
+            fields.pop(field, None)
+        return {**json.loads(fields.pop("details")), **fields}
+
+    @staticmethod
+    def _write_record(conn, kind, record, *, update):
+        table, columns = STORAGE[kind]
+        details = dict(record)
+        fields = [details.pop(column, None) for column in columns]
+        if update:
+            assignments = ",".join(column + "=?" for column in columns[1:])
+            conn.execute(
+                f"UPDATE {table} SET {assignments},details=? WHERE id=?",
+                (*fields[1:], encode(details), record["id"]),
+            )
+        else:
+            names = ",".join((*columns, "details"))
+            placeholders = ",".join("?" for _ in range(len(columns) + 1))
+            conn.execute(
+                f"INSERT INTO {table} ({names}) VALUES ({placeholders})",
+                (*fields, encode(details)),
+            )
+
+    @staticmethod
+    def _rubrics_metadata(row):
+        return {**json.loads(row["rubrics_metadata"]), "latest_version_id": row["id"]}
+
+    @staticmethod
     def get_in(conn, object_id, kind=None):
-        row = conn.execute(
-            "SELECT kind,data FROM objects WHERE id=?", (object_id,)
-        ).fetchone()
-        if row is None or (kind and row["kind"] != kind):
-            raise NotFound(f"{kind or 'object'} not found: {object_id}")
-        return json.loads(row["data"])
+        if kind is None:
+            kind = object_id.partition("_")[0]
+        if kind == "rubrics":
+            row = conn.execute(
+                "SELECT id,rubrics_metadata FROM versions WHERE rubrics_id=? ORDER BY number DESC LIMIT 1",
+                (object_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFound(f"{kind} not found: {object_id}")
+            return Store._rubrics_metadata(row)
+        if kind not in STORAGE:
+            raise NotFound(f"object not found: {object_id}")
+        table, _ = STORAGE[kind]
+        row = conn.execute(f"SELECT * FROM {table} WHERE id=?", (object_id,)).fetchone()
+        if row is None:
+            raise NotFound(f"{kind} not found: {object_id}")
+        return Store._record(row)
 
     def get(self, object_id, kind=None):
         with self.connect() as conn:
@@ -145,16 +238,14 @@ class Store:
 
     @staticmethod
     def execution_recipe_name(conn, execution):
-        recipe_id = (
-            execution.get("recipe_id")
-            or (execution.get("result") or {}).get("recipe_id")
-            or (execution.get("test_request") or {}).get("recipe_id")
-        )
+        recipe_id = execution.get("recipe_id") or (
+            execution.get("test_request") or {}
+        ).get("recipe_id")
         base_id = execution.get("base_recipe_version_id")
         if recipe_id or base_id:
             row = conn.execute(
-                """SELECT json_extract(data, '$.name') FROM objects
-                WHERE kind='recipe' AND id=COALESCE(?, (SELECT object_id FROM versions WHERE id=?))""",
+                """SELECT name FROM recipes
+                WHERE id=COALESCE(?, (SELECT object_id FROM versions WHERE id=?))""",
                 (recipe_id, base_id),
             ).fetchone()
             if row and row[0]:
@@ -172,42 +263,43 @@ class Store:
             "updated_at": now,
             "archived_at": None,
         }
-        conn.execute(
-            "INSERT INTO objects(id,kind,data,created) VALUES (?,?,?,?)",
-            (data["id"], kind, encode(data), now),
-        )
-        if kind == "execution":
-            conn.execute(
-                "INSERT INTO jobs(id,status,created) VALUES (?,?,?)",
-                (data["id"], data["status"], now),
-            )
+        if kind != "rubrics":
+            Store._write_record(conn, kind, data, update=False)
         return data
 
     @staticmethod
     def save(conn, data):
         data = {**data, "revision": data["revision"] + 1, "updated_at": time.time()}
-        conn.execute(
-            "UPDATE objects SET data=?,revision=? WHERE id=?",
-            (encode(data), data["revision"], data["id"]),
-        )
-        if data["id"].startswith("execution_"):
-            conn.execute(
-                "UPDATE jobs SET status=? WHERE id=?", (data["status"], data["id"])
-            )
+        kind = data["id"].partition("_")[0]
+        if kind == "rubrics":
+            raise InvalidState("rubrics metadata is written with its version")
+        Store._write_record(conn, kind, data, update=True)
         return data
 
     def list(self, kind, *, archived=False, limit=50, offset=0):
         if not 1 <= limit <= 200 or offset < 0:
             raise ValueError("limit must be 1..200; offset must be nonnegative")
         with self.connect() as conn:
-            # Metadata filtering in SQL; bounded, stable pagination.
+            if kind == "rubrics":
+                rows = conn.execute(
+                    """WITH current AS (
+                        SELECT id,rubrics_id,rubrics_metadata,
+                               row_number() OVER (PARTITION BY rubrics_id ORDER BY number DESC) AS position
+                        FROM versions WHERE rubrics_id IS NOT NULL
+                    )
+                    SELECT id,rubrics_metadata FROM current
+                    WHERE position=1 AND (json_extract(rubrics_metadata,'$.archived_at') IS NOT NULL)=?
+                    ORDER BY json_extract(rubrics_metadata,'$.created_at'),rubrics_id LIMIT ? OFFSET ?""",
+                    (int(archived), limit, offset),
+                )
+                return [self._rubrics_metadata(row) for row in rows]
+            table, _ = STORAGE[kind]
             rows = conn.execute(
-                """SELECT data FROM objects WHERE kind=?
-                AND ((json_extract(data,'$.archived_at') IS NOT NULL)=?)
-                ORDER BY created,id LIMIT ? OFFSET ?""",
-                (kind, int(archived), limit, offset),
+                f"""SELECT * FROM {table} WHERE (archived_at IS NOT NULL)=?
+                ORDER BY created_at,id LIMIT ? OFFSET ?""",
+                (int(archived), limit, offset),
             ).fetchall()
-            return [json.loads(row["data"]) for row in rows]
+            return [self._record(row) for row in rows]
 
     @staticmethod
     def version_in(conn, object_id, version_id=None):
@@ -257,7 +349,7 @@ class Store:
             ).fetchone()
             rubrics_version_id = (execution.get("test_request") or {}).get(
                 "rubrics_version_id"
-            ) or execution.get("rubrics_version_id")
+            )
             if not rubrics_version_id and replay:
                 rubrics_version_id = replay[0]
             if not rubrics_version_id:
@@ -287,9 +379,8 @@ class Store:
                 execution["name"] = name
             execution.update(
                 questions=analysis["questions"],
-                hypothesis=analysis["hypothesis"],
-                resolved_rubrics_version_id=rubrics_version_id,
-                analysis=analysis,
+                rubrics_version_id=rubrics_version_id,
+                analysis=compact_analysis(analysis),
                 analyzed_input_revision=revision,
             )
             self.save(conn, execution)
@@ -369,15 +460,12 @@ class Store:
                 for q in execution["questions"]
             )
             result = {
-                "recipe_id": state["recipe_id"],
-                "recipe_version_id": state["version_id"],
-                "rubrics_version_id": state["rubrics_version_id"],
                 "test_status": state["test"]["status"],
                 "provisional": provisional,
-                "activated": False,
+                "published": False,
             }
             if state["test"]["status"] == "passed" and not provisional:
-                result["activated"] = self.publish_recipe_version(
+                result["published"] = self.publish_recipe_version(
                     conn, state["recipe_id"], state["version_id"]
                 )
             execution.update(
@@ -386,6 +474,7 @@ class Store:
                 progress_percent=100,
                 recipe_id=state["recipe_id"],
                 recipe_version_id=state["version_id"],
+                rubrics_version_id=state["rubrics_version_id"],
                 result=result,
             )
             return self.save(conn, execution)
@@ -427,12 +516,27 @@ class Store:
             "provenance": provenance or {},
             "created_at": time.time(),
         }
+        kind = obj["id"].partition("_")[0]
+        metadata = None
+        if kind == "rubrics":
+            fields = {**obj, "revision": obj["revision"] + 1, "updated_at": time.time()}
+            fields.pop("latest_version_id", None)
+            metadata = encode(fields)
         conn.execute(
-            "INSERT INTO versions VALUES (?,?,?,?,?)",
-            (version["id"], obj["id"], number, encode(version), operation_key),
+            "INSERT INTO versions (id,recipe_id,rubrics_id,rubrics_metadata,number,data,operation_key) VALUES (?,?,?,?,?,?,?)",
+            (
+                version["id"],
+                obj["id"] if kind == "recipe" else None,
+                obj["id"] if kind == "rubrics" else None,
+                metadata,
+                number,
+                encode(version),
+                operation_key,
+            ),
         )
         obj["latest_version_id"] = version["id"]
-        Store.save(conn, obj)
+        if kind == "recipe":
+            Store.save(conn, obj)
         return version
 
     @staticmethod
@@ -494,7 +598,7 @@ class Store:
                 (now + ttl, owner, now),
             )
             conn.execute(
-                "UPDATE jobs SET lease_until=? WHERE owner=? AND lease_until>=? AND status='running'",
+                "UPDATE executions SET lease_until=? WHERE owner=? AND lease_until>=? AND status='running'",
                 (now + ttl, owner, now),
             )
 
@@ -502,18 +606,18 @@ class Store:
         now = time.time()
         with self.transaction() as conn:
             running = conn.execute(
-                "SELECT COUNT(*) FROM jobs WHERE status='running' AND lease_until>=?",
+                "SELECT COUNT(*) FROM executions WHERE status='running' AND lease_until>=?",
                 (now,),
             ).fetchone()[0]
             if running >= max_executions:
                 return None
             row = conn.execute(
-                """SELECT jobs.id,jobs.fence FROM jobs JOIN objects ON objects.id=jobs.id
-                WHERE (jobs.status='queued' OR (jobs.status='running' AND jobs.lease_until<?))
-                AND COALESCE(json_extract(objects.data,'$.runtime_config.max_executions'),?)>?
-                AND (? IS NULL OR json_extract(objects.data,'$.runtime_config.model.api_key_env')
+                """SELECT executions.id,executions.fence FROM executions
+                WHERE (executions.status='queued' OR (executions.status='running' AND executions.lease_until<?))
+                AND COALESCE(json_extract(executions.details,'$.runtime_config.max_executions'),?)>?
+                AND (? IS NULL OR json_extract(executions.details,'$.runtime_config.model.api_key_env')
                      IN (SELECT value FROM json_each(?)))
-                ORDER BY jobs.created,jobs.id LIMIT 1""",
+                ORDER BY executions.created_at,executions.id LIMIT 1""",
                 (
                     now,
                     max_executions,
@@ -528,7 +632,7 @@ class Store:
             if not row:
                 return None
             conn.execute(
-                "UPDATE jobs SET owner=?,lease_until=?,fence=fence+1,status='running' WHERE id=?",
+                "UPDATE executions SET owner=?,lease_until=?,fence=fence+1 WHERE id=?",
                 (owner, now + ttl, row["id"]),
             )
             obj = self.get_in(conn, row["id"], "execution")
@@ -538,11 +642,15 @@ class Store:
 
     @staticmethod
     def guard(conn, execution_id, owner, fence, input_revision=None):
-        job = conn.execute("SELECT * FROM jobs WHERE id=?", (execution_id,)).fetchone()
+        job = conn.execute(
+            "SELECT owner,lease_until,fence,status FROM executions WHERE id=?",
+            (execution_id,),
+        ).fetchone()
         if (
             not job
             or job["owner"] != owner
             or job["fence"] != fence
+            or job["lease_until"] is None
             or job["lease_until"] < time.time()
             or job["status"] != "running"
         ):
@@ -558,7 +666,7 @@ class Store:
         with self.transaction() as conn:
             obj = self.guard(conn, execution_id, owner, fence, input_revision)
             obj["progress_percent"] = max(
-                execution_progress(obj),
+                obj["progress_percent"],
                 stage_progress(
                     changes.get("stage"), round_number, obj["policy"]["max_rounds"]
                 ),
@@ -570,12 +678,12 @@ class Store:
         keys = encode(credentials) if credentials is not None else None
         with self.connect() as conn:
             row = conn.execute(
-                """SELECT jobs.id, json_extract(objects.data,'$.runtime_config') AS config
-                   FROM jobs JOIN objects ON objects.id=jobs.id
-                   WHERE jobs.status IN ('queued','running')
-                   AND (? IS NULL OR json_extract(objects.data,'$.runtime_config.model.api_key_env')
+                """SELECT executions.id, json_extract(executions.details,'$.runtime_config') AS config
+                   FROM executions
+                   WHERE executions.status IN ('queued','running')
+                   AND (? IS NULL OR json_extract(executions.details,'$.runtime_config.model.api_key_env')
                         IN (SELECT value FROM json_each(?)))
-                   ORDER BY jobs.created,jobs.id LIMIT 1""",
+                   ORDER BY executions.created_at,executions.id LIMIT 1""",
                 (keys, keys),
             ).fetchone()
             return dict(row) if row else None
