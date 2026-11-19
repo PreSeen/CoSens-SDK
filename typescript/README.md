@@ -1,4 +1,4 @@
-# CoSens TypeScript Local RSI SDK
+# CoSens TypeScript RSI SDK
 
 Use Node.js 22 or later. Install the SDK tarball from your Agent project.
 
@@ -6,7 +6,21 @@ Use Node.js 22 or later. Install the SDK tarball from your Agent project.
 npm install /path/to/cosens-sdk-<version>.tgz
 ```
 
-Set `RSI_MODEL_API_KEY` in the Agent process. The model must support Chat Completions and tool calls. If you package a standalone Node with the host, set `RSI_NODE_EXECUTABLE` and include the SDK worker and the matching `better-sqlite3` native dependency.
+Cloud mode is the default: `new RSIClient()` uses the CoSens service with `COSENS_API_KEY`, and only the files named in `evidence` are uploaded.
+
+```ts
+import { RSIClient } from 'cosens-sdk/rsi';
+
+const cloud = new RSIClient();
+const run = await cloud.execution_create({
+  evidence: { context_path: 'context.txt', files: [{ path: 'sales.csv', role: 'input' }] },
+  idempotency_key: 'delivery-42',
+});
+```
+
+All methods are async in both modes. For local mode, pass `data_dir` and your own model as below.
+
+In local mode, set `RSI_MODEL_API_KEY` in the Agent process. The model must support Chat Completions and tool calls. If you package a standalone Node with the host, set `RSI_NODE_EXECUTABLE` and include the SDK worker and the matching `better-sqlite3` native dependency.
 
 ```ts
 import { RSIClient } from 'cosens-sdk/rsi';

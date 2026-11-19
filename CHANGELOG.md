@@ -2,6 +2,12 @@
 
 Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned separately.
 
+## Python 0.9.0
+
+- `RSIClient()` with no arguments is **cloud mode**: the CoSens service learns with CoSens models, authenticated by `COSENS_API_KEY` (or `api_key=`, `base_url=`). Only the files named in `evidence` are uploaded. Methods and results are the same as local mode; `recover()` returns `{"started": 0}`.
+- `RSIClient(data_dir=..., config=...)` (or `mode="local"`) keeps the local Worker unchanged.
+- TypeScript: `new RSIClient()` is cloud mode, `new RSIClient({ data_dir, config })` local. All `RSIClient` methods are now async in both modes.
+
 ## Python 0.8.3
 
 - A final structured result whose fields arrive as the text `"None"` or `"null"` is read as null, and objects sent as JSON strings are decoded leniently, so models that stringify nested results (seen with qwen3.8-27b) no longer fail analysis after three attempts.

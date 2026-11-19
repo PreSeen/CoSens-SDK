@@ -23,7 +23,7 @@ import { ChatRuntime } from '../src/rsi/runtime.js';
 import { legacyRecipes, schema } from '../src/rsi/store-schema.js';
 
 for (const version of [3, 4]) {
-  test(`schema v${version} migration preserves the archived restoration target and the newer candidate`, () => {
+  test(`schema v${version} migration preserves the archived restoration target and the newer candidate`, async () => {
     const data_dir = mkdtempSync(join(tmpdir(), 'cosens-rsi-migrate-'));
     const recipeId = 'recipe_legacy';
     try {
@@ -93,27 +93,27 @@ for (const version of [3, 4]) {
       }
       const host = new PublicRSIClient({ data_dir, config: null });
       try {
-        const recipe = host.recipe_get(recipeId, 'latest');
+        const recipe = (await host.recipe_get(recipeId, 'latest'));
         assert.equal(recipe.latest_version_id, 'version_second');
         assert.equal(recipe.latest_qualified_version_id, 'version_first');
         assert.equal(recipe.active_version_id, null);
         assert.equal('revision' in recipe, false);
         assert.equal('description' in recipe, false);
         assert.equal(recipe.selected_version?.id, 'version_second');
-        const unversioned = host.recipe_get('recipe_unversioned', 'latest');
+        const unversioned = (await host.recipe_get('recipe_unversioned', 'latest'));
         assert.equal('revision' in unversioned, false);
         assert.equal('description' in unversioned, false);
         assert.equal(unversioned.selected_version, null);
-        host.recipe_version_set_archived(recipeId, {
+        (await host.recipe_version_set_archived(recipeId, {
           version_id: 'version_first',
           archived: false,
-        });
+        }));
         assert.equal(
-          host.recipe_list()[0].available_version_id,
+          (await host.recipe_list())[0].available_version_id,
           'version_first',
         );
         assert.equal(
-          host.recipe_get(recipeId, 'active').selected_version?.id,
+          (await host.recipe_get(recipeId, 'active')).selected_version?.id,
           'version_first',
         );
         const migrated = new Database(join(data_dir, 'rsi-ts.sqlite3'), {
@@ -551,19 +551,18 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       );
       const host = new PublicRSIClient({ data_dir, config: null });
       try {
-        const available = host
-          .recipe_list()
+        const available = (await host.recipe_list())
           .find((row) => row.recipe_id === run.recipe_id);
         assert.equal('recipe_activate' in host, false);
-        const detail = host.recipe_get(run.recipe_id!, 'latest');
-        const allRecipes = host.recipe_list();
+        const detail = (await host.recipe_get(run.recipe_id!, 'latest'));
+        const allRecipes = (await host.recipe_list());
         const requested = allRecipes.slice(0, 2);
         assert.equal(requested.length, 2);
         const selectedIds = requested.map((row) => row.recipe_id!);
         assert.deepEqual(
-          host
-            .recipe_list({ recipe_ids: [...selectedIds].reverse() })
-            .map((row) => row.recipe_id),
+          (
+            await host.recipe_list({ recipe_ids: [...selectedIds].reverse() })
+          ).map((row) => row.recipe_id),
           selectedIds,
         );
         assert.deepEqual(available, {
@@ -576,32 +575,31 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           updated_at: detail.updated_at,
         });
         const version_id = run.recipe_version_id!;
-        host.recipe_version_set_archived(run.recipe_id!, {
+        (await host.recipe_version_set_archived(run.recipe_id!, {
           version_id,
           archived: true,
-        });
-        const archived = host
-          .recipe_list()
+        }));
+        const archived = (await host.recipe_list())
           .find((row) => row.recipe_id === run.recipe_id);
         assert.equal(archived?.available_version_id, null);
         assert.equal(
-          host.recipe_get(run.recipe_id!, version_id).selected_version
+          (await host.recipe_get(run.recipe_id!, version_id)).selected_version
             ?.archived,
           true,
         );
-        host.recipe_version_set_archived(run.recipe_id!, {
+        (await host.recipe_version_set_archived(run.recipe_id!, {
           version_id,
           archived: false,
-        });
+        }));
         assert.equal(
-          host.recipe_get(run.recipe_id!, 'active').selected_version?.id,
+          (await host.recipe_get(run.recipe_id!, 'active')).selected_version?.id,
           version_id,
         );
         assert.equal(
-          host.recipe_get(
+          (await host.recipe_get(
             available!.recipe_id!,
             available!.available_version_id!,
-          ).selected_version?.id,
+          )).selected_version?.id,
           run.recipe_version_id,
         );
       } finally {
@@ -686,9 +684,9 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       assert.equal(run.result?.test_status, 'passed');
       assert.ok(run.test_results[0].trace_path?.includes('lease-2'));
     } finally {
-      for (const run of recovery.execution_list()) {
+      for (const run of (await recovery.execution_list())) {
         if (run.status === 'running' || run.status === 'queued')
-          recovery.execution_cancel(run.id);
+          (await recovery.execution_cancel(run.id));
       }
       recovery.close();
     }
@@ -1166,15 +1164,15 @@ test('an expired worker lease resumes the graph without regenerating the candida
       assert.equal('recipe_version_list' in host, false);
       assert.equal('recipe_search' in host, false);
       assert.ok(
-        host.recipe_list().some((row) => row.recipe_id === after.recipe_id),
+        (await host.recipe_list()).some((row) => row.recipe_id === after.recipe_id),
       );
-      const latest = host.recipe_get(
+      const latest = (await host.recipe_get(
         after.recipe_id!,
         'latest',
-      ).selected_version;
+      )).selected_version;
       assert.equal(latest?.id, after.recipe_version_id);
       assert.deepEqual(
-        host.recipe_get(after.recipe_id!, latest!.id).selected_version,
+        (await host.recipe_get(after.recipe_id!, latest!.id)).selected_version,
         latest,
       );
       const feedback = join(directory, 'feedback.md');
@@ -1195,7 +1193,7 @@ test('an expired worker lease resumes the graph without regenerating the candida
         /terminal inputs are immutable/,
       );
       assert.equal(
-        host.recipe_list()[0].available_version_id,
+        (await host.recipe_list())[0].available_version_id,
         after.recipe_version_id,
       );
       await client.run_pending({
@@ -1217,7 +1215,7 @@ test('an expired worker lease resumes the graph without regenerating the candida
           },
         },
       });
-      const next = host.execution_get(followUp.id);
+      const next = (await host.execution_get(followUp.id));
       assert.equal(next.result?.test_status, 'passed');
       assert.equal(next.recipe_id, after.recipe_id);
       assert.equal((await host.execution_create(submission)).id, followUp.id);
@@ -1227,22 +1225,21 @@ test('an expired worker lease resumes the graph without regenerating the candida
       );
       assert.equal(next.progress_percent, 100);
       assert.equal(
-        host
-          .execution_list({ execution_ids: [next.id] })
+        (await host.execution_list({ execution_ids: [next.id] }))
           .find((row) => row.id === next.id)?.progress_percent,
         100,
       );
       assert.equal(
-        host.recipe_list()[0].available_version_id,
+        (await host.recipe_list())[0].available_version_id,
         next.recipe_version_id,
       );
       assert.equal(
-        host.recipe_get(after.recipe_id!, after.recipe_version_id!)
+        (await host.recipe_get(after.recipe_id!, after.recipe_version_id!))
           .selected_version?.archived,
         true,
       );
-      assert.throws(
-        () =>
+      await assert.rejects(
+        async () =>
           host.recipe_version_set_archived(after.recipe_id!, {
             version_id: after.recipe_version_id!,
             archived: false,
@@ -1290,7 +1287,7 @@ test('recipe_list shows first-time learning and preserves the usable version dur
       config: null,
     });
     try {
-      assert.deepEqual(learningHost.recipe_list(), [
+      assert.deepEqual((await learningHost.recipe_list()), [
         {
           recipe_id: null,
           execution_ids: [execution.id],
@@ -1330,22 +1327,20 @@ test('recipe_list shows first-time learning and preserves the usable version dur
       config: null,
     });
     try {
-      const unassociated = learningOnlyHost
-        .recipe_list()
+      const unassociated = (await learningOnlyHost.recipe_list())
         .find((entry) => entry.recipe_id === seed.id);
       assert.deepEqual(unassociated?.execution_ids, []);
       assert.ok(
-        learningOnlyHost
-          .recipe_list()
+        (await learningOnlyHost.recipe_list())
           .some((entry) => entry.recipe_id === null),
       );
       assert.deepEqual(
-        learningOnlyHost.recipe_list({
+        (await learningOnlyHost.recipe_list({
           recipe_ids: [seed.id, 'recipe_missing', seed.id],
-        }),
+        })),
         [unassociated],
       );
-      assert.deepEqual(learningOnlyHost.recipe_list({ recipe_ids: [] }), []);
+      assert.deepEqual((await learningOnlyHost.recipe_list({ recipe_ids: [] })), []);
     } finally {
       learningOnlyHost.close();
     }
@@ -1446,9 +1441,9 @@ test('recipe_list shows first-time learning and preserves the usable version dur
       const revision = await host.execution_create(submission);
       assert.equal(revision.recipe_id, recipe.id);
       assert.equal(revision.recipe_version_id, null);
-      const detail = host.recipe_get(recipe.id, 'latest');
+      const detail = (await host.recipe_get(recipe.id, 'latest'));
       assert.deepEqual(
-        host.recipe_list().filter((entry) => entry.recipe_id === recipe.id),
+        (await host.recipe_list()).filter((entry) => entry.recipe_id === recipe.id),
         [
           {
             recipe_id: recipe.id,
@@ -1467,38 +1462,36 @@ test('recipe_list shows first-time learning and preserves the usable version dur
       );
       await client.execution_update(previousContinuationId, { archived: true });
       assert.ok(
-        !host.execution_list().some((row) => row.id === previousContinuationId),
+        !(await host.execution_list()).some((row) => row.id === previousContinuationId),
       );
       assert.deepEqual(
-        host
-          .execution_list({
+        (await host.execution_list({
             execution_ids: [
               previousContinuationId,
               'execution_missing',
               previousContinuationId,
             ],
-          })
+          }))
           .map((row) => row.id),
         [previousContinuationId],
       );
       assert.deepEqual(
-        host
-          .execution_list({ execution_ids: [revision.id, execution.id] })
+        (await host.execution_list({ execution_ids: [revision.id, execution.id] }))
           .map((row) => row.id),
         [execution.id, revision.id],
       );
-      assert.deepEqual(host.execution_list({ execution_ids: [] }), []);
+      assert.deepEqual((await host.execution_list({ execution_ids: [] })), []);
       assert.deepEqual(
-        host.recipe_list().find((entry) => entry.recipe_id === recipe.id)
+        (await host.recipe_list()).find((entry) => entry.recipe_id === recipe.id)
           ?.execution_ids,
         [revision.id, execution.id],
       );
 
       // An archived recipe has no available version.
-      host.recipe_version_set_archived(recipe.id, {
+      (await host.recipe_version_set_archived(recipe.id, {
         version_id: active,
         archived: true,
-      });
+      }));
       await assert.rejects(
         host.execution_create({
           ...submission,
