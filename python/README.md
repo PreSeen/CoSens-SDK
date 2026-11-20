@@ -25,3 +25,7 @@ rsi = RSIClient(
 ```
 
 After refreshing a token, create a Client with the same data directory and `credential_scope` and the new headers. `rsi.recover()` resumes that account's unfinished work with the new Client settings, and `rsi.recover(recipe_id=recipe_id)` limits recovery to one SDK Recipe. Local Recipe reads include a `storage_path` relative to `data_dir`. See the [atomic API and Hook lifecycle](docs/local-rsi.md) and the [Python Hook example](examples/05_rsi_sdk_v2.py).
+
+### Virtual User selection
+
+For cloud RSI, use `RSIClient(virtual_user_id="vu_...")` to bind this client to a Virtual User. Use separate clients for separate Virtual Users. Local RSI does not accept this option. Memory's `memory_recall`, `memory_ingest`, `get_memory_items`, and `get_memory_job` take an optional `virtual_user_id` per call. `get_memory` and `get_memory_experience` do not support Virtual User selection and reject it. Calls without a selection use the authenticated account. The server checks each caller's current grant; availability depends on the service deployment.

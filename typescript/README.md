@@ -57,3 +57,7 @@ The SDK submits the snapshots and queues the Execution in one call. The Worker r
 Use `config: null` for read-only clients. After a token refresh, create a Client with the same data directory and `credential_scope` and the new headers. `recover()` resumes that account's unfinished work with the new Client settings. Use `recover({ recipe_id: recipeId })` to recover only executions for that SDK Recipe. Close each client with `close()` when done. The worker uses LangGraph for recovery and sends direct model API requests from its nodes.
 
 See the [complete TS and Python interface reference](../python/docs/local-rsi.md). Run `npm run check` to build, typecheck and test the public package.
+
+### Virtual User selection
+
+For cloud RSI, use `new RSIClient({ mode: 'cloud', virtualUserId: 'vu_...' })` to bind this client to a Virtual User. Use separate clients for separate Virtual Users. Local RSI does not accept this option. Memory's `memoryRecall`, `memoryIngest`, `getMemoryItems`, and `getMemoryJob` take `virtualUserId` in their per-call options. `getMemory` and `getMemoryExperience` do not support Virtual User selection and reject it. Calls without a selection use the authenticated account. The server checks each caller's current grant; availability depends on the service deployment.

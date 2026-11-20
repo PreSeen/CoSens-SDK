@@ -133,3 +133,17 @@ def test_uploads_over_the_gateway_limit_fail_before_sending(tmp_path):
             idempotency_key="k1",
         )
     assert seen == []
+
+
+def test_virtual_user_is_instance_scoped_and_rejected_in_local_mode(tmp_path):
+    transport, seen = recording()
+    a = CloudRSIClient(api_key="k", transport=transport, virtual_user_id="vu_a")
+    b = CloudRSIClient(api_key="k", transport=transport, virtual_user_id="vu_b")
+    ordinary = CloudRSIClient(api_key="k", transport=transport)
+    a.execution_get("a")
+    b.execution_get("b")
+    ordinary.execution_get("c")
+    assert [r["headers"].get("x-virtual-user-id") for r in seen] == ["vu_a", "vu_b", None]
+    assert isinstance(RSIClient(api_key="k", virtual_user_id="vu_a"), CloudRSIClient)
+    with pytest.raises(ValueError):
+        RSIClient(data_dir=tmp_path, virtual_user_id="vu_a")

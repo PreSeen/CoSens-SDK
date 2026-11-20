@@ -105,3 +105,24 @@ def test_memory_errors_redact_key_and_reject_redirects(monkeypatch):
         assert exc.value.status == 302
 
     asyncio.run(run())
+
+
+def test_virtual_user_selection_is_per_call_and_unsupported_methods_reject(monkeypatch):
+    seen = []
+    def mock(request):
+        seen.append((request.url.path, request.headers.get("x-virtual-user-id")))
+        return httpx.Response(200, json={})
+    monkeypatch.setenv("COSENS_API_KEY", "fixture-key")
+    monkeypatch.setattr(httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(mock)))
+    async def run():
+        await asyncio.gather(
+            memory_recall(query="a", virtual_user_id="vu_a"),
+            memory_ingest(content="b", request_key="k", virtual_user_id="vu_b"),
+            get_memory_items(virtual_user_id="vu_b"), get_memory_job("j", virtual_user_id="vu_a"), get_memory_items(),
+        )
+        with pytest.raises(ValueError):
+            await get_memory(virtual_user_id="vu_a")
+        with pytest.raises(ValueError):
+            await get_memory_experience("e", virtual_user_id="vu_a")
+    asyncio.run(run())
+    assert set(seen) == {("/api/v1/memory/recall", "vu_a"), ("/api/v1/memory/ingest", "vu_b"), ("/api/v1/memory/items", None), ("/api/v1/memory/items", "vu_b"), ("/api/v1/memory/jobs/j", "vu_a")}

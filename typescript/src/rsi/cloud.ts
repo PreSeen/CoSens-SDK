@@ -11,7 +11,7 @@ export const DEFAULT_CLOUD_BASE_URL = 'https://rsi.cosens.ai/api';
 /** The CoSens gateway accepts request bodies up to 10 MiB. */
 export const MAX_CLOUD_REQUEST_BYTES = 10 * 1024 * 1024;
 
-export type CloudOptions = { api_key?: string; base_url?: string };
+export type CloudOptions = { api_key?: string; base_url?: string; virtualUserId?: string };
 
 type EvidenceInput = {
   context_path: string;
@@ -76,12 +76,16 @@ function segment(value: string) {
 export class CloudClient {
   readonly #base: string;
   readonly #key: string;
+  readonly #virtualUserId?: string;
 
   constructor(options: CloudOptions = {}) {
     const key = options.api_key ?? process.env.COSENS_API_KEY;
     if (!key)
       throw new TypeError('cloud mode needs COSENS_API_KEY (or api_key)');
     this.#key = key;
+    if (options.virtualUserId !== undefined && (typeof options.virtualUserId !== "string" || !options.virtualUserId || /[\s\x00-\x1f\x7f]/.test(options.virtualUserId)))
+      throw new TypeError("virtualUserId must be a nonempty header value");
+    this.#virtualUserId = options.virtualUserId;
     this.#base = (
       options.base_url ??
       process.env.COSENS_RSI_BASE_URL ??
@@ -109,6 +113,7 @@ export class CloudClient {
         headers: {
           authorization: `Bearer ${this.#key}`,
           'x-auth-type': 'api_key',
+          ...(this.#virtualUserId === undefined ? {} : { 'X-Virtual-User-Id': this.#virtualUserId }),
           'user-agent': USER_AGENT,
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
         },

@@ -2,6 +2,10 @@
 
 Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned separately.
 
+## Unreleased
+
+- Python and TypeScript cloud RSI clients support explicit Virtual User selection. Supported Memory calls accept a per-call selection; unsupported Memory overview and experience calls reject it.
+
 ## Python 0.9.0
 
 - `RSIClient()` with no arguments is **cloud mode**: the CoSens service learns with CoSens models, authenticated by `COSENS_API_KEY` (or `api_key=`, `base_url=`). Only the files named in `evidence` are uploaded. Methods and results are the same as local mode; `recover()` returns `{"started": 0}`.

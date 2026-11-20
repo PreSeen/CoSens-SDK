@@ -7,6 +7,7 @@ export interface MemoryIngest {
   durable?: boolean;
   sourceId?: string;
   expectedRevision?: number;
+  virtualUserId?: string;
 }
 export interface MemoryRecallResult extends Record<string, unknown> {
   items: Record<string, unknown>[];
@@ -38,14 +39,16 @@ function pathPart(id: string) {
 export function memoryRecall({
   query,
   tokenBudget = 1000,
+  virtualUserId,
 }: {
   query: string;
   tokenBudget?: number;
+  virtualUserId?: string;
 }) {
   return request<MemoryRecallResult>('POST', '/recall', {
     query,
     token_budget: boundedInteger(tokenBudget, 'tokenBudget', 1, 8000),
-  });
+  }, virtualUserId);
 }
 
 export function memoryIngest({
@@ -55,6 +58,7 @@ export function memoryIngest({
   durable = true,
   sourceId,
   expectedRevision,
+  virtualUserId,
 }: MemoryIngest) {
   if (
     typeof requestKey !== 'string' ||
@@ -89,24 +93,26 @@ export function memoryIngest({
             Number.MAX_SAFE_INTEGER,
           ),
         }),
-  });
+  }, virtualUserId);
 }
 
-export function getMemoryItems({ limit = 200 }: { limit?: number } = {}) {
+export function getMemoryItems({ limit = 200, virtualUserId }: { limit?: number; virtualUserId?: string } = {}) {
   return request(
     'GET',
     `/items?limit=${boundedInteger(limit, 'limit', 1, 500)}`,
+    undefined, virtualUserId,
   );
 }
 
-export function getMemoryJob(jobId: string) {
-  return request('GET', `/jobs/${pathPart(jobId)}`);
+export function getMemoryJob(jobId: string, { virtualUserId }: { virtualUserId?: string } = {}) {
+  return request('GET', `/jobs/${pathPart(jobId)}`, undefined, virtualUserId);
 }
 
 export function getMemoryExperience(
   experienceId: string,
-  { revision }: { revision?: number } = {},
+  { revision, virtualUserId }: { revision?: number; virtualUserId?: string } = {},
 ) {
+  if (virtualUserId !== undefined) throw new TypeError("Virtual User selection is not supported for experience details");
   const suffix =
     revision === undefined
       ? ''
@@ -114,7 +120,8 @@ export function getMemoryExperience(
   return request('GET', `/experiences/${pathPart(experienceId)}${suffix}`);
 }
 
-export function getMemory() {
+export function getMemory({ virtualUserId }: { virtualUserId?: string } = {}) {
+  if (virtualUserId !== undefined) throw new TypeError("Virtual User selection is not supported for memory overview");
   return request('GET', '');
 }
 
@@ -122,7 +129,10 @@ async function request<T = Record<string, unknown>>(
   method: 'GET' | 'POST',
   path: string,
   body?: object,
+  virtualUserId?: string,
 ): Promise<T> {
+  if (virtualUserId !== undefined && (typeof virtualUserId !== "string" || !virtualUserId || /[\s\x00-\x1f\x7f]/.test(virtualUserId)))
+    throw new TypeError("virtualUserId must be a nonempty header value");
   const apiKey = process.env.COSENS_API_KEY;
   if (!apiKey || /\s/.test(apiKey))
     throw new TypeError('Set COSENS_API_KEY to the bare CoSens API key');
@@ -131,6 +141,7 @@ async function request<T = Record<string, unknown>>(
     Authorization: `Bearer ${apiKey}`,
   });
   if (body !== undefined) headers.set('Content-Type', 'application/json');
+  if (virtualUserId !== undefined) headers.set('X-Virtual-User-Id', virtualUserId);
   const redact = (value: string) => value.split(apiKey).join('[REDACTED]');
   let response: Response;
   try {

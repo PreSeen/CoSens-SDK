@@ -73,7 +73,7 @@ class RSIClient:
     relative to data_dir.
     """
 
-    def __new__(cls, *, mode=None, data_dir=None, config=None, api_key=None, base_url=None):
+    def __new__(cls, *, mode=None, data_dir=None, config=None, api_key=None, base_url=None, virtual_user_id=None):
         if mode is None:
             mode = "local" if data_dir is not None or config is not None else "cloud"
         if mode == "cloud":
@@ -81,10 +81,10 @@ class RSIClient:
                 raise ValueError("data_dir and config are for mode='local'")
             from .cloud import CloudRSIClient
 
-            return CloudRSIClient(api_key=api_key, base_url=base_url)
+            return CloudRSIClient(api_key=api_key, base_url=base_url, virtual_user_id=virtual_user_id)
         if mode != "local":
             raise ValueError("mode must be 'cloud' or 'local'")
-        if api_key is not None or base_url is not None:
+        if api_key is not None or base_url is not None or virtual_user_id is not None:
             raise ValueError("api_key and base_url are for mode='cloud'")
         if data_dir is None:
             raise ValueError("mode='local' needs data_dir")
@@ -92,7 +92,7 @@ class RSIClient:
 
     mode = "local"
 
-    def __init__(self, *, mode=None, data_dir, config: dict | None = None, api_key=None, base_url=None):
+    def __init__(self, *, mode=None, data_dir, config: dict | None = None, api_key=None, base_url=None, virtual_user_id=None):
         settings = ModelEndpoint.model_validate(config) if config is not None else None
         scope = credential_scope_id(settings.credential_scope) if settings else None
         binding = (

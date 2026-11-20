@@ -107,3 +107,23 @@ test('Memory atoms redact authentication and refuse gateway redirects', async (t
     status: 302,
   });
 });
+
+test('virtual user selection is per call and unsupported operations reject', async (t) => {
+  useFixtureKey(t);
+  const seen: Array<[string, string | null]> = [];
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    seen.push([new URL(String(url)).pathname, new Headers(init?.headers).get('x-virtual-user-id')]);
+    return Response.json({});
+  });
+  await Promise.all([
+    memoryRecall({ query: 'a', virtualUserId: 'vu_a' }),
+    memoryIngest({ content: 'b', requestKey: 'k', virtualUserId: 'vu_b' }),
+    getMemoryItems({ virtualUserId: 'vu_b' }), getMemoryJob('j', { virtualUserId: 'vu_a' }), getMemoryItems(),
+  ]);
+  assert.deepEqual(seen, [
+    ['/api/v1/memory/recall', 'vu_a'], ['/api/v1/memory/ingest', 'vu_b'],
+    ['/api/v1/memory/items', 'vu_b'], ['/api/v1/memory/jobs/j', 'vu_a'], ['/api/v1/memory/items', null],
+  ]);
+  assert.throws(() => getMemory({ virtualUserId: 'vu_a' }), TypeError);
+  assert.throws(() => getMemoryExperience('e', { virtualUserId: 'vu_a' }), TypeError);
+});
