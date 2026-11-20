@@ -37,6 +37,7 @@ export const ModelConfigSchema = z.strictObject({
     .string()
     .regex(/^[A-Za-z_][A-Za-z0-9_]*$/)
     .default('RSI_MODEL_API_KEY'),
+  credential_scope: z.string().regex(/^[a-f0-9]{64}$/u).optional(),
   timeout: z.number().positive().max(3600).default(120),
   // Unset leaves the completion budget to the endpoint; reasoning models need more than a fixed 4096.
   max_tokens: z.number().int().positive().optional(),
@@ -328,6 +329,7 @@ export interface ExecutionAnswer {
 }
 export interface Execution extends ObjectMetadata {
   runtime_config: LocalConfig;
+  recovery_config?: LocalConfig;
   material_ids: string[];
   policy: z.output<typeof PolicySchema>;
   base_execution_id: string | null;

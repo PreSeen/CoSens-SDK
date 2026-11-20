@@ -333,6 +333,15 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           (tool: { function: { name: string } }) => tool.function.name,
         ),
       );
+      const token = req.headers['x-api-key'];
+      if (token === 'fixture-expired' && tools.has('write_output')) {
+        res.writeHead(401).end();
+        return;
+      }
+      if (token === 'fixture-refreshed') {
+        assert.equal(input.model, 'fixture-refreshed-model');
+        assert.equal(input.max_tokens, 16384);
+      }
       if (tools.has('web_search')) assert.ok(tools.has('RecipeContent'));
       let call: { name: string; args: object } | undefined;
       const evidence = evidence_catalog[0];
@@ -895,6 +904,63 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       }
       recovery.close();
     }
+
+    await t.test('refreshed model credentials resume the same checkpoint and isolate accounts', async () => {
+      const { RSIClient: BuiltClient } = await import('cosens-sdk/rsi');
+      const data_dir = join(directory, 'refresh-token');
+      const config = { model: 'fixture-expired-model', base_url: client.config.model.base_url!, auto_start: false };
+      const expiredHeaders = { 'X-Api-Key': 'fixture-expired' };
+      const freshConfig = {
+        ...config,
+        model: 'fixture-refreshed-model',
+        headers: { 'X-Api-Key': 'fixture-refreshed' },
+        max_tokens: 16384,
+        timeout: 600,
+      };
+      const expired = new BuiltClient({ data_dir, config: { ...config, headers: expiredHeaders, credential_scope: 'account-a' } });
+      const refreshed = new BuiltClient({ data_dir, config: { ...freshConfig, credential_scope: 'account-a' } });
+      const other = new BuiltClient({ data_dir, config: { ...freshConfig, credential_scope: 'account-b' } });
+      const legacy = new BuiltClient({ data_dir, config: { ...config, headers: expiredHeaders } });
+      const reader = new RSIClient({ data_dir, auto_start: false });
+      try {
+        const evidence = {
+          context_path: path,
+          files: [
+            { path: feedbackPath, role: 'feedback' as const },
+            { path: referencePath, role: 'reference' as const },
+            { path: currentPath, role: 'input' as const },
+          ],
+        };
+        const unrelated = await other.execution_create({ evidence, idempotency_key: 'other-account' });
+        const old = await expired.execution_create({ evidence, idempotency_key: 'refresh-token' });
+        const beforeScope = await legacy.execution_create({ evidence, idempotency_key: 'legacy-binding' });
+        await expired.recover({ recipe_id: old.recipe_id! });
+        const failed = await reader.wait(old.id, { timeout: 20 });
+        assert.equal(failed.error?.upstream_status, 401);
+        assert.ok(failed.recipe_version_id);
+        assert.deepEqual(await expired.recover({ recipe_id: old.recipe_id! }), { started: 0 });
+        assert.deepEqual(await other.recover({ recipe_id: old.recipe_id!, previous_headers: expiredHeaders }), { started: 0 });
+
+        await refreshed.recover();
+        const completed = await reader.wait(old.id, { timeout: 20 });
+        assert.equal(completed.status, 'completed', JSON.stringify(completed.error));
+        assert.equal(completed.result?.test_status, 'passed');
+        assert.equal(completed.recipe_version_id, failed.recipe_version_id);
+        assert.equal(completed.runtime_config.model.model, freshConfig.model);
+        assert.equal(completed.runtime_config.model.max_tokens, freshConfig.max_tokens);
+        assert.equal(completed.runtime_config.model.timeout, freshConfig.timeout);
+        assert.equal(reader.execution_get(unrelated.id).status, 'queued');
+        assert.equal(reader.execution_get(beforeScope.id).status, 'queued');
+
+        await refreshed.recover({ recipe_id: beforeScope.recipe_id!, previous_headers: expiredHeaders });
+        const migrated = await reader.wait(beforeScope.id, { timeout: 20 });
+        assert.equal(migrated.status, 'completed', JSON.stringify(migrated.error));
+        assert.equal(migrated.runtime_config.model.credential_scope, completed.runtime_config.model.credential_scope);
+        assert.equal(reader.execution_get(unrelated.id).status, 'queued');
+      } finally {
+        for (const host of [expired, refreshed, other, legacy, reader]) host.close();
+      }
+    });
 
     const environment = {
       RSI_MODEL_API_KEY: 'fixture',

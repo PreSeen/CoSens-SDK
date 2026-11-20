@@ -37,13 +37,14 @@ TS 用 `new RSIClient({ data_dir, config })`。Python 用 `RSIClient(data_dir=..
 | `config.model` | 提供配置对象时必填。 | 非空字符串，模型 ID。 |
 | `config.base_url` | 提供配置对象时必填。 | 支持工具调用的 OpenAI-compatible Chat Completions 基地址。 |
 | `config.headers` | 选填，省略等同 `{}`。 | 宿主提供的 HTTP 请求头，键和值都是字符串。认证方案及凭证格式由宿主决定。 |
+| `config.credential_scope` | 选填。需要在 token 刷新后自动匹配同账号任务时传入。 | 宿主为已认证账号指定的稳定非空标识。同账号刷新 token 时沿用该值，共用 `data_dir` 的不同账号使用不同值。SQLite 保存标识的哈希。 |
 | `config.auto_start` | 提供配置对象时必填。 | 布尔值。为 `true` 时入队后自动调度 Worker，为 `false` 时由宿主调用 `recover()`。 |
 | `config.max_tokens` | 选填。 | 正整数，限制单次模型调用的输出。省略时由模型服务决定。 |
 | `config.timeout` | 选填。 | 秒数，默认 120，有效范围为大于 0 且不超过 3600。 |
 
 本地模型请求直接使用 `headers`。例如网关可以接收 `Authorization: Bearer <access_token>` 和它要求的令牌类型头，其他模型可以接收 `X-Api-Key` 或供应商要求的请求头。请求头值只在 Client 和 Worker 进程使用，SQLite 只保存匹配标识。未指定 User-Agent 时默认使用 `cosens-sdk-python/<版本>` 或 `cosens-sdk-typescript/<版本>`。
 
-重启后使用相同的 `data_dir`、`model`、`base_url` 和 `headers` 调用 `recover()`。凭证变化的 Client 只能执行使用新配置创建的任务。历史上依赖 `RSI_MODEL_API_KEY` 的执行仍可通过原环境变量恢复。TS 可通过 `RSI_NODE_EXECUTABLE` 指定 Worker 的 Node 可执行文件。
+刷新 token 后，用原 `data_dir` 和 `credential_scope`、新的 `headers` 创建 Client，再调用 `recover()`。Worker 接手时使用本次 Client 的模型、地址、请求头、超时和输出预算。历史上依赖 `RSI_MODEL_API_KEY` 的执行仍可通过原环境变量恢复。TS 可通过 `RSI_NODE_EXECUTABLE` 指定 Worker 的 Node 可执行文件。
 
 ## 业务接口
 
@@ -252,12 +253,14 @@ TS 和 Python 使用相同的表结构。查询时，`latest_version_id` 取版�
 
 | 方法 | 必填参数 | 选填参数 | 用途 |
 | --- | --- | --- | --- |
-| `recover` | 无 | `recipe_id`（SDK Recipe ID，非空字符串） | 恢复本地未完成的 Execution，返回 `started`。Worker 需要等待租约或空闲槽位时可返回 `scheduled=true`。云端返回 `{ started: 0 }`，服务端自行恢复。 |
+| `recover` | 无 | `recipe_id`（SDK Recipe ID）、`previous_headers`（任务上次绑定的请求头，键值是字符串）。 | 使用当前 Client 的配置恢复符合条件的本地 Execution，返回 `started`。等待租约或空闲槽位时可返回 `scheduled=true`。云端返回 `{ started: 0 }`，服务端自行恢复。 |
 | `close` | 无 | 无 | TS 本地释放 SQLite 连接，TS 云端直接返回。Python 云端释放 HTTPX 连接。 |
 
 TS 的 RSI 业务接口及 `recover()` 用 `await`，`close()` 同步调用。Python RSI 方法同步调用。
 
-TS 用 `await client.recover({ recipe_id: recipeId })`，Python 用 `client.recover(recipe_id=recipe_id)`。指定 SDK Recipe ID 时，本次启动或安排的 Worker 只接手此 Recipe 的排队中或可接管的 Execution。省略参数时恢复当前 Client 模型配置可接手的全部未完成 Execution。没有匹配任务时返回 `{ started: 0 }`。
+TS 用 `await client.recover({ recipe_id: recipeId })`，Python 用 `client.recover(recipe_id=recipe_id)`。指定 SDK Recipe ID 时只接手该 Recipe。省略 ID 时恢复同一账号可接手的全部 Execution，包括排队中的任务、租约到期的任务，以及更换凭证后可以重试的 HTTP 401 或 403 失败任务。继续使用原 Execution ID 和已有断点。没有匹配任务时返回 `{ started: 0 }`。
+
+以前创建的任务如果没有 `credential_scope`，可用与创建时匹配的模型配置恢复。如果旧请求头已有变化，首次续跑可在 `recover()` 传入 `previous_headers`，用于匹配原绑定。若新 Client 也配置了 `credential_scope`，恢复成功后后续刷新 token 只需继续使用同一个标识。
 
 ## Memory 服务接口
 

@@ -7,7 +7,7 @@ import {
   type Execution as StoredExecution,
 } from './models.js';
 import { readRecipeFile } from './recipe-file.js';
-import { bindModelHeaders } from './model-headers.js';
+import { bindModelHeaders, credentialScopeId } from './model-headers.js';
 import type { RecipeListStatus } from './recipe-list.js';
 
 const text = z.string().min(1);
@@ -16,11 +16,13 @@ const page = z.strictObject({
   archived: z.boolean(),
 });
 const revision = z.number().int().positive();
+const modelHeaders = z.record(z.string(), z.string());
 const config = z
   .strictObject({
     model: text,
     base_url: text,
-    headers: z.record(z.string(), z.string()).optional(),
+    headers: modelHeaders.optional(),
+    credential_scope: z.string().trim().min(1).optional(),
     auto_start: z.boolean(),
     max_tokens: z.number().int().positive().optional(),
     timeout: z.number().positive().max(3600).optional(),
@@ -51,7 +53,10 @@ const answer = z.strictObject({
 });
 const executionListQuery = z.strictObject({ execution_ids: z.array(text) });
 const recipeListQuery = z.strictObject({ recipe_ids: z.array(text) });
-const recoverOptions = z.strictObject({ recipe_id: text.optional() });
+const recoverOptions = z.strictObject({
+  recipe_id: text.optional(),
+  previous_headers: modelHeaders.optional(),
+});
 const recipeTest = z.strictObject({
   execution_id: text,
   recipe_id: text,
@@ -132,8 +137,11 @@ export class RSIClient {
     }
     this.mode = 'local';
     const { data_dir, config: settings } = clientOptions.parse(options);
+    const scope = settings?.credential_scope === undefined
+      ? undefined
+      : credentialScopeId(settings.credential_scope);
     const binding = settings && bindModelHeaders(
-      settings.base_url, settings.model, settings.headers ?? {},
+      settings.base_url, settings.model, settings.headers ?? {}, scope,
     );
     this.#queue = new QueueClient({
       data_dir,
@@ -144,6 +152,7 @@ export class RSIClient {
                 model: settings.model,
                 base_url: settings.base_url,
                 api_key_env: binding.name,
+                ...(scope === undefined ? {} : { credential_scope: scope }),
                 ...(settings.max_tokens === undefined
                   ? {}
                   : { max_tokens: settings.max_tokens }),
@@ -343,9 +352,9 @@ export class RSIClient {
   }
 
   async recover(options?: RecoverOptions) {
-    const recipeId = recoverOptions.optional().parse(options)?.recipe_id;
+    const { recipe_id, previous_headers } = recoverOptions.optional().parse(options) ?? {};
     if (this.#cloud) return { started: 0 };
-    return this.#queue.recover(recipeId);
+    return this.#queue.recover(recipe_id, { previousHeaders: previous_headers });
   }
 
   close() {

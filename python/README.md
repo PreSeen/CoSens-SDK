@@ -24,4 +24,4 @@ rsi = RSIClient(
 )
 ```
 
-Use `rsi.recover()` to resume all unfinished work that matches the local Client configuration, or `rsi.recover(recipe_id=recipe_id)` to resume work for one SDK Recipe. Local Recipe reads include a `storage_path` relative to `data_dir`. See the [atomic API and Hook lifecycle](docs/local-rsi.md) and the [Python Hook example](examples/05_rsi_sdk_v2.py).
+After refreshing a token, create a Client with the same data directory and `credential_scope` and the new headers. `rsi.recover()` resumes that account's unfinished work with the new Client settings, and `rsi.recover(recipe_id=recipe_id)` limits recovery to one SDK Recipe. Local Recipe reads include a `storage_path` relative to `data_dir`. See the [atomic API and Hook lifecycle](docs/local-rsi.md) and the [Python Hook example](examples/05_rsi_sdk_v2.py).

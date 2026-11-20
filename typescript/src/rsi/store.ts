@@ -1,4 +1,5 @@
 import { upgradeExecution } from './execution-data.js';
+import { bindModelHeaders } from './model-headers.js';
 import {
   legacyRecipes,
   migrateRecipeVersions,
@@ -26,11 +27,13 @@ import {
   type Versioned,
   type Recipe,
   type RecipeContent,
+  type LocalConfig,
 } from './models.js';
 
 export const uid = (prefix: string) =>
   `${prefix}_${randomUUID().replaceAll('-', '')}`;
 export const now = () => Date.now() / 1000;
+const queuedConfig = `COALESCE(json_extract(details, '$.recovery_config'), json_extract(details, '$.runtime_config'))`;
 /** Stable JSON for idempotency comparison, including nested object key order. */
 export function encode(value: unknown): string {
   return JSON.stringify(value, (_k, v: unknown) =>
@@ -679,8 +682,8 @@ export class Store {
         .prepare(
           `SELECT executions.id, executions.fence FROM executions
            WHERE (executions.status='queued' OR (executions.status='running' AND executions.lease_until<?))
-           AND COALESCE(json_extract(executions.details, '$.runtime_config.max_executions'), ?) > ?
-           AND (? IS NULL OR json_extract(executions.details, '$.runtime_config.model.api_key_env') IN (SELECT value FROM json_each(?)))
+           AND COALESCE(json_extract(${queuedConfig}, '$.max_executions'), ?) > ?
+           AND (? IS NULL OR json_extract(${queuedConfig}, '$.model.api_key_env') IN (SELECT value FROM json_each(?)))
            AND (? IS NULL OR executions.recipe_id = ?)
            ORDER BY executions.created_at,executions.id LIMIT 1`,
         )
@@ -699,8 +702,10 @@ export class Store {
           'UPDATE executions SET owner=?,lease_until=?,fence=fence+1 WHERE id=?',
         )
         .run(owner, time + ttl, row.id);
+      const { recovery_config, ...execution } = this.get<Execution>(row.id, 'execution');
       this.save({
-        ...this.get<Execution>(row.id, 'execution'),
+        ...execution,
+        ...(recovery_config ? { runtime_config: recovery_config, error: null } : {}),
         status: 'running',
       });
       return { id: row.id, fence: row.fence + 1 };
@@ -733,13 +738,58 @@ export class Store {
       fail('input_changed', 'execution inputs changed');
     return execution;
   }
+  stage_recovery(
+    config: LocalConfig,
+    recipeId?: string,
+    previousHeaders?: Record<string, string>,
+  ) {
+    this.tx(() => {
+      const rows = this.db.prepare(`
+        SELECT * FROM executions
+        WHERE (? IS NULL OR recipe_id = ?)
+          AND (status IN ('queued','running') OR (status='failed'
+               AND json_extract(details, '$.error.upstream_status') IN (401,403)))
+      `).all(recipeId ?? null, recipeId ?? null) as Record<string, unknown>[];
+      const current = config.model;
+      const latest = encode(config);
+      for (const row of rows) {
+        const execution = this.record<Execution>(row);
+        const effective = execution.recovery_config ?? execution.runtime_config;
+        const stored = effective?.model;
+        if (!stored) continue;
+        const matches = stored.credential_scope !== undefined
+          ? stored.credential_scope === current.credential_scope
+          : stored.api_key_env === current.api_key_env || (
+              previousHeaders !== undefined &&
+              bindModelHeaders(stored.base_url, stored.model, previousHeaders).name === stored.api_key_env
+            );
+        if (!matches || encode(effective) === latest) continue;
+        if (execution.status === 'failed' && stored.api_key_env === current.api_key_env) continue;
+        if (execution.status === 'running') {
+          this.save({
+            ...execution,
+            recovery_config: encode(execution.runtime_config) === latest ? undefined : config,
+          });
+        } else {
+          this.save({
+            ...execution,
+            runtime_config: config,
+            recovery_config: undefined,
+            status: 'queued',
+            stage: 'queued',
+            error: null,
+          });
+        }
+      }
+    });
+  }
   pending_execution(credentials?: string[], recipeId?: string) {
     return this.db
       .prepare(
-        `SELECT executions.id AS id, json_extract(executions.details, '$.runtime_config') AS config
+        `SELECT executions.id AS id, ${queuedConfig} AS config
        FROM executions
        WHERE executions.status IN ('queued','running')
-       AND (? IS NULL OR json_extract(executions.details, '$.runtime_config.model.api_key_env') IN (SELECT value FROM json_each(?)))
+       AND (? IS NULL OR json_extract(${queuedConfig}, '$.model.api_key_env') IN (SELECT value FROM json_each(?)))
        AND (? IS NULL OR executions.recipe_id = ?)
        ORDER BY executions.created_at, executions.id LIMIT 1`,
       )
@@ -757,7 +807,7 @@ export class Store {
     return this.db
       .prepare(`
         SELECT COUNT(*) FROM executions WHERE status IN ('queued','running')
-        AND json_extract(details, '$.runtime_config.model.api_key_env') IN (SELECT value FROM json_each(?))
+        AND json_extract(${queuedConfig}, '$.model.api_key_env') IN (SELECT value FROM json_each(?))
         AND (? IS NULL OR recipe_id = ?)
       `)
       .pluck()

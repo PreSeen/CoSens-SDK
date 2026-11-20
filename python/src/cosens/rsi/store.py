@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .execution_data import compact_analysis, upgrade_execution
+from .model_headers import bind_model_headers
 from .models import Conflict, InputChanged, InvalidState, LeaseLost, NotFound
 from .progress import stage_progress
 from .store_schema import (
@@ -34,6 +35,12 @@ def uid(prefix):
 
 def encode(value):
     return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True)
+
+
+EFFECTIVE_RUNTIME = """COALESCE(
+    json_extract(executions.details,'$.recovery_config'),
+    json_extract(executions.details,'$.runtime_config')
+)"""
 
 
 INITIALIZE_RECIPE_AVAILABILITY = """
@@ -561,6 +568,7 @@ class Store:
                 rubrics_version_id=state["rubrics_version_id"],
                 result=result,
             )
+            execution.pop("recovery_config", None)
             return self.save(conn, execution)
 
     def publish_recipe_version(self, conn, recipe_id, version_id):
@@ -751,11 +759,11 @@ class Store:
             if running >= max_executions:
                 return None
             row = conn.execute(
-                """SELECT executions.id,executions.fence FROM executions
+                f"""SELECT executions.id,executions.fence FROM executions
                 WHERE (executions.status='queued' OR (executions.status='running' AND executions.lease_until<?))
-                AND COALESCE(json_extract(executions.details,'$.runtime_config.max_executions'),?)>?
+                AND COALESCE(json_extract({EFFECTIVE_RUNTIME},'$.max_executions'),?)>?
                 AND (? IS NULL OR executions.recipe_id=?)
-                AND (? IS NULL OR json_extract(executions.details,'$.runtime_config.model.api_key_env')
+                AND (? IS NULL OR json_extract({EFFECTIVE_RUNTIME},'$.model.api_key_env')
                      IN (SELECT value FROM json_each(?)))
                 ORDER BY executions.created_at,executions.id LIMIT 1""",
                 (
@@ -779,6 +787,9 @@ class Store:
             )
             obj = self.get_in(conn, row["id"], "execution")
             obj["status"] = "running"
+            recovery = obj.pop("recovery_config", None)
+            if recovery is not None:
+                obj.update(runtime_config=recovery, error=None)
             self.save(conn, obj)
             return row["id"], row["fence"] + 1
 
@@ -816,15 +827,84 @@ class Store:
             obj.update(changes)
             return self.save(conn, obj)
 
+    def fail_execution(self, execution_id, owner, fence, error):
+        with self.transaction() as conn:
+            obj = self.guard(conn, execution_id, owner, fence)
+            recovery = obj.pop("recovery_config", None)
+            if (
+                error.get("upstream_status") in (401, 403)
+                and recovery is not None
+                and recovery["model"]["api_key_env"]
+                != obj["runtime_config"]["model"]["api_key_env"]
+            ):
+                obj.update(
+                    runtime_config=recovery, status="queued", stage="queued", error=None
+                )
+            else:
+                obj.update(status="failed", stage="failed", error=error)
+            return self.save(conn, obj)
+
+    def prepare_recovery(self, config, *, recipe_id=None, previous_headers=None):
+        """Refresh the runtime for jobs identified by this Client's model credentials."""
+        latest_model = config["model"]
+        latest_binding = latest_model["api_key_env"]
+        with self.transaction() as conn:
+            rows = conn.execute(
+                """SELECT * FROM executions
+                   WHERE (? IS NULL OR recipe_id=?)
+                   AND (status IN ('queued','running') OR
+                        (status='failed' AND json_extract(details,'$.error.upstream_status') IN (401,403)))""",
+                (recipe_id, recipe_id),
+            ).fetchall()
+            for row in rows:
+                obj = self._record(row)
+                runtime = obj.get("runtime_config") or {}
+                effective = obj.get("recovery_config") or runtime
+                model = effective.get("model") or {}
+                binding = model.get("api_key_env")
+                scope = model.get("credential_scope")
+                if scope is not None:
+                    matched = scope == latest_model["credential_scope"]
+                else:
+                    matched = binding == latest_binding
+                    if (
+                        not matched
+                        and previous_headers is not None
+                        and model.get("base_url")
+                        and model.get("model")
+                    ):
+                        expected, _ = bind_model_headers(
+                            model["base_url"], model["model"], previous_headers
+                        )
+                        matched = binding == expected
+                if not matched or effective == config:
+                    continue
+                if obj["status"] == "failed" and binding == latest_binding:
+                    continue
+                if obj["status"] == "running":
+                    if runtime == config:
+                        obj.pop("recovery_config", None)
+                    else:
+                        obj["recovery_config"] = config
+                else:
+                    obj.pop("recovery_config", None)
+                    obj.update(
+                        runtime_config=config,
+                        status="queued",
+                        stage="queued",
+                        error=None,
+                    )
+                self.save(conn, obj)
+
     def pending_execution(self, credentials=None, *, recipe_id=None):
         keys = encode(credentials) if credentials is not None else None
         with self.connect() as conn:
             row = conn.execute(
-                """SELECT executions.id, json_extract(executions.details,'$.runtime_config') AS config
+                f"""SELECT executions.id, {EFFECTIVE_RUNTIME} AS config
                    FROM executions
                    WHERE executions.status IN ('queued','running')
                    AND (? IS NULL OR executions.recipe_id=?)
-                   AND (? IS NULL OR json_extract(executions.details,'$.runtime_config.model.api_key_env')
+                   AND (? IS NULL OR json_extract({EFFECTIVE_RUNTIME},'$.model.api_key_env')
                         IN (SELECT value FROM json_each(?)))
                    ORDER BY executions.created_at,executions.id LIMIT 1""",
                 (recipe_id, recipe_id, keys, keys),
@@ -837,9 +917,9 @@ class Store:
     def pending_count(self, credentials, *, recipe_id=None):
         with self.connect() as conn:
             return conn.execute(
-                """SELECT COUNT(*) FROM executions WHERE status IN ('queued','running')
+                f"""SELECT COUNT(*) FROM executions WHERE status IN ('queued','running')
                    AND (? IS NULL OR recipe_id=?)
-                   AND json_extract(details, '$.runtime_config.model.api_key_env')
+                   AND json_extract({EFFECTIVE_RUNTIME}, '$.model.api_key_env')
                        IN (SELECT value FROM json_each(?))""",
                 (recipe_id, recipe_id, encode(credentials)),
             ).fetchone()[0]

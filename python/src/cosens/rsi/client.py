@@ -13,7 +13,7 @@ from pydantic import (
 )
 
 from ._queue_client import RSIClient as QueueClient
-from .model_headers import bind_model_headers
+from .model_headers import bind_model_headers, credential_scope_id
 from .models import Contract, RecipeReference
 from .recipe_file import read_recipe_file
 
@@ -28,6 +28,7 @@ class ModelEndpoint(Contract):
     model: Text
     base_url: Text
     headers: dict[str, str] = Field(default_factory=dict)
+    credential_scope: Text | None = None
     auto_start: StrictBool
     max_tokens: Positive | None = None
     timeout: Annotated[float, Field(gt=0, le=3600)] | None = None
@@ -57,6 +58,7 @@ class RecipeListQuery(Contract):
 
 
 _TEXT = TypeAdapter(Text)
+_HEADERS = TypeAdapter(dict[str, str], config=ConfigDict(hide_input_in_errors=True))
 _ANSWER = TypeAdapter(Text | Annotated[list[Text], Field(min_length=1)])
 _REVISION = TypeAdapter(Positive)
 _ARCHIVED = TypeAdapter(StrictBool)
@@ -92,9 +94,16 @@ class RSIClient:
 
     def __init__(self, *, mode=None, data_dir, config: dict | None = None, api_key=None, base_url=None):
         settings = ModelEndpoint.model_validate(config) if config is not None else None
+        scope = credential_scope_id(settings.credential_scope) if settings else None
         binding = (
-            bind_model_headers(settings.base_url, settings.model, settings.headers)
-            if settings is not None else None
+            bind_model_headers(
+                settings.base_url,
+                settings.model,
+                settings.headers,
+                credential_scope=scope,
+            )
+            if settings is not None
+            else None
         )
         self._queue = QueueClient(
             data_dir=data_dir,
@@ -103,6 +112,7 @@ class RSIClient:
                     "model": settings.model,
                     "base_url": settings.base_url,
                     "api_key_env": binding[0],
+                    "credential_scope": scope,
                     **settings.model_dump(
                         include={"max_tokens", "timeout"}, exclude_none=True
                     ),
@@ -254,7 +264,18 @@ class RSIClient:
             archived=_ARCHIVED.validate_python(archived),
         )
 
-    def recover(self, *, recipe_id: str | None = None):
+    def recover(
+        self,
+        *,
+        recipe_id: str | None = None,
+        previous_headers: dict[str, str] | None = None,
+    ):
         return self._queue.recover(
-            recipe_id=_TEXT.validate_python(recipe_id) if recipe_id is not None else None
+            recipe_id=_TEXT.validate_python(recipe_id) if recipe_id is not None else None,
+            previous_headers=(
+                _HEADERS.validate_python(previous_headers)
+                if previous_headers is not None
+                else None
+            ),
+            refresh=True,
         )

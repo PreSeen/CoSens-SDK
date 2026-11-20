@@ -3,10 +3,14 @@ import { fail } from './models.js';
 
 const prefix = 'RSI_MODEL_HEADERS_';
 
+export const credentialScopeId = (scope: string) =>
+  createHash('sha256').update(scope).digest('hex');
+
 export function bindModelHeaders(
-  baseUrl: string,
+  baseUrl: string | undefined,
   model: string,
   headers: Record<string, string>,
+  scope?: string,
 ) {
   let entries: [string, string][];
   try {
@@ -15,7 +19,10 @@ export function bindModelHeaders(
     return fail('invalid_argument', 'Invalid model request headers');
   }
   // Pin work to the original model endpoint and header values across processes.
-  const identity = JSON.stringify([baseUrl.replace(/\/+$/, ''), model, entries]);
+  const identity = JSON.stringify([
+    baseUrl?.replace(/\/+$/, ''), model, entries,
+    ...(scope === undefined ? [] : [scope]),
+  ]);
   const name = prefix + createHash('sha256').update(identity).digest('hex');
   return { name, value: JSON.stringify(Object.fromEntries(entries)) };
 }

@@ -93,11 +93,19 @@ export async function drain(
           try {
             store.tx(() => {
               const execution = store.guard(id, owner, fence);
+              const failure = failureDetails(error, execution.stage);
+              const pending = execution.recovery_config;
+              const useRefreshedCredentials = pending &&
+                pending.model.api_key_env !== execution.runtime_config.model.api_key_env &&
+                'upstream_status' in failure &&
+                (failure.upstream_status === 401 || failure.upstream_status === 403);
               store.save({
                 ...execution,
-                status: 'failed',
-                stage: 'failed',
-                error: failureDetails(error, execution.stage),
+                runtime_config: useRefreshedCredentials ? pending : execution.runtime_config,
+                recovery_config: undefined,
+                status: useRefreshedCredentials ? 'queued' : 'failed',
+                stage: useRefreshedCredentials ? 'queued' : 'failed',
+                error: useRefreshedCredentials ? null : failure,
               });
             });
           } catch (persistError) {
@@ -209,8 +217,9 @@ if (
     const reader = new RSIClient({ data_dir, auto_start: false });
     try {
       const pending = reader.store.pending_execution(undefined, recipeId);
-      const config = executionId
-        ? reader.execution_get(executionId).runtime_config
+      const requested = executionId ? reader.execution_get(executionId) : undefined;
+      const config = requested
+        ? requested.recovery_config ?? requested.runtime_config
         : pending && LocalConfigSchema.parse(JSON.parse(pending.config));
       if (config) {
         const client = new RSIClient({ data_dir, config, auto_start: false });

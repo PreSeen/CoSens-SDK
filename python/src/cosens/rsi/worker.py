@@ -129,14 +129,11 @@ def drain(client, *, runtime=None, owner=None, slot=None, recipe_id=None):
                 # Provider exceptions may contain credentials or raw prompts. Persist
                 # only the class name and a stable diagnostic code, never repr(exc).
                 try:
-                    store.progress(
+                    store.fail_execution(
                         execution_id,
                         owner,
                         fence,
-                        None,
-                        status="failed",
-                        stage="failed",
-                        error=failure_details(
+                        failure_details(
                             exc, store.get(execution_id, "execution")["stage"]
                         ),
                     )
@@ -194,7 +191,8 @@ def main():
         parser.error("owner and slot must be supplied together")
     reader = RSIClient(data_dir=args.data_dir, auto_start=False)
     if args.execution_id:
-        config = reader.execution_get(args.execution_id)["runtime_config"]
+        execution = reader.execution_get(args.execution_id)
+        config = execution.get("recovery_config") or execution["runtime_config"]
     else:
         pending = reader.store.pending_execution(recipe_id=args.recipe_id)
         if not pending:

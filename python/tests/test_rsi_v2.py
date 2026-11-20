@@ -812,7 +812,19 @@ def test_late_clarification_waits_for_all_answers_and_creates_child_once(
 
 
 def test_last_answer_during_generation_creates_one_child(client, tmp_path):
+    from cosens.rsi import RSIClient as HostClient
+
     execution = run(client, material(client, tmp_path)["id"])
+    latest = HostClient(
+        data_dir=client.data_dir,
+        config={
+            "model": "fixture-replacement",
+            "base_url": "http://127.0.0.1:1/v1",
+            "headers": {"X-Api-Key": "fixture-refreshed"},
+            "credential_scope": "account-primary",
+            "auto_start": False,
+        },
+    )._queue.config.model_dump()
 
     class AnsweringRuntime(TwoQuestionRuntime):
         child_id = None
@@ -828,6 +840,10 @@ def test_last_answer_during_generation_creates_one_child(client, tmp_path):
         def generate(self, context, *args):
             assert context["recipe_name"] == "Format numbers"
             if not self.generation_count:
+                with client.store.transaction() as conn:
+                    running = client.store.get_in(conn, execution["id"], "execution")
+                    assert running["status"] == "running"
+                    client.store.save(conn, {**running, "recovery_config": latest})
                 first = client.execution_clarification_answer(
                     execution["id"],
                     question_id="format",
@@ -853,10 +869,12 @@ def test_last_answer_during_generation_creates_one_child(client, tmp_path):
     client.run_pending(runtime=runtime)
     parent = client.execution_get(execution["id"])
     assert parent["status"] == "cancelled"
+    assert "recovery_config" not in parent
     assert parent["input_revision"] == 1
     assert parent["test_results"] == []
     final = client.execution_get(runtime.child_id)
     assert final["status"] == "completed", final
+    assert final["runtime_config"] == latest
     assert final["base_execution_id"] == parent["id"]
     assert final["input_revision"] == parent["input_revision"] + 1
     assert runtime.generation_count == 2

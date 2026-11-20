@@ -33,6 +33,13 @@ def gateway(monkeypatch):
         bad_output = "malformed"
         lock = threading.Lock()
 
+        def __init__(self, *args):
+            super().__init__(*args)
+            self.rejected_keys = {}
+            self.model_requests = []
+            self.rejection_started = threading.Event()
+            self.release_rejection = None
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -44,7 +51,18 @@ def gateway(monkeypatch):
                 server.active += 1
                 server.peak = max(server.peak, server.active)
                 server.requests += 1
+                api_key = self.headers.get("X-Api-Key")
+                server.model_requests.append(
+                    (api_key, request["model"], request.get("max_tokens"))
+                )
             try:
+                rejection = server.rejected_keys.get(api_key)
+                if rejection is not None:
+                    server.rejection_started.set()
+                    if server.release_rejection is not None:
+                        server.release_rejection.wait(timeout=10)
+                    self.send_error(rejection)
+                    return
                 time.sleep(0.03)
                 model = request["model"]
                 if "-session-" in model:
@@ -582,6 +600,116 @@ def test_recover_recipe_leaves_other_recipes_queued(tmp_path, gateway, deferred)
     assert restored.recover(recipe_id=target["recipe_id"]) == {"started": 0}
     assert restored.recover() == {"started": 1}
     assert restored._queue.wait(other["id"], timeout=20)["status"] == "completed"
+
+
+@pytest.mark.parametrize("scoped", [True, False])
+def test_explicit_recover_refreshes_rejected_credentials(tmp_path, gateway, scoped):
+    from cosens.rsi import RSIClient as HostClient
+
+    gateway.rejected_keys["fixture-expired"] = 401
+    initial_config = {
+        "model": "model-before-refresh",
+        "base_url": f"http://127.0.0.1:{gateway.server_port}/v1",
+        "headers": {"X-Api-Key": "fixture-expired"},
+        "auto_start": False,
+    }
+    if scoped:
+        initial_config["credential_scope"] = "account-primary"
+    root = tmp_path / "rsi"
+    context = tmp_path / "context.md"
+    context.write_text("Write the answer 42 into answer.txt")
+    evidence = {"context_path": str(context), "files": []}
+    initial = HostClient(data_dir=root, config=initial_config)
+    target = initial.execution_create(evidence=evidence, idempotency_key="target")
+    other_client = HostClient(
+        data_dir=root,
+        config={**initial_config, "credential_scope": "account-secondary"},
+    )
+    other = other_client.execution_create(evidence=evidence, idempotency_key="other")
+
+    assert initial.recover(recipe_id=target["recipe_id"]) == {"started": 1}
+    failed = initial._queue.wait(target["id"], timeout=20)
+    assert failed["status"] == "failed"
+    assert failed["error"]["upstream_status"] == 401
+    assert initial.recover(recipe_id=target["recipe_id"]) == {"started": 0}
+
+    latest = HostClient(
+        data_dir=root,
+        config={
+            **initial_config,
+            "credential_scope": "account-primary",
+            "headers": {"X-Api-Key": "fixture-refreshed"},
+            "model": "model-after-refresh",
+            "max_tokens": 2048,
+            "timeout": 35,
+        },
+    )
+    proof = {}
+    if not scoped:
+        assert latest.recover() == {"started": 0}
+        assert latest.recover(previous_headers={"X-Api-Key": "wrong"}) == {"started": 0}
+        proof = {"previous_headers": {"x-api-key": "fixture-expired"}}
+    assert latest.recover(**proof) == {"started": 1}
+    result = latest._queue.wait(target["id"], timeout=20)
+    assert result["status"] == "completed", result
+    assert result["recipe_id"] == target["recipe_id"]
+    assert result["error"] is None
+    assert result["runtime_config"]["model"]["timeout"] == 35
+    assert result["result"]["test_status"] == "passed"
+    assert latest.execution_get(other["id"])["status"] == "queued"
+    assert ("fixture-refreshed", "model-after-refresh", 2048) in gateway.model_requests
+    stored = json.dumps(result["runtime_config"])
+    assert "account-primary" not in stored
+    assert "fixture-refreshed" not in stored
+
+
+def test_live_worker_hands_off_expired_credentials_after_public_recover(
+    tmp_path, gateway
+):
+    from cosens.rsi import RSIClient as HostClient
+
+    gateway.rejected_keys["fixture-expired"] = 403
+    gateway.release_rejection = threading.Event()
+    config = {
+        "model": "local-test",
+        "base_url": f"http://127.0.0.1:{gateway.server_port}/v1",
+        "headers": {"X-Api-Key": "fixture-expired"},
+        "credential_scope": "account-primary",
+        "auto_start": False,
+    }
+    root = tmp_path / "rsi"
+    initial = HostClient(data_dir=root, config=config)
+    context = tmp_path / "context.md"
+    context.write_text("Write the answer 42 into answer.txt")
+    target = initial.execution_create(
+        evidence={"context_path": str(context), "files": []}, idempotency_key="target"
+    )
+    assert initial.recover() == {"started": 1}
+    latest = HostClient(
+        data_dir=root,
+        config={
+            **config,
+            "headers": {"X-Api-Key": "fixture-refreshed"},
+            "model": "replacement-model",
+        },
+    )
+    try:
+        assert gateway.rejection_started.wait(timeout=10)
+        assert latest.recover(recipe_id=target["recipe_id"]) == {"started": 1}
+        staged = latest._queue.execution_get(target["id"])
+        assert staged["status"] == "running"
+        assert staged["runtime_config"]["model"]["model"] == "local-test"
+        assert staged["recovery_config"]["model"]["model"] == "replacement-model"
+    finally:
+        gateway.release_rejection.set()
+
+    result = latest._queue.wait(target["id"], timeout=20)
+    assert result["status"] == "completed", result
+    assert result["error"] is None
+    assert result["result"]["test_status"] == "passed"
+    assert "recovery_config" not in result
+    assert ("fixture-refreshed", "replacement-model", None) in gateway.model_requests
+    assert "lease-2" in result["test_results"][0]["trace_path"]
 
 
 @pytest.mark.parametrize(

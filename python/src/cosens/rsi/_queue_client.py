@@ -510,6 +510,7 @@ class RSIClient:
             return self._cancel_execution(conn, obj)
 
     def _cancel_execution(self, conn, execution):
+        execution.pop("recovery_config", None)
         result = self.store.save(
             conn, {**execution, "status": "cancelled", "stage": "cancelled"}
         )
@@ -613,6 +614,9 @@ class RSIClient:
                 f"{q['id']}:{q['revision']}" in answers for q in obj["questions"]
             )
             if all_answered and (active or obj["status"] == "completed"):
+                parent_config = LocalConfig.model_validate(
+                    obj.get("recovery_config") or obj["runtime_config"]
+                )
                 parent = self._cancel_execution(conn, obj) if active else obj
                 inherited = {
                     "material_ids": parent["material_ids"],
@@ -634,7 +638,6 @@ class RSIClient:
                     inherited["name"] = name
                 if active and parent.get("test_request"):
                     inherited["test_request"] = parent["test_request"]
-                parent_config = LocalConfig.model_validate(parent["runtime_config"])
                 child_id = self._execution_insert(
                     conn,
                     inherited,
@@ -764,8 +767,16 @@ class RSIClient:
         if (config or self.config).model.api_key_env not in self.credential_names():
             raise InvalidState("Model headers are unavailable for this execution")
 
-    def recover(self, *, recipe_id=None):
+    def recover(self, *, recipe_id=None, previous_headers=None, refresh=False):
         """Dispatch workers for pending work, optionally limited to one Recipe."""
+        if refresh and self._model_header_binding is not None:
+            self.store.prepare_recovery(
+                self.config.model_dump(),
+                recipe_id=recipe_id,
+                previous_headers=previous_headers,
+            )
+        elif previous_headers is not None:
+            raise InvalidState("Model configuration is required to replace headers")
         credentials = self.credential_names()
         pending = self.store.pending_execution(credentials, recipe_id=recipe_id)
         if not pending:

@@ -622,6 +622,7 @@ export class Engine {
         );
       this.store.save({
         ...execution,
+        recovery_config: undefined,
         status: 'completed',
         stage: 'done',
         progress_percent: 100,

@@ -12,7 +12,11 @@ _HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 _BAD_VALUE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]|[^\x00-\xff]")
 
 
-def bind_model_headers(base_url, model, headers):
+def credential_scope_id(scope):
+    return hashlib.sha256(scope.encode()).hexdigest() if scope is not None else None
+
+
+def bind_model_headers(base_url, model, headers, *, credential_scope=None):
     normalized = {}
     for name, value in headers.items():
         if not _HEADER_NAME.fullmatch(name) or _BAD_VALUE.search(value):
@@ -22,10 +26,10 @@ def bind_model_headers(base_url, model, headers):
             normalized[name] += ", " + value
         else:
             normalized[name] = value
-    identity = json.dumps(
-        [base_url.rstrip("/"), model, sorted(normalized.items())],
-        ensure_ascii=False,
-    )
+    identity = [base_url.rstrip("/"), model, sorted(normalized.items())]
+    if credential_scope is not None:
+        identity.append(credential_scope)
+    identity = json.dumps(identity, ensure_ascii=False)
     name = _PREFIX + hashlib.sha256(identity.encode()).hexdigest()
     return name, json.dumps(normalized)
 

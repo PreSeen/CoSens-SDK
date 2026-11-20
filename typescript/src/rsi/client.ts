@@ -533,6 +533,7 @@ export class RSIClient {
   private cancelExecution(execution: Execution): Execution {
     const result = this.store.save<Execution>({
       ...execution,
+      recovery_config: undefined,
       status: 'cancelled',
       stage: 'cancelled',
     });
@@ -605,6 +606,7 @@ export class RSIClient {
         (question) => `${question.id}:${question.revision}` in answers,
       );
       if (allAnswered && (active || obj.status === 'completed')) {
+        const continuationConfig = obj.recovery_config ?? obj.runtime_config;
         const parent = active ? this.cancelExecution(obj) : obj;
         child_id = this.execution_insert(
           {
@@ -628,9 +630,9 @@ export class RSIClient {
               ? { test_request: parent.test_request }
               : {}),
           },
-          isHeaderBinding(parent.runtime_config.model.api_key_env)
-            ? parent.runtime_config
-            : this.suppliedConfig ?? parent.runtime_config,
+          isHeaderBinding(continuationConfig.model.api_key_env)
+            ? continuationConfig
+            : this.suppliedConfig ?? continuationConfig,
         ).id;
         this.store.save({
           ...parent,
@@ -756,7 +758,11 @@ export class RSIClient {
   }
   async recover(
     recipeId?: string,
+    override?: { previousHeaders?: Record<string, string> },
   ): Promise<{ started: number; scheduled?: true }> {
+    if (override && this.model_header_binding) {
+      this.store.stage_recovery(this.config, recipeId, override.previousHeaders);
+    }
     const credentials = this.credentialNames();
     const pending = this.store.pending_execution(credentials, recipeId);
     if (!pending) return { started: 0 };
