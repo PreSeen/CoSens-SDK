@@ -2,10 +2,9 @@
 
 Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned separately.
 
-## Unreleased (Python and TypeScript)
+## Python 0.9.1 (TypeScript unreleased)
 
 - Supported Memory calls can specify an HTTPS service URL and explicit API key per call.
-
 - Python and TypeScript cloud RSI clients support explicit Virtual User selection. Supported Memory calls accept a per-call selection; unsupported Memory overview and experience calls reject it.
 - Local clarification continuations can start automatically with refreshed headers from the same credential scope and model endpoint.
 - Local `recover` accepts a Recipe ID and `retry_key` to resume a timed-out execution with its existing checkpoints and idempotent dispatch.
