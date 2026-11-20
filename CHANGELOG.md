@@ -2,6 +2,12 @@
 
 Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned separately.
 
+## Unreleased (Python and TypeScript)
+
+- Local clarification continuations can start automatically with refreshed headers from the same credential scope and model endpoint.
+- Local `recover` accepts a Recipe ID and `retry_key` to resume a timed-out execution with its existing checkpoints and idempotent dispatch.
+- Local Recipe tests can run Python in an isolated Docker workspace when a trusted local image is configured. Publication requires actual execution evidence when the task calls for Python.
+
 ## Python 0.9.0
 
 - `RSIClient()` with no arguments is **cloud mode**: the CoSens service learns with CoSens models, authenticated by `COSENS_API_KEY` (or `api_key=`, `base_url=`). Only the files named in `evidence` are uploaded. Methods and results are the same as local mode; `recover()` returns `{"started": 0}`.

@@ -201,6 +201,9 @@ class CloudRSIClient:
         *,
         recipe_id: str | None = None,
         previous_headers: dict[str, str] | None = None,
+        retry_key: str | None = None,
     ):
         """The service recovers its own Workers; nothing to start locally."""
+        if retry_key is not None:
+            raise InvalidState("recover retry_key requires local mode")
         return {"started": 0}

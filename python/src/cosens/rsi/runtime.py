@@ -6,7 +6,7 @@ import json
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Protocol
+from typing import Annotated, Protocol
 
 from pydantic import Field, StrictStr, ValidationError
 
@@ -28,6 +28,7 @@ from .models import (
     NamedAnalysis,
     RecipeContent,
 )
+from .python_runner import run_python, sandbox_path
 
 
 class Runtime(Protocol):
@@ -95,6 +96,13 @@ class WriteOutputArgs(ReadOutputArgs):
     content: StrictStr
 
 
+class RunPythonArgs(Contract):
+    path: Annotated[StrictStr, Field(min_length=1, max_length=4096)]
+    args: list[Annotated[StrictStr, Field(max_length=4096)]] = Field(
+        default_factory=list, max_length=64
+    )
+
+
 class ChatRuntime:
     def __init__(self, client, owner, check_alive):
         self.client, self.owner, self.check_alive = client, owner, check_alive
@@ -133,6 +141,7 @@ class ChatRuntime:
         headers = model_headers(settings.api_key_env)
         by_locator = {f["locator"]: f for f in files}
         reads = []
+        python_runs = []
         last_file = None
         long_page_messages = {}
 
@@ -207,6 +216,11 @@ class ChatRuntime:
                 self.check_alive()
                 return output_path(path).read_text(encoding="utf-8")[:100000]
 
+            def execute_python(path, args):
+                """Execute a staged scripts/*.py with optional arguments in the isolated test sandbox and return its receipt."""
+                self.check_alive()
+                return run_python(path, args, root, files, self.client.config, self.check_alive)
+
             tools.extend(
                 [
                     Tool(
@@ -217,6 +231,9 @@ class ChatRuntime:
                     ),
                     Tool(
                         "read_output", read_output.__doc__, ReadOutputArgs, read_output
+                    ),
+                    Tool(
+                        "run_python", execute_python.__doc__, RunPythonArgs, execute_python
                     ),
                 ]
             )
@@ -230,6 +247,7 @@ class ChatRuntime:
                 "material_id": f["locator"].split("/")[0]
                 if f["locator"].startswith("material_")
                 else None,
+                **({"sandbox_path": sandbox_path(f)} if workspace is not None else {}),
             }
             for f in files
         ]
@@ -327,6 +345,7 @@ class ChatRuntime:
                             self.check_alive()
                             tool = by_name.get(call.function.name)
                             output = "Unknown or unauthorized tool."
+                            args = None
                             if tool is not None:
                                 try:
                                     args = json.loads(call.function.arguments)
@@ -342,6 +361,19 @@ class ChatRuntime:
                                         output = (
                                             "Tool could not complete the operation."
                                         )
+                            if workspace is not None and call.function.name == "run_python":
+                                if isinstance(output, str):
+                                    output = {
+                                        "status": "rejected", "exit_code": None,
+                                        "stdout": "", "stderr": output,
+                                    }
+                                script = args.get("path") if isinstance(args, dict) else None
+                                script_args = args.get("args") if isinstance(args, dict) else None
+                                python_runs.append({
+                                    "path": script if isinstance(script, str) else None,
+                                    "args": script_args if isinstance(script_args, list) else [],
+                                    **output,
+                                })
                             if (
                                 call.function.name == "read_evidence"
                                 and isinstance(output, dict)
@@ -359,7 +391,11 @@ class ChatRuntime:
                                 else json.dumps(output, ensure_ascii=False),
                             )
                     elif schema is None:
-                        return {"summary": reply.content or "", "reads": reads}
+                        return {
+                            "summary": reply.content or "",
+                            "reads": reads,
+                            **({"python_runs": python_runs} if python_runs else {}),
+                        }
                     else:
                         correct()
                         messages.append(
@@ -377,6 +413,7 @@ class ChatRuntime:
                         "model": settings.model,
                         "system_prompt": prompt,
                         "reads": reads,
+                        **({"python_runs": python_runs} if python_runs else {}),
                         "structured_output_attempts": min(corrections + 1, 3),
                         "messages": [
                             {
@@ -422,6 +459,7 @@ class ChatRuntime:
             "Otherwise set sufficient_information=true, hypothesis=null and questions=[]. Limit applicability to what the evidence supports. "
             "Derive scoring criteria by combining task requirements and observed execution with the separately extracted user_feedback rules. Use extracted feedback for user_feedback criteria and carry over their source citations. Merge overlapping requirements into a single criterion. "
             "Each criterion must be verifiable on future executions. State the applicable condition for each conditional criterion and keep distinct scenarios separate so each can be verified independently. "
+            "Set rubrics.requires_python=true only when a task requirement explicitly calls for actual Python execution or Python-based validation, not when Python is just a possible implementation. "
             "Cite sources only in each criterion's evidence field. Express the underlying requirement without including details specific to a past execution or requiring its replay. "
             "If fixed Rubrics are supplied, preserve their standard. "
             "When learning evidence contains corrective feedback or a documented correction, fill attribution.possible_causes. "
@@ -456,7 +494,10 @@ class ChatRuntime:
             trace_path=trace_path,
             instruction="Actually perform test_task using recipe.instructions. Read task inputs with read_evidence; "
             "write the resulting deliverable files with write_output. Use only the authorized input and shared reference files in this catalog. "
-            "If these tools cannot perform the task, explain the missing capability; do not claim completion. No shell/network tools exist.",
+            "When actual Python execution is required, write a script under scripts/ with write_output, then call run_python with that path and any arguments. "
+            "Python may read only the input and shared reference sandbox_path values in the catalog and should write deliverables to its current output directory. "
+            "The scripts directory is for execution only. For every required check, execute it and report its observed result. "
+            "If these tools cannot perform the task, explain the missing capability. Claim completion only when the required work was executed successfully. No shell or network tools exist.",
         )
 
     def assess(self, context, files, trace_path):
@@ -471,6 +512,7 @@ class ChatRuntime:
             "Never score a scenario absent from this run as zero, grant it credit, or infer its outcome from the Recipe. "
             "For an exercised criterion with sufficient evidence, use status=verified and a numeric score from 0 to 1. "
             "If the condition was exercised and the required behavior is observably missing or wrong, score that as a verified failure. "
+            "For criteria requiring execution of a particular check, require evidence of that check's actual execution and observed result in the executor trace. A source file, tool invocation alone, or an artifact claiming a check passed cannot establish this. "
             "If an applicable criterion cannot be judged from the available evidence, mark it unverified and set verifiable=false. "
             "A scenario simply not exercised does not make the entire test unverifiable. "
             "Base judgments on actual evidence and do not seek learning files.",

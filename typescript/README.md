@@ -56,4 +56,6 @@ The SDK submits the snapshots and queues the Execution in one call. The Worker r
 
 Use `config: null` for read-only clients. After a token refresh, create a Client with the same data directory and `credential_scope` and the new headers. `recover()` resumes that account's unfinished work with the new Client settings. Use `recover({ recipe_id: recipeId })` to recover only executions for that SDK Recipe. Close each client with `close()` when done. The worker uses LangGraph for recovery and sends direct model API requests from its nodes.
 
+To explicitly retry a timed-out local execution, call `recover({ recipe_id: recipeId, retry_key: requestId })`. Reuse the key if the request is submitted again.
+
 See the [complete TS and Python interface reference](../python/docs/local-rsi.md). Run `npm run check` to build, typecheck and test the public package.

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { authorizedTestFiles, snapshot } from './materials.js';
 import { restartExecution } from './progress.js';
-import { Store, uid, now, encode } from './store.js';
+import { Store, uid, now, encode, type RetryTarget } from './store.js';
 import { isHeaderBinding } from './model-headers.js';
 import {
   readRecipeList,
@@ -42,6 +42,13 @@ type EvidenceExecutionCreate = {
   confirmation_ref: string;
   idempotency_key: string;
   base: { kind: 'recipe'; id: string } | null;
+};
+
+export type RecoverResult = {
+  started: number;
+  scheduled?: true;
+  recipe_id?: string;
+  execution_id?: string;
 };
 
 export class RSIClient {
@@ -544,6 +551,53 @@ export class RSIClient {
       .run(execution.id);
     return result;
   }
+  private refreshClarificationHeaders(
+    execution: Execution,
+    inherited: LocalConfig,
+  ): LocalConfig {
+    const current = this.suppliedConfig?.model;
+    const binding = this.model_header_binding;
+    const original = inherited.model;
+    if (
+      !binding ||
+      !current ||
+      !execution.recipe_id ||
+      !isHeaderBinding(original.api_key_env) ||
+      !original.credential_scope ||
+      original.credential_scope !== current.credential_scope ||
+      original.api_key_env === binding.name ||
+      original.model !== current.model ||
+      original.base_url?.replace(/\/+$/, '') !== current.base_url?.replace(/\/+$/, '')
+    ) return inherited;
+
+    const version = execution.recipe_version_id ?? execution.base_recipe_version_id ?? null;
+    const linkedRecipe = this.store.db.prepare(`
+      SELECT 1 FROM recipes WHERE id=? AND archived_at IS NULL AND (? IS NULL OR EXISTS (
+        SELECT 1 FROM versions WHERE recipe_id=recipes.id AND id=?
+      ))
+    `).get(execution.recipe_id, version, version);
+    if (!linkedRecipe) return inherited;
+
+    return { ...inherited, model: { ...original, api_key_env: binding.name } };
+  }
+  private repairQueuedClarification(parentId: string, childId?: string | null) {
+    if (!this.model_header_binding || !childId) return;
+    const child = this.store.get<Execution>(childId, 'execution');
+    if (child.status !== 'queued' || !child.recipe_id || child.base_execution_id !== parentId) return;
+    const inherited = child.recovery_config ?? child.runtime_config;
+    if (inherited.model.api_key_env === this.model_header_binding.name) return;
+    const parent = this.store.get<Execution>(parentId, 'execution');
+    const version = parent.recipe_version_id ?? parent.base_recipe_version_id ?? null;
+    const parentConfig = parent.recovery_config ?? parent.runtime_config;
+    if (
+      child.recipe_id !== parent.recipe_id ||
+      (child.base_recipe_version_id ?? null) !== version ||
+      inherited.model.credential_scope !== parentConfig.model.credential_scope
+    ) return;
+    const config = this.refreshClarificationHeaders(child, inherited);
+    if (config !== inherited)
+      this.store.save({ ...child, runtime_config: config, recovery_config: undefined });
+  }
   async execution_clarification_answer(
     id: string,
     options: ClarificationAnswer,
@@ -562,7 +616,10 @@ export class RSIClient {
         execution_id: string;
         continuation_execution_id: string | null;
       }>('clarification', idempotency_key, request);
-      if (prev) return prev;
+      if (prev) {
+        this.repairQueuedClarification(id, prev.continuation_execution_id);
+        return prev;
+      }
       const obj = this.store.get<Execution>(id, 'execution'),
         q = obj.questions.find(
           (q) =>
@@ -594,6 +651,7 @@ export class RSIClient {
             'conflict',
             'answer already accepted; submit correction as feedback Material',
           );
+        this.repairQueuedClarification(id, continuation_execution_id);
         return {
           execution_id: id,
           continuation_execution_id: continuation_execution_id ?? null,
@@ -631,7 +689,7 @@ export class RSIClient {
               : {}),
           },
           isHeaderBinding(continuationConfig.model.api_key_env)
-            ? continuationConfig
+            ? this.refreshClarificationHeaders(obj, continuationConfig)
             : this.suppliedConfig ?? continuationConfig,
         ).id;
         this.store.save({
@@ -687,6 +745,86 @@ export class RSIClient {
       }
       return { recipe_id: id, version_id: versionId, archived };
     });
+  }
+  private async retryTimedOutExecution(recipeId: string, retryKey: string): Promise<RecoverResult> {
+    this.check_runtime();
+    const { model: current } = this.config;
+    const request = { recipe_id: recipeId };
+    const { target, config, dispatch } = this.store.tx(() => {
+      const recipe = this.store.get<Recipe>(recipeId, 'recipe');
+      if (recipe.archived_at != null) fail('invalid_state', 'recipe is archived');
+      const replay = this.store.replay<RetryTarget>(
+        'recipe_retry', retryKey, request,
+      );
+      const selected = this.store.recipeExecution(recipeId, replay?.id);
+      if (!selected || selected.execution.archived_at != null)
+        return fail('invalid_state', 'no eligible execution for this Recipe');
+      const { execution, target } = selected;
+      const stored = execution.recovery_config ?? execution.runtime_config;
+      const original = stored.model;
+      if (
+        original.credential_scope !== current.credential_scope ||
+        (original.credential_scope === undefined &&
+          original.api_key_env !== current.api_key_env) ||
+        original.model !== current.model ||
+        original.base_url?.replace(/\/+$/, '') !== current.base_url?.replace(/\/+$/, '')
+      )
+        fail('invalid_state', 'retry requires the original model endpoint, model and credential scope');
+
+      const config = {
+        ...stored,
+        model: { ...original, api_key_env: current.api_key_env },
+      };
+      if (replay) {
+        const queued = this.store.queuedRetry(replay);
+        if (queued && original.api_key_env !== current.api_key_env) {
+          this.store.save({
+            ...execution,
+            runtime_config: config,
+            recovery_config: undefined,
+          });
+        }
+        return { target: replay, config, dispatch: queued };
+      }
+      if (
+        execution.status !== 'failed' ||
+        execution.result?.published ||
+        execution.error?.code !== 'timeout' ||
+        execution.error.upstream_status !== undefined
+      )
+        return fail('invalid_state', 'only the latest timed-out execution can be retried');
+      if (this.store.has_pending(undefined, recipeId))
+        fail('invalid_state', 'a Recipe execution is already queued or running');
+
+      this.store.save({
+        ...execution,
+        runtime_config: config,
+        recovery_config: undefined,
+        status: 'queued',
+        stage: execution.error.stage,
+        error: null,
+      });
+      this.store.remember('recipe_retry', retryKey, request, target);
+      return { target, config, dispatch: true };
+    });
+    const receipt = { started: 0, recipe_id: recipeId, execution_id: target.id };
+    if (dispatch) {
+      const owner = uid('worker');
+      // Keep the dispatch reservation while its Worker waits for a slot or claims this attempt.
+      const slot = this.store.tx(() =>
+        this.store.queuedRetry(target, config.model.api_key_env)
+          ? this.store.reserve(
+              `recovery:retry:${target.id}:${target.fence}:${config.model.api_key_env}`,
+              owner, 1, config.lease_seconds,
+            )
+          : null,
+      );
+      if (slot) {
+        await this.launchWorker(owner, slot, target.id, recipeId, true, target.fence);
+        return { ...receipt, scheduled: true };
+      }
+    }
+    return receipt;
   }
   async recipe_test({
     execution_id,
@@ -756,10 +894,54 @@ export class RSIClient {
       fail('invalid_state', 'Model headers are unavailable for this execution');
     }
   }
+  private async launchWorker(
+    owner: string,
+    slot: string,
+    executionId: string,
+    recipeId?: string,
+    deferred = false,
+    retryFence?: number,
+  ) {
+    try {
+      const worker = fileURLToPath(new URL('./worker.js', import.meta.url));
+      if (!existsSync(worker))
+        fail('invalid_state', 'build the TypeScript SDK before starting detached workers');
+      const args = [worker, this.data_dir, owner, slot, executionId];
+      if (deferred) args.push('--wait-for-slot');
+      if (recipeId !== undefined) args.push('--recipe-id', recipeId);
+      if (retryFence !== undefined) args.push('--retry-fence', String(retryFence));
+      const child = spawn(this.node_executable, args, {
+        detached: true,
+        stdio: 'ignore',
+        env: {
+          ...process.env,
+          ...(this.model_header_binding && {
+            [this.model_header_binding.name]: this.model_header_binding.value,
+          }),
+          LANGSMITH_TRACING: 'false',
+          LANGCHAIN_TRACING_V2: 'false',
+          LANGCHAIN_VERBOSE: 'false',
+        },
+      });
+      await new Promise<void>((resolve, reject) => {
+        child.once('spawn', resolve);
+        child.once('error', reject);
+      });
+      child.unref();
+    } catch (error) {
+      this.store.release(slot);
+      throw error;
+    }
+  }
   async recover(
     recipeId?: string,
-    override?: { previousHeaders?: Record<string, string> },
-  ): Promise<{ started: number; scheduled?: true }> {
+    override?: { previousHeaders?: Record<string, string>; retryKey?: string },
+  ): Promise<RecoverResult> {
+    if (override?.retryKey !== undefined) {
+      if (recipeId === undefined || override.previousHeaders !== undefined)
+        return fail('invalid_argument', 'retry_key requires recipe_id and cannot be combined with previous_headers');
+      return this.retryTimedOutExecution(recipeId, override.retryKey);
+    }
     if (override && this.model_header_binding) {
       this.store.stage_recovery(this.config, recipeId, override.previousHeaders);
     }
@@ -767,48 +949,6 @@ export class RSIClient {
     const pending = this.store.pending_execution(credentials, recipeId);
     if (!pending) return { started: 0 };
     const config = LocalConfigSchema.parse(JSON.parse(pending.config));
-    const worker = fileURLToPath(new URL('./worker.js', import.meta.url));
-    if (!existsSync(worker))
-      fail(
-        'invalid_state',
-        'build the TypeScript SDK before starting detached workers',
-      );
-
-    const launch = async (owner: string, slot: string, deferred = false) => {
-      try {
-        const args = [
-          worker,
-          this.data_dir,
-          owner,
-          slot,
-          pending.id,
-        ];
-        if (deferred) args.push('--wait-for-slot');
-        if (recipeId !== undefined) args.push('--recipe-id', recipeId);
-        const child = spawn(this.node_executable, args, {
-          detached: true,
-          stdio: 'ignore',
-          env: {
-            ...process.env,
-            ...(this.model_header_binding && {
-              [this.model_header_binding.name]: this.model_header_binding.value,
-            }),
-            LANGSMITH_TRACING: 'false',
-            LANGCHAIN_TRACING_V2: 'false',
-            LANGCHAIN_VERBOSE: 'false',
-          },
-        });
-        await new Promise<void>((resolve, reject) => {
-          child.once('spawn', resolve);
-          child.once('error', reject);
-        });
-        child.unref();
-      } catch (error) {
-        this.store.release(slot);
-        throw error;
-      }
-    };
-
     const workers =
       this.model_header_binding || recipeId !== undefined
         ? Math.min(
@@ -827,7 +967,7 @@ export class RSIClient {
         true,
       );
       if (!slot) break;
-      await launch(owner, slot);
+      await this.launchWorker(owner, slot, pending.id, recipeId);
       started++;
     }
     if (started) return { started };
@@ -844,7 +984,7 @@ export class RSIClient {
         : null,
     );
     if (!deferred) return { started: 0 };
-    await launch(owner, deferred, true);
+    await this.launchWorker(owner, deferred, pending.id, recipeId, true);
     return { started: 0, scheduled: true };
   }
   async run_pending({ runtime }: { runtime?: Runtime } = {}): Promise<{

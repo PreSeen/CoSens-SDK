@@ -520,6 +520,67 @@ class RSIClient:
         )
         return result
 
+    def _clarification_model_config(self, conn, config, recipe_id, base_version_id):
+        model = config.model
+        if self._model_header_binding is None or not is_header_binding(
+            model.api_key_env
+        ):
+            return config
+        current = self.config.model
+        if (
+            not model.credential_scope
+            or model.credential_scope != current.credential_scope
+            or model.model != current.model
+            or (model.base_url or "").rstrip("/")
+            != (current.base_url or "").rstrip("/")
+            or model.api_key_env == current.api_key_env
+            or not recipe_id
+        ):
+            return config
+        valid_recipe = conn.execute(
+            """SELECT 1 FROM recipes WHERE id=? AND archived_at IS NULL AND (? IS NULL OR EXISTS (
+                   SELECT 1 FROM versions WHERE recipe_id=recipes.id AND id=?
+               ))""",
+            (recipe_id, base_version_id, base_version_id),
+        ).fetchone()
+        if valid_recipe is None:
+            return config
+        return config.model_copy(
+            update={
+                "model": model.model_copy(update={"api_key_env": current.api_key_env})
+            }
+        )
+
+    def _repair_queued_clarification(self, conn, parent_id, child_id):
+        if self._model_header_binding is None or not child_id:
+            return
+        parent = self.store.get_in(conn, parent_id, "execution")
+        child = self.store.get_in(conn, child_id, "execution")
+        base_version_id = parent["recipe_version_id"] or parent.get(
+            "base_recipe_version_id"
+        )
+        if (
+            child["status"] != "queued"
+            or child["base_execution_id"] != parent_id
+            or child["recipe_id"] != parent["recipe_id"]
+            or child.get("base_recipe_version_id") != base_version_id
+        ):
+            return
+        config = LocalConfig.model_validate(
+            child.get("recovery_config") or child["runtime_config"]
+        )
+        parent_config = LocalConfig.model_validate(
+            parent.get("recovery_config") or parent["runtime_config"]
+        )
+        if config.model.credential_scope != parent_config.model.credential_scope:
+            return
+        updated = self._clarification_model_config(
+            conn, config, parent["recipe_id"], base_version_id
+        )
+        if updated is not config:
+            child.pop("recovery_config", None)
+            self.store.save(conn, {**child, "runtime_config": updated.model_dump()})
+
     def execution_clarification_answer(
         self,
         execution_id,
@@ -570,6 +631,9 @@ class RSIClient:
                 conn, "clarification", idempotency_key, request
             )
             if previous:
+                self._repair_queued_clarification(
+                    conn, execution_id, previous["continuation_execution_id"]
+                )
                 return previous
             obj = self.store.get_in(conn, execution_id, "execution")
             question = next(
@@ -603,6 +667,7 @@ class RSIClient:
                     raise Conflict(
                         "answer already accepted; submit correction as new feedback Material"
                     )
+                self._repair_queued_clarification(conn, execution_id, continuation_id)
                 return {
                     "execution_id": execution_id,
                     "continuation_execution_id": continuation_id,
@@ -641,7 +706,12 @@ class RSIClient:
                 child_id = self._execution_insert(
                     conn,
                     inherited,
-                    config=parent_config
+                    config=self._clarification_model_config(
+                        conn,
+                        parent_config,
+                        inherited["recipe_id"],
+                        inherited["base_recipe_version_id"],
+                    )
                     if is_header_binding(parent_config.model.api_key_env)
                     else self._supplied_config or parent_config,
                 )["id"]
@@ -686,6 +756,104 @@ class RSIClient:
                 "version_id": version_id,
                 "archived": archived,
             }
+
+    def _retry_runtime(self, execution):
+        config = LocalConfig.model_validate(
+            execution.get("recovery_config") or execution["runtime_config"]
+        )
+        model = config.model
+        current = self.config.model
+        if (
+            model.credential_scope != current.credential_scope
+            or (
+                model.credential_scope is None
+                and model.api_key_env != current.api_key_env
+            )
+            or model.model != current.model
+            or (model.base_url or "").rstrip("/")
+            != (current.base_url or "").rstrip("/")
+        ):
+            raise InvalidState(
+                "Retry requires the original model endpoint, model and credential scope"
+            )
+        return config.model_copy(
+            update={
+                "model": model.model_copy(update={"api_key_env": current.api_key_env})
+            }
+        )
+
+    def _retry_timed_out_execution(self, recipe_id, retry_key):
+        self._check_runtime()
+        request = {"recipe_id": recipe_id}
+        with self.store.transaction() as conn:
+            recipe = self.store.get_in(conn, recipe_id, "recipe")
+            if recipe["archived_at"] is not None:
+                raise InvalidState("Recipe is archived")
+            previous = self.store.replay(conn, "recipe_retry", retry_key, request)
+            row = (
+                conn.execute(
+                    "SELECT id,fence FROM executions WHERE recipe_id=? AND id=?",
+                    (recipe_id, previous["execution_id"]),
+                ).fetchone()
+                if previous
+                else conn.execute(
+                    "SELECT id,fence FROM executions WHERE recipe_id=? ORDER BY created_at DESC,id DESC LIMIT 1",
+                    (recipe_id,),
+                ).fetchone()
+            )
+            if row is None:
+                raise InvalidState("Recipe has no matching execution to retry")
+            execution = self.store.get_in(conn, row["id"], "execution")
+            if execution["archived_at"] is not None:
+                raise InvalidState("Recipe has no matching execution to retry")
+            config = self._retry_runtime(execution)
+            if previous:
+                dispatch = (
+                    execution["status"] == "queued"
+                    and row["fence"] == previous["fence"]
+                )
+            else:
+                error = execution.get("error") or {}
+                open_execution = conn.execute(
+                    "SELECT 1 FROM executions WHERE recipe_id=? AND status IN ('queued','running') LIMIT 1",
+                    (recipe_id,),
+                ).fetchone()
+                if (
+                    execution["status"] != "failed"
+                    or (execution.get("result") or {}).get("published")
+                    or error.get("code") != "timeout"
+                    or error.get("upstream_status") is not None
+                    or open_execution is not None
+                ):
+                    raise InvalidState(
+                        "Only the latest timed-out execution can be retried"
+                    )
+                dispatch = True
+                execution.update(status="queued", stage=error["stage"], error=None)
+                self.store.remember(
+                    conn,
+                    "recipe_retry",
+                    retry_key,
+                    request,
+                    {"execution_id": execution["id"], "fence": row["fence"]},
+                )
+            if dispatch:
+                runtime = config.model_dump()
+                if (
+                    not previous
+                    or runtime != execution["runtime_config"]
+                    or "recovery_config" in execution
+                ):
+                    execution.pop("recovery_config", None)
+                    self.store.save(conn, {**execution, "runtime_config": runtime})
+        receipt = {"started": 0}
+        if dispatch:
+            receipt = self.recover(
+                recipe_id=recipe_id,
+                execution_id=execution["id"],
+                retry_fence=row["fence"],
+            )
+        return {**receipt, "recipe_id": recipe_id, "execution_id": execution["id"]}
 
     def recipe_test(
         self,
@@ -767,8 +935,23 @@ class RSIClient:
         if (config or self.config).model.api_key_env not in self.credential_names():
             raise InvalidState("Model headers are unavailable for this execution")
 
-    def recover(self, *, recipe_id=None, previous_headers=None, refresh=False):
+    def recover(
+        self,
+        *,
+        recipe_id=None,
+        previous_headers=None,
+        retry_key=None,
+        refresh=False,
+        execution_id=None,
+        retry_fence=None,
+    ):
         """Dispatch workers for pending work, optionally limited to one Recipe."""
+        if retry_key is not None:
+            if recipe_id is None or previous_headers is not None:
+                raise InvalidState(
+                    "retry_key requires recipe_id and cannot be used with previous_headers"
+                )
+            return self._retry_timed_out_execution(recipe_id, retry_key)
         if refresh and self._model_header_binding is not None:
             self.store.prepare_recovery(
                 self.config.model_dump(),
@@ -778,7 +961,12 @@ class RSIClient:
         elif previous_headers is not None:
             raise InvalidState("Model configuration is required to replace headers")
         credentials = self.credential_names()
-        pending = self.store.pending_execution(credentials, recipe_id=recipe_id)
+        pending = self.store.pending_execution(
+            credentials,
+            recipe_id=recipe_id,
+            execution_id=execution_id,
+            retry_fence=retry_fence,
+        )
         if not pending:
             return {"started": 0}
         config = LocalConfig.model_validate_json(pending["config"])
@@ -806,6 +994,8 @@ class RSIClient:
             ]
             if recipe_id is not None:
                 command.extend(("--recipe-id", recipe_id))
+            if retry_fence is not None:
+                command.extend(("--retry-fence", str(retry_fence)))
             if deferred:
                 command.append("--wait-for-slot")
             try:
@@ -821,6 +1011,22 @@ class RSIClient:
             except BaseException:
                 self.store.release(slot)
                 raise
+
+        if retry_fence is not None:
+            owner = uid("worker")
+            # Hold the dispatch slot until the exact Worker has drained.
+            kind = f"recovery:retry:{execution_id}:{retry_fence}:{config.model.api_key_env}"
+            slot = self.store.reserve(
+                kind,
+                owner,
+                1,
+                config.lease_seconds,
+                retry_target=(execution_id, retry_fence, config.model.api_key_env),
+            )
+            if not slot:
+                return {"started": 0}
+            launch(owner, slot, deferred=True)
+            return {"started": 0, "scheduled": True}
 
         workers = config.max_executions
         if self._model_header_binding or recipe_id is not None:

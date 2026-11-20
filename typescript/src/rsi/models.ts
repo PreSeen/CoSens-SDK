@@ -44,6 +44,7 @@ export const ModelConfigSchema = z.strictObject({
 });
 export const LocalConfigSchema = z.strictObject({
   model: ModelConfigSchema,
+  test_python_image: z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,254}$/u).optional(),
   max_executions: z.number().int().min(1).max(32).default(2),
   max_model_requests: z.number().int().min(1).max(32).default(2),
   lease_seconds: z.number().min(3).max(3600).default(30),
@@ -123,6 +124,7 @@ export const RubricsSchema = z
       )
       .min(1),
     pass_threshold: z.number().min(0).max(1).default(0.8),
+    requires_python: z.boolean().optional(),
   })
   .refine(
     (r) => new Set(r.criteria.map((c) => c.id)).size === r.criteria.length,

@@ -33,7 +33,12 @@ import {
 export const uid = (prefix: string) =>
   `${prefix}_${randomUUID().replaceAll('-', '')}`;
 export const now = () => Date.now() / 1000;
+export type RetryTarget = { id: string; fence: number };
 const queuedConfig = `COALESCE(json_extract(details, '$.recovery_config'), json_extract(details, '$.runtime_config'))`;
+const retryEligible = `executions.status='queued' AND executions.fence=?
+  AND executions.archived_at IS NULL AND EXISTS (
+    SELECT 1 FROM recipes WHERE id=executions.recipe_id AND archived_at IS NULL
+  )`;
 /** Stable JSON for idempotency comparison, including nested object key order. */
 export function encode(value: unknown): string {
   return JSON.stringify(value, (_k, v: unknown) =>
@@ -443,6 +448,21 @@ export class Store {
       }) as Record<string, unknown>[];
     return rows.map((row) => this.record<Execution>(row));
   }
+  recipeExecution(recipeId: string, executionId?: string) {
+    const row = this.db.prepare(`
+      SELECT * FROM executions WHERE recipe_id=? AND (? IS NULL OR id=?)
+      ORDER BY created_at DESC, id DESC LIMIT 1
+    `).get(recipeId, executionId ?? null, executionId ?? null) as
+      (Record<string, unknown> & RetryTarget) | undefined;
+    if (row) return { execution: this.record<Execution>(row), target: { id: row.id, fence: row.fence } };
+  }
+  queuedRetry(target: RetryTarget, credential?: string): boolean {
+    return !!this.db.prepare(`
+      SELECT 1 FROM executions
+      WHERE id=? AND ${retryEligible}
+      AND (? IS NULL OR json_extract(${queuedConfig}, '$.model.api_key_env') = ?)
+    `).get(target.id, target.fence, credential ?? null, credential ?? null);
+  }
   version<C = unknown>(object_id: string, version_id: string): Version<C> {
     const row = this.db
       .prepare('SELECT data FROM versions WHERE object_id=? AND id=?')
@@ -669,6 +689,7 @@ export class Store {
     limit: number,
     credentials?: string[],
     recipeId?: string,
+    target?: RetryTarget,
   ): { id: string; fence: number } | null {
     return this.tx(() => {
       const time = now();
@@ -685,6 +706,7 @@ export class Store {
            AND COALESCE(json_extract(${queuedConfig}, '$.max_executions'), ?) > ?
            AND (? IS NULL OR json_extract(${queuedConfig}, '$.model.api_key_env') IN (SELECT value FROM json_each(?)))
            AND (? IS NULL OR executions.recipe_id = ?)
+           AND (? IS NULL OR (executions.id = ? AND ${retryEligible}))
            ORDER BY executions.created_at,executions.id LIMIT 1`,
         )
         .get(
@@ -695,6 +717,9 @@ export class Store {
           credentials ? encode(credentials) : null,
           recipeId ?? null,
           recipeId ?? null,
+          target?.id ?? null,
+          target?.id ?? null,
+          target?.fence ?? null,
         ) as { id: string; fence: number } | undefined;
       if (!row) return null;
       this.db

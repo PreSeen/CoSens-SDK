@@ -304,6 +304,10 @@ test('independent Node hooks enqueue work that persists and passes a file test a
   let active = 0;
   let peak = 0;
   let requests = 0;
+  let clarificationToken = 'Bearer fixture-clarification-old';
+  let rejectedClarificationRequests = 0;
+  let retryExecutions = 0;
+  let retryGenerations = 0;
   const server = createServer(async (req, res) => {
     active++;
     peak = Math.max(peak, active);
@@ -313,6 +317,16 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       const input = JSON.parse(Buffer.concat(chunks).toString());
+      const clarification = input.model === 'fixture-clarification-model';
+      if (clarification) {
+        if (req.headers.authorization !== clarificationToken) {
+          rejectedClarificationRequests++;
+          res.writeHead(401).end();
+          return;
+        }
+        assert.equal(req.headers['x-friday-auth-type'], 'access_token');
+        assert.equal(input.max_tokens, 4096);
+      }
       const key = input.model.slice(-1);
       if (key === 'a') {
         assert.equal(req.headers.authorization, 'Bearer fixture-gateway-a');
@@ -334,6 +348,19 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         ),
       );
       const token = req.headers['x-api-key'];
+      if (input.model === 'fixture-retry-model') {
+        assert.equal(input.max_tokens, 4096);
+        if (tools.has('RecipeContent') && token === 'timeout-b') retryGenerations++;
+        if (tools.has('write_output') && !afterTool) {
+          if (token === 'timeout-a') {
+            // Keep the connection open until the SDK's actual request deadline.
+            await new Promise<void>((resolve) => res.once('close', resolve));
+            return;
+          }
+          assert.equal(token, 'timeout-b');
+          retryExecutions++;
+        }
+      }
       if (token === 'fixture-expired' && tools.has('write_output')) {
         res.writeHead(401).end();
         return;
@@ -453,13 +480,19 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           ),
         );
         assert.deepEqual(context.user_feedback, feedback);
+        const needsAnswer = clarification && Object.keys(context.answers).length === 0;
         call = {
           name: 'Analysis',
           args: {
             recipe_name: 'Write checked answers',
-            sufficient_information: true,
-            hypothesis: null,
-            questions: [],
+            sufficient_information: !needsAnswer,
+            hypothesis: needsAnswer ? 'Use plain text until confirmed' : null,
+            questions: needsAnswer ? [{
+              id: 'format',
+              question: 'Which output format should be used?',
+              assumption: 'Use plain text',
+              options: [{ id: 'plain', label: 'Plain text' }, { id: 'json', label: 'JSON' }],
+            }] : [],
             attribution,
             rubrics: {
               criteria: [
@@ -642,10 +675,12 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       client.close();
       process.stdout.write(JSON.stringify({id:execution.id,recipe_id:execution.recipe_id}));
     `;
-    const runHook = async (source: string, args: string[]) => {
+    const runHook = async (source: string, args: string[], executable = process.execPath) => {
       const child = spawn(
-        process.execPath,
-        ['--input-type=module', '-e', source, ...args],
+        executable,
+        executable === process.execPath
+          ? ['--input-type=module', '-e', source, ...args]
+          : ['-e', source, ...args],
         {
           cwd: new URL('..', import.meta.url),
           env: {
@@ -959,6 +994,186 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         assert.equal(reader.execution_get(unrelated.id).status, 'queued');
       } finally {
         for (const host of [expired, refreshed, other, legacy, reader]) host.close();
+      }
+    });
+
+    await t.test('answering with a new token starts the clarification continuation automatically', async () => {
+      const dataDir = join(directory, 'refresh-clarification');
+      const reader = new RSIClient({ data_dir: dataDir, auto_start: false });
+      const config = {
+        model: 'fixture-clarification-model',
+        base_url: client.config.model.base_url!,
+        credential_scope: 'fixture-account',
+        auto_start: true,
+        max_tokens: 4096,
+      };
+      const callHook = (request: object) => runHook(
+        `
+        import { RSIClient } from 'cosens-sdk/rsi';
+        const [data_dir, payload] = process.argv.slice(-2);
+        const { config, create, answer } = JSON.parse(payload);
+        const client = new RSIClient({ data_dir, config });
+        const result = create
+          ? await client.execution_create(create)
+          : await client.execution_clarification_answer(answer.execution_id, answer.value);
+        console.log(JSON.stringify(result));
+        client.close();
+        `,
+        [dataDir, JSON.stringify(request)],
+        process.env.RSI_TEST_BUN_EXECUTABLE,
+      ).then(JSON.parse);
+      const headers = () => ({ Authorization: clarificationToken, 'X-Friday-Auth-Type': 'access_token' });
+      try {
+        const first = await callHook({
+          config: { ...config, headers: headers() },
+          create: {
+            idempotency_key: 'clarification-token-rotation',
+            evidence: {
+              context_path: path,
+              files: [
+                { path: feedbackPath, role: 'feedback' },
+                { path: referencePath, role: 'reference' },
+                { path: currentPath, role: 'input' },
+              ],
+            },
+          },
+        });
+        const parent = await reader.wait(first.id, { timeout: 20 });
+        assert.equal(parent.status, 'completed', JSON.stringify(parent.error));
+        assert.equal(parent.result?.provisional, true);
+        assert.equal(parent.questions.length, 1);
+        const question = parent.questions[0];
+        clarificationToken = 'Bearer fixture-clarification-new';
+
+        const request = {
+          config: { ...config, base_url: config.base_url + '/', max_tokens: 8192, headers: headers() },
+          answer: {
+            execution_id: parent.id,
+            value: { question_id: question.id, question_revision: question.revision, answer: ['plain'] },
+          },
+        };
+        const submitted = await callHook(request);
+        assert.ok(submitted.continuation_execution_id);
+        const child = await reader.wait(submitted.continuation_execution_id, { timeout: 10, poll_interval: 0.05 });
+        assert.equal(child.status, 'completed', JSON.stringify(child.error));
+        assert.equal(child.result?.published, true);
+        assert.equal(child.recipe_id, parent.recipe_id);
+        assert.equal(child.runtime_config.model.base_url, config.base_url);
+        assert.equal(child.runtime_config.model.max_tokens, config.max_tokens);
+        assert.equal(rejectedClarificationRequests, 0);
+        assert.deepEqual(await callHook(request), submitted);
+        assert.equal(reader.store.db.prepare('SELECT COUNT(*) FROM recipes').pluck().get(), 1);
+        assert.equal(reader.execution_list_all().length, 2);
+      } finally {
+        for (const execution of reader.execution_list_all()) {
+          if (execution.status === 'queued' || execution.status === 'running') {
+            reader.execution_cancel(execution.id);
+          }
+        }
+        reader.close();
+      }
+    });
+
+    await t.test('recover with a retry key resumes a timed-out test on the same execution and candidate', async () => {
+      const { RSIClient: BuiltClient } = await import('cosens-sdk/rsi');
+      const data_dir = join(directory, 'retry-timeout');
+      const settings = {
+        model: 'fixture-retry-model',
+        base_url: client.config.model.base_url!,
+        credential_scope: 'retry-account',
+        auto_start: true,
+        timeout: 1,
+        max_tokens: 4096,
+      };
+      const original = new BuiltClient({
+        data_dir, config: { ...settings, headers: { 'X-Api-Key': 'timeout-a' } },
+      });
+      const freshSettings = {
+        ...settings,
+        base_url: settings.base_url + '/',
+        headers: { 'X-Api-Key': 'timeout-b' },
+        max_tokens: 8192,
+        auto_start: false,
+      };
+      const refreshed = new BuiltClient({ data_dir, config: freshSettings });
+      const other = new BuiltClient({
+        data_dir, config: { ...freshSettings, credential_scope: 'other-account' },
+      });
+      const wrongRoute = new BuiltClient({
+        data_dir, config: { ...freshSettings, model: 'wrong-model' },
+      });
+      const reader = new RSIClient({ data_dir, auto_start: false });
+      try {
+        const request = {
+          idempotency_key: 'retry-test-original',
+          evidence: {
+            context_path: path,
+            files: [
+              { path: feedbackPath, role: 'feedback' as const },
+              { path: referencePath, role: 'reference' as const },
+              { path: currentPath, role: 'input' as const },
+            ],
+          },
+        };
+        const created = await original.execution_create(request);
+        const failed = await reader.wait(created.id, { timeout: 15, poll_interval: 0.05 });
+        assert.equal(failed.error?.code, 'timeout');
+        assert.ok(failed.recipe_id && failed.recipe_version_id);
+        const id = failed.recipe_id;
+        const retry = { recipe_id: id, retry_key: 'retry-click' };
+        assert.deepEqual(await refreshed.recover({ recipe_id: id }), { started: 0 });
+        assert.equal((await original.execution_create(request)).status, 'failed');
+        assert.equal('recipe_retry' in refreshed, false);
+        await assert.rejects(
+          refreshed.recover({ retry_key: retry.retry_key }),
+          { code: 'invalid_argument' },
+        );
+        await assert.rejects(
+          refreshed.recover({ ...retry, previous_headers: {} }),
+          { code: 'invalid_argument' },
+        );
+        await assert.rejects(other.recover(retry), { code: 'invalid_state' });
+        await assert.rejects(wrongRoute.recover(retry), { code: 'invalid_state' });
+
+        const executable = process.env.RSI_NODE_EXECUTABLE;
+        process.env.RSI_NODE_EXECUTABLE = join(data_dir, 'missing-worker-runtime');
+        const brokenLauncher = new BuiltClient({ data_dir, config: freshSettings });
+        if (executable === undefined) delete process.env.RSI_NODE_EXECUTABLE;
+        else process.env.RSI_NODE_EXECUTABLE = executable;
+        try {
+          await assert.rejects(brokenLauncher.recover(retry), { code: 'ENOENT' });
+          assert.equal(reader.execution_get(failed.id).status, 'queued');
+        } finally {
+          brokenLauncher.close();
+        }
+        await assert.rejects(
+          refreshed.recover({ ...retry, retry_key: 'new-click-while-queued' }),
+          { code: 'invalid_state' },
+        );
+        const receipt = { started: 0, recipe_id: id, execution_id: failed.id };
+        const replies = await Promise.all([
+          refreshed.recover(retry),
+          refreshed.recover(retry),
+        ]);
+        assert.equal(replies.filter((reply) => reply.scheduled).length, 1);
+        for (const { scheduled: _, ...reply } of replies) assert.deepEqual(reply, receipt);
+        const completed = await reader.wait(failed.id, { timeout: 15, poll_interval: 0.05 });
+        assert.equal(completed.status, 'completed', JSON.stringify(completed.error));
+        assert.equal(completed.result?.published, true);
+        assert.equal(completed.recipe_version_id, failed.recipe_version_id);
+        assert.equal(completed.input_revision, failed.input_revision);
+        assert.deepEqual(completed.material_ids, failed.material_ids);
+        assert.equal(completed.runtime_config.model.base_url, settings.base_url);
+        assert.equal(retryExecutions, 1);
+        assert.equal(retryGenerations, 0);
+        assert.equal(reader.execution_list_all().length, 1);
+        assert.deepEqual(await refreshed.recover(retry), receipt);
+        await assert.rejects(
+          refreshed.recover({ ...retry, retry_key: 'new-click-after-success' }),
+          { code: 'invalid_state' },
+        );
+      } finally {
+        for (const host of [reader, original, refreshed, other, wrongRoute]) host.close();
       }
     });
 

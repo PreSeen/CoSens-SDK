@@ -103,6 +103,9 @@ def test_reads_and_queries_map_to_routes():
     assert client.execution_list(query={"execution_ids": []}) == []
     assert client.recover() == {"started": 0}
     assert client.recover(recipe_id="r1") == {"started": 0}
+    assert not hasattr(client, "recipe_retry")
+    with pytest.raises(InvalidState, match="requires local mode"):
+        client.recover(recipe_id="r1", retry_key="retry")
 
 
 def test_service_errors_keep_their_codes():

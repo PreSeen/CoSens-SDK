@@ -708,10 +708,16 @@ class Store:
                 (scope, key, encode(request), encode(result)),
             )
 
-    def reserve(self, kind, owner, limit, ttl):
+    def reserve(self, kind, owner, limit, ttl, *, retry_target=None):
         now = time.time()
         with self.transaction() as conn:
             conn.execute("DELETE FROM slots WHERE expires<?", (now,))
+            if retry_target is not None:
+                execution_id, fence, credential = retry_target
+                if not self.has_pending(
+                    [credential], execution_id=execution_id, retry_fence=fence
+                ):
+                    return None
             if (
                 conn.execute(
                     "SELECT COUNT(*) FROM slots WHERE kind=?", (kind,)
@@ -749,7 +755,17 @@ class Store:
                 (now + ttl, owner, now),
             )
 
-    def claim(self, owner, ttl, max_executions, credentials=None, *, recipe_id=None):
+    def claim(
+        self,
+        owner,
+        ttl,
+        max_executions,
+        credentials=None,
+        *,
+        recipe_id=None,
+        execution_id=None,
+        retry_fence=None,
+    ):
         now = time.time()
         with self.transaction() as conn:
             running = conn.execute(
@@ -763,6 +779,11 @@ class Store:
                 WHERE (executions.status='queued' OR (executions.status='running' AND executions.lease_until<?))
                 AND COALESCE(json_extract({EFFECTIVE_RUNTIME},'$.max_executions'),?)>?
                 AND (? IS NULL OR executions.recipe_id=?)
+                AND (? IS NULL OR executions.id=?)
+                AND (? IS NULL OR (executions.status='queued' AND executions.fence=?
+                    AND executions.archived_at IS NULL AND EXISTS (
+                        SELECT 1 FROM recipes WHERE id=executions.recipe_id AND archived_at IS NULL
+                    )))
                 AND (? IS NULL OR json_extract({EFFECTIVE_RUNTIME},'$.model.api_key_env')
                      IN (SELECT value FROM json_each(?)))
                 ORDER BY executions.created_at,executions.id LIMIT 1""",
@@ -772,6 +793,10 @@ class Store:
                     running,
                     recipe_id,
                     recipe_id,
+                    execution_id,
+                    execution_id,
+                    retry_fence,
+                    retry_fence,
                     *(
                         [encode(credentials)] * 2
                         if credentials is not None
@@ -896,7 +921,9 @@ class Store:
                     )
                 self.save(conn, obj)
 
-    def pending_execution(self, credentials=None, *, recipe_id=None):
+    def pending_execution(
+        self, credentials=None, *, recipe_id=None, execution_id=None, retry_fence=None
+    ):
         keys = encode(credentials) if credentials is not None else None
         with self.connect() as conn:
             row = conn.execute(
@@ -904,15 +931,39 @@ class Store:
                    FROM executions
                    WHERE executions.status IN ('queued','running')
                    AND (? IS NULL OR executions.recipe_id=?)
+                   AND (? IS NULL OR executions.id=?)
+                   AND (? IS NULL OR (executions.status='queued' AND executions.fence=?
+                       AND executions.archived_at IS NULL AND EXISTS (
+                          SELECT 1 FROM recipes WHERE id=executions.recipe_id AND archived_at IS NULL
+                       )))
                    AND (? IS NULL OR json_extract({EFFECTIVE_RUNTIME},'$.model.api_key_env')
                         IN (SELECT value FROM json_each(?)))
                    ORDER BY executions.created_at,executions.id LIMIT 1""",
-                (recipe_id, recipe_id, keys, keys),
+                (
+                    recipe_id,
+                    recipe_id,
+                    execution_id,
+                    execution_id,
+                    retry_fence,
+                    retry_fence,
+                    keys,
+                    keys,
+                ),
             ).fetchone()
             return dict(row) if row else None
 
-    def has_pending(self, credentials=None, *, recipe_id=None):
-        return self.pending_execution(credentials, recipe_id=recipe_id) is not None
+    def has_pending(
+        self, credentials=None, *, recipe_id=None, execution_id=None, retry_fence=None
+    ):
+        return (
+            self.pending_execution(
+                credentials,
+                recipe_id=recipe_id,
+                execution_id=execution_id,
+                retry_fence=retry_fence,
+            )
+            is not None
+        )
 
     def pending_count(self, credentials, *, recipe_id=None):
         with self.connect() as conn:
