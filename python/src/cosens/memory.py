@@ -109,7 +109,7 @@ def _service_url(base_url):
         raise ValueError("base_url must be an absolute HTTPS URL")
     try:
         parts = urlsplit(base_url)
-        port = parts.port
+        parts.port  # Validate the port without retaining it.
     except ValueError:
         raise ValueError("base_url must be an absolute HTTPS URL") from None
     if parts.scheme != "https" or not parts.hostname or parts.username is not None or parts.password is not None or "?" in base_url or "#" in base_url:

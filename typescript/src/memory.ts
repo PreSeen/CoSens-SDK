@@ -165,7 +165,7 @@ async function request<T = Record<string, unknown>>(
   if ((options.baseUrl === undefined) !== (options.apiKey === undefined))
     throw new TypeError('baseUrl and apiKey must be supplied together');
   const base = options.baseUrl === undefined ? SERVICE_URL : serviceUrl(options.baseUrl);
-  const apiKey = options.apiKey ?? process.env.COSENS_API_KEY;
+  const apiKey = options.baseUrl === undefined ? process.env.COSENS_API_KEY : options.apiKey;
   if (typeof apiKey !== 'string' || !apiKey || /[\s\x00-\x1f\x7f]/.test(apiKey))
     throw new TypeError('Set COSENS_API_KEY to the bare CoSens API key');
   const headers = new Headers({

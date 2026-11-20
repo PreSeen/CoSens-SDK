@@ -155,3 +155,21 @@ test('explicit Memory service and key are per call and fail closed', async (t) =
   await assert.rejects(memoryRecall({query:'a', apiKey:'explicit'}), TypeError);
   assert.equal(seen.length, 4);
 });
+
+test('a null explicit key never sends the ambient key to a custom service', async (t) => {
+  useFixtureKey(t);
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    return Response.json({});
+  });
+  await assert.rejects(
+    memoryRecall({
+      query: 'a',
+      baseUrl: 'https://regional.example/v1/memory',
+      apiKey: null as unknown as string,
+    }),
+    TypeError,
+  );
+  assert.equal(calls, 0);
+});
