@@ -73,6 +73,14 @@ jobs:
           test "typescript-v${version}" = "${GITHUB_REF_NAME}" || { echo "Tag ${GITHUB_REF_NAME} does not match version ${version}"; exit 1; }
       - run: npm ci
       - run: npm run check
-      - run: npm publish --provenance --access public
+      - name: Publish to npm
+        run: |
+          version=${GITHUB_REF_NAME#typescript-v}
+          version=${version%%+*}
+          tag_args=()
+          case "${version#*-}" in
+            rsi|rsi.*) tag_args=(--tag rsi) ;;
+          esac
+          npm publish --provenance --access public "${tag_args[@]}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
