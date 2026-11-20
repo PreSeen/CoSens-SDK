@@ -76,11 +76,6 @@ test('cloud create uploads only the named files', async () => {
   writeFileSync(join(dir, 'unrelated.txt'), 'stays local');
   await withService({}, async (base_url, seen) => {
     const client = new RSIClient({ mode: 'cloud', api_key: 'k', base_url });
-    await assert.rejects(
-      client.recipe_insert(join(dir, 'RECIPE.md')),
-      (error: unknown) => error instanceof RSIError && error.code === 'invalid_state',
-    );
-    assert.equal(seen.length, 0);
     await client.execution_create({
       evidence: {
         context_path: join(dir, 'context.txt'),
@@ -193,4 +188,27 @@ test('virtual_user_id is accepted as an alias for virtualUserId', async (t) => {
       { name: 'TypeError', message: /virtual_user_id must be a nonempty header value/ },
     );
   assert.throws(() => new RSIClient({ data_dir: '/tmp/nope', config: null, virtual_user_id: 'vu_a' } as never));
+});
+
+test('cloud recipe_insert uploads the validated Markdown', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rsi-cloud-recipe-'));
+  const markdown =
+    '---\nname: Weekly report\ndescription: Sales by region\n---\nGroup sales by region.\n';
+  writeFileSync(join(dir, 'RECIPE.md'), markdown);
+  writeFileSync(join(dir, 'bad.md'), 'Group sales by region.');
+  const reply = { recipe_id: 'recipe_1', recipe_version_id: 'version_1' };
+  await withService({ 'POST /api/recipes': [200, reply] }, async (base_url, seen) => {
+    const client = new RSIClient({ mode: 'cloud', api_key: 'k', base_url });
+    assert.deepEqual(await client.recipe_insert(join(dir, 'RECIPE.md')), reply);
+    assert.deepEqual(
+      seen.map(({ method, url, body }) => [method, url, body]),
+      [['POST', '/api/recipes', { markdown }]],
+    );
+    await assert.rejects(
+      client.recipe_insert(join(dir, 'bad.md')),
+      (error: unknown) =>
+        error instanceof RSIError && error.code === 'invalid_argument',
+    );
+    assert.equal(seen.length, 1);
+  });
 });

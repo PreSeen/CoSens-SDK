@@ -1,6 +1,6 @@
 # CoSens RSI SDK 接口文档
 
-云端模式默认启用，本地模式使用 SQLite schema v7。本地支持 `recipe_insert()`，`recipe_get()` 另返回 Recipe 文件的 `storage_path`。TS 从 `cosens-sdk/rsi` 导入，Python 从 `cosens.rsi` 导入。
+云端模式默认启用，本地模式使用 SQLite schema v7。云端和本地都支持 `recipe_insert()`，`recipe_get()` 另返回 Recipe 文件的 `storage_path`。TS 从 `cosens-sdk/rsi` 导入，Python 从 `cosens.rsi` 导入。
 
 ```text
 Agent 启动 → recover()
@@ -62,7 +62,7 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 | `rubrics_list` | `offset`（非负整数）、`archived`（布尔值） | 无 | 分页列出评分标准及最新版本 ID。 |
 | `rubrics_get` | `rubrics_id`（字符串）、`version`（`"latest"` 或版本 ID） | 无 | 返回选中的评分标准版本。 |
 | `recipe_list` | 无 | `query`，提供时须含 `recipe_ids: string[]`（Python 为 `list[str]`）。 | 返回首次学习条目和现有 Recipe 的摘要。 |
-| `recipe_insert` | `path`（本地 Recipe 文件路径） | 无 | 仅本地。验证文件，创建新 Recipe 和可用 v1，返回 `recipe_id` 和 `recipe_version_id`。 |
+| `recipe_insert` | `path`（本地 Recipe 文件路径） | 无 | 验证文件，创建新 Recipe 和可用 v1，返回 `recipe_id` 和 `recipe_version_id`。云端模式先在本地验证，再上传文件内容（`POST /recipes`）。 |
 | `recipe_get` | `recipe_id`（字符串）、`version`（`"active"`、`"latest"` 或版本 ID） | 无 | 返回 Recipe 和 `selected_version`。 |
 | `recipe_test` | `execution_id`、`recipe_id`、`version_id`、`rubrics_version_id`（均为字符串） | 无 | 在活动 Execution 内安排指定版本测试。 |
 | `recipe_version_set_archived` | `recipe_id`、`version_id`（字符串）、`archived`（布尔值） | 无 | `true` 归档版本，`false` 恢复最近发布的版本。返回两个 ID 和归档状态。 |

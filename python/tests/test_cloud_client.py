@@ -41,9 +41,6 @@ def test_create_uploads_only_the_named_files(tmp_path):
     (tmp_path / "unrelated.txt").write_text("stays local")
     transport, seen = recording()
     client = CloudRSIClient(api_key="k", base_url="https://rsi.example/api", transport=transport)
-    with pytest.raises(InvalidState, match="requires local mode"):
-        client.recipe_insert(tmp_path / "RECIPE.md")
-    assert seen == []
     client.execution_create(
         evidence={
             "context_path": str(tmp_path / "context.txt"),
@@ -150,3 +147,19 @@ def test_virtual_user_is_instance_scoped_and_rejected_in_local_mode(tmp_path):
     assert isinstance(RSIClient(api_key="k", virtual_user_id="vu_a"), CloudRSIClient)
     with pytest.raises(ValueError):
         RSIClient(data_dir=tmp_path, virtual_user_id="vu_a")
+
+
+def test_recipe_insert_uploads_the_validated_markdown(tmp_path):
+    markdown = "---\nname: Weekly report\ndescription: Sales by region\n---\nGroup sales by region.\n"
+    (tmp_path / "RECIPE.md").write_text(markdown, encoding="utf-8")
+    reply = {"recipe_id": "recipe_1", "recipe_version_id": "version_1"}
+    transport, seen = recording({("POST", "/api/recipes"): (200, reply)})
+    client = CloudRSIClient(api_key="k", base_url="https://rsi.example/api", transport=transport)
+    assert client.recipe_insert(tmp_path / "RECIPE.md") == reply
+    assert [(r["method"], r["path"], r["body"]) for r in seen] == [
+        ("POST", "/api/recipes", {"markdown": markdown})
+    ]
+    (tmp_path / "bad.md").write_text("Group sales by region.")
+    with pytest.raises(ValueError, match="frontmatter"):
+        client.recipe_insert(tmp_path / "bad.md")
+    assert len(seen) == 1

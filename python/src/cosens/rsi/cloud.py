@@ -16,6 +16,7 @@ import httpx
 
 from .chat_completions import USER_AGENT
 from .models import Conflict, InvalidState, NotFound, RecipeReference, RSIError
+from .recipe_file import read_recipe_file
 
 DEFAULT_BASE_URL = "https://rsi.cosens.ai/api"
 # The CoSens gateway accepts request bodies up to 10 MiB.
@@ -93,7 +94,7 @@ class CloudRSIClient:
             content = _json.dumps(json, ensure_ascii=False).encode("utf-8")
             if len(content) > MAX_REQUEST_BYTES:
                 raise ValueError(
-                    "evidence upload exceeds the 10 MiB cloud request limit; send fewer or smaller files, or use local mode"
+                    "upload exceeds the 10 MiB cloud request limit; send fewer or smaller files, or use local mode"
                 )
         try:
             response = self._http.request(
@@ -180,7 +181,9 @@ class CloudRSIClient:
         return self._request("GET", "/recipes", params=params)
 
     def recipe_insert(self, path: str | Path):
-        raise InvalidState("recipe_insert requires local mode")
+        # Validate locally first, so a malformed file fails the same way in both modes.
+        _, markdown = read_recipe_file(path)
+        return self._request("POST", "/recipes", json={"markdown": markdown})
 
     def recipe_get(self, recipe_id, *, version):
         return self._request("GET", f"/recipes/{_segment(recipe_id)}", params={"version": version})
