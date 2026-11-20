@@ -343,8 +343,11 @@ class Engine:
                 rubric_rule_text(rubric["content"])
             ):
                 raise ModelOutputError("Test rules contain learning-only literals")
+            requires_python = rubric["content"].get("requires_python", False)
+            python_requirement = {"requires_python": True} if requires_python else {}
             test_rubrics = {
                 "pass_threshold": rubric["content"]["pass_threshold"],
+                **python_requirement,
                 "criteria": [
                     {field: c[field] for field in ("id", "description", "required")}
                     for c in rubric["content"]["criteria"]
@@ -365,6 +368,7 @@ class Engine:
                 {
                     "test_task": {"instruction": task["instruction"]},
                     "recipe": recipe["content"],
+                    **python_requirement,
                 },
                 test_files,
                 workspace,
@@ -374,6 +378,8 @@ class Engine:
             self.guard(state["input_revision"])
             artifacts = []
             for path in sorted(workspace.rglob("*")):
+                if path.relative_to(workspace).parts[0] == "scripts":
+                    continue
                 if path.is_file():
                     if path.is_symlink() or not path.resolve().is_relative_to(
                         workspace.resolve()
@@ -398,7 +404,29 @@ class Engine:
                 artifacts=artifacts,
                 trace_path=str(attempt / "executor-trace.json"),
             )
-            if not artifacts:
+
+            python_runs = {}
+            if isinstance(executor_result, dict):
+                receipts = executor_result.get("python_runs")
+                if isinstance(receipts, list):
+                    python_runs = {run["path"]: run for run in receipts}
+            python_passed = bool(python_runs) and all(
+                run["status"] == "completed" and run["exit_code"] == 0
+                for run in python_runs.values()
+            )
+            if (requires_python or python_runs) and not python_passed:
+                unavailable = (
+                    requires_python and not self.client.config.test_python_image
+                ) or any(run["status"] == "unavailable" for run in python_runs.values())
+                result.update(
+                    status="unverifiable" if unavailable else "failed",
+                    reason=(
+                        "Python sandbox is unavailable for Recipe validation"
+                        if unavailable
+                        else "Recipe executor did not complete required Python execution"
+                    ),
+                )
+            elif not artifacts:
                 result["reason"] = "Recipe executor produced no verifiable output files"
             else:
                 checks = self.objective_checks(workspace, task["checks"])

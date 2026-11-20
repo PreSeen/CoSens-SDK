@@ -10,7 +10,7 @@ import {
   type Execution,
   type Runtime,
 } from './models.js';
-import { now, uid } from './store.js';
+import { now, uid, type RetryTarget } from './store.js';
 
 export async function drain(
   client: RSIClient,
@@ -18,6 +18,7 @@ export async function drain(
   owner = uid('worker'),
   reservedSlot?: string,
   recipeId?: string,
+  target?: RetryTarget,
 ) {
   const { store, config } = client;
   const credentials = runtime ? undefined : client.credentialNames();
@@ -50,8 +51,10 @@ export async function drain(
         config.max_executions,
         credentials,
         recipeId,
+        target,
       );
       if (!active) {
+        if (target && !store.queuedRetry(target, config.model.api_key_env)) break;
         if (Date.now() - idleSince >= 1000) {
           const emptied = store.tx(() => {
             // A detached worker can pick up an interrupted job once its lease expires.
@@ -124,6 +127,7 @@ export async function drain(
         leaseSeconds = config.lease_seconds;
       }
       processed++;
+      if (target) break;
       idleSince = Date.now();
     }
     return { processed };
@@ -138,6 +142,7 @@ async function waitForWorkerSlot(
   owner: string,
   waitingSlot: string,
   recipeId?: string,
+  target?: RetryTarget,
 ) {
   const { store, config } = client;
   const credentials = client.credentialNames();
@@ -149,9 +154,12 @@ async function waitForWorkerSlot(
         nextHeartbeat = now() + config.lease_seconds / 3;
       }
       const pending = store.tx(() => {
-        if (store.has_pending(credentials, recipeId)) return true;
-        store.release(waitingSlot);
-        return false;
+        const matches = target
+          ? credentials.includes(config.model.api_key_env) &&
+            store.queuedRetry(target, config.model.api_key_env)
+          : store.has_pending(credentials, recipeId);
+        if (!matches) store.release(waitingSlot);
+        return matches;
       });
       if (!pending) return null;
 
@@ -166,7 +174,7 @@ async function waitForWorkerSlot(
       await sleep(250);
     }
   } finally {
-    store.release(waitingSlot);
+    if (!target) store.release(waitingSlot);
   }
 }
 
@@ -201,17 +209,24 @@ if (
       options: {
         'wait-for-slot': { type: 'boolean' },
         'recipe-id': { type: 'string' },
+        'retry-fence': { type: 'string' },
       },
       allowPositionals: true,
     });
     const [data_dir, owner, slot, executionId] = positionals;
     const waiting = values['wait-for-slot'];
     const recipeId = values['recipe-id'];
+    const retryFence = values['retry-fence'];
+    const target = executionId && retryFence !== undefined
+      ? { id: executionId, fence: Number(retryFence) }
+      : undefined;
     if (
       !data_dir ||
       positionals.length > 4 ||
       Boolean(owner) !== Boolean(slot) ||
-      (waiting && !slot)
+      (waiting && !slot) ||
+      (retryFence !== undefined &&
+        (!target || !Number.isSafeInteger(target.fence) || target.fence < 0))
     )
       throw new Error('worker expects a data directory and optional lease');
     const reader = new RSIClient({ data_dir, auto_start: false });
@@ -225,11 +240,12 @@ if (
         const client = new RSIClient({ data_dir, config, auto_start: false });
         try {
           const workerSlot = waiting
-            ? await waitForWorkerSlot(client, owner, slot, recipeId)
+            ? await waitForWorkerSlot(client, owner, slot, recipeId, target)
             : slot;
           if (workerSlot !== null)
-            await drain(client, undefined, owner, workerSlot, recipeId);
+            await drain(client, undefined, owner, workerSlot, recipeId, target);
         } finally {
+          if (target && slot) reader.store.release(slot);
           client.close();
         }
       }

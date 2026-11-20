@@ -146,6 +146,10 @@ test('cloud reads map to routes and errors keep their codes', async () => {
       assert.deepEqual(await client.recover(), { started: 0 });
       assert.deepEqual(await client.recover({ recipe_id: 'recipe_1' }), { started: 0 });
       await assert.rejects(
+        client.recover({ recipe_id: 'recipe_1', retry_key: 'click-1' }),
+        { code: 'invalid_state' },
+      );
+      await assert.rejects(
         client.execution_get('missing'),
         (error: unknown) =>
           error instanceof RSIError && error.code === 'not_found',

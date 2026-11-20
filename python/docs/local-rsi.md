@@ -41,6 +41,7 @@ TS 用 `new RSIClient({ data_dir, config })`。Python 用 `RSIClient(data_dir=..
 | `config.auto_start` | 提供配置对象时必填。 | 布尔值。为 `true` 时入队后自动调度 Worker，为 `false` 时由宿主调用 `recover()`。 |
 | `config.max_tokens` | 选填。 | 正整数，限制单次模型调用的输出。省略时由模型服务决定。 |
 | `config.timeout` | 选填。 | 秒数，默认 120，有效范围为大于 0 且不超过 3600。 |
+| `config.test_python_image` | 选填。 | 本机已安装且由宿主信任的 Docker Python 镜像，例如 `python:3.12-slim`。设置后本地 Worker 可以在隔离容器中运行测试脚本。需要的依赖由镜像预装。 |
 
 本地模型请求直接使用 `headers`。例如网关可以接收 `Authorization: Bearer <access_token>` 和它要求的令牌类型头，其他模型可以接收 `X-Api-Key` 或供应商要求的请求头。请求头值只在 Client 和 Worker 进程使用，SQLite 只保存匹配标识。未指定 User-Agent 时默认使用 `cosens-sdk-python/<版本>` 或 `cosens-sdk-typescript/<版本>`。
 
@@ -225,12 +226,21 @@ TS 用 `execution_list({ execution_ids: [id1, id2] })`，Python 用 `execution_l
 - Worker 自动提炼并锁定 Recipe 名称、生成 Rubrics、保存候选及测试结果。自动学习最多两轮。
 - 如果宿主显式调用 `recipe_test` 改测另一个 Recipe，Execution 会切换到指定的测试目标。原先为这一条执行预建、尚无任何版本的 Recipe 会归档。
 
+### 测试中运行 Python
+
+本地 Client 配置 `test_python_image` 后，测试模型可用 `write_output` 把脚本写到 `scripts/`，再调用 `run_python({ path, args })`。`path` 是脚本相对路径，`args` 是参数数组，省略时为 `[]`。Docker 使用本机已有镜像。脚本在 `/workspace/outputs` 中运行，从 `/workspace/inputs` 读取本轮获准测试的只读文件。工具将真实退出码、标准输出和标准错误写入测试轨迹。测试产物由隔离工作区收集，待运行脚本与产物分开。
+
+容器禁用网络并限制运行时间和资源。使用未声明 `VOLUME` 的可信镜像，由镜像预装任务所需的依赖，例如读取 Excel 所需的库。模型请求头、宿主的其他路径和学习材料不会挂载到容器。
+
+分析识别到任务明确要求实跑 Python 时，Rubric 会标记 `requires_python: true`。评分继续使用原阈值。需要实跑而缺少成功执行证据时，Recipe 无法发布。镜像或 Docker 不可用时，测试结果为 `unverifiable`，详情见 `test_results[].reason` 和测试轨迹。评审根据实际执行和产物核对每项校验。
+
 ### 更新和澄清参数
 
 - `execution_append_evidence` 接收新增的 `context_path` 和 `files`。新证据递增输入版本并触发重新分析，测试继续使用创建时的输入范围。重试相同证据批次会复用原快照。
 - `question_id` 和 `question_revision` 来自 `execution_get().questions`。`answer` 为同一道题选中的选项 ID 数组或非空文本。多道题逐题提交到原 Execution。只要还有待回答的问题，SDK 就只保存答案，返回 `continuation_execution_id: null`。
 - 最后一道题回答后，SDK 创建一个继承全部答案的子 Execution，并返回 `continuation_execution_id`。原执行尚在排队或运行时，会停止并标记为 `cancelled`。原执行已经完成时，保留已有测试结果。重试最后一道相同答案将复用同一个子 Execution。
 - 宿主从返回的子 Execution ID 跟踪重新分析、生成和测试。子执行后续再次提出澄清问题时，按同样流程回答。
+- 同一账号刷新 token 后，用相同的 `credential_scope`、原任务的模型和 endpoint、新的 `headers` 创建 Client。最后一道答案通过归属校验后，SDK 用新的凭证自动启动同一 Recipe 的子 Execution。使用 `auto_start: true` 时，回答一次即可续跑。
 
 ## 本地 SQLite 存储
 
@@ -253,7 +263,7 @@ TS 和 Python 使用相同的表结构。查询时，`latest_version_id` 取版�
 
 | 方法 | 必填参数 | 选填参数 | 用途 |
 | --- | --- | --- | --- |
-| `recover` | 无 | `recipe_id`（SDK Recipe ID）、`previous_headers`（任务上次绑定的请求头，键值是字符串）。 | 使用当前 Client 的配置恢复符合条件的本地 Execution，返回 `started`。等待租约或空闲槽位时可返回 `scheduled=true`。云端返回 `{ started: 0 }`，服务端自行恢复。 |
+| `recover` | 无。传 `retry_key` 时必填 `recipe_id`。 | `recipe_id`（SDK Recipe ID）、`previous_headers`（任务上次绑定的请求头）、`retry_key`（非空字符串，仅本地，与 `previous_headers` 互斥）。 | 返回 `started`。安排后台 Worker 等待执行时可返回 `scheduled: true`。带 `retry_key` 时还返回受理的 `recipe_id` 和 `execution_id`。云端由服务端自行恢复，默认调用返回 `{ started: 0 }`。 |
 | `close` | 无 | 无 | TS 本地释放 SQLite 连接，TS 云端直接返回。Python 云端释放 HTTPX 连接。 |
 
 TS 的 RSI 业务接口及 `recover()` 用 `await`，`close()` 同步调用。Python RSI 方法同步调用。
@@ -261,6 +271,24 @@ TS 的 RSI 业务接口及 `recover()` 用 `await`，`close()` 同步调用。Py
 TS 用 `await client.recover({ recipe_id: recipeId })`，Python 用 `client.recover(recipe_id=recipe_id)`。指定 SDK Recipe ID 时只接手该 Recipe。省略 ID 时恢复同一账号可接手的全部 Execution，包括排队中的任务、租约到期的任务，以及更换凭证后可以重试的 HTTP 401 或 403 失败任务。继续使用原 Execution ID 和已有断点。没有匹配任务时返回 `{ started: 0 }`。
 
 以前创建的任务如果没有 `credential_scope`，可用与创建时匹配的模型配置恢复。如果旧请求头已有变化，首次续跑可在 `recover()` 传入 `previous_headers`，用于匹配原绑定。若新 Client 也配置了 `credential_scope`，恢复成功后后续刷新 token 只需继续使用同一个标识。
+
+### 失败任务的显式重试
+
+任务卡片上的「重试」调用 `recover`，同时传入 `recipe_id` 和 `retry_key`。SDK 找到该 Recipe 最近的 Execution，接受状态为 `failed`、错误码为 `timeout` 的模型调用超时。旧版本仍可用时，也可以重试这条最近失败的 Execution。普通恢复调用沿用上面的条件。
+
+重试保留 Recipe ID、Execution ID、材料快照、已保存的候选版本和 LangGraph 断点。新 Client 使用原模型、原 endpoint、同一 `credential_scope` 和当前有效的 `headers`。旧任务没有 `credential_scope` 时，重试使用原请求头绑定。调用 `recover` 会调度 Worker，即使 Client 设置了 `auto_start: false`。
+
+```ts
+const retry = await client.recover({ recipe_id: recipeId, retry_key: retryRequestId });
+const execution = await client.execution_get(retry.execution_id);
+```
+
+```python
+retry = client.recover(recipe_id=recipe_id, retry_key=retry_request_id)
+execution = client.execution_get(retry["execution_id"])
+```
+
+每次重试使用一个稳定的 `retry_key`。响应丢失时沿用原键，SDK 返回同一对 ID，并在必要时补派发同一次重试。后台 Worker 已安排时返回 `scheduled: true`。宿主继续用原 Execution ID 查询进度和结果。重跑再次超时后，用户可用新键发起下一次重试。
 
 ## Memory 服务接口
 

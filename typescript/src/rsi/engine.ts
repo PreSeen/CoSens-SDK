@@ -17,6 +17,7 @@ import {
 import { LearningLiterals, rubricRuleText } from './portability.js';
 import { uid } from './store.js';
 import { stageProgress } from './progress.js';
+import type { PythonRun } from './test-python.js';
 import {
   AnalysisSchema,
   FeedbackExtractionSchema,
@@ -448,6 +449,7 @@ export class Engine {
       fail('invalid_model_output', 'Test rules contain learning-only literals');
     const testRubrics = {
       pass_threshold: rubrics.pass_threshold,
+      ...(rubrics.requires_python ? { requires_python: true } : {}),
       criteria: rubrics.criteria.map(({ id, description, required }) => ({
         id,
         description,
@@ -462,7 +464,11 @@ export class Engine {
       rubrics_version_id: state.rubric,
     });
     const summary = await this.runtime.execute(
-      { recipe: recipe.content, test_task: { instruction: task.instruction } },
+      {
+        recipe: recipe.content,
+        test_task: { instruction: task.instruction },
+        ...(rubrics.requires_python ? { requires_python: true } : {}),
+      },
       inputs,
       workspace,
       trace,
@@ -481,6 +487,29 @@ export class Engine {
           'Actual Recipe test output',
         ),
       );
+    const latestRuns = new Map<string, PythonRun>();
+    if (summary && typeof summary === 'object' && 'python_runs' in summary &&
+      Array.isArray(summary.python_runs)) {
+      for (const run of summary.python_runs as PythonRun[]) latestRuns.set(run.path, run);
+    }
+    const runs = [...latestRuns.values()];
+    const unavailable = runs.find((run) => run.status === 'unavailable');
+    const failed = runs.find((run) => run.exit_code !== 0);
+    if (unavailable || (rubrics.requires_python && !this.client.config.test_python_image)) {
+      result.reason = unavailable?.stderr ?? 'Required Python execution is not configured';
+      atomic_json(join(attempt, 'result.json'), result);
+      return;
+    }
+    if (failed || (rubrics.requires_python && !runs.length)) {
+      result.status = 'failed';
+      result.reason = failed?.status === 'rejected'
+        ? failed.stderr
+        : failed
+          ? `Python script ${failed.path} exited with code ${failed.exit_code}`
+          : 'Required Python execution was skipped';
+      atomic_json(join(attempt, 'result.json'), result);
+      return;
+    }
     if (!result.artifacts.length) {
       result.reason = 'Recipe executor produced no verifiable output files';
       return;

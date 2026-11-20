@@ -14,7 +14,7 @@ from pydantic import (
 
 from ._queue_client import RSIClient as QueueClient
 from .model_headers import bind_model_headers, credential_scope_id
-from .models import Contract, RecipeReference
+from .models import Contract, PythonImage, RecipeReference
 from .recipe_file import read_recipe_file
 
 Text = Annotated[str, StringConstraints(min_length=1)]
@@ -32,6 +32,7 @@ class ModelEndpoint(Contract):
     auto_start: StrictBool
     max_tokens: Positive | None = None
     timeout: Annotated[float, Field(gt=0, le=3600)] | None = None
+    test_python_image: PythonImage | None = None
 
 
 class File(Contract):
@@ -116,7 +117,8 @@ class RSIClient:
                     **settings.model_dump(
                         include={"max_tokens", "timeout"}, exclude_none=True
                     ),
-                }
+                },
+                **settings.model_dump(include={"test_python_image"}, exclude_none=True),
             }
             if settings and binding
             else None,
@@ -269,6 +271,7 @@ class RSIClient:
         *,
         recipe_id: str | None = None,
         previous_headers: dict[str, str] | None = None,
+        retry_key: str | None = None,
     ):
         return self._queue.recover(
             recipe_id=_TEXT.validate_python(recipe_id) if recipe_id is not None else None,
@@ -277,5 +280,6 @@ class RSIClient:
                 if previous_headers is not None
                 else None
             ),
+            retry_key=_TEXT.validate_python(retry_key) if retry_key is not None else None,
             refresh=True,
         )

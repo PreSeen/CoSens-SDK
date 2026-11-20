@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -39,6 +40,8 @@ def gateway(monkeypatch):
             self.model_requests = []
             self.rejection_started = threading.Event()
             self.release_rejection = None
+            self.ask_clarification = False
+            self.test_timeout_key = None
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -80,6 +83,13 @@ def gateway(monkeypatch):
                         assert "Authorization" not in self.headers
                 messages = request["messages"]
                 system = messages[0]["content"]
+                if (
+                    server.test_timeout_key == api_key
+                    and api_key is not None
+                    and "recipe test executor" in system
+                ):
+                    time.sleep(0.9)
+                    return
                 payload = json.loads(
                     next(m["content"] for m in messages if m["role"] == "user")
                 )
@@ -153,13 +163,30 @@ def gateway(monkeypatch):
                         assert pages[2]["end_offset"] == pages[2]["total_chars"]
                     assert payload["context"]["user_feedback"] == feedback
                     locator = catalog[0]["locator"]
+                    needs_answer = (
+                        server.ask_clarification and not payload["context"]["answers"]
+                    )
                     name, arguments = (
                         "Analysis",
                         {
                             "recipe_name": "Write checked answers",
-                            "sufficient_information": True,
-                            "hypothesis": None,
-                            "questions": [],
+                            "sufficient_information": not needs_answer,
+                            "hypothesis": "Assume decimal format"
+                            if needs_answer
+                            else None,
+                            "questions": [
+                                {
+                                    "id": "format",
+                                    "question": "Which number format?",
+                                    "assumption": "decimal",
+                                    "options": [
+                                        {"id": "decimal", "label": "Decimal"},
+                                        {"id": "hex", "label": "Hexadecimal"},
+                                    ],
+                                }
+                            ]
+                            if needs_answer
+                            else [],
                             "rubrics": {
                                 "criteria": [
                                     {
@@ -710,6 +737,256 @@ def test_live_worker_hands_off_expired_credentials_after_public_recover(
     assert "recovery_config" not in result
     assert ("fixture-refreshed", "replacement-model", None) in gateway.model_requests
     assert "lease-2" in result["test_results"][0]["trace_path"]
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_clarification_dispatch_uses_refreshed_headers_for_the_same_recipe(
+    tmp_path, gateway, replay
+):
+    from cosens.rsi import RSIClient as HostClient
+
+    gateway.ask_clarification = True
+    config = {
+        "model": "local-test",
+        "base_url": f"http://127.0.0.1:{gateway.server_port}/v1",
+        "headers": {"X-Api-Key": "fixture-before-clarification"},
+        "credential_scope": "account-primary",
+        "max_tokens": 2048,
+        "timeout": 23,
+        "auto_start": True,
+    }
+    root = tmp_path / "rsi"
+    context = tmp_path / "context.md"
+    context.write_text("Write the answer 42 into answer.txt")
+    evidence = {"context_path": str(context), "files": []}
+    original = HostClient(data_dir=root, config=config)
+    first = original.execution_create(
+        evidence=evidence, idempotency_key="clarification"
+    )
+    foreign_config = {
+        **config,
+        "credential_scope": "account-secondary",
+        "headers": {"X-Api-Key": "fixture-other-account"},
+    }
+    foreign = HostClient(data_dir=root, config={**foreign_config, "auto_start": False})
+    unrelated = foreign.execution_create(
+        evidence=evidence, idempotency_key="other-account"
+    )
+    parent = original._queue.wait(first["id"], timeout=20)
+    assert parent["status"] == "completed", parent
+    assert parent["result"]["provisional"] is True
+    deadline = time.monotonic() + 5
+    while True:
+        with original._queue.store.connect() as conn:
+            active = conn.execute(
+                "SELECT 1 FROM slots WHERE kind='worker' AND expires>=? LIMIT 1",
+                (time.time(),),
+            ).fetchone()
+        if not active:
+            break
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    (question,) = parent["questions"]
+    answer = {
+        "question_id": question["id"],
+        "question_revision": question["revision"],
+        "answer": ["decimal"],
+    }
+    gateway.rejected_keys["fixture-before-clarification"] = 401
+    request_cutoff = len(gateway.model_requests)
+    fresh_config = {
+        **config,
+        "base_url": config["base_url"] + "/",
+        "headers": {"X-Api-Key": "fixture-after-clarification"},
+        "max_tokens": 4096,
+        "timeout": 61,
+    }
+    fresh = HostClient(data_dir=root, config=fresh_config)
+
+    if replay:
+        stale = HostClient(data_dir=root, config={**config, "auto_start": False})
+        queued = stale.execution_clarification_answer(parent["id"], **answer)
+        queued_id = queued["continuation_execution_id"]
+        for changes in (
+            foreign_config,
+            {"model": "different-model"},
+            {"base_url": config["base_url"] + "/other"},
+        ):
+            differing = HostClient(
+                data_dir=root, config={**fresh_config, **changes, "auto_start": False}
+            )
+            assert (
+                differing.execution_clarification_answer(parent["id"], **answer)
+                == queued
+            )
+            untouched = original._queue.execution_get(queued_id)
+            assert untouched["status"] == "queued"
+            assert untouched["runtime_config"] == parent["runtime_config"]
+
+    response = fresh.execution_clarification_answer(parent["id"], **answer)
+    if replay:
+        assert response == queued
+    child = fresh._queue.wait(response["continuation_execution_id"], timeout=20)
+    assert child["status"] == "completed", child
+    assert child["base_execution_id"] == parent["id"]
+    assert child["recipe_id"] == parent["recipe_id"]
+    assert child["base_recipe_version_id"] == parent["recipe_version_id"]
+    assert child["result"]["published"] is True
+    expected_runtime = {
+        **parent["runtime_config"],
+        "model": {
+            **parent["runtime_config"]["model"],
+            "api_key_env": fresh._queue.config.model.api_key_env,
+        },
+    }
+    assert child["runtime_config"] == expected_runtime
+    assert fresh.execution_get(unrelated["id"])["status"] == "queued"
+    continuation_requests = gateway.model_requests[request_cutoff:]
+    assert continuation_requests
+    assert set(continuation_requests) == {
+        ("fixture-after-clarification", "local-test", 2048)
+    }
+    assert fresh.execution_clarification_answer(parent["id"], **answer) == response
+
+
+@pytest.mark.parametrize("scoped", [True, False])
+def test_recover_retry_key_resumes_timed_out_checkpoint_once(
+    tmp_path, gateway, monkeypatch, scoped
+):
+    from cosens.rsi import InvalidState
+    from cosens.rsi import RSIClient as HostClient
+
+    gateway.test_timeout_key = "fixture-timed-out"
+    config = {
+        "model": "local-test",
+        "base_url": f"http://127.0.0.1:{gateway.server_port}/v1",
+        "headers": {"X-Api-Key": gateway.test_timeout_key},
+        "max_tokens": 2048,
+        "timeout": 0.45,
+        "auto_start": True,
+    }
+    if scoped:
+        config["credential_scope"] = "account-primary"
+    directory = tmp_path / "rsi"
+    initial = HostClient(data_dir=directory, config=config)
+    skill = tmp_path / "SKILL.md"
+    skill.write_text(
+        "---\nname: answer-writer\ndescription: Write an answer\n---\n\nWrite the answer 42.\n"
+    )
+    recipe = initial.recipe_insert(skill)
+    context = tmp_path / "context.md"
+    context.write_text("Write the answer 42 into answer.txt")
+    evidence = {"context_path": str(context), "files": []}
+    job = initial.execution_create(
+        evidence=evidence,
+        idempotency_key="model-timeout",
+        recipe_reference={"path": str(skill), "recipe_id": recipe["recipe_id"]},
+    )
+    recipe_id = job["recipe_id"]
+    execution_id = job["id"]
+    failed = initial._queue.wait(execution_id, timeout=20)
+    assert failed["status"] == "failed", failed
+    assert failed["error"]["code"] == "timeout"
+    assert failed["error"]["stage"] == "test"
+    assert (
+        initial.recipe_get(recipe_id, version="active")["selected_version"]["id"]
+        == recipe["recipe_version_id"]
+    )
+    assert initial.recover(recipe_id=recipe_id) == {"started": 0}
+
+    store = initial._queue.store
+    deadline = time.monotonic() + 5
+    while True:
+        with store.connect() as conn:
+            active = conn.execute(
+                "SELECT 1 FROM slots WHERE kind='worker' AND expires>=? LIMIT 1",
+                (time.time(),),
+            ).fetchone()
+        if not active:
+            break
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+
+    fresh_token = "fixture-refreshed" if scoped else gateway.test_timeout_key
+    gateway.test_timeout_key = None
+    fresh_config = {
+        **config,
+        "base_url": config["base_url"] + "/",
+        "headers": {"X-Api-Key": fresh_token},
+        "max_tokens": 4096,
+        "timeout": 25,
+    }
+    fresh = HostClient(data_dir=directory, config=fresh_config)
+    assert not hasattr(fresh, "recipe_retry")
+    with pytest.raises(InvalidState, match="requires recipe_id"):
+        fresh.recover(retry_key="retry")
+    with pytest.raises(InvalidState, match="previous_headers"):
+        fresh.recover(recipe_id=recipe_id, retry_key="retry", previous_headers={})
+    with pytest.raises(ValueError):
+        fresh.recover(recipe_id=recipe_id, retry_key="")
+    for changes in (
+        {"credential_scope": "account-secondary"},
+        {"model": "different-model"},
+        {"base_url": config["base_url"] + "/other"},
+    ):
+        wrong = HostClient(data_dir=directory, config={**fresh_config, **changes})
+        with pytest.raises(InvalidState):
+            wrong.recover(recipe_id=recipe_id, retry_key="retry")
+    queue_only = HostClient(
+        data_dir=directory, config={**fresh_config, "auto_start": False}
+    )
+    unrelated = queue_only.execution_create(
+        evidence=evidence, idempotency_key="unrelated"
+    )
+
+    def fail_launch(*args, **kwargs):
+        raise OSError("fixture launch error")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "Popen", fail_launch)
+        with pytest.raises(OSError, match="fixture launch error"):
+            queue_only.recover(recipe_id=recipe_id, retry_key="retry")
+    queued = fresh._queue.execution_get(execution_id)
+    assert queued["status"] == "queued"
+    assert queued["stage"] == "test"
+    assert queued["error"] is None
+    assert queued["material_ids"] == failed["material_ids"]
+    with pytest.raises(InvalidState):
+        fresh.recover(recipe_id=recipe_id, retry_key="duplicate-new-key")
+
+    actual_spawn = subprocess.Popen
+    launches = []
+
+    def count_launch(command, *args, **kwargs):
+        launches.append(command)
+        return actual_spawn(command, *args, **kwargs)
+
+    request_cutoff = len(gateway.model_requests)
+    retry_receipt = {"started": 0, "recipe_id": recipe_id, "execution_id": execution_id}
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "Popen", count_launch)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(client.recover, recipe_id=recipe_id, retry_key="retry")
+                for client in (fresh, queue_only)
+            ]
+            results = sorted((future.result() for future in futures), key=len)
+        assert results == [retry_receipt, {**retry_receipt, "scheduled": True}]
+        assert len(launches) == 1
+        assert "--retry-fence" in launches[0]
+    result = fresh._queue.wait(execution_id, timeout=20)
+    assert result["status"] == "completed", result
+    assert result["result"]["published"] is True
+    assert result["recipe_version_id"] == failed["recipe_version_id"]
+    assert result["input_revision"] == failed["input_revision"]
+    assert result["runtime_config"]["model"]["timeout"] == 0.45
+    assert set(gateway.model_requests[request_cutoff:]) == {
+        (fresh_token, "local-test", 2048)
+    }
+    assert fresh.execution_get(unrelated["id"])["status"] == "queued"
+    assert fresh.recover(recipe_id=recipe_id, retry_key="retry") == retry_receipt
+    with pytest.raises(InvalidState):
+        fresh.recover(recipe_id=recipe_id, retry_key="already-published")
 
 
 @pytest.mark.parametrize(

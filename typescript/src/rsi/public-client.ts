@@ -1,7 +1,8 @@
 import { z } from 'zod';
-import { RSIClient as QueueClient } from './client.js';
+import { RSIClient as QueueClient, type RecoverResult } from './client.js';
 import { CloudClient, type CloudOptions } from './cloud.js';
 import {
+  fail,
   RecipeReferenceSchema,
   type EvidenceFile,
   type Execution as StoredExecution,
@@ -26,6 +27,7 @@ const config = z
     auto_start: z.boolean(),
     max_tokens: z.number().int().positive().optional(),
     timeout: z.number().positive().max(3600).optional(),
+    test_python_image: text.optional(),
   })
   .nullable();
 const clientOptions = z.strictObject({ data_dir: text, config });
@@ -56,6 +58,7 @@ const recipeListQuery = z.strictObject({ recipe_ids: z.array(text) });
 const recoverOptions = z.strictObject({
   recipe_id: text.optional(),
   previous_headers: modelHeaders.optional(),
+  retry_key: text.optional(),
 });
 const recipeTest = z.strictObject({
   execution_id: text,
@@ -148,6 +151,9 @@ export class RSIClient {
       ...(settings && binding
         ? {
             config: {
+              ...(settings.test_python_image === undefined
+                ? {}
+                : { test_python_image: settings.test_python_image }),
               model: {
                 model: settings.model,
                 base_url: settings.base_url,
@@ -351,10 +357,14 @@ export class RSIClient {
     );
   }
 
-  async recover(options?: RecoverOptions) {
-    const { recipe_id, previous_headers } = recoverOptions.optional().parse(options) ?? {};
-    if (this.#cloud) return { started: 0 };
-    return this.#queue.recover(recipe_id, { previousHeaders: previous_headers });
+  async recover(options?: RecoverOptions): Promise<RecoverResult> {
+    const { recipe_id, previous_headers, retry_key } =
+      recoverOptions.optional().parse(options) ?? {};
+    if (this.#cloud) {
+      if (retry_key !== undefined) fail('invalid_state', 'recover retry_key requires local mode');
+      return { started: 0 };
+    }
+    return this.#queue.recover(recipe_id, { previousHeaders: previous_headers, retryKey: retry_key });
   }
 
   close() {

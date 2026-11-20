@@ -71,6 +71,12 @@ class ModelConfig(Contract):
         return self
 
 
+PythonImage = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,254}$"),
+]
+
+
 class LocalConfig(Contract):
     model: ModelConfig
     max_executions: int = Field(default=2, ge=1, le=32)
@@ -79,6 +85,7 @@ class LocalConfig(Contract):
     max_file_bytes: int = Field(default=4 * 1024 * 1024, ge=1)
     max_bundle_bytes: int = Field(default=32 * 1024 * 1024, ge=1)
     recursion_limit: int = Field(default=40, ge=4, le=500)
+    test_python_image: PythonImage | None = None
 
 
 class FileRef(Contract):
@@ -141,6 +148,7 @@ class Criterion(Contract):
 class RubricsContent(Contract):
     criteria: list[Criterion] = Field(min_length=1)
     pass_threshold: float = Field(default=0.8, ge=0, le=1)
+    requires_python: bool = False
 
     @model_validator(mode="after")
     def unique_ids(self):

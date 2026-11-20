@@ -34,7 +34,16 @@ def failure_details(exc, stage):
     return details
 
 
-def drain(client, *, runtime=None, owner=None, slot=None, recipe_id=None):
+def drain(
+    client,
+    *,
+    runtime=None,
+    owner=None,
+    slot=None,
+    recipe_id=None,
+    execution_id=None,
+    retry_fence=None,
+):
     from ._queue_client import RSIClient
     from .engine import Engine
     from .runtime import ChatRuntime
@@ -83,8 +92,20 @@ def drain(client, *, runtime=None, owner=None, slot=None, recipe_id=None):
                 config.max_executions,
                 credentials,
                 recipe_id=recipe_id,
+                execution_id=execution_id,
+                retry_fence=retry_fence,
             )
             if claim is None:
+                if retry_fence is not None:
+                    if not store.has_pending(
+                        credentials,
+                        recipe_id=recipe_id,
+                        execution_id=execution_id,
+                        retry_fence=retry_fence,
+                    ):
+                        break
+                    time.sleep(0.2)
+                    continue
                 # Brief idle grace handles simultaneous hook dispatch; exits once drained.
                 if time.monotonic() - idle_since >= 1:
                     # Release under the same write lock as the final empty check: an
@@ -109,20 +130,20 @@ def drain(client, *, runtime=None, owner=None, slot=None, recipe_id=None):
                 time.sleep(0.2 if detached else 0.05)
                 continue
             idle_since = time.monotonic()
-            execution_id, fence = claim
+            claimed_id, fence = claim
             # Tools check cancellation and leases; Engine checks input revisions
             # before committing a stage and restarts analysis when needed.
-            active[0] = (execution_id, fence, None)
+            active[0] = (claimed_id, fence, None)
             try:
                 work = RSIClient(
                     data_dir=client.data_dir,
-                    config=store.get(execution_id, "execution")["runtime_config"],
+                    config=store.get(claimed_id, "execution")["runtime_config"],
                     auto_start=False,
                 )
                 lease_seconds = work.config.lease_seconds
                 store.heartbeat(owner, lease_seconds, worker_slot=slot)
                 agent = runtime or ChatRuntime(work, owner, check_alive)
-                Engine(work, agent, owner, fence, execution_id).run()
+                Engine(work, agent, owner, fence, claimed_id).run()
             except LeaseLost:
                 pass
             except Exception as exc:  # noqa: BLE001 - isolate arbitrary model/tool failures at the job boundary
@@ -130,11 +151,11 @@ def drain(client, *, runtime=None, owner=None, slot=None, recipe_id=None):
                 # only the class name and a stable diagnostic code, never repr(exc).
                 try:
                     store.fail_execution(
-                        execution_id,
+                        claimed_id,
                         owner,
                         fence,
                         failure_details(
-                            exc, store.get(execution_id, "execution")["stage"]
+                            exc, store.get(claimed_id, "execution")["stage"]
                         ),
                     )
                 except LeaseLost:
@@ -143,6 +164,8 @@ def drain(client, *, runtime=None, owner=None, slot=None, recipe_id=None):
                 active[0] = None
                 lease_seconds = config.lease_seconds
             processed += 1
+            if retry_fence is not None:
+                break
     finally:
         stop.set()
         thread.join(timeout=config.lease_seconds)
@@ -150,7 +173,9 @@ def drain(client, *, runtime=None, owner=None, slot=None, recipe_id=None):
     return {"processed": processed}
 
 
-def wait_for_worker_slot(client, owner, waiting_slot, *, recipe_id=None):
+def wait_for_worker_slot(
+    client, owner, waiting_slot, *, recipe_id=None, execution_id=None, retry_fence=None
+):
     store, config = client.store, client.config
     credentials = client.credential_names()
     next_heartbeat = 0
@@ -160,7 +185,12 @@ def wait_for_worker_slot(client, owner, waiting_slot, *, recipe_id=None):
                 store.heartbeat(owner, config.lease_seconds, worker_slot=waiting_slot)
                 next_heartbeat = time.monotonic() + config.lease_seconds / 3
             with store.transaction() as conn:
-                if not store.has_pending(credentials, recipe_id=recipe_id):
+                if not store.has_pending(
+                    credentials,
+                    recipe_id=recipe_id,
+                    execution_id=execution_id,
+                    retry_fence=retry_fence,
+                ):
                     conn.execute("DELETE FROM slots WHERE token=?", (waiting_slot,))
                     return None
 
@@ -171,7 +201,8 @@ def wait_for_worker_slot(client, owner, waiting_slot, *, recipe_id=None):
                 return slot
             time.sleep(0.25)
     finally:
-        store.release(waiting_slot)
+        if retry_fence is None:
+            store.release(waiting_slot)
 
 
 def main():
@@ -184,11 +215,14 @@ def main():
     parser.add_argument("--owner")
     parser.add_argument("--slot")
     parser.add_argument("--execution-id")
+    parser.add_argument("--retry-fence", type=int)
     parser.add_argument("--recipe-id")
     parser.add_argument("--wait-for-slot", action="store_true")
     args = parser.parse_args()
     if bool(args.owner) != bool(args.slot) or (args.wait_for_slot and not args.slot):
         parser.error("owner and slot must be supplied together")
+    if args.retry_fence is not None and (not args.execution_id or args.retry_fence < 0):
+        parser.error("--retry-fence must be nonnegative and needs --execution-id")
     reader = RSIClient(data_dir=args.data_dir, auto_start=False)
     if args.execution_id:
         execution = reader.execution_get(args.execution_id)
@@ -200,11 +234,33 @@ def main():
         config = LocalConfig.model_validate_json(pending["config"])
     client = RSIClient(data_dir=args.data_dir, config=config, auto_start=False)
     slot = args.slot
-    if args.wait_for_slot:
-        slot = wait_for_worker_slot(client, args.owner, slot, recipe_id=args.recipe_id)
-        if slot is None:
-            return
-    drain(client, owner=args.owner, slot=slot, recipe_id=args.recipe_id)
+    execution_id = args.execution_id if args.retry_fence is not None else None
+    recovery_slot = (
+        slot if args.retry_fence is not None and args.wait_for_slot else None
+    )
+    try:
+        if args.wait_for_slot:
+            slot = wait_for_worker_slot(
+                client,
+                args.owner,
+                slot,
+                recipe_id=args.recipe_id,
+                execution_id=execution_id,
+                retry_fence=args.retry_fence,
+            )
+            if slot is None:
+                return
+        drain(
+            client,
+            owner=args.owner,
+            slot=slot,
+            recipe_id=args.recipe_id,
+            execution_id=execution_id,
+            retry_fence=args.retry_fence,
+        )
+    finally:
+        if recovery_slot:
+            reader.store.release(recovery_slot)
 
 
 if __name__ == "__main__":
