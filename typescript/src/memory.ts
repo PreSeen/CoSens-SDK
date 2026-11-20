@@ -1,6 +1,8 @@
 const SERVICE_URL = 'https://rsi.cosens.ai/api/v1/memory';
 
-export interface MemoryIngest {
+export interface MemoryEndpointOptions { baseUrl?: string; apiKey?: string }
+
+export interface MemoryIngest extends MemoryEndpointOptions {
   content: string;
   requestKey: string;
   sourceKind?: string;
@@ -40,7 +42,8 @@ export function memoryRecall({
   query,
   tokenBudget = 1000,
   virtualUserId,
-}: {
+  baseUrl, apiKey,
+}: MemoryEndpointOptions & {
   query: string;
   tokenBudget?: number;
   virtualUserId?: string;
@@ -48,7 +51,7 @@ export function memoryRecall({
   return request<MemoryRecallResult>('POST', '/recall', {
     query,
     token_budget: boundedInteger(tokenBudget, 'tokenBudget', 1, 8000),
-  }, virtualUserId);
+  }, virtualUserId, { baseUrl, apiKey });
 }
 
 export function memoryIngest({
@@ -59,6 +62,7 @@ export function memoryIngest({
   sourceId,
   expectedRevision,
   virtualUserId,
+  baseUrl, apiKey,
 }: MemoryIngest) {
   if (
     typeof requestKey !== 'string' ||
@@ -93,19 +97,19 @@ export function memoryIngest({
             Number.MAX_SAFE_INTEGER,
           ),
         }),
-  }, virtualUserId);
+  }, virtualUserId, { baseUrl, apiKey });
 }
 
-export function getMemoryItems({ limit = 200, virtualUserId }: { limit?: number; virtualUserId?: string } = {}) {
+export function getMemoryItems({ limit = 200, virtualUserId, baseUrl, apiKey }: MemoryEndpointOptions & { limit?: number; virtualUserId?: string } = {}) {
   return request(
     'GET',
     `/items?limit=${boundedInteger(limit, 'limit', 1, 500)}`,
-    undefined, virtualUserId,
+    undefined, virtualUserId, { baseUrl, apiKey },
   );
 }
 
-export function getMemoryJob(jobId: string, { virtualUserId }: { virtualUserId?: string } = {}) {
-  return request('GET', `/jobs/${pathPart(jobId)}`, undefined, virtualUserId);
+export function getMemoryJob(jobId: string, { virtualUserId, baseUrl, apiKey }: MemoryEndpointOptions & { virtualUserId?: string } = {}) {
+  return request('GET', `/jobs/${pathPart(jobId)}`, undefined, virtualUserId, { baseUrl, apiKey });
 }
 
 export function getMemoryExperience(
@@ -125,27 +129,56 @@ export function getMemory({ virtualUserId }: { virtualUserId?: string } = {}) {
   return request('GET', '');
 }
 
+function serviceUrl(baseUrl: string): string {
+  if (typeof baseUrl !== 'string' || /[\s\x00-\x1f\x7f\\]/.test(baseUrl))
+    throw new TypeError('baseUrl must be an absolute HTTPS URL');
+  const match = /^https:\/\/([^/?#]+)(\/[^?#]*)?$/i.exec(baseUrl);
+  if (!match || match[1].includes('@')) throw new TypeError('baseUrl must be an absolute HTTPS URL without credentials, query or fragment');
+  let parsed: URL;
+  try { parsed = new URL(baseUrl); } catch { throw new TypeError('Invalid baseUrl'); }
+  if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password)
+    throw new TypeError('baseUrl must be an absolute HTTPS URL without credentials');
+  for (const segment of (match[2] ?? '').split('/')) {
+    let decoded = segment;
+    try {
+      for (let i = 0; i < 5; i++) {
+        const next = decodeURIComponent(decoded);
+        if (next === decoded) break;
+        decoded = next;
+      }
+    } catch { throw new TypeError('Invalid baseUrl path'); }
+    if (decoded === '.' || decoded === '..' || /[\/\\%\s\x00-\x1f\x7f]/.test(decoded))
+      throw new TypeError('baseUrl path must not contain traversal or encoded separators');
+  }
+  return baseUrl.replace(/\/+$/, '');
+}
+
 async function request<T = Record<string, unknown>>(
   method: 'GET' | 'POST',
   path: string,
   body?: object,
   virtualUserId?: string,
+  options: MemoryEndpointOptions = {},
 ): Promise<T> {
   if (virtualUserId !== undefined && (typeof virtualUserId !== "string" || !virtualUserId || /[\s\x00-\x1f\x7f]/.test(virtualUserId)))
     throw new TypeError("virtualUserId must be a nonempty header value");
-  const apiKey = process.env.COSENS_API_KEY;
-  if (!apiKey || /\s/.test(apiKey))
+  if ((options.baseUrl === undefined) !== (options.apiKey === undefined))
+    throw new TypeError('baseUrl and apiKey must be supplied together');
+  const base = options.baseUrl === undefined ? SERVICE_URL : serviceUrl(options.baseUrl);
+  const apiKey = options.apiKey ?? process.env.COSENS_API_KEY;
+  if (typeof apiKey !== 'string' || !apiKey || /[\s\x00-\x1f\x7f]/.test(apiKey))
     throw new TypeError('Set COSENS_API_KEY to the bare CoSens API key');
   const headers = new Headers({
     'X-Auth-Type': 'api_key',
     Authorization: `Bearer ${apiKey}`,
   });
   if (body !== undefined) headers.set('Content-Type', 'application/json');
+  if (options.baseUrl !== undefined) headers.set('X-CoSens-Auth-Type', 'api_key');
   if (virtualUserId !== undefined) headers.set('X-Virtual-User-Id', virtualUserId);
   const redact = (value: string) => value.split(apiKey).join('[REDACTED]');
   let response: Response;
   try {
-    response = await fetch(SERVICE_URL + path, {
+    response = await fetch(base + path, {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),

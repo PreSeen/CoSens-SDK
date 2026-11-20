@@ -127,3 +127,31 @@ test('virtual user selection is per call and unsupported operations reject', asy
   assert.throws(() => getMemory({ virtualUserId: 'vu_a' }), TypeError);
   assert.throws(() => getMemoryExperience('e', { virtualUserId: 'vu_a' }), TypeError);
 });
+
+test('explicit Memory service and key are per call and fail closed', async (t) => {
+  useFixtureKey(t);
+  const seen: Array<[string, string | null, string | null, string | null]> = [];
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    const h = new Headers(init?.headers);
+    seen.push([String(url), h.get('authorization'), h.get('x-cosens-auth-type'), h.get('x-virtual-user-id')]);
+    assert.equal(init?.redirect, 'manual');
+    return Response.json({});
+  });
+  await Promise.all([
+    memoryRecall({ query: 'a', baseUrl: 'https://regional.example/v1/memory', apiKey: 'region-key', virtualUserId: 'vu_a' }),
+    getMemoryItems(),
+    memoryIngest({content: 'b', requestKey: 'k', baseUrl: 'https://stage.example/api/v1/memory/', apiKey: 'stage-key'}),
+    getMemoryJob('j', {baseUrl: 'https://regional.example/v1/memory', apiKey: 'region-key'}),
+  ]);
+  assert.deepEqual(seen, [
+    ['https://regional.example/v1/memory/recall', 'Bearer region-key', 'api_key', 'vu_a'],
+    ['https://rsi.cosens.ai/api/v1/memory/items?limit=200', 'Bearer fixture-key', null, null],
+    ['https://stage.example/api/v1/memory/ingest', 'Bearer stage-key', 'api_key', null],
+    ['https://regional.example/v1/memory/jobs/j', 'Bearer region-key', 'api_key', null],
+  ]);
+  for (const baseUrl of ['http://example.test/a', 'https://u:p@example.test/a', 'https://example.test/a?x=1', 'https://example.test/a#x', 'https://example.test/a/../b', 'https://example.test/a/%2e%2e/b', 'https://example.test/a%2fb', 'https://example.test/a\\b', 'https://@example.test/a', 'https://example.test/a/%00b'])
+    await assert.rejects(memoryRecall({query:'a', baseUrl, apiKey:'explicit'}), TypeError);
+  await assert.rejects(memoryRecall({query:'a', baseUrl:'https://regional.example/v1/memory'}), TypeError);
+  await assert.rejects(memoryRecall({query:'a', apiKey:'explicit'}), TypeError);
+  assert.equal(seen.length, 4);
+});
