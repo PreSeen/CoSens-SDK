@@ -14,7 +14,7 @@ from cosens.rsi import Conflict, InvalidState, NotFound
 from cosens.rsi._queue_client import RSIClient
 from cosens.rsi.materials import atomic_json, read_snapshot
 from cosens.rsi.models import LeaseLost, RubricsContent
-from cosens.rsi.store_schema import LEGACY_RECIPES, SCHEMA
+from cosens.rsi.store_schema import LEGACY_RECIPES, RECIPE_PROJECTION, SCHEMA
 
 
 def settings(**overrides):
@@ -398,6 +398,11 @@ def test_version_availability_archive_and_restore(client, tmp_path):
     client.run_pending(runtime=FileRuntime())
     new_id = client.execution_get(revision["id"])["recipe_version_id"]
     assert reopened.recipe_list()[0]["available_version_id"] == new_id
+    recipe = reopened.recipe_get(recipe_id, version="active")
+    assert recipe["storage_path"] == f"recipes/{recipe_id}"
+    for exported_id in (version_id, new_id):
+        path = reopened.data_dir / recipe["storage_path"] / exported_id / "RECIPE.md"
+        assert "## Instructions\n\nWrite 42" in path.read_text(encoding="utf-8")
 
     assert reopened.recipe_get(recipe_id, version=version_id)["selected_version"][
         "archived"
@@ -412,7 +417,7 @@ def test_version_availability_archive_and_restore(client, tmp_path):
         )
 
 
-@pytest.mark.parametrize("schema_version", [3, 4])
+@pytest.mark.parametrize("schema_version", [3, 4, 5])
 def test_recipe_migration_preserves_archived_target_and_candidate(
     tmp_path, schema_version
 ):
@@ -441,10 +446,15 @@ def test_recipe_migration_preserves_archived_target_and_candidate(
             )
         else:
             conn.executescript(
-                SCHEMA
+                SCHEMA.replace(",\n    storage_path TEXT NOT NULL", "")
                 + """
                 INSERT INTO recipes VALUES ('recipe_legacy', 1, 2, NULL, 'Legacy Recipe');
                 INSERT INTO recipes VALUES ('recipe_unversioned', 2, 3, NULL, 'Waiting Recipe');
+                """
+            )
+        if schema_version == 4:
+            conn.executescript(
+                """
                 CREATE TABLE recipe_api_metadata (
                     recipe_id TEXT PRIMARY KEY REFERENCES recipes(id),
                     revision INTEGER NOT NULL, description TEXT NOT NULL
@@ -455,6 +465,8 @@ def test_recipe_migration_preserves_archived_target_and_candidate(
                     FROM recipes r LEFT JOIN recipe_api_metadata m ON m.recipe_id = r.id;
                 """
             )
+        if schema_version == 5:
+            conn.executescript(RECIPE_PROJECTION)
         conn.execute(f"PRAGMA user_version = {schema_version}")
         for version_id, number in (("version_first", 1), ("version_second", 2)):
             version = {
@@ -473,7 +485,7 @@ def test_recipe_migration_preserves_archived_target_and_candidate(
                 "INSERT INTO versions (id,recipe_id,number,data) VALUES (?,?,?,?)",
                 (version_id, recipe_id, number, json.dumps(version)),
             )
-        if schema_version == 4:
+        if schema_version >= 4:
             conn.execute(
                 "UPDATE versions SET status=CASE WHEN number=1 THEN 'archived' ELSE 'candidate' END"
             )
@@ -486,6 +498,12 @@ def test_recipe_migration_preserves_archived_target_and_candidate(
     assert recipe["latest_version_id"] == "version_second"
     assert recipe["latest_qualified_version_id"] == "version_first"
     assert recipe["active_version_id"] is None
+    assert recipe["storage_path"] == f"recipes/{recipe_id}"
+    for version_id in ("version_first", "version_second"):
+        path = tmp_path / recipe["storage_path"] / version_id / "RECIPE.md"
+        assert path.read_text(encoding="utf-8") == (
+            "# Legacy Recipe\n\n## Applicability\n\nFixture\n\n## Instructions\n\nProduce output\n"
+        )
     assert "revision" not in recipe
     assert "description" not in recipe
     assert recipe["selected_version"]["id"] == "version_second"
@@ -510,6 +528,7 @@ def test_recipe_migration_preserves_archived_target_and_candidate(
             "created_at",
             "updated_at",
             "archived_at",
+            "storage_path",
         }
         assert [
             row[0]
@@ -518,7 +537,7 @@ def test_recipe_migration_preserves_archived_target_and_candidate(
             "available",
             "candidate",
         ]
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 6
         assert (
             migrated.execute(
                 "SELECT name FROM sqlite_schema WHERE name='recipe_api_metadata'"

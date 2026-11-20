@@ -121,7 +121,8 @@ export type RSIClientOptions = LocalOptions | ({ mode: 'cloud' } & CloudOptions)
  *
  * `new RSIClient()` uses the CoSens service with `COSENS_API_KEY`.
  * `new RSIClient({ data_dir, config })` runs the local Worker with your own
- * model. Methods and results are the same in both modes, and all are async.
+ * model. Both modes expose the same async methods. Local Recipe reads also
+ * return a storage_path relative to data_dir.
  */
 export class RSIClient {
   readonly #queue!: QueueClient;

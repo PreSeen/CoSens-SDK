@@ -24,4 +24,4 @@ rsi = RSIClient(
 )
 ```
 
-Both modes have the same methods and results. See the [atomic API and Hook lifecycle](docs/local-rsi.md) and the [Python Hook example](examples/05_rsi_sdk_v2.py).
+Both modes expose the same methods. Local Recipe reads include a `storage_path` relative to `data_dir`. See the [atomic API and Hook lifecycle](docs/local-rsi.md) and the [Python Hook example](examples/05_rsi_sdk_v2.py).

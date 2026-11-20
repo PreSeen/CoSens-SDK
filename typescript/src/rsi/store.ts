@@ -8,7 +8,13 @@ import {
 } from './store-schema.js';
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, chmodSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { resolve, join } from 'node:path';
 import {
   fail,
@@ -19,6 +25,7 @@ import {
   type Execution,
   type Versioned,
   type Recipe,
+  type RecipeContent,
 } from './models.js';
 
 export const uid = (prefix: string) =>
@@ -101,16 +108,17 @@ export class Store {
     chmodSync(path, 0o600);
   }
   private initialize() {
-    if (this.db.pragma('user_version', { simple: true }) === 5) return;
+    if (this.db.pragma('user_version', { simple: true }) === 6) return;
     this.tx(() => {
       const version = this.db.pragma('user_version', { simple: true });
-      if (version === 5) return;
+      if (version === 6) return;
       if (
         version !== 0 &&
         version !== 1 &&
         version !== 2 &&
         version !== 3 &&
-        version !== 4
+        version !== 4 &&
+        version !== 5
       )
         fail('invalid_state', 'unsupported RSI SQLite schema version');
       const legacy = this.db
@@ -213,8 +221,29 @@ export class Store {
           DROP VIEW IF EXISTS recipe_records;
           DROP TABLE IF EXISTS recipe_api_metadata;
         `);
+      if (
+        legacy ||
+        version === 2 ||
+        version === 3 ||
+        version === 4 ||
+        version === 5
+      ) {
+        this.db.exec(`
+          ALTER TABLE recipes ADD COLUMN storage_path TEXT NOT NULL DEFAULT '';
+          UPDATE recipes SET storage_path = 'recipes/' || id;
+        `);
+        const rows = this.db
+          .prepare(
+            `
+          SELECT r.storage_path, v.data FROM versions v JOIN recipes r ON r.id = v.recipe_id
+        `,
+          )
+          .iterate() as Iterable<{ storage_path: string; data: string }>;
+        for (const row of rows)
+          this.writeRecipeFile(row.storage_path, JSON.parse(row.data));
+      }
       this.db.exec(recipeProjection);
-      this.db.pragma('user_version = 5');
+      this.db.pragma('user_version = 6');
     });
   }
   tx<T>(fn: () => T): T {
@@ -327,6 +356,8 @@ export class Store {
       updated_at: now(),
       archived_at: null,
     } as unknown as T;
+    if (kind === 'recipe')
+      Object.assign(obj, { storage_path: `recipes/${obj.id}` });
     if (kind !== 'rubrics') this.writeRecord(kind, { ...obj }, false);
     return obj;
   }
@@ -492,8 +523,42 @@ export class Store {
         operation_key ?? null,
         kind === 'recipe' ? 'candidate' : null,
       );
-    if (kind === 'recipe') this.save(obj);
+    if (kind === 'recipe') {
+      const recipe = obj as Recipe;
+      this.writeRecipeFile(
+        recipe.storage_path,
+        version as Version<RecipeContent>,
+      );
+      this.save(recipe);
+    }
     return version;
+  }
+  private writeRecipeFile(
+    storagePath: string,
+    version: Version<RecipeContent>,
+  ) {
+    if (
+      !/^[A-Za-z0-9_-]+$/u.test(version.object_id) ||
+      !/^[A-Za-z0-9_-]+$/u.test(version.id) ||
+      storagePath !== `recipes/${version.object_id}`
+    )
+      fail('invalid_state', 'invalid Recipe version storage path');
+    const directory = join(this.root, storagePath, version.id);
+    const target = join(directory, 'RECIPE.md');
+    const temporary = join(directory, `.${randomUUID()}.tmp`);
+    const { title, applicability, instructions } = version.content;
+    const markdown = `# ${title}\n\n## Applicability\n\n${applicability}\n\n## Instructions\n\n${instructions}\n`;
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    try {
+      writeFileSync(temporary, markdown, {
+        flag: 'wx',
+        mode: 0o600,
+        flush: true,
+      });
+      renameSync(temporary, target);
+    } finally {
+      rmSync(temporary, { force: true });
+    }
   }
   replay<T>(
     scope: string,

@@ -57,7 +57,7 @@ def _evidence(evidence):
 
 
 class CloudRSIClient:
-    """Cloud mode of RSIClient: same methods and results, no local Worker."""
+    """Cloud mode of RSIClient, backed by the CoSens service."""
 
     def __init__(self, *, api_key=None, base_url=None, timeout=60.0, transport=None):
         key = api_key or os.environ.get("COSENS_API_KEY")

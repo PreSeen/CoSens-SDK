@@ -1,6 +1,6 @@
 # CoSens RSI SDK 接口文档
 
-适用于云端模式（默认）和本地模式，两种模式方法和返回结构相同。TS 从 `cosens-sdk/rsi` 导入，Python 从 `cosens.rsi` 导入。`null`（Python 为 `None`）用于明确表示首次学习。
+云端模式默认启用，本地模式使用 SQLite schema v6。两种模式共用 RSI 方法，本地 `recipe_get()` 另返回 Recipe 文件的 `storage_path`。TS 从 `cosens-sdk/rsi` 导入，Python 从 `cosens.rsi` 导入。
 
 ```text
 Agent 启动 → recover()
@@ -15,7 +15,7 @@ Agent 启动 → recover()
 - 云端（默认）：TS `new RSIClient()`，Python `RSIClient()`。读取 `COSENS_API_KEY`，学习在 CoSens 服务端用 CoSens 的模型完成。只上传 `evidence` 里列出的文件。可传 `api_key`、`base_url`（TS 为 `{ mode: 'cloud', api_key, base_url }`）。云端的 `recover()` 直接返回 `{ started: 0 }`，服务端自行恢复。
 - 本地：TS `new RSIClient({ data_dir, config })`，Python `RSIClient(data_dir=data_dir, config=config)`。TS 两种模式的方法都是 async。
 
-本地模式下，`data_dir` 是本地数据目录。`config` 为 `{ model, base_url, auto_start }`，创建 Execution 时提供，查询和恢复已有工作时可以传 `null`。三项均必填。可选 `max_tokens`（每次模型调用的输出上限，默认不设，由模型服务决定；推理模型建议 16384 以上）和 `timeout`（单次请求秒数，默认 120）。`base_url` 是模型 API 基地址，支持 Chat Completions 和工具调用。请求的 User-Agent 为 `cosens-sdk-python/<版本>`（TS 为 `cosens-sdk-typescript/<版本>`）。`auto_start=true` 在入队后自动派发 Worker，`false` 时由宿主调用 `recover()`。模型密钥从 `RSI_MODEL_API_KEY` 读取。TS 如需覆盖启动 Worker 的 Node 路径，设置 `RSI_NODE_EXECUTABLE`。
+本地模式下，`data_dir` 是 SQLite、证据快照和 Recipe 文件的保存根目录。创建 Execution 时，`config` 必须包含 `model`、`base_url` 和 `auto_start`。查询和恢复已有工作时可以传 `null`（Python 为 `None`）。可选 `max_tokens` 设置每次模型调用的输出上限，省略时由模型服务决定。`timeout` 设置单次请求秒数，默认 120。`base_url` 是支持 Chat Completions 和工具调用的模型 API 基地址。请求的 User-Agent 为 `cosens-sdk-python/<版本>`（TS 为 `cosens-sdk-typescript/<版本>`）。`auto_start=true` 在入队后自动派发 Worker，`false` 时由宿主调用 `recover()`。模型密钥从 `RSI_MODEL_API_KEY` 读取。TS 如需覆盖启动 Worker 的 Node 路径，设置 `RSI_NODE_EXECUTABLE`。
 
 ## 业务接口
 
@@ -23,7 +23,7 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 
 | 对象 | 方法 | 必填参数 | 返回与用途 |
 | --- | --- | --- | --- |
-| Execution | `execution_create` | `evidence`, `idempotency_key` | 排队创建 Execution，立即返回 `recipe_id`。 |
+| Execution | `execution_create` | `evidence`, `idempotency_key` | 排队创建 Execution，立即返回执行的 `id` 和关联的 `recipe_id`。 |
 | Execution | `execution_get` | `execution_id` | 读取名称、阶段、进度、问题、测试结果和错误。 |
 | Execution | `execution_list` | 无 | 列出未归档 Execution。可用 `query.execution_ids` 按 ID 筛选。 |
 | Execution | `execution_append_evidence` | `execution_id`, `evidence` | 给进行中的 Execution 追加证据并重新分析。 |
@@ -38,7 +38,28 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 
 ### Recipe 详情返回结构
 
-`recipe_get()` 返回 `id`、`name`、`created_at`、`updated_at`、`archived_at`、`latest_version_id`、`active_version_id`、`latest_qualified_version_id`、`selected_version`。Recipe 顶层的 `revision` 和 `description` 已移除。展示场景可用 `name` 和 `selected_version.content.applicability`。
+本地 `recipe_get()` 返回 `id`、`name`、`created_at`、`updated_at`、`archived_at`、`storage_path`、`latest_version_id`、`active_version_id`、`latest_qualified_version_id`、`selected_version`。
+
+`storage_path` 在入队时分配，值为相对于 `RSIClient.data_dir` 的 `recipes/<recipe_id>`。SDK 保存候选版本时创建目录和 Markdown 文件。用 `selected_version.id` 拼出具体版本文件 `<data_dir>/<storage_path>/<version_id>/RECIPE.md`。归档和恢复沿用原路径。SQLite 保存版本正文和状态，Markdown 文件供宿主读取和复用。
+
+```ts
+import { join } from 'node:path';
+
+const recipe = await client.recipe_get(recipeId, versionId);
+const recipeFile = client.data_dir && recipe.selected_version
+  ? join(client.data_dir, recipe.storage_path, recipe.selected_version.id, 'RECIPE.md')
+  : null;
+```
+
+```python
+recipe = client.recipe_get(recipe_id, version=version_id)
+version = recipe["selected_version"]
+recipe_file = (
+    client.data_dir / recipe["storage_path"] / version["id"] / "RECIPE.md"
+    if version
+    else None
+)
+```
 
 ### Recipe 列表返回结构
 
@@ -118,7 +139,7 @@ TS 用 `execution_list({ execution_ids: [id1, id2] })`，Python 用 `execution_l
 | 表 | 内容 |
 | --- | --- |
 | `executions` | **业务主表。** 记录状态、阶段、进度、续接关系及关联版本。`created_at` 用于排队，`owner`、`lease_until`、`fence` 用于 Worker 认领、续租和接管。澄清、评分和错误等明细存于 `details`。 |
-| `recipes` | **业务主表。** 五列为 `id`、`name`、`created_at`、`updated_at`、`archived_at`。`archived_at` 记录整条 Recipe 的归档。 |
+| `recipes` | **业务主表。** 六列为 `id`、`name`、`created_at`、`updated_at`、`archived_at`、`storage_path`。`storage_path` 是相对于 `data_dir` 的固定目录。 |
 | `versions` | Recipe 和 Rubrics 的版本内容。通过 `recipe_id` 或 `rubrics_id` 归组。Recipe 版本的 `status` 为 `candidate`、`available` 或 `archived`。`rubrics_metadata` 保存评分标准名称、时间等元数据。 |
 | `evidence_snapshots` | 保存 Execution 的上下文与文件快照元数据。 |
 | `slots` | 协调同一数据目录内的 Worker 和模型调用并发。 |
@@ -128,7 +149,7 @@ TS 和 Python 使用相同的表结构。查询时，`latest_version_id` 取版�
 
 新版本验证通过并发布后，较早版本在同一事务中归档。手动归档当前可用版本后，可用版本 ID 为空。只允许恢复最新通过验证的版本。
 
-初始化在一个事务内将旧库升级到 SQLite schema v5。v3 及更早的版本指针迁入版本状态。v4 升级时重建 Recipe 查询视图，删除 `recipe_api_metadata` 及其中旧的 Recipe 修订计数和描述。迁移保留 Recipe ID、版本内容与状态、执行记录和 Worker 租约。升级前先停止使用同一数据库的旧版 Worker。
+初始化在一个事务内将旧库升级到 SQLite schema v6。v3 及更早的版本指针迁入版本状态，v4 的 `recipe_api_metadata` 在迁移中删除。SDK 为历史 Recipe 补齐 `storage_path`，并在同一 `data_dir` 下按版本导出已有正文。迁移保留 Recipe ID、版本内容与状态、执行记录和 Worker 租约。升级前先停止使用同一数据库的旧版 Worker。
 
 ## 运行管理
 

@@ -79,7 +79,8 @@ class RSIClient:
 
     `RSIClient()` uses the CoSens service with `COSENS_API_KEY`.
     `RSIClient(data_dir=..., config=...)` (or `mode="local"`) runs the local
-    Worker with your own model. Both return the same shapes.
+    Worker with your own model. Local Recipe reads include a storage_path
+    relative to data_dir.
     """
 
     def __new__(cls, *, mode=None, data_dir=None, config=None, api_key=None, base_url=None):

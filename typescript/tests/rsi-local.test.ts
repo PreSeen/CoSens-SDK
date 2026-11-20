@@ -20,9 +20,13 @@ import { RSIClient as PublicRSIClient } from '../src/rsi/index.js';
 import type { Runtime } from '../src/rsi/models.js';
 import { Engine } from '../src/rsi/engine.js';
 import { ChatRuntime } from '../src/rsi/runtime.js';
-import { legacyRecipes, schema } from '../src/rsi/store-schema.js';
+import {
+  legacyRecipes,
+  recipeProjection,
+  schema,
+} from '../src/rsi/store-schema.js';
 
-for (const version of [3, 4]) {
+for (const version of [3, 4, 5]) {
   test(`schema v${version} migration preserves the archived restoration target and the newer candidate`, async () => {
     const data_dir = mkdtempSync(join(tmpdir(), 'cosens-rsi-migrate-'));
     const recipeId = 'recipe_legacy';
@@ -45,10 +49,14 @@ for (const version of [3, 4]) {
           NULL, NULL, NULL, '{"description":"Description without a version"}');
         `);
         } else {
-          db.exec(schema);
+          db.exec(schema.replace(',\n    storage_path TEXT NOT NULL', ''));
           db.exec(`
           INSERT INTO recipes VALUES ('recipe_legacy', 1, 2, NULL, 'Legacy Recipe');
           INSERT INTO recipes VALUES ('recipe_unversioned', 2, 3, NULL, 'Waiting Recipe');
+          `);
+        }
+        if (version === 4) {
+          db.exec(`
           CREATE TABLE recipe_api_metadata (
             recipe_id TEXT PRIMARY KEY REFERENCES recipes(id),
             revision INTEGER NOT NULL, description TEXT NOT NULL
@@ -59,6 +67,7 @@ for (const version of [3, 4]) {
             FROM recipes r LEFT JOIN recipe_api_metadata m ON m.recipe_id = r.id;
         `);
         }
+        if (version === 5) db.exec(recipeProjection);
         db.pragma(`user_version = ${version}`);
         const insert = db.prepare(
           'INSERT INTO versions (id,recipe_id,number,data) VALUES (?,?,?,?)',
@@ -84,7 +93,7 @@ for (const version of [3, 4]) {
               created_at: 1,
             }),
           );
-        if (version === 4)
+        if (version >= 4)
           db.exec(
             "UPDATE versions SET status=CASE WHEN number=1 THEN 'archived' ELSE 'candidate' END",
           );
@@ -97,6 +106,15 @@ for (const version of [3, 4]) {
         assert.equal(recipe.latest_version_id, 'version_second');
         assert.equal(recipe.latest_qualified_version_id, 'version_first');
         assert.equal(recipe.active_version_id, null);
+        assert.equal(recipe.storage_path, `recipes/${recipeId}`);
+        for (const id of ['version_first', 'version_second'])
+          assert.equal(
+            readFileSync(
+              join(data_dir, recipe.storage_path, id, 'RECIPE.md'),
+              'utf8',
+            ),
+            '# Legacy Recipe\n\n## Applicability\n\nFixture\n\n## Instructions\n\nProduce output\n',
+          );
         assert.equal('revision' in recipe, false);
         assert.equal('description' in recipe, false);
         assert.equal(recipe.selected_version?.id, 'version_second');
@@ -125,7 +143,14 @@ for (const version of [3, 4]) {
               .pragma('table_info(recipes)')
               .map((column) => (column as { name: string }).name)
               .sort(),
-            ['archived_at', 'created_at', 'id', 'name', 'updated_at'],
+            [
+              'archived_at',
+              'created_at',
+              'id',
+              'name',
+              'storage_path',
+              'updated_at',
+            ],
           );
           assert.deepEqual(
             migrated
@@ -134,7 +159,7 @@ for (const version of [3, 4]) {
               .all(),
             ['available', 'candidate'],
           );
-          assert.equal(migrated.pragma('user_version', { simple: true }), 5);
+          assert.equal(migrated.pragma('user_version', { simple: true }), 6);
           assert.equal(
             migrated
               .prepare(
@@ -1218,6 +1243,16 @@ test('an expired worker lease resumes the graph without regenerating the candida
       const next = (await host.execution_get(followUp.id));
       assert.equal(next.result?.test_status, 'passed');
       assert.equal(next.recipe_id, after.recipe_id);
+      const recipe = await host.recipe_get(next.recipe_id!, 'active');
+      assert.ok(host.data_dir);
+      assert.equal(recipe.storage_path, `recipes/${next.recipe_id}`);
+      for (const id of [after.recipe_version_id!, next.recipe_version_id!]) {
+        const file = readFileSync(
+          join(host.data_dir, recipe.storage_path, id, 'RECIPE.md'),
+          'utf8',
+        );
+        assert.match(file, /## Instructions\n\n/);
+      }
       assert.equal((await host.execution_create(submission)).id, followUp.id);
       assert.equal(
         client.execution_get(followUp.id).base_recipe_version_id,
