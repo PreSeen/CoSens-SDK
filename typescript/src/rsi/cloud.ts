@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
+import { selectedVirtualUser, type VirtualUserSelection } from '../virtual-user.js';
 import { USER_AGENT } from './chat-completions.js';
 import {
   RecipeReferenceSchema,
@@ -11,7 +12,7 @@ export const DEFAULT_CLOUD_BASE_URL = 'https://rsi.cosens.ai/api';
 /** The CoSens gateway accepts request bodies up to 10 MiB. */
 export const MAX_CLOUD_REQUEST_BYTES = 10 * 1024 * 1024;
 
-export type CloudOptions = { api_key?: string; base_url?: string; virtualUserId?: string };
+export type CloudOptions = { api_key?: string; base_url?: string } & VirtualUserSelection;
 
 type EvidenceInput = {
   context_path: string;
@@ -83,9 +84,7 @@ export class CloudClient {
     if (!key)
       throw new TypeError('cloud mode needs COSENS_API_KEY (or api_key)');
     this.#key = key;
-    if (options.virtualUserId !== undefined && (typeof options.virtualUserId !== "string" || !options.virtualUserId || /[\s\x00-\x1f\x7f]/.test(options.virtualUserId)))
-      throw new TypeError("virtualUserId must be a nonempty header value");
-    this.#virtualUserId = options.virtualUserId;
+    this.#virtualUserId = selectedVirtualUser(options);
     this.#base = (
       options.base_url ??
       process.env.COSENS_RSI_BASE_URL ??

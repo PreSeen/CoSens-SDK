@@ -128,6 +128,34 @@ test('virtual user selection is per call and unsupported operations reject', asy
   assert.throws(() => getMemoryExperience('e', { virtualUserId: 'vu_a' }), TypeError);
 });
 
+test('virtual_user_id is accepted as an alias for virtualUserId in Memory calls', async (t) => {
+  useFixtureKey(t);
+  const seen: Array<[string, string | null]> = [];
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    seen.push([new URL(String(url)).pathname, new Headers(init?.headers).get('x-virtual-user-id')]);
+    return Response.json({});
+  });
+  await memoryRecall({ query: 'a', virtual_user_id: 'vu_a' });
+  await memoryIngest({ content: 'b', requestKey: 'k', virtual_user_id: 'vu_b' });
+  await getMemoryItems({ virtual_user_id: 'vu_b', virtualUserId: 'vu_b' });
+  await getMemoryJob('j', { virtual_user_id: 'vu_a' });
+  assert.deepEqual(seen, [
+    ['/api/v1/memory/recall', 'vu_a'], ['/api/v1/memory/ingest', 'vu_b'],
+    ['/api/v1/memory/items', 'vu_b'], ['/api/v1/memory/jobs/j', 'vu_a'],
+  ]);
+  await assert.rejects(
+    memoryRecall({ query: 'a', virtualUserId: 'vu_a', virtual_user_id: 'vu_b' }),
+    { name: 'TypeError', message: /virtualUserId and virtual_user_id differ/ },
+  );
+  await assert.rejects(
+    getMemoryItems({ virtual_user_id: '' }),
+    { name: 'TypeError', message: /virtual_user_id must be a nonempty header value/ },
+  );
+  assert.equal(seen.length, 4);
+  assert.throws(() => getMemory({ virtual_user_id: 'vu_a' }), TypeError);
+  assert.throws(() => getMemoryExperience('e', { virtual_user_id: 'vu_a' }), TypeError);
+});
+
 test('explicit Memory service and key are per call and fail closed', async (t) => {
   useFixtureKey(t);
   const seen: Array<[string, string | null, string | null, string | null]> = [];
