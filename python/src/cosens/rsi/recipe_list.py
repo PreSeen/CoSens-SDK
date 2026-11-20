@@ -105,7 +105,7 @@ execution_ids_by_recipe AS (
 list_rows AS (
     SELECT r.id, 'recipe' AS kind, r.id AS recipe_id,
         COALESCE(r.name, a.name, '首次学习') AS name,
-        json_object('id', r.id, 'name', r.name,
+        json_object('id', r.id, 'name', r.name, 'storage_path', r.storage_path,
             'created_at', r.created_at, 'updated_at', r.updated_at, 'archived_at', r.archived_at,
             'active_version_id', r.active_version_id,
             'latest_version_id', r.latest_version_id,

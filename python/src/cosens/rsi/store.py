@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
+import tempfile
 import time
 import uuid
 from contextlib import contextmanager
@@ -82,13 +84,13 @@ class Store:
 
     def _initialize(self):
         with self.connect() as conn:
-            if conn.execute("PRAGMA user_version").fetchone()[0] == 5:
+            if conn.execute("PRAGMA user_version").fetchone()[0] == 6:
                 return
         with self.transaction() as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version == 5:
+            if version == 6:
                 return
-            if version not in (0, 1, 2, 3, 4):
+            if version not in (0, 1, 2, 3, 4, 5):
                 raise InvalidState("unsupported RSI SQLite schema version")
             legacy = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='objects'"
@@ -184,10 +186,24 @@ class Store:
                 conn.execute("DROP VIEW IF EXISTS recipe_records")
                 conn.execute("DROP TABLE IF EXISTS recipe_api_metadata")
             upgrade = MIGRATE_RECIPE_VERSIONS if legacy or version in (2, 3) else ""
-            for statement in (upgrade + RECIPE_PROJECTION).split(";"):
+            for statement in upgrade.split(";"):
                 if statement.strip():
                     conn.execute(statement)
-            conn.execute("PRAGMA user_version = 5")
+            if legacy or version in (2, 3, 4, 5):
+                conn.execute(
+                    "ALTER TABLE recipes ADD COLUMN storage_path TEXT NOT NULL DEFAULT ''"
+                )
+                conn.execute("UPDATE recipes SET storage_path = 'recipes/' || id")
+                for row in conn.execute("""
+                    SELECT r.storage_path, v.data FROM versions v JOIN recipes r ON r.id = v.recipe_id
+                """):
+                    self._write_recipe_file(
+                        row["storage_path"], json.loads(row["data"])
+                    )
+            for statement in RECIPE_PROJECTION.split(";"):
+                if statement.strip():
+                    conn.execute(statement)
+            conn.execute("PRAGMA user_version = 6")
 
     @contextmanager
     def connect(self):
@@ -306,7 +322,9 @@ class Store:
             "updated_at": now,
             "archived_at": None,
         }
-        if kind != "recipe":
+        if kind == "recipe":
+            data["storage_path"] = f"recipes/{data['id']}"
+        else:
             data["revision"] = 1
         if kind != "rubrics":
             Store._write_record(conn, kind, data, update=False)
@@ -558,8 +576,9 @@ class Store:
         if result.rowcount:
             Store.save(conn, recipe)
 
-    @staticmethod
-    def append_version(conn, obj, content, *, operation_key=None, provenance=None):
+    def append_version(
+        self, conn, obj, content, *, operation_key=None, provenance=None
+    ):
         if operation_key:
             row = conn.execute(
                 "SELECT data FROM versions WHERE operation_key=?",
@@ -600,8 +619,38 @@ class Store:
         )
         obj["latest_version_id"] = version["id"]
         if kind == "recipe":
-            Store.save(conn, obj)
+            self._write_recipe_file(obj["storage_path"], version)
+            self.save(conn, obj)
         return version
+
+    def _write_recipe_file(self, storage_path, version):
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_-]+", version["object_id"])
+            or not re.fullmatch(r"[A-Za-z0-9_-]+", version["id"])
+            or storage_path != f"recipes/{version['object_id']}"
+        ):
+            raise InvalidState("invalid Recipe version storage path")
+        content = version["content"]
+        markdown = (
+            f"# {content['title']}\n\n"
+            f"## Applicability\n\n{content['applicability']}\n\n"
+            f"## Instructions\n\n{content['instructions']}\n"
+        )
+        directory = self.root / storage_path / version["id"]
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=directory, delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+                stream.write(markdown)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, directory / "RECIPE.md")
+        finally:
+            if temporary:
+                temporary.unlink(missing_ok=True)
 
     @staticmethod
     def replay(conn, scope, key, request):

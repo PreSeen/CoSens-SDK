@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS recipes (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
     archived_at REAL,
-    name TEXT
+    name TEXT,
+    storage_path TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS recipes_created ON recipes(created_at,id);
 CREATE TABLE IF NOT EXISTS evidence_snapshots (
@@ -147,7 +148,7 @@ export const storage = {
   },
   recipe: {
     table: 'recipes',
-    columns: [...identity, 'name'],
+    columns: [...identity, 'name', 'storage_path'],
   },
   material: { table: 'evidence_snapshots', columns: [...common] },
 } satisfies Record<

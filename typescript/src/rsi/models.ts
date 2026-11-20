@@ -279,7 +279,12 @@ export interface Versioned<C = unknown> extends ObjectMetadata {
   latest_qualified_version_id?: string | null;
   selected_version?: Version<C> | null;
 }
-export type Recipe = Omit<Versioned<RecipeContent>, 'revision' | 'description'>;
+export type Recipe = Omit<
+  Versioned<RecipeContent>,
+  'revision' | 'description'
+> & {
+  storage_path: string;
+};
 export interface TestResult {
   id: string;
   execution_id: string;

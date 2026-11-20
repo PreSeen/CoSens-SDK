@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS recipes (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
     archived_at REAL,
-    name TEXT
+    name TEXT,
+    storage_path TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS recipes_created ON recipes(created_at,id);
 CREATE TABLE IF NOT EXISTS evidence_snapshots (
@@ -145,6 +146,6 @@ STORAGE = {
             "input_revision",
         ),
     ),
-    "recipe": ("recipes", (*_IDENTITY, "name")),
+    "recipe": ("recipes", (*_IDENTITY, "name", "storage_path")),
     "material": ("evidence_snapshots", _COMMON),
 }
