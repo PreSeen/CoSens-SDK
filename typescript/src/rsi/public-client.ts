@@ -51,6 +51,7 @@ const answer = z.strictObject({
 });
 const executionListQuery = z.strictObject({ execution_ids: z.array(text) });
 const recipeListQuery = z.strictObject({ recipe_ids: z.array(text) });
+const recoverOptions = z.strictObject({ recipe_id: text.optional() });
 const recipeTest = z.strictObject({
   execution_id: text,
   recipe_id: text,
@@ -89,6 +90,7 @@ export type ExecutionCreate = z.input<typeof executionCreate>;
 export type Page = z.input<typeof page>;
 export type ExecutionListQuery = z.input<typeof executionListQuery>;
 export type RecipeListQuery = z.input<typeof recipeListQuery>;
+export type RecoverOptions = z.input<typeof recoverOptions>;
 export type RecipeListEntry = {
   recipe_id: string | null;
   execution_ids: string[];
@@ -340,9 +342,10 @@ export class RSIClient {
     );
   }
 
-  async recover() {
+  async recover(options?: RecoverOptions) {
+    const recipeId = recoverOptions.optional().parse(options)?.recipe_id;
     if (this.#cloud) return { started: 0 };
-    return this.#queue.recover();
+    return this.#queue.recover(recipeId);
   }
 
   close() {

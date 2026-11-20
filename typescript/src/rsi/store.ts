@@ -665,6 +665,7 @@ export class Store {
     ttl: number,
     limit: number,
     credentials?: string[],
+    recipeId?: string,
   ): { id: string; fence: number } | null {
     return this.tx(() => {
       const time = now();
@@ -680,6 +681,7 @@ export class Store {
            WHERE (executions.status='queued' OR (executions.status='running' AND executions.lease_until<?))
            AND COALESCE(json_extract(executions.details, '$.runtime_config.max_executions'), ?) > ?
            AND (? IS NULL OR json_extract(executions.details, '$.runtime_config.model.api_key_env') IN (SELECT value FROM json_each(?)))
+           AND (? IS NULL OR executions.recipe_id = ?)
            ORDER BY executions.created_at,executions.id LIMIT 1`,
         )
         .get(
@@ -688,6 +690,8 @@ export class Store {
           count,
           credentials ? encode(credentials) : null,
           credentials ? encode(credentials) : null,
+          recipeId ?? null,
+          recipeId ?? null,
         ) as { id: string; fence: number } | undefined;
       if (!row) return null;
       this.db
@@ -729,28 +733,35 @@ export class Store {
       fail('input_changed', 'execution inputs changed');
     return execution;
   }
-  pending_execution(credentials?: string[]) {
+  pending_execution(credentials?: string[], recipeId?: string) {
     return this.db
       .prepare(
         `SELECT executions.id AS id, json_extract(executions.details, '$.runtime_config') AS config
        FROM executions
        WHERE executions.status IN ('queued','running')
        AND (? IS NULL OR json_extract(executions.details, '$.runtime_config.model.api_key_env') IN (SELECT value FROM json_each(?)))
+       AND (? IS NULL OR executions.recipe_id = ?)
        ORDER BY executions.created_at, executions.id LIMIT 1`,
       )
       .get(
         credentials ? encode(credentials) : null,
         credentials ? encode(credentials) : null,
+        recipeId ?? null,
+        recipeId ?? null,
       ) as { id: string; config: string } | undefined;
   }
-  has_pending(credentials?: string[]): boolean {
-    return !!this.pending_execution(credentials);
+  has_pending(credentials?: string[], recipeId?: string): boolean {
+    return !!this.pending_execution(credentials, recipeId);
   }
-  pending_count(credential: string): number {
-    return this.db.prepare(`
-      SELECT COUNT(*) FROM executions WHERE status IN ('queued','running')
-      AND json_extract(details, '$.runtime_config.model.api_key_env') = ?
-    `).pluck().get(credential) as number;
+  pending_count(credentials: string[], recipeId?: string): number {
+    return this.db
+      .prepare(`
+        SELECT COUNT(*) FROM executions WHERE status IN ('queued','running')
+        AND json_extract(details, '$.runtime_config.model.api_key_env') IN (SELECT value FROM json_each(?))
+        AND (? IS NULL OR recipe_id = ?)
+      `)
+      .pluck()
+      .get(encode(credentials), recipeId ?? null, recipeId ?? null) as number;
   }
   close() {
     this.db.close();

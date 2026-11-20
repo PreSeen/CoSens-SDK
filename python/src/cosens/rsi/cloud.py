@@ -196,6 +196,6 @@ class CloudRSIClient:
             json={"archived": archived},
         )
 
-    def recover(self):
+    def recover(self, *, recipe_id: str | None = None):
         """The service recovers its own Workers; nothing to start locally."""
         return {"started": 0}

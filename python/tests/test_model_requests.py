@@ -103,6 +103,7 @@ def test_recover_leaves_pending_tasks_for_their_original_headers(tmp_path):
         data_dir=tmp_path, config={**config, "headers": {"X-Api-Key": "b"}}
     )
     assert other.recover() == {"started": 0}
+    assert other.recover(recipe_id=execution["recipe_id"]) == {"started": 0}
     assert RSIClient(data_dir=tmp_path).recover() == {"started": 0}
     assert client.execution_get(execution["id"])["status"] == "queued"
 

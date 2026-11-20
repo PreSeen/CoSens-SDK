@@ -254,5 +254,7 @@ class RSIClient:
             archived=_ARCHIVED.validate_python(archived),
         )
 
-    def recover(self):
-        return self._queue.recover()
+    def recover(self, *, recipe_id: str | None = None):
+        return self._queue.recover(
+            recipe_id=_TEXT.validate_python(recipe_id) if recipe_id is not None else None
+        )

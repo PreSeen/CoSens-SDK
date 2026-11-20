@@ -284,6 +284,10 @@ test('recover leaves pending work for the Client with matching headers', async (
       evidence: { context_path: path, files: [] }, idempotency_key: 'example',
     });
     assert.deepEqual(await other.recover(), { started: 0 });
+    assert.deepEqual(
+      await other.recover({ recipe_id: execution.recipe_id! }),
+      { started: 0 },
+    );
     assert.deepEqual(await readOnly.recover(), { started: 0 });
     assert.equal((await client.execution_get(execution.id)).status, 'queued');
   } finally {
@@ -828,34 +832,62 @@ test('independent Node hooks enqueue work that persists and passes a file test a
     });
     try {
       const source = recovery.material_create({ manifest: material.manifest });
-      const execution = await recovery.execution_create({
-        material_ids: [source.id],
-        policy: {
-          artifact_confirmed: true,
-          confirmation_ref: 'recovery',
-          test_task: {
-            instruction: 'Create answer.txt',
-            checks: [{ kind: 'text_equals', path: 'answer.txt', value: '42' }],
+      const queueForRecovery = async (confirmation_ref: string) => {
+        const run = await recovery.execution_create({
+          material_ids: [source.id],
+          policy: {
+            artifact_confirmed: true,
+            confirmation_ref,
+            test_task: {
+              instruction: 'Create answer.txt',
+              checks: [{ kind: 'text_equals', path: 'answer.txt', value: '42' }],
+            },
           },
-        },
-      });
-      assert.ok(recovery.store.reserve('worker', 'stopped-worker', 1, 3));
-      assert.equal(recovery.store.claim('stopped-worker', 3, 1)?.fence, 1);
-      const reply = await runHook(
-        `
-        import { RSIClient } from 'cosens-sdk/rsi';
-        const client = new RSIClient({ data_dir: process.argv[1], config: null });
-        console.log(JSON.stringify(await client.recover()));
-        client.close();
-      `,
-        [recovery.data_dir],
+        });
+        return recovery.store.tx(() =>
+          recovery.store.save({ ...run, recipe_id: recovery.store.createRecipe().id }),
+        );
+      };
+      const other = await queueForRecovery('other-recipe');
+      const execution = await queueForRecovery('selected-recipe');
+      const recoverFromHook = async (recipeId?: string) => JSON.parse(
+        await runHook(
+          `
+          import { RSIClient } from 'cosens-sdk/rsi';
+          const client = new RSIClient({ data_dir: process.argv[1], config: null });
+          const recipe_id = process.argv[2];
+          console.log(JSON.stringify(await (recipe_id ? client.recover({ recipe_id }) : client.recover())));
+          client.close();
+          `,
+          recipeId === undefined ? [recovery.data_dir] : [recovery.data_dir, recipeId],
+        ),
       );
-      assert.deepEqual(JSON.parse(reply), { started: 0, scheduled: true });
+      assert.deepEqual(await recoverFromHook('recipe_missing'), { started: 0 });
+      assert.ok(recovery.store.reserve('worker', 'stopped-worker', 1, 3));
+      assert.deepEqual(
+        recovery.store.claim('stopped-worker', 3, 1, undefined, execution.recipe_id!),
+        { id: execution.id, fence: 1 },
+      );
+      assert.deepEqual(
+        await recoverFromHook(execution.recipe_id!),
+        { started: 0, scheduled: true },
+      );
 
       const run = await recovery.wait(execution.id, { timeout: 20 });
       assert.equal(run.status, 'completed', JSON.stringify(run.error));
       assert.equal(run.result?.test_status, 'passed');
       assert.ok(run.test_results[0].trace_path?.includes('lease-2'));
+      const workerSlots = recovery.store.db.prepare("SELECT 1 FROM slots WHERE kind='worker'");
+      const deadline = Date.now() + 5_000;
+      while (workerSlots.get() && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(workerSlots.get(), undefined);
+      assert.equal(recovery.execution_get(other.id).status, 'queued');
+      assert.deepEqual(await recoverFromHook(execution.recipe_id!), { started: 0 });
+
+      assert.deepEqual(await recoverFromHook(), { started: 1 });
+      const remaining = await recovery.wait(other.id, { timeout: 20 });
+      assert.equal(remaining.status, 'completed', JSON.stringify(remaining.error));
     } finally {
       for (const run of (await recovery.execution_list())) {
         if (run.status === 'running' || run.status === 'queued')

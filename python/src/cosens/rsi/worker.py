@@ -34,7 +34,7 @@ def failure_details(exc, stage):
     return details
 
 
-def drain(client, *, runtime=None, owner=None, slot=None):
+def drain(client, *, runtime=None, owner=None, slot=None, recipe_id=None):
     from ._queue_client import RSIClient
     from .engine import Engine
     from .runtime import ChatRuntime
@@ -78,7 +78,11 @@ def drain(client, *, runtime=None, owner=None, slot=None):
         idle_since = time.monotonic()
         while not lost.is_set():
             claim = store.claim(
-                owner, config.lease_seconds, config.max_executions, credentials
+                owner,
+                config.lease_seconds,
+                config.max_executions,
+                credentials,
+                recipe_id=recipe_id,
             )
             if claim is None:
                 # Brief idle grace handles simultaneous hook dispatch; exits once drained.
@@ -88,8 +92,10 @@ def drain(client, *, runtime=None, owner=None, slot=None):
                     with store.transaction() as conn:
                         # Detached workers can take over a running job after its lease expires.
                         pending = (
-                            store.has_pending(credentials)
-                            if detached or credentials is not None
+                            store.has_pending(credentials, recipe_id=recipe_id)
+                            if detached
+                            or credentials is not None
+                            or recipe_id is not None
                             else conn.execute(
                                 "SELECT 1 FROM executions WHERE status='queued' "
                                 "OR (status='running' AND lease_until<?) LIMIT 1",
@@ -147,7 +153,7 @@ def drain(client, *, runtime=None, owner=None, slot=None):
     return {"processed": processed}
 
 
-def wait_for_worker_slot(client, owner, waiting_slot):
+def wait_for_worker_slot(client, owner, waiting_slot, *, recipe_id=None):
     store, config = client.store, client.config
     credentials = client.credential_names()
     next_heartbeat = 0
@@ -157,7 +163,7 @@ def wait_for_worker_slot(client, owner, waiting_slot):
                 store.heartbeat(owner, config.lease_seconds, worker_slot=waiting_slot)
                 next_heartbeat = time.monotonic() + config.lease_seconds / 3
             with store.transaction() as conn:
-                if not store.has_pending(credentials):
+                if not store.has_pending(credentials, recipe_id=recipe_id):
                     conn.execute("DELETE FROM slots WHERE token=?", (waiting_slot,))
                     return None
 
@@ -181,6 +187,7 @@ def main():
     parser.add_argument("--owner")
     parser.add_argument("--slot")
     parser.add_argument("--execution-id")
+    parser.add_argument("--recipe-id")
     parser.add_argument("--wait-for-slot", action="store_true")
     args = parser.parse_args()
     if bool(args.owner) != bool(args.slot) or (args.wait_for_slot and not args.slot):
@@ -189,17 +196,17 @@ def main():
     if args.execution_id:
         config = reader.execution_get(args.execution_id)["runtime_config"]
     else:
-        pending = reader.store.pending_execution()
+        pending = reader.store.pending_execution(recipe_id=args.recipe_id)
         if not pending:
             return
         config = LocalConfig.model_validate_json(pending["config"])
     client = RSIClient(data_dir=args.data_dir, config=config, auto_start=False)
     slot = args.slot
     if args.wait_for_slot:
-        slot = wait_for_worker_slot(client, args.owner, slot)
+        slot = wait_for_worker_slot(client, args.owner, slot, recipe_id=args.recipe_id)
         if slot is None:
             return
-    drain(client, owner=args.owner, slot=slot)
+    drain(client, owner=args.owner, slot=slot, recipe_id=args.recipe_id)
 
 
 if __name__ == "__main__":

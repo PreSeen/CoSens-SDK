@@ -252,10 +252,12 @@ TS 和 Python 使用相同的表结构。查询时，`latest_version_id` 取版�
 
 | 方法 | 必填参数 | 选填参数 | 用途 |
 | --- | --- | --- | --- |
-| `recover` | 无 | 无 | 本地 Agent 启动时调用，返回 `started`，旧租约尚未过期时可返回 `scheduled=true`。云端返回 `{ started: 0 }`，服务端自行恢复。 |
+| `recover` | 无 | `recipe_id`（SDK Recipe ID，非空字符串） | 恢复本地未完成的 Execution，返回 `started`。Worker 需要等待租约或空闲槽位时可返回 `scheduled=true`。云端返回 `{ started: 0 }`，服务端自行恢复。 |
 | `close` | 无 | 无 | TS 本地释放 SQLite 连接，TS 云端直接返回。Python 云端释放 HTTPX 连接。 |
 
 TS 的 RSI 业务接口及 `recover()` 用 `await`，`close()` 同步调用。Python RSI 方法同步调用。
+
+TS 用 `await client.recover({ recipe_id: recipeId })`，Python 用 `client.recover(recipe_id=recipe_id)`。指定 SDK Recipe ID 时，本次启动或安排的 Worker 只接手此 Recipe 的排队中或可接管的 Execution。省略参数时恢复当前 Client 模型配置可接手的全部未完成 Execution。没有匹配任务时返回 `{ started: 0 }`。
 
 ## Memory 服务接口
 

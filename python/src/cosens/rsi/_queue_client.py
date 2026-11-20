@@ -764,10 +764,10 @@ class RSIClient:
         if (config or self.config).model.api_key_env not in self.credential_names():
             raise InvalidState("Model headers are unavailable for this execution")
 
-    def recover(self):
-        """Dispatch detached workers, or schedule one to wait for an expired lease."""
+    def recover(self, *, recipe_id=None):
+        """Dispatch workers for pending work, optionally limited to one Recipe."""
         credentials = self.credential_names()
-        pending = self.store.pending_execution(credentials)
+        pending = self.store.pending_execution(credentials, recipe_id=recipe_id)
         if not pending:
             return {"started": 0}
         config = LocalConfig.model_validate_json(pending["config"])
@@ -793,6 +793,8 @@ class RSIClient:
                 "--execution-id",
                 pending["id"],
             ]
+            if recipe_id is not None:
+                command.extend(("--recipe-id", recipe_id))
             if deferred:
                 command.append("--wait-for-slot")
             try:
@@ -810,9 +812,10 @@ class RSIClient:
                 raise
 
         workers = config.max_executions
-        if self._model_header_binding:
+        if self._model_header_binding or recipe_id is not None:
             workers = min(
-                workers, self.store.pending_count(self._model_header_binding[0])
+                workers,
+                self.store.pending_count(credentials, recipe_id=recipe_id),
             )
         started = 0
         for _ in range(workers):
@@ -833,7 +836,9 @@ class RSIClient:
             if self._model_header_binding
             else "recovery"
         )
-        if not self.store.has_pending(credentials):
+        if recipe_id is not None:
+            kind = f"{kind}:recipe:{recipe_id}"
+        if not self.store.has_pending(credentials, recipe_id=recipe_id):
             return {"started": 0}
         deferred = self.store.reserve(kind, owner, 1, config.lease_seconds)
         if not deferred:

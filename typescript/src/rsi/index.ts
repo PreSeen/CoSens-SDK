@@ -15,6 +15,7 @@ export type {
   RecipeListEntry,
   RecipeListQuery,
   RecipeListRecipeEntry,
+  RecoverOptions,
 } from './public-client.js';
 export { RSIError } from './models.js';
 export type {

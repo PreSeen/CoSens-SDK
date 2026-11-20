@@ -754,9 +754,11 @@ export class RSIClient {
       fail('invalid_state', 'Model headers are unavailable for this execution');
     }
   }
-  async recover(): Promise<{ started: number; scheduled?: true }> {
+  async recover(
+    recipeId?: string,
+  ): Promise<{ started: number; scheduled?: true }> {
     const credentials = this.credentialNames();
-    const pending = this.store.pending_execution(credentials);
+    const pending = this.store.pending_execution(credentials, recipeId);
     if (!pending) return { started: 0 };
     const config = LocalConfigSchema.parse(JSON.parse(pending.config));
     const worker = fileURLToPath(new URL('./worker.js', import.meta.url));
@@ -776,6 +778,7 @@ export class RSIClient {
           pending.id,
         ];
         if (deferred) args.push('--wait-for-slot');
+        if (recipeId !== undefined) args.push('--recipe-id', recipeId);
         const child = spawn(this.node_executable, args, {
           detached: true,
           stdio: 'ignore',
@@ -800,9 +803,13 @@ export class RSIClient {
       }
     };
 
-    const workers = this.model_header_binding
-      ? Math.min(config.max_executions, this.store.pending_count(this.model_header_binding.name))
-      : config.max_executions;
+    const workers =
+      this.model_header_binding || recipeId !== undefined
+        ? Math.min(
+            config.max_executions,
+            this.store.pending_count(credentials, recipeId),
+          )
+        : config.max_executions;
     let started = 0;
     for (let i = 0; i < workers; i++) {
       const owner = uid('worker');
@@ -820,12 +827,14 @@ export class RSIClient {
     if (started) return { started };
 
     const owner = uid('worker');
+    const credential = this.model_header_binding?.name;
+    const recoveryScope = recipeId === undefined
+      ? credential
+      : `${credential ?? 'legacy'}:recipe:${recipeId}`;
+    const recoveryKind = recoveryScope ? `recovery:${recoveryScope}` as const : 'recovery';
     const deferred = this.store.tx(() =>
-      this.store.has_pending(credentials)
-        ? this.store.reserve(
-            this.model_header_binding ? `recovery:${this.model_header_binding.name}` : 'recovery',
-            owner, 1, config.lease_seconds,
-          )
+      this.store.has_pending(credentials, recipeId)
+        ? this.store.reserve(recoveryKind, owner, 1, config.lease_seconds)
         : null,
     );
     if (!deferred) return { started: 0 };

@@ -530,6 +530,60 @@ print(json.dumps(RSIClient(data_dir=sys.argv[1], config=None).recover()))
     assert "lease-2" in run["test_results"][0]["trace_path"]
 
 
+@pytest.mark.parametrize("deferred", [False, True])
+def test_recover_recipe_leaves_other_recipes_queued(tmp_path, gateway, deferred):
+    from cosens.rsi import RSIClient as HostClient
+
+    config = {
+        "model": "local-test",
+        "base_url": f"http://127.0.0.1:{gateway.server_port}/v1",
+        "headers": {"X-Api-Key": "fixture"},
+        "auto_start": False,
+    }
+    context = tmp_path / "context.md"
+    context.write_text("Write the answer 42 into answer.txt")
+    client = HostClient(data_dir=tmp_path / "rsi", config=config)
+    evidence = {"context_path": str(context), "files": []}
+    other = client.execution_create(evidence=evidence, idempotency_key="other")
+    target = client.execution_create(evidence=evidence, idempotency_key="target")
+    assert client.recover(recipe_id="recipe_unknown") == {"started": 0}
+    store = client._queue.store
+
+    if deferred:
+        for owner in ("stopped-worker", "stopped-peer"):
+            assert store.reserve("worker", owner, 2, 3)
+        assert store.claim("stopped-worker", 3, 2, recipe_id=target["recipe_id"]) == (
+            target["id"],
+            1,
+        )
+
+    restored = HostClient(data_dir=client.data_dir, config=config)
+    assert restored.recover(recipe_id=target["recipe_id"]) == (
+        {"started": 0, "scheduled": True} if deferred else {"started": 1}
+    )
+    completed = restored._queue.wait(target["id"], timeout=20)
+    assert completed["status"] == "completed", completed
+    assert completed["result"]["test_status"] == "passed"
+    assert completed["recipe_id"] == target["recipe_id"]
+
+    # Wait for the scoped Worker to finish draining before invoking unscoped recovery.
+    deadline = time.monotonic() + 5
+    while True:
+        with store.connect() as conn:
+            active = conn.execute(
+                "SELECT 1 FROM slots WHERE kind='worker' AND expires>=? LIMIT 1",
+                (time.time(),),
+            ).fetchone()
+        if not active:
+            break
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    assert restored.execution_get(other["id"])["status"] == "queued"
+    assert restored.recover(recipe_id=target["recipe_id"]) == {"started": 0}
+    assert restored.recover() == {"started": 1}
+    assert restored._queue.wait(other["id"], timeout=20)["status"] == "completed"
+
+
 @pytest.mark.parametrize(
     "bad_output,budget",
     [("malformed", 1), ("prose", 1), ("malformed", 10), ("bad_material", 1)],

@@ -1,5 +1,6 @@
 import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { parseArgs } from 'node:util';
 import { RSIClient } from './client.js';
 import { Engine } from './engine.js';
 import { ChatRuntime } from './runtime.js';
@@ -16,6 +17,7 @@ export async function drain(
   runtime?: Runtime,
   owner = uid('worker'),
   reservedSlot?: string,
+  recipeId?: string,
 ) {
   const { store, config } = client;
   const credentials = runtime ? undefined : client.credentialNames();
@@ -47,14 +49,14 @@ export async function drain(
         config.lease_seconds,
         config.max_executions,
         credentials,
+        recipeId,
       );
       if (!active) {
         if (Date.now() - idleSince >= 1000) {
           const emptied = store.tx(() => {
             // A detached worker can pick up an interrupted job once its lease expires.
-            const pending = reservedSlot
-              || credentials
-              ? store.has_pending(credentials)
+            const pending = reservedSlot || credentials || recipeId !== undefined
+              ? store.has_pending(credentials, recipeId)
               : store.db
                   .prepare(
                     "SELECT 1 FROM executions WHERE status='queued' OR (status='running' AND lease_until<?) LIMIT 1",
@@ -127,6 +129,7 @@ async function waitForWorkerSlot(
   client: RSIClient,
   owner: string,
   waitingSlot: string,
+  recipeId?: string,
 ) {
   const { store, config } = client;
   const credentials = client.credentialNames();
@@ -138,7 +141,7 @@ async function waitForWorkerSlot(
         nextHeartbeat = now() + config.lease_seconds / 3;
       }
       const pending = store.tx(() => {
-        if (store.has_pending(credentials)) return true;
+        if (store.has_pending(credentials, recipeId)) return true;
         store.release(waitingSlot);
         return false;
       });
@@ -185,28 +188,38 @@ if (
   process.argv[1] &&
   pathToFileURL(process.argv[1]).href === import.meta.url
 ) {
-  const [data_dir, owner, slot, executionId, mode] = process.argv.slice(2);
   try {
+    const { positionals, values } = parseArgs({
+      options: {
+        'wait-for-slot': { type: 'boolean' },
+        'recipe-id': { type: 'string' },
+      },
+      allowPositionals: true,
+    });
+    const [data_dir, owner, slot, executionId] = positionals;
+    const waiting = values['wait-for-slot'];
+    const recipeId = values['recipe-id'];
     if (
       !data_dir ||
+      positionals.length > 4 ||
       Boolean(owner) !== Boolean(slot) ||
-      (mode && (mode !== '--wait-for-slot' || !owner || !slot))
+      (waiting && !slot)
     )
       throw new Error('worker expects a data directory and optional lease');
     const reader = new RSIClient({ data_dir, auto_start: false });
     try {
-      const pending = reader.store.pending_execution();
+      const pending = reader.store.pending_execution(undefined, recipeId);
       const config = executionId
         ? reader.execution_get(executionId).runtime_config
         : pending && LocalConfigSchema.parse(JSON.parse(pending.config));
       if (config) {
         const client = new RSIClient({ data_dir, config, auto_start: false });
         try {
-          const workerSlot = mode
-            ? await waitForWorkerSlot(client, owner, slot)
+          const workerSlot = waiting
+            ? await waitForWorkerSlot(client, owner, slot, recipeId)
             : slot;
           if (workerSlot !== null)
-            await drain(client, undefined, owner, workerSlot);
+            await drain(client, undefined, owner, workerSlot, recipeId);
         } finally {
           client.close();
         }

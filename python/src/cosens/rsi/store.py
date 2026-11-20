@@ -741,7 +741,7 @@ class Store:
                 (now + ttl, owner, now),
             )
 
-    def claim(self, owner, ttl, max_executions, credentials=None):
+    def claim(self, owner, ttl, max_executions, credentials=None, *, recipe_id=None):
         now = time.time()
         with self.transaction() as conn:
             running = conn.execute(
@@ -754,6 +754,7 @@ class Store:
                 """SELECT executions.id,executions.fence FROM executions
                 WHERE (executions.status='queued' OR (executions.status='running' AND executions.lease_until<?))
                 AND COALESCE(json_extract(executions.details,'$.runtime_config.max_executions'),?)>?
+                AND (? IS NULL OR executions.recipe_id=?)
                 AND (? IS NULL OR json_extract(executions.details,'$.runtime_config.model.api_key_env')
                      IN (SELECT value FROM json_each(?)))
                 ORDER BY executions.created_at,executions.id LIMIT 1""",
@@ -761,6 +762,8 @@ class Store:
                     now,
                     max_executions,
                     running,
+                    recipe_id,
+                    recipe_id,
                     *(
                         [encode(credentials)] * 2
                         if credentials is not None
@@ -813,27 +816,30 @@ class Store:
             obj.update(changes)
             return self.save(conn, obj)
 
-    def pending_execution(self, credentials=None):
+    def pending_execution(self, credentials=None, *, recipe_id=None):
         keys = encode(credentials) if credentials is not None else None
         with self.connect() as conn:
             row = conn.execute(
                 """SELECT executions.id, json_extract(executions.details,'$.runtime_config') AS config
                    FROM executions
                    WHERE executions.status IN ('queued','running')
+                   AND (? IS NULL OR executions.recipe_id=?)
                    AND (? IS NULL OR json_extract(executions.details,'$.runtime_config.model.api_key_env')
                         IN (SELECT value FROM json_each(?)))
                    ORDER BY executions.created_at,executions.id LIMIT 1""",
-                (keys, keys),
+                (recipe_id, recipe_id, keys, keys),
             ).fetchone()
             return dict(row) if row else None
 
-    def has_pending(self, credentials=None):
-        return self.pending_execution(credentials) is not None
+    def has_pending(self, credentials=None, *, recipe_id=None):
+        return self.pending_execution(credentials, recipe_id=recipe_id) is not None
 
-    def pending_count(self, credential):
+    def pending_count(self, credentials, *, recipe_id=None):
         with self.connect() as conn:
             return conn.execute(
                 """SELECT COUNT(*) FROM executions WHERE status IN ('queued','running')
-                   AND json_extract(details, '$.runtime_config.model.api_key_env') = ?""",
-                (credential,),
+                   AND (? IS NULL OR recipe_id=?)
+                   AND json_extract(details, '$.runtime_config.model.api_key_env')
+                       IN (SELECT value FROM json_each(?))""",
+                (recipe_id, recipe_id, encode(credentials)),
             ).fetchone()[0]

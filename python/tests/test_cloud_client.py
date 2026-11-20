@@ -102,6 +102,7 @@ def test_reads_and_queries_map_to_routes():
     assert seen[4]["params"] == {"offset": "50", "archived": "true"}
     assert client.execution_list(query={"execution_ids": []}) == []
     assert client.recover() == {"started": 0}
+    assert client.recover(recipe_id="r1") == {"started": 0}
 
 
 def test_service_errors_keep_their_codes():
