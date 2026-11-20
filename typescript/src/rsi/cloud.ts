@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { selectedVirtualUser, type VirtualUserSelection } from '../virtual-user.js';
 import { USER_AGENT } from './chat-completions.js';
+import { readRecipeFile } from './recipe-file.js';
 import {
   RecipeReferenceSchema,
   RSIError,
@@ -100,7 +101,7 @@ export class CloudClient {
     const payload = body === undefined ? undefined : JSON.stringify(body);
     if (payload !== undefined && Buffer.byteLength(payload) > MAX_CLOUD_REQUEST_BYTES)
       throw new TypeError(
-        'evidence upload exceeds the 10 MiB cloud request limit; send fewer or smaller files, or use local mode',
+        'upload exceeds the 10 MiB cloud request limit; send fewer or smaller files, or use local mode',
       );
     const url = new URL(this.#base + path);
     for (const [key, value] of Object.entries(params ?? {}))
@@ -207,8 +208,12 @@ export class CloudClient {
     });
   }
 
-  async recipe_insert(_path: string): Promise<never> {
-    throw new RSIError('invalid_state', 'recipe_insert requires local mode');
+  async recipe_insert(
+    path: string,
+  ): Promise<{ recipe_id: string; recipe_version_id: string }> {
+    // Validate locally first, so a malformed file fails the same way in both modes.
+    const { markdown } = await readRecipeFile(path);
+    return this.request('POST', '/recipes', { body: { markdown } });
   }
 
   recipe_get(id: string, version: string) {
