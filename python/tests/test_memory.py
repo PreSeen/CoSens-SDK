@@ -18,7 +18,7 @@ from cosens import (
 
 def test_memory_atoms_1026_contract(monkeypatch):
     requests = []
-    prefix = "/api/v1/memory"
+    prefix = "/api/memory"
 
     def mock(request):
         assert request.url.host == "rsi.cosens.ai"
@@ -72,8 +72,8 @@ def test_memory_atoms_1026_contract(monkeypatch):
         ),
         ("GET", prefix + "/items?limit=200", None),
         ("GET", prefix + "/jobs/job%2F1", None),
-        ("GET", prefix + "/experiences/exp%2F1?revision=2", None),
-        ("GET", prefix, None),
+        ("GET", "/api/v1/memory/experiences/exp%2F1?revision=2", None),
+        ("GET", "/api/v1/memory", None),
     ]
 
 
@@ -125,7 +125,7 @@ def test_virtual_user_selection_is_per_call_and_unsupported_methods_reject(monke
         with pytest.raises(ValueError):
             await get_memory_experience("e", virtual_user_id="vu_a")
     asyncio.run(run())
-    assert set(seen) == {("/api/v1/memory/recall", "vu_a"), ("/api/v1/memory/ingest", "vu_b"), ("/api/v1/memory/items", None), ("/api/v1/memory/items", "vu_b"), ("/api/v1/memory/jobs/j", "vu_a")}
+    assert set(seen) == {("/api/memory/recall", "vu_a"), ("/api/memory/ingest", "vu_b"), ("/api/memory/items", None), ("/api/memory/items", "vu_b"), ("/api/memory/jobs/j", "vu_a")}
 
 
 def test_explicit_service_and_key_are_per_call_and_fail_closed(monkeypatch):
@@ -139,7 +139,7 @@ def test_explicit_service_and_key_are_per_call_and_fail_closed(monkeypatch):
         await asyncio.gather(
             memory_recall(query='a', base_url='https://regional.example/v1/memory', api_key='region-key', virtual_user_id='vu_a'),
             get_memory_items(),
-            memory_ingest(content='b', request_key='k', base_url='https://stage.example/api/v1/memory/', api_key='stage-key'),
+            memory_ingest(content='b', request_key='k', base_url='https://friday-rsi-cn.stardust-ai.com/api/v1/memory/', api_key='cn-key'),
             get_memory_job('j', base_url='https://regional.example/v1/memory', api_key='region-key'),
         )
         for url in ['http://example.test/v1/memory', 'https://user:pw@example.test/a', 'https://example.test/a?x=1', 'https://example.test/a#x', 'https://example.test/a/../b', 'https://example.test/a/%2e%2e/b', 'https://example.test/a%2fb', 'https://example.test/a\\b', 'https://@example.test/a', 'https://example.test/a/%00b']:
@@ -152,7 +152,7 @@ def test_explicit_service_and_key_are_per_call_and_fail_closed(monkeypatch):
     asyncio.run(run())
     assert set(requests) == {
         ('https://regional.example/v1/memory/recall','Bearer region-key','api_key','vu_a'),
-        ('https://rsi.cosens.ai/api/v1/memory/items?limit=200','Bearer ambient-key',None,None),
-        ('https://stage.example/api/v1/memory/ingest','Bearer stage-key','api_key',None),
+        ('https://rsi.cosens.ai/api/memory/items?limit=200','Bearer ambient-key',None,None),
+        ('https://friday-rsi-cn.stardust-ai.com/api/v1/memory/ingest','Bearer cn-key','api_key',None),
         ('https://regional.example/v1/memory/jobs/j','Bearer region-key','api_key',None),
     }

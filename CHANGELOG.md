@@ -2,6 +2,10 @@
 
 Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned separately.
 
+## Python 0.9.2 (TypeScript unreleased)
+
+- The US Memory SDK uses `/api/memory` for ingest, recall, items, and job status. Explicit regional service URLs retain their supplied paths. Memory overview and experience details use their existing endpoints.
+
 ## Python 0.9.1 (TypeScript unreleased)
 
 - Supported Memory calls can specify an HTTPS service URL and explicit API key per call.

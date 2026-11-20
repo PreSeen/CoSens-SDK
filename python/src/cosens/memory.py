@@ -5,7 +5,8 @@ from urllib.parse import quote, urlencode, urlsplit, unquote
 
 import httpx
 
-_SERVICE_URL = "https://rsi.cosens.ai/api/v1/memory"
+_SERVICE_URL = "https://rsi.cosens.ai/api/memory"
+_LEGACY_SERVICE_URL = "https://rsi.cosens.ai/api/v1/memory"
 
 
 class MemoryError(RuntimeError):
@@ -95,13 +96,13 @@ async def get_memory_experience(experience_id, *, revision=None, virtual_user_id
     if virtual_user_id is not None:
         raise ValueError("Virtual User selection is not supported for experience details")
     suffix = "?" + urlencode({"revision": revision}) if revision is not None else ""
-    return await _request("GET", f"/experiences/{_path_part(experience_id)}{suffix}")
+    return await _request("GET", f"/experiences/{_path_part(experience_id)}{suffix}", default_url=_LEGACY_SERVICE_URL)
 
 
 async def get_memory(*, virtual_user_id=None):
     if virtual_user_id is not None:
         raise ValueError("Virtual User selection is not supported for memory overview")
-    return await _request("GET", "")
+    return await _request("GET", "", default_url=_LEGACY_SERVICE_URL)
 
 
 def _service_url(base_url):
@@ -126,12 +127,14 @@ def _service_url(base_url):
     return base_url.rstrip("/")
 
 
-async def _request(method, path, body=None, *, virtual_user_id=None, base_url=None, api_key=None):
+async def _request(
+    method, path, body=None, *, virtual_user_id=None, base_url=None, api_key=None, default_url=_SERVICE_URL,
+):
     if virtual_user_id is not None and (not isinstance(virtual_user_id, str) or not virtual_user_id or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in virtual_user_id)):
         raise ValueError("virtual_user_id must be a nonempty header value")
     if (base_url is None) != (api_key is None):
         raise ValueError("base_url and api_key must be supplied together")
-    service_url = _SERVICE_URL if base_url is None else _service_url(base_url)
+    service_url = default_url if base_url is None else _service_url(base_url)
     api_key = os.getenv("COSENS_API_KEY") if api_key is None else api_key
     if not isinstance(api_key, str) or not api_key or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in api_key):
         raise ValueError("Set COSENS_API_KEY to the bare CoSens API key")

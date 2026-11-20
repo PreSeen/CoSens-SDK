@@ -296,10 +296,10 @@ execution = client.execution_get(retry["execution_id"])
 
 | TS 方法 | Python 方法 | 必填参数（TS / Python） | 选填参数和默认值（TS / Python） | 服务接口 |
 | --- | --- | --- | --- | --- |
-| `memoryRecall` | `memory_recall` | `query`（字符串） | `tokenBudget` / `token_budget`（整数，默认 1000，范围 1–8000） | `POST /v1/memory/recall` |
-| `memoryIngest` | `memory_ingest` | `content`（字符串）、`requestKey` / `request_key`（1–256 字符） | `sourceKind` / `source_kind`（默认 `"decision"`）、`durable`（布尔值，默认 `true`）、`sourceId` / `source_id`（非空字符串）、`expectedRevision` / `expected_revision`（非负整数） | `POST /v1/memory/ingest` |
-| `getMemoryItems` | `get_memory_items` | 无 | `limit`（整数，默认 200，范围 1–500） | `GET /v1/memory/items` |
-| `getMemoryJob` | `get_memory_job` | `jobId` / `job_id`（任务 ID） | 无 | `GET /v1/memory/jobs/{job_id}` |
+| `memoryRecall` | `memory_recall` | `query`（字符串） | `tokenBudget` / `token_budget`（整数，默认 1000，范围 1–8000） | `POST /memory/recall` |
+| `memoryIngest` | `memory_ingest` | `content`（字符串）、`requestKey` / `request_key`（1–256 字符） | `sourceKind` / `source_kind`（默认 `"decision"`）、`durable`（布尔值，默认 `true`）、`sourceId` / `source_id`（非空字符串）、`expectedRevision` / `expected_revision`（非负整数） | `POST /memory/ingest` |
+| `getMemoryItems` | `get_memory_items` | 无 | `limit`（整数，默认 200，范围 1–500） | `GET /memory/items` |
+| `getMemoryJob` | `get_memory_job` | `jobId` / `job_id`（任务 ID） | 无 | `GET /memory/jobs/{job_id}` |
 | `getMemoryExperience` | `get_memory_experience` | `experienceId` / `experience_id`（经验 ID） | `revision`（版本号） | `GET /v1/memory/experiences/{experience_id}` |
 | `getMemory` | `get_memory` | 无 | 无 | `GET /v1/memory` |
 

@@ -1,6 +1,7 @@
 import { selectedVirtualUser, type VirtualUserSelection } from './virtual-user.js';
 
-const SERVICE_URL = 'https://rsi.cosens.ai/api/v1/memory';
+const SERVICE_URL = 'https://rsi.cosens.ai/api/memory';
+const LEGACY_SERVICE_URL = 'https://rsi.cosens.ai/api/v1/memory';
 
 export interface MemoryEndpointOptions { baseUrl?: string; apiKey?: string }
 
@@ -52,7 +53,7 @@ export function memoryRecall({
   return request<MemoryRecallResult>('POST', '/recall', {
     query,
     token_budget: boundedInteger(tokenBudget, 'tokenBudget', 1, 8000),
-  }, { virtualUserId, virtual_user_id }, { baseUrl, apiKey });
+  }, { virtualUserId, virtual_user_id, baseUrl, apiKey });
 }
 
 export function memoryIngest({
@@ -99,19 +100,19 @@ export function memoryIngest({
             Number.MAX_SAFE_INTEGER,
           ),
         }),
-  }, { virtualUserId, virtual_user_id }, { baseUrl, apiKey });
+  }, { virtualUserId, virtual_user_id, baseUrl, apiKey });
 }
 
 export function getMemoryItems({ limit = 200, virtualUserId, virtual_user_id, baseUrl, apiKey }: MemoryEndpointOptions & VirtualUserSelection & { limit?: number } = {}) {
   return request(
     'GET',
     `/items?limit=${boundedInteger(limit, 'limit', 1, 500)}`,
-    undefined, { virtualUserId, virtual_user_id }, { baseUrl, apiKey },
+    undefined, { virtualUserId, virtual_user_id, baseUrl, apiKey },
   );
 }
 
 export function getMemoryJob(jobId: string, { virtualUserId, virtual_user_id, baseUrl, apiKey }: MemoryEndpointOptions & VirtualUserSelection = {}) {
-  return request('GET', `/jobs/${pathPart(jobId)}`, undefined, { virtualUserId, virtual_user_id }, { baseUrl, apiKey });
+  return request('GET', `/jobs/${pathPart(jobId)}`, undefined, { virtualUserId, virtual_user_id, baseUrl, apiKey });
 }
 
 export function getMemoryExperience(
@@ -123,12 +124,12 @@ export function getMemoryExperience(
     revision === undefined
       ? ''
       : `?${new URLSearchParams({ revision: String(revision) })}`;
-  return request('GET', `/experiences/${pathPart(experienceId)}${suffix}`);
+  return request('GET', `/experiences/${pathPart(experienceId)}${suffix}`, undefined, { defaultUrl: LEGACY_SERVICE_URL });
 }
 
 export function getMemory({ virtualUserId, virtual_user_id }: VirtualUserSelection = {}) {
   if (virtualUserId !== undefined || virtual_user_id !== undefined) throw new TypeError("Virtual User selection is not supported for memory overview");
-  return request('GET', '');
+  return request('GET', '', undefined, { defaultUrl: LEGACY_SERVICE_URL });
 }
 
 function serviceUrl(baseUrl: string): string {
@@ -159,13 +160,12 @@ async function request<T = Record<string, unknown>>(
   method: 'GET' | 'POST',
   path: string,
   body?: object,
-  selection: VirtualUserSelection = {},
-  options: MemoryEndpointOptions = {},
+  options: VirtualUserSelection & MemoryEndpointOptions & { defaultUrl?: string } = {},
 ): Promise<T> {
-  const virtualUserId = selectedVirtualUser(selection);
+  const virtualUserId = selectedVirtualUser(options);
   if ((options.baseUrl === undefined) !== (options.apiKey === undefined))
     throw new TypeError('baseUrl and apiKey must be supplied together');
-  const base = options.baseUrl === undefined ? SERVICE_URL : serviceUrl(options.baseUrl);
+  const base = options.baseUrl === undefined ? (options.defaultUrl ?? SERVICE_URL) : serviceUrl(options.baseUrl);
   const apiKey = options.baseUrl === undefined ? process.env.COSENS_API_KEY : options.apiKey;
   if (typeof apiKey !== 'string' || !apiKey || /[\s\x00-\x1f\x7f]/.test(apiKey))
     throw new TypeError('Set COSENS_API_KEY to the bare CoSens API key');
