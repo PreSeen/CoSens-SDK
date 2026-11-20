@@ -24,6 +24,7 @@ export type {
   Question,
   Recipe,
   RecipeContent,
+  RecipeReference,
   RubricsContent,
   TestResult,
   Version,

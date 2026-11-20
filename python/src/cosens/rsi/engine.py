@@ -276,7 +276,7 @@ class Engine:
                 )
             ).model_dump()
             if recipe_name:
-                content["title"] = recipe_name
+                content["name"] = recipe_name
             if not literals.found_in(content.values()):
                 break
             if attempt == 2:

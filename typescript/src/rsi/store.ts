@@ -108,17 +108,18 @@ export class Store {
     chmodSync(path, 0o600);
   }
   private initialize() {
-    if (this.db.pragma('user_version', { simple: true }) === 6) return;
+    if (this.db.pragma('user_version', { simple: true }) === 7) return;
     this.tx(() => {
       const version = this.db.pragma('user_version', { simple: true });
-      if (version === 6) return;
+      if (version === 7) return;
       if (
         version !== 0 &&
         version !== 1 &&
         version !== 2 &&
         version !== 3 &&
         version !== 4 &&
-        version !== 5
+        version !== 5 &&
+        version !== 6
       )
         fail('invalid_state', 'unsupported RSI SQLite schema version');
       const legacy = this.db
@@ -232,19 +233,34 @@ export class Store {
           ALTER TABLE recipes ADD COLUMN storage_path TEXT NOT NULL DEFAULT '';
           UPDATE recipes SET storage_path = 'recipes/' || id;
         `);
-        const rows = this.db
-          .prepare(
-            `
-          SELECT r.storage_path, v.data FROM versions v JOIN recipes r ON r.id = v.recipe_id
-        `,
-          )
-          .iterate() as Iterable<{ storage_path: string; data: string }>;
-        for (const row of rows)
-          this.writeRecipeFile(row.storage_path, JSON.parse(row.data));
       }
+      this.migrateRecipeContent();
       this.db.exec(recipeProjection);
-      this.db.pragma('user_version = 6');
+      this.db.pragma('user_version = 7');
     });
+  }
+
+  private migrateRecipeContent() {
+    const rows = this.db
+      .prepare(`
+        SELECT r.storage_path, v.data FROM versions v JOIN recipes r ON r.id=v.recipe_id
+      `)
+      .all() as { storage_path: string; data: string }[];
+    const update = this.db.prepare('UPDATE versions SET data=? WHERE id=?');
+    for (const row of rows) {
+      const version = JSON.parse(row.data) as Version<{
+        title: string;
+        applicability: string;
+        instructions: string;
+      }>;
+      const { title, applicability, instructions } = version.content;
+      const migrated = {
+        ...version,
+        content: { name: title, description: applicability, instructions },
+      };
+      this.writeRecipeFile(row.storage_path, migrated);
+      update.run(encode(migrated), migrated.id);
+    }
   }
   tx<T>(fn: () => T): T {
     return this.db.transaction(fn).immediate();
@@ -483,6 +499,7 @@ export class Store {
     content: C,
     operation_key?: string,
     provenance: Record<string, unknown> = {},
+    recipeMarkdown?: string,
   ): Version<C> {
     if (operation_key) {
       const prev = this.operation<C>(operation_key);
@@ -528,6 +545,7 @@ export class Store {
       this.writeRecipeFile(
         recipe.storage_path,
         version as Version<RecipeContent>,
+        recipeMarkdown,
       );
       this.save(recipe);
     }
@@ -536,6 +554,7 @@ export class Store {
   private writeRecipeFile(
     storagePath: string,
     version: Version<RecipeContent>,
+    markdown?: string,
   ) {
     if (
       !/^[A-Za-z0-9_-]+$/u.test(version.object_id) ||
@@ -546,11 +565,16 @@ export class Store {
     const directory = join(this.root, storagePath, version.id);
     const target = join(directory, 'RECIPE.md');
     const temporary = join(directory, `.${randomUUID()}.tmp`);
-    const { title, applicability, instructions } = version.content;
-    const markdown = `# ${title}\n\n## Applicability\n\n${applicability}\n\n## Instructions\n\n${instructions}\n`;
+    const { name, description, instructions } = version.content;
+    const frontmatter = `---\nname: ${JSON.stringify(name)}\ndescription: ${JSON.stringify(description)}\n---\n`;
+    const body =
+      instructions && !instructions.endsWith('\n')
+        ? `${instructions}\n`
+        : instructions;
+    const source = markdown ?? (body ? `${frontmatter}\n${body}` : frontmatter);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     try {
-      writeFileSync(temporary, markdown, {
+      writeFileSync(temporary, source, {
         flag: 'wx',
         mode: 0o600,
         flush: true,
@@ -585,7 +609,7 @@ export class Store {
         .run(scope, key, encode(request), encode(result));
   }
   reserve(
-    kind: 'model' | 'worker' | 'recovery',
+    kind: 'model' | 'worker' | 'recovery' | `recovery:${string}`,
     owner: string,
     limit: number,
     ttl: number,
@@ -721,6 +745,12 @@ export class Store {
   }
   has_pending(credentials?: string[]): boolean {
     return !!this.pending_execution(credentials);
+  }
+  pending_count(credential: string): number {
+    return this.db.prepare(`
+      SELECT COUNT(*) FROM executions WHERE status IN ('queued','running')
+      AND json_extract(details, '$.runtime_config.model.api_key_env') = ?
+    `).pluck().get(credential) as number;
   }
   close() {
     this.db.close();

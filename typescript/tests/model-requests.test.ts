@@ -49,8 +49,8 @@ test('completion budget is left to the endpoint unless configured', async () => 
     const model = (extra: object) =>
       LocalConfigSchema.parse({ model: { model: 'm', base_url, ...extra } })
         .model;
-    await requestCompletion(model({}), 'k', [], []);
-    await requestCompletion(model({ max_tokens: 16384 }), 'k', [], []);
+    await requestCompletion(model({}), {}, [], []);
+    await requestCompletion(model({ max_tokens: 16384 }), {}, [], []);
     assert.equal('max_tokens' in seen[0].body, false);
     assert.equal(seen[1].body.max_tokens, 16384);
   });
@@ -60,8 +60,10 @@ test('model requests name the SDK in the User-Agent', async () => {
   await withEndpoint(async (base_url, seen) => {
     const model = LocalConfigSchema.parse({ model: { model: 'm', base_url } })
       .model;
-    await requestCompletion(model, 'k', [], []);
+    await requestCompletion(model, { 'x-api-key': 'test-token' }, [], []);
     assert.match(String(seen[0].headers['user-agent']), /^cosens-sdk-typescript\//);
+    assert.equal(seen[0].headers['x-api-key'], 'test-token');
+    assert.equal(seen[0].headers.authorization, undefined);
   });
 });
 

@@ -10,6 +10,7 @@ import sys
 import time
 
 from .materials import authorized_test_files, snapshot
+from .model_headers import is_header_binding
 from .models import (
     TERMINAL,
     Conflict,
@@ -25,13 +26,19 @@ from .store import Store, uid
 
 class RSIClient:
     def __init__(
-        self, *, data_dir, config: LocalConfig | dict | None = None, auto_start=True
+        self,
+        *,
+        data_dir,
+        config: LocalConfig | dict | None = None,
+        auto_start=True,
+        model_header_binding=None,
     ):
         self.store = Store(data_dir)
         self._supplied_config = (
             LocalConfig.model_validate(config) if config is not None else None
         )
         self.auto_start = auto_start
+        self._model_header_binding = model_header_binding
 
     @property
     def config(self):
@@ -147,6 +154,19 @@ class RSIClient:
         return self._get_versioned(
             "rubrics", rubrics_id, version_id, include_content=include_content
         )
+
+    def recipe_insert(self, content, markdown):
+        with self.store.transaction() as conn:
+            recipe = self.store.create_recipe(conn, name=content["name"])
+            version = self.store.append_version(
+                conn,
+                recipe,
+                content,
+                provenance={"source": "external"},
+                recipe_markdown=markdown,
+            )
+            self.store.publish_recipe_version(conn, recipe["id"], version["id"])
+        return {"recipe_id": recipe["id"], "recipe_version_id": version["id"]}
 
     def recipe_get(
         self, recipe_id, *, version_id=None, version_selector=None, include_content=True
@@ -614,11 +634,13 @@ class RSIClient:
                     inherited["name"] = name
                 if active and parent.get("test_request"):
                     inherited["test_request"] = parent["test_request"]
+                parent_config = LocalConfig.model_validate(parent["runtime_config"])
                 child_id = self._execution_insert(
                     conn,
                     inherited,
-                    config=self._supplied_config
-                    or LocalConfig.model_validate(parent["runtime_config"]),
+                    config=parent_config
+                    if is_header_binding(parent_config.model.api_key_env)
+                    else self._supplied_config or parent_config,
                 )["id"]
                 answers = {
                     **answers,
@@ -720,28 +742,42 @@ class RSIClient:
             self.recover()
         return result
 
+    def credential_names(self):
+        if self._model_header_binding is not None:
+            return [self._model_header_binding[0]]
+        name = (
+            self._supplied_config.model.api_key_env if self._supplied_config else None
+        )
+        if name and is_header_binding(name):
+            return [name] if os.environ.get(name) else []
+        return [
+            name
+            for name, value in os.environ.items()
+            if value and not is_header_binding(name)
+        ]
+
     def _check_runtime(self, config=None):
         if not importlib.util.find_spec("langgraph"):
             raise InvalidState(
                 "install cosens-sdk[local-rsi] in the Hook Python environment"
             )
-        if not os.environ.get((config or self.config).model.api_key_env):
-            raise InvalidState(
-                "set the configured model API key environment variable (a nonsecret placeholder is allowed for unauthenticated local gateways)"
-            )
+        if (config or self.config).model.api_key_env not in self.credential_names():
+            raise InvalidState("Model headers are unavailable for this execution")
 
     def recover(self):
         """Dispatch detached workers, or schedule one to wait for an expired lease."""
-        first = self.store.pending_execution()
-        if not first:
+        credentials = self.credential_names()
+        pending = self.store.pending_execution(credentials)
+        if not pending:
             return {"started": 0}
-        credentials = [name for name, value in os.environ.items() if value]
-        pending = self.store.pending_execution(credentials) or first
         config = LocalConfig.model_validate_json(pending["config"])
         self._check_runtime(config)
 
         def launch(owner, slot, *, deferred=False):
             env = dict(os.environ)
+            if self._model_header_binding is not None:
+                name, value = self._model_header_binding
+                env[name] = value
             # Editable installs and host launchers must reach the same package.
             env["PYTHONPATH"] = os.pathsep.join(str(p) for p in sys.path if p)
             command = [
@@ -773,8 +809,13 @@ class RSIClient:
                 self.store.release(slot)
                 raise
 
+        workers = config.max_executions
+        if self._model_header_binding:
+            workers = min(
+                workers, self.store.pending_count(self._model_header_binding[0])
+            )
         started = 0
-        for _ in range(config.max_executions):
+        for _ in range(workers):
             owner = uid("worker")
             slot = self.store.reserve(
                 "worker", owner, config.max_executions, config.lease_seconds
@@ -787,7 +828,14 @@ class RSIClient:
             return {"started": started}
 
         owner = uid("worker")
-        deferred = self.store.reserve("recovery", owner, 1, config.lease_seconds)
+        kind = (
+            f"recovery:{self._model_header_binding[0]}"
+            if self._model_header_binding
+            else "recovery"
+        )
+        if not self.store.has_pending(credentials):
+            return {"started": 0}
+        deferred = self.store.reserve(kind, owner, 1, config.lease_seconds)
         if not deferred:
             return {"started": 0}
         launch(owner, deferred, deferred=True)

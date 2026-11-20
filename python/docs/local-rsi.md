@@ -1,6 +1,6 @@
 # CoSens RSI SDK 接口文档
 
-云端模式默认启用，本地模式使用 SQLite schema v6。两种模式共用 RSI 方法，本地 `recipe_get()` 另返回 Recipe 文件的 `storage_path`。TS 从 `cosens-sdk/rsi` 导入，Python 从 `cosens.rsi` 导入。
+云端模式默认启用，本地模式使用 SQLite schema v7。本地支持 `recipe_insert()`，`recipe_get()` 另返回 Recipe 文件的 `storage_path`。TS 从 `cosens-sdk/rsi` 导入，Python 从 `cosens.rsi` 导入。
 
 ```text
 Agent 启动 → recover()
@@ -12,29 +12,128 @@ Agent 启动 → recover()
 
 ## 初始化
 
-- 云端（默认）：TS `new RSIClient()`，Python `RSIClient()`。读取 `COSENS_API_KEY`，学习在 CoSens 服务端用 CoSens 的模型完成。只上传 `evidence` 里列出的文件。可传 `api_key`、`base_url`（TS 为 `{ mode: 'cloud', api_key, base_url }`）。云端的 `recover()` 直接返回 `{ started: 0 }`，服务端自行恢复。
-- 本地：TS `new RSIClient({ data_dir, config })`，Python `RSIClient(data_dir=data_dir, config=config)`。TS 两种模式的方法都是 async。
+### 云端模式（默认）
 
-本地模式下，`data_dir` 是 SQLite、证据快照和 Recipe 文件的保存根目录。创建 Execution 时，`config` 必须包含 `model`、`base_url` 和 `auto_start`。查询和恢复已有工作时可以传 `null`（Python 为 `None`）。可选 `max_tokens` 设置每次模型调用的输出上限，省略时由模型服务决定。`timeout` 设置单次请求秒数，默认 120。`base_url` 是支持 Chat Completions 和工具调用的模型 API 基地址。请求的 User-Agent 为 `cosens-sdk-python/<版本>`（TS 为 `cosens-sdk-typescript/<版本>`）。`auto_start=true` 在入队后自动派发 Worker，`false` 时由宿主调用 `recover()`。模型密钥从 `RSI_MODEL_API_KEY` 读取。TS 如需覆盖启动 Worker 的 Node 路径，设置 `RSI_NODE_EXECUTABLE`。
+TS 可用 `new RSIClient()` 或 `new RSIClient({ mode: "cloud", api_key, base_url })`。Python 可用 `RSIClient()` 或 `RSIClient(mode="cloud", api_key=..., base_url=...)`。
+
+| 参数 | 必填条件 | 类型、默认值和用途 |
+| --- | --- | --- |
+| `mode` | TS 传云端配置对象时必填。Python 选填。 | 取值 `"cloud"`。无参构造默认选择云端。 |
+| `api _key` | 选填。有可用凭证才能发起调用。 | 非空字符串，省略时读取 `COSENS_API_KEY`。 |
+| `base_url` | 选填。 | 字符串，省略时依次使用 `COSENS_RSI_BASE_URL` 和 `https://rsi.cosens.ai/api`。 |
+
+TS 也可以直接 `new CloudClient({ api_key, base_url })`，配置对象和两个字段均可省略。该类提供 `request(method, path, options?)`，其中 HTTP 方法 `method` 和相对 API 路径 `path` 必填，`options.body` 和 `options.params` 选填。TS 云端请求超时为 60 秒。Python 直接构造 `CloudRSIClient(api_key=..., base_url=..., timeout=..., transport=...)` 时，四项均选填，`timeout` 默认 60 秒，`transport` 默认 `None`，可传自定义 HTTPX transport。这两个参数属于 `CloudRSIClient`。
+
+学习由 CoSens 服务端执行。SDK 上传 `evidence` 中列出的文件和选填的 `recipe_reference` 文件，单次编码后 JSON 请求体上限为 10 MiB。
+
+### 本地模式
+
+TS 用 `new RSIClient({ data_dir, config })`。Python 用 `RSIClient(data_dir=..., config=...)`，可显式传 `mode="local"`。
+
+| 参数 | 必填条件 | 类型、默认值和用途 |
+| --- | --- | --- |
+| `data_dir` | 必填。 | TS 为路径字符串，Python 可传字符串或 `Path`。它是 SQLite、文件快照和 Recipe 文件的保存根目录。 |
+| `config` | 创建或恢复本地 Execution 时传入。TS 只读查询传 `null`，Python 可省略或传 `None`。 | 本地模型配置。 |
+| `config.model` | 提供配置对象时必填。 | 非空字符串，模型 ID。 |
+| `config.base_url` | 提供配置对象时必填。 | 支持工具调用的 OpenAI-compatible Chat Completions 基地址。 |
+| `config.headers` | 选填，省略等同 `{}`。 | 宿主提供的 HTTP 请求头，键和值都是字符串。认证方案及凭证格式由宿主决定。 |
+| `config.auto_start` | 提供配置对象时必填。 | 布尔值。为 `true` 时入队后自动调度 Worker，为 `false` 时由宿主调用 `recover()`。 |
+| `config.max_tokens` | 选填。 | 正整数，限制单次模型调用的输出。省略时由模型服务决定。 |
+| `config.timeout` | 选填。 | 秒数，默认 120，有效范围为大于 0 且不超过 3600。 |
+
+本地模型请求直接使用 `headers`。例如网关可以接收 `Authorization: Bearer <access_token>` 和它要求的令牌类型头，其他模型可以接收 `X-Api-Key` 或供应商要求的请求头。请求头值只在 Client 和 Worker 进程使用，SQLite 只保存匹配标识。未指定 User-Agent 时默认使用 `cosens-sdk-python/<版本>` 或 `cosens-sdk-typescript/<版本>`。
+
+重启后使用相同的 `data_dir`、`model`、`base_url` 和 `headers` 调用 `recover()`。凭证变化的 Client 只能执行使用新配置创建的任务。历史上依赖 `RSI_MODEL_API_KEY` 的执行仍可通过原环境变量恢复。TS 可通过 `RSI_NODE_EXECUTABLE` 指定 Worker 的 Node 可执行文件。
 
 ## 业务接口
 
 TS 的创建和测试参数放在一个对象内，Python 的字段用关键字传入。读写已有对象时，两版先传对象 ID。分页列表接收分页对象。TS 直接把 `evidence` 对象传给追加接口，并把澄清和版本归档的字段放在 ID 后的参数对象内。Python 使用关键字。`recipe_get` 和 `rubrics_get` 的第二项在 TS 中是位置参数，在 Python 中使用关键字。
 
-| 对象 | 方法 | 必填参数 | 返回与用途 |
+| 方法 | 必填参数 | 选填参数 | 返回与用途 |
 | --- | --- | --- | --- |
-| Execution | `execution_create` | `evidence`, `idempotency_key` | 排队创建 Execution，立即返回执行的 `id` 和关联的 `recipe_id`。 |
-| Execution | `execution_get` | `execution_id` | 读取名称、阶段、进度、问题、测试结果和错误。 |
-| Execution | `execution_list` | 无 | 列出未归档 Execution。可用 `query.execution_ids` 按 ID 筛选。 |
-| Execution | `execution_append_evidence` | `execution_id`, `evidence` | 给进行中的 Execution 追加证据并重新分析。 |
-| Execution | `execution_cancel` | `execution_id` | 取消排队或进行中的 Execution。 |
-| Execution | `execution_clarification_answer` | `execution_id`, `question_id`, `question_revision`, `answer` | 提交澄清。返回 Execution ID 及可空的子 Execution ID。 |
-| Rubrics | `rubrics_list` | `offset`, `archived` | 分页列出各套评分标准及最新版本 ID。 |
-| Rubrics | `rubrics_get` | `rubrics_id`, `version` | `version` 传 `"latest"` 或版本 ID，返回选中的版本和评分项。 |
-| Recipe | `recipe_list` | 无 | 返回首次学习条目和现有 Recipe 的摘要。可用 `query.recipe_ids` 按 ID 筛选。 |
-| Recipe | `recipe_get` | `recipe_id`, `version` | `version` 传 `"active"`、`"latest"` 或版本 ID，返回 Recipe 基础字段、三个版本 ID 和 `selected_version`。 |
-| Recipe | `recipe_test` | `execution_id`, `recipe_id`, `version_id`, `rubrics_version_id` | 在活动 Execution 内安排指定版本测试。 |
-| Recipe | `recipe_version_set_archived` | `recipe_id`, `version_id`, `archived` | `true` 归档指定版本，`false` 恢复最新通过验证的版本。返回 `recipe_id`、`version_id`、`archived`。 |
+| `execution_create` | `evidence`（对象）、`idempotency_key`（非空字符串） | `recipe_reference`（对象），提供时 `path` 必填，`recipe_id` 选填。 | 排队创建 Execution，立即返回执行的 `id` 和关联的 `recipe_id`。 |
+| `execution_get` | `execution_id`（字符串） | 无 | 读取名称、阶段、进度、问题、测试结果和错误。 |
+| `execution_list` | 无 | `query`，提供时须含 `execution_ids: string[]`（Python 为 `list[str]`）。 | 返回 Execution 列表。 |
+| `execution_append_evidence` | `execution_id`（字符串）、`evidence`（对象） | 无顶层选填项。`evidence` 字段要求见下表。 | 给进行中的 Execution 追加证据并重新分析。 |
+| `execution_cancel` | `execution_id`（字符串） | 无 | 取消排队或进行中的 Execution。 |
+| `execution_clarification_answer` | `execution_id`、`question_id`（字符串）、`question_revision`（正整数）、`answer`（非空文本或非空选项 ID 数组） | 无 | 提交单题答案，返回原执行 ID 和可空的子执行 ID。 |
+| `rubrics_list` | `offset`（非负整数）、`archived`（布尔值） | 无 | 分页列出评分标准及最新版本 ID。 |
+| `rubrics_get` | `rubrics_id`（字符串）、`version`（`"latest"` 或版本 ID） | 无 | 返回选中的评分标准版本。 |
+| `recipe_list` | 无 | `query`，提供时须含 `recipe_ids: string[]`（Python 为 `list[str]`）。 | 返回首次学习条目和现有 Recipe 的摘要。 |
+| `recipe_insert` | `path`（本地 Recipe 文件路径） | 无 | 仅本地。验证文件，创建新 Recipe 和可用 v1，返回 `recipe_id` 和 `recipe_version_id`。 |
+| `recipe_get` | `recipe_id`（字符串）、`version`（`"active"`、`"latest"` 或版本 ID） | 无 | 返回 Recipe 和 `selected_version`。 |
+| `recipe_test` | `execution_id`、`recipe_id`、`version_id`、`rubrics_version_id`（均为字符串） | 无 | 在活动 Execution 内安排指定版本测试。 |
+| `recipe_version_set_archived` | `recipe_id`、`version_id`（字符串）、`archived`（布尔值） | 无 | `true` 归档版本，`false` 恢复最近发布的版本。返回两个 ID 和归档状态。 |
+
+### `execution_create()` 的材料参数
+
+| 参数 | 必填条件 | 类型和用途 |
+| --- | --- | --- |
+| `idempotency_key` | 必填。 | 非空字符串。同一请求重试用同一个键。 |
+| `evidence.context_path` | 必填。 | 上下文文件路径。 |
+| `evidence.files` | 本地模式和 TS 云端模式必填。Python 云端模式可省略，默认 `[]`。 | 文件项数组，无附加文件时传 `[]`。本地模式与参考 Recipe 合计最多 1000 个文件。 |
+| `evidence.files[].path` | 每个文件项必填。 | 本地文件路径。 |
+| `evidence.files[].role` | 每个文件项必填。 | 取值 `input`、`artifact`、`reference` 或 `feedback`。 |
+| `recipe_reference` | 选填，Python 可传 `None`。 | 对象，指定一份供首轮生成参考的 Recipe。 |
+| `recipe_reference.path` | 提供参考对象时必填。 | 参考 Recipe 的本地文件路径，支持直接使用已有版本的 `RECIPE.md`。 |
+| `recipe_reference.recipe_id` | 选填。 | 字符串。传入时关联已有 Recipe，新版本归到该 ID。省略或在 Python 中传 `None` 时，使用参考文件学习并新建 Recipe。 |
+
+`recipe_reference` 只在创建时提供。参考文件正文是首轮生成的基线，本地 Execution 的返回字段 `evidence` 会用 `role="recipe"` 标识该快照。要给已有本地 Recipe 生成新版本，应附上该 Recipe 的 `recipe_id`，该 Recipe 须有可用版本。普通历史材料使用 `role="reference"`。
+
+```ts
+const run = await client.execution_create({
+  idempotency_key: 'delivery-42',
+  evidence: {
+    context_path: contextPath,
+    files: [],
+  },
+  recipe_reference: { path: previousRecipeFile, recipe_id: recipeId },
+});
+```
+
+```python
+run = client.execution_create(
+    idempotency_key="delivery-42",
+    evidence={
+        "context_path": context_path,
+        "files": [],
+    },
+    recipe_reference={"path": previous_recipe_file, "recipe_id": recipe_id},
+)
+```
+
+`execution_append_evidence()` 的 `evidence` 使用相同的 `context_path`、`files`、`path` 和 `role` 规则，角色限于 `input`、`artifact`、`reference`、`feedback`。
+
+本地完整文本上下文随 `context_path` 创建快照，无固定单文件或批次大小上限。Agent 通过 `read_evidence(locator, offset?, limit?, query?)` 读取，每页最多 8192 字符。按 `next_offset` 继续读取，或用 `query` 从指定位置查找下一处精确匹配。在较长的工具调用历史中，旧页的正文会从发给模型的请求中移除，原始快照和读取轨迹可供追查。普通附件以及云端上传仍适用各自的大小限制。
+
+### 导入外部 Recipe
+
+`recipe_insert(path)` 只接收一个本地文件路径。TS 传路径字符串，Python 接受字符串或 `Path`。文件须是 UTF-8，开头是由两行 `---` 包围的 YAML 映射，包含非空字符串 `name` 和 `description`。Markdown 正文可以为空。格式校验失败时本地库不会新增记录。
+
+每次成功导入都会创建新的 Recipe 和可用的 v1，直接返回 `recipe_id` 和 `recipe_version_id`。SDK 将原文件保存为对应版本目录下的 `RECIPE.md`，包括额外的 YAML 字段。用返回的两个 ID 调 `recipe_get()` 可以读取版本，`selected_version.provenance.source` 为 `external`。导入无需模型配置，`recipe_list()` 中的 `execution_ids` 为 `[]`。
+
+```ts
+const { recipe_id, recipe_version_id } = await client.recipe_insert('/local/order-export/SKILL.md');
+const recipe = await client.recipe_get(recipe_id, recipe_version_id);
+```
+
+```python
+result = client.recipe_insert('/local/order-export/SKILL.md')
+recipe = client.recipe_get(result['recipe_id'], version=result['recipe_version_id'])
+```
+
+导入和模型生成都要求 `name` 和 `description`。模型生成的 `instructions` 也必须是非空 Markdown。`selected_version.content` 使用这三个字段。示例文件如下。
+
+```markdown
+---
+name: "order-export"
+description: "按用户要求将订单数据导出为 CSV。"
+---
+
+## 步骤
+
+按指定列顺序生成 CSV。
+```
 
 ### Recipe 详情返回结构
 
@@ -83,7 +182,7 @@ recipe_file = (
 
 例如 v2 待回答而 v1 仍可用时，`status` 为 `needs_clarification`，`available_version_id` 仍指向 v1。手动归档后条目仍在列表，可用版本 ID 变为 `null`。恢复时可用 `recipe_get(recipe_id, "latest")`（Python 用 `version="latest"`）读取 `latest_qualified_version_id`，再调用 `recipe_version_set_archived`。
 
-在没有未决澄清时，上一个可用版本保留到编号更高的版本验证通过。切换和旧版归档在同一个事务完成。旧版可按 ID 读取，`selected_version.archived` 表示所查版本的归档状态。恢复仅支持最新通过验证的版本。手动归档只作用于指定版本，更新的版本通过验证后仍会自动可用。
+在没有未决澄清时，上一个可用版本保留到编号更高的版本验证通过。切换和旧版归档在同一个事务完成。旧版可按 ID 读取，`selected_version.archived` 表示所查版本的归档状态。恢复仅支持最近发布的版本，包括通过 `recipe_insert()` 导入的 v1。手动归档只作用于指定版本，更新的版本通过验证后仍会自动可用。
 
 `rubrics_list()` 固定每页 50 条。`offset` 从 0 开始，`archived=false` 查未归档对象，`true` 查已归档对象。
 
@@ -118,18 +217,16 @@ TS 用 `execution_list({ execution_ids: [id1, id2] })`，Python 用 `execution_l
 
 ### Execution 证据和测试
 
-- `evidence` 由必填的 `context_path` 和 `files` 组成。无附加文件时传 `[]`。每个文件都需要 `path` 和 `role`，角色为 `input`、`artifact`、`reference`、`feedback` 或 `recipe`。
-- SDK 在创建 Execution 时复制文件快照。详情的 `evidence[]` 返回文件列表，包含角色、哈希和定位符。旧记录沿用原快照读取。
+- 本地 SDK 在创建 Execution 时复制文件快照。详情的 `evidence[]` 返回文件列表，包含角色、哈希和定位符。旧记录沿用原快照读取。
 - 宿主在取得用户交付确认后调用接口。SDK 使用 `idempotency_key` 记录本次提交。
 - SDK 自动用 Recipe 重跑当前任务。创建时标为 `input` 的文件同时用于学习和测试。测试在独立工作区生成新产物，再按 Rubric 评分。上下文、历史参考、确认产物、反馈和 `recipe` 文件只用于学习。该得分衡量当前任务能否复现。
-- 创建时可传一份 `role: "recipe"` 的文件，例如 `{ "path": "/work/recipe.md", "role": "recipe", "recipe_id": "recipe_…" }`。首轮生成以该文件的快照内容为基线。填写 `recipe_id` 时，新版本归到该 Recipe 下，要求该 Recipe 存在且有可用版本。省略 `recipe_id` 时创建新 Recipe。两种情况均在入队时返回关联的 `recipe_id`。
 - `idempotency_key` 是本次提交的稳定非空字符串。同一操作重试保留原键和输入。旧接口已经提交的执行可按 ID 查询或恢复，使用旧提交的幂等键提交新格式会报冲突。
 - Worker 自动提炼并锁定 Recipe 名称、生成 Rubrics、保存候选及测试结果。自动学习最多两轮。
 - 如果宿主显式调用 `recipe_test` 改测另一个 Recipe，Execution 会切换到指定的测试目标。原先为这一条执行预建、尚无任何版本的 Recipe 会归档。
 
 ### 更新和澄清参数
 
-- `execution_append_evidence` 接收新增的 `context_path` 和 `files`。角色 `recipe` 仅在创建时提交。新证据递增输入版本并触发重新分析，测试继续使用创建时的输入范围。重试相同证据批次会复用原快照。
+- `execution_append_evidence` 接收新增的 `context_path` 和 `files`。新证据递增输入版本并触发重新分析，测试继续使用创建时的输入范围。重试相同证据批次会复用原快照。
 - `question_id` 和 `question_revision` 来自 `execution_get().questions`。`answer` 为同一道题选中的选项 ID 数组或非空文本。多道题逐题提交到原 Execution。只要还有待回答的问题，SDK 就只保存答案，返回 `continuation_execution_id: null`。
 - 最后一道题回答后，SDK 创建一个继承全部答案的子 Execution，并返回 `continuation_execution_id`。原执行尚在排队或运行时，会停止并标记为 `cancelled`。原执行已经完成时，保留已有测试结果。重试最后一道相同答案将复用同一个子 Execution。
 - 宿主从返回的子 Execution ID 跟踪重新分析、生成和测试。子执行后续再次提出澄清问题时，按同样流程回答。
@@ -147,31 +244,31 @@ TS 用 `execution_list({ execution_ids: [id1, id2] })`，Python 用 `execution_l
 
 TS 和 Python 使用相同的表结构。查询时，`latest_version_id` 取版本号最大的一条，`active_version_id` 取唯一可用版本，`latest_qualified_version_id` 取可用及已归档版本中编号最大的一条。`recipe_list()` 继续返回 `available_version_id`。
 
-新版本验证通过并发布后，较早版本在同一事务中归档。手动归档当前可用版本后，可用版本 ID 为空。只允许恢复最新通过验证的版本。
+新版本验证通过并发布后，较早版本在同一事务中归档。手动归档当前可用版本后，可用版本 ID 为空。只允许恢复最近发布的版本。
 
-初始化在一个事务内将旧库升级到 SQLite schema v6。v3 及更早的版本指针迁入版本状态，v4 的 `recipe_api_metadata` 在迁移中删除。SDK 为历史 Recipe 补齐 `storage_path`，并在同一 `data_dir` 下按版本导出已有正文。迁移保留 Recipe ID、版本内容与状态、执行记录和 Worker 租约。升级前先停止使用同一数据库的旧版 Worker。
+初始化将旧库升级到 SQLite schema v7。v3 及更早的版本指针迁入版本状态，v4 的 `recipe_api_metadata` 在迁移中删除，v5 及更早的 Recipe 补齐 `storage_path`。v6 及更早的版本将 `title` 迁为 `name`、`applicability` 迁为 `description`，并在原路径按新格式导出 `RECIPE.md`。Recipe ID、版本 ID、Markdown 正文、版本状态、执行记录和 Worker 租约保留。升级前先停止使用同一数据库的旧版 Worker。
 
 ## 运行管理
 
-| 方法 | 参数 | 用途 |
-| --- | --- | --- |
-| `recover` | 无 | Agent 启动时调用一次。返回 `started`，旧租约尚未过期时可返回 `scheduled=true`。 |
-| `close`（TS） | 无 | 释放宿主持有的 SQLite 连接。 |
+| 方法 | 必填参数 | 选填参数 | 用途 |
+| --- | --- | --- | --- |
+| `recover` | 无 | 无 | 本地 Agent 启动时调用，返回 `started`，旧租约尚未过期时可返回 `scheduled=true`。云端返回 `{ started: 0 }`，服务端自行恢复。 |
+| `close` | 无 | 无 | TS 本地释放 SQLite 连接，TS 云端直接返回。Python 云端释放 HTTPX 连接。 |
 
-TS 需等待 `execution_create`、`execution_append_evidence`、`execution_clarification_answer`、`recipe_test` 和 `recover` 返回。Python 接口按同步方式调用。
+TS 的 RSI 业务接口及 `recover()` 用 `await`，`close()` 同步调用。Python RSI 方法同步调用。
 
 ## Memory 服务接口
 
 宿主 Agent 直接调用 Memory 原子函数。调用时读取环境变量 `COSENS_API_KEY`，通过 US 算法网关 `https://rsi.cosens.ai/api` 发送请求，认证头为 `Authorization: Bearer <COSENS_API_KEY>` 和 `X-Auth-Type: api_key`。
 
-| TS 方法 | Python 方法 | 参数（TS / Python） | 服务接口 |
-| --- | --- | --- | --- |
-| `memoryRecall` | `memory_recall` | `query`，`tokenBudget` / `token_budget` 默认 1000，范围 1–8000 | `POST /v1/memory/recall` |
-| `memoryIngest` | `memory_ingest` | 必填 `content`、`requestKey` / `request_key`。可选 `sourceKind` / `source_kind`（默认 `decision`）、`durable`（默认 `true`）、`sourceId` / `source_id`、`expectedRevision` / `expected_revision` | `POST /v1/memory/ingest` |
-| `getMemoryItems` | `get_memory_items` | `limit` 默认 200，范围 1–500 | `GET /v1/memory/items` |
-| `getMemoryJob` | `get_memory_job` | 任务 ID | `GET /v1/memory/jobs/{job_id}` |
-| `getMemoryExperience` | `get_memory_experience` | 经验 ID，可选 `revision` | `GET /v1/memory/experiences/{experience_id}` |
-| `getMemory` | `get_memory` | 无 | `GET /v1/memory` |
+| TS 方法 | Python 方法 | 必填参数（TS / Python） | 选填参数和默认值（TS / Python） | 服务接口 |
+| --- | --- | --- | --- | --- |
+| `memoryRecall` | `memory_recall` | `query`（字符串） | `tokenBudget` / `token_budget`（整数，默认 1000，范围 1–8000） | `POST /v1/memory/recall` |
+| `memoryIngest` | `memory_ingest` | `content`（字符串）、`requestKey` / `request_key`（1–256 字符） | `sourceKind` / `source_kind`（默认 `"decision"`）、`durable`（布尔值，默认 `true`）、`sourceId` / `source_id`（非空字符串）、`expectedRevision` / `expected_revision`（非负整数） | `POST /v1/memory/ingest` |
+| `getMemoryItems` | `get_memory_items` | 无 | `limit`（整数，默认 200，范围 1–500） | `GET /v1/memory/items` |
+| `getMemoryJob` | `get_memory_job` | `jobId` / `job_id`（任务 ID） | 无 | `GET /v1/memory/jobs/{job_id}` |
+| `getMemoryExperience` | `get_memory_experience` | `experienceId` / `experience_id`（经验 ID） | `revision`（版本号） | `GET /v1/memory/experiences/{experience_id}` |
+| `getMemory` | `get_memory` | 无 | 无 | `GET /v1/memory` |
 
 `memoryRecall` / `memory_recall` 返回服务响应，其中 `items` 为召回条目。写入重试使用相同的 `requestKey` / `request_key`。HTTP 错误通过 `MemoryError` 暴露状态码，以及服务返回的错误码和请求 ID。
 

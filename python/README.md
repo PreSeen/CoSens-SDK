@@ -15,12 +15,12 @@ run = rsi.execution_create(
 print(rsi.execution_get(run["id"])["status"])
 ```
 
-Only the files named in `evidence` are uploaded. For local mode, pass a data directory and your own tool-calling model; the key comes from `RSI_MODEL_API_KEY`:
+The cloud SDK uploads files listed in `evidence` and the optional `recipe_reference`. For local mode, pass a data directory, the tool-calling model name and the host's model request `headers`.
 
 ```python
 rsi = RSIClient(
     data_dir="./.rsi-python",
-    config={"model": "your-model", "base_url": "http://127.0.0.1:8000/v1", "auto_start": True},
+    config={"model": "your-model", "base_url": "http://127.0.0.1:8000/v1", "headers": {}, "auto_start": True},
 )
 ```
 

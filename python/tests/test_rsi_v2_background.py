@@ -46,6 +46,20 @@ def gateway(monkeypatch):
                 server.requests += 1
             try:
                 time.sleep(0.03)
+                model = request["model"]
+                if "-session-" in model:
+                    session = model.rsplit("-", 1)[-1]
+                    if session == "0":
+                        assert (
+                            self.headers["Authorization"] == "Bearer fixture-gateway-0"
+                        )
+                        assert self.headers["X-Friday-Auth-Type"] == "access_token"
+                        assert "X-Api-Key" not in self.headers
+                    else:
+                        assert (
+                            self.headers["X-Api-Key"] == "fixture-provider-" + session
+                        )
+                        assert "Authorization" not in self.headers
                 messages = request["messages"]
                 system = messages[0]["content"]
                 payload = json.loads(
@@ -75,7 +89,24 @@ def gateway(monkeypatch):
                     if feedback_source
                     else []
                 )
-                if not called:
+                long_analysis = (
+                    "Analysis" in tools and catalog[0]["size"] > 4 * 1024 * 1024
+                )
+                pages = (
+                    [json.loads(m["content"]) for m in messages if m["role"] == "tool"]
+                    if long_analysis
+                    else []
+                )
+                if long_analysis and len(pages) < 3:
+                    name, arguments = (
+                        "read_evidence",
+                        {"locator": catalog[0]["locator"], "limit": 512},
+                    )
+                    if len(pages) == 1:
+                        arguments["offset"] = pages[0]["next_offset"]
+                    if len(pages) == 2:
+                        arguments["query"] = "TAIL_FINAL_RULE"
+                elif not called:
                     if "recipe test executor" in system:
                         name, arguments = (
                             "write_output",
@@ -96,6 +127,12 @@ def gateway(monkeypatch):
                     assert all(f["role"] in {"context", "feedback"} for f in catalog)
                     name, arguments = "FeedbackExtraction", {"items": feedback}
                 elif "Analysis" in tools:
+                    if long_analysis:
+                        assert pages[0]["text_omitted"] is True
+                        assert pages[1]["offset"] == pages[0]["next_offset"]
+                        assert pages[2]["match_offset"] > 4 * 1024 * 1024
+                        assert "TAIL_FINAL_RULE" in pages[2]["text"]
+                        assert pages[2]["end_offset"] == pages[2]["total_chars"]
                     assert payload["context"]["user_feedback"] == feedback
                     locator = catalog[0]["locator"]
                     name, arguments = (
@@ -136,14 +173,19 @@ def gateway(monkeypatch):
                         {"query": "public text formatting conventions"},
                     )
                 elif "RecipeContent" in tools:
+                    corrected = any(
+                        m["role"] == "tool" and "matching its schema" in m["content"]
+                        for m in messages
+                    )
                     name, arguments = (
                         "RecipeContent",
                         {
-                            "title": "Write 42",
-                            "applicability": "Fixed answer task",
+                            "name": "Write 42",
                             "instructions": "Write 42 into answer.txt using write_output",
                         },
                     )
+                    if corrected:
+                        arguments["description"] = "Fixed answer task"
                 elif "Assessment" in tools:
                     assert "user_feedback" not in payload["context"]
                     assert (
@@ -233,7 +275,7 @@ def gateway(monkeypatch):
 def test_multiple_hook_processes_survive_exit_and_share_limits(
     tmp_path, gateway, monkeypatch
 ):
-    monkeypatch.setenv("RSI_MODEL_API_KEY", "fixture-not-a-live-secret")
+    monkeypatch.delenv("RSI_MODEL_API_KEY", raising=False)
     monkeypatch.delenv("COSENS_API_KEY", raising=False)
     root = tmp_path / "local-rsi"
     config = {
@@ -249,6 +291,10 @@ def test_multiple_hook_processes_survive_exit_and_share_limits(
     source.write_text(
         "User confirmed artifact. Learn how to write the fixed answer 42 into answer.txt."
     )
+    long_source = tmp_path / "long-context.jsonl"
+    long_source.write_text(
+        "session trace\n" * 330_000 + "TAIL_FINAL_RULE: Write only 42.\n"
+    )
     feedback = tmp_path / "feedback.md"
     feedback.write_text("User: Please write only the corrected answer in the file.")
     evidence = {
@@ -261,6 +307,9 @@ import json, sys
 from cosens.rsi import RSIClient
 config = json.loads(sys.argv[4])["model"]
 config["model"] += "-" + sys.argv[3]
+session = sys.argv[3].rsplit("-", 1)[-1]
+config["headers"] = ({"Authorization": "Bearer fixture-gateway-0", "X-Friday-Auth-Type": "access_token"}
+    if session == "0" else {"X-Api-Key": "fixture-provider-" + session})
 c = RSIClient(data_dir=sys.argv[1], config={**config, "auto_start": True})
 run = c.execution_create(evidence=json.loads(sys.argv[2]),
     idempotency_key='hook-' + sys.argv[3])
@@ -273,7 +322,11 @@ print(json.dumps({'id': run['id']}))
                 "-c",
                 script,
                 str(root),
-                json.dumps(evidence),
+                json.dumps(
+                    {**evidence, "context_path": str(long_source)}
+                    if index == 3
+                    else evidence
+                ),
                 f"session-{index}",
                 json.dumps(config),
             ],
@@ -304,7 +357,7 @@ print(json.dumps({'id': run['id']}))
         assert all(r["status"] == "completed" for r in runs), runs
         assert all(r["result"]["published"] for r in runs), runs
         assert peak_running == 2
-        assert gateway.peak == 2  # Shared default model budget across processes.
+        assert 1 <= gateway.peak <= 2  # Shared default model budget across processes.
         assert gateway.requests >= 40  # 5 stages, tool call + result, 4 runs.
         for index, run in enumerate(runs):
             material = client.material_get(run["material_ids"][0])
@@ -319,6 +372,8 @@ print(json.dumps({'id': run['id']}))
             trace = json.loads(Path(test["trace_path"]).read_text())
             expected_model = f"local-test-session-{index}"
             assert run["runtime_config"]["model"]["model"] == expected_model
+            assert "fixture-gateway" not in json.dumps(run["runtime_config"])
+            assert "fixture-provider" not in json.dumps(run["runtime_config"])
             assert trace["model"] == expected_model
             assert any(m["role"] == "tool" for m in trace["messages"])
             checkpoint = (

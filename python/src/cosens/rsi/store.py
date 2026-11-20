@@ -84,13 +84,13 @@ class Store:
 
     def _initialize(self):
         with self.connect() as conn:
-            if conn.execute("PRAGMA user_version").fetchone()[0] == 6:
+            if conn.execute("PRAGMA user_version").fetchone()[0] == 7:
                 return
         with self.transaction() as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version == 6:
+            if version == 7:
                 return
-            if version not in (0, 1, 2, 3, 4, 5):
+            if version not in (0, 1, 2, 3, 4, 5, 6):
                 raise InvalidState("unsupported RSI SQLite schema version")
             legacy = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='objects'"
@@ -194,16 +194,29 @@ class Store:
                     "ALTER TABLE recipes ADD COLUMN storage_path TEXT NOT NULL DEFAULT ''"
                 )
                 conn.execute("UPDATE recipes SET storage_path = 'recipes/' || id")
-                for row in conn.execute("""
-                    SELECT r.storage_path, v.data FROM versions v JOIN recipes r ON r.id = v.recipe_id
-                """):
-                    self._write_recipe_file(
-                        row["storage_path"], json.loads(row["data"])
-                    )
+            self._migrate_recipe_content(conn)
             for statement in RECIPE_PROJECTION.split(";"):
                 if statement.strip():
                     conn.execute(statement)
-            conn.execute("PRAGMA user_version = 6")
+            conn.execute("PRAGMA user_version = 7")
+
+    def _migrate_recipe_content(self, conn):
+        rows = conn.execute("""
+            SELECT r.storage_path,v.data FROM versions v JOIN recipes r ON r.id=v.recipe_id
+        """).fetchall()
+        for row in rows:
+            version = json.loads(row["data"])
+            content = version["content"]
+            version["content"] = {
+                "name": content["title"],
+                "description": content["applicability"],
+                "instructions": content["instructions"],
+            }
+            self._write_recipe_file(row["storage_path"], version)
+            conn.execute(
+                "UPDATE versions SET data=? WHERE id=?",
+                (encode(version), version["id"]),
+            )
 
     @contextmanager
     def connect(self):
@@ -490,16 +503,16 @@ class Store:
                 self.get_in(conn, recipe_id, "recipe")
                 if recipe_id
                 else self.create_recipe(
-                    conn, name=execution.get("name") or content["title"]
+                    conn, name=execution.get("name") or content["name"]
                 )
             )
             if recipe["archived_at"]:
                 raise InvalidState("recipe was archived during learning")
-            name = recipe.get("name") or execution.get("name") or content["title"]
+            name = recipe.get("name") or execution.get("name") or content["name"]
             version = self.append_version(
                 conn,
                 {**recipe, "name": name},
-                {**content, "title": name},
+                {**content, "name": name},
                 operation_key=operation_key,
                 provenance={
                     "execution_id": execution_id,
@@ -577,7 +590,14 @@ class Store:
             Store.save(conn, recipe)
 
     def append_version(
-        self, conn, obj, content, *, operation_key=None, provenance=None
+        self,
+        conn,
+        obj,
+        content,
+        *,
+        operation_key=None,
+        provenance=None,
+        recipe_markdown=None,
     ):
         if operation_key:
             row = conn.execute(
@@ -619,29 +639,35 @@ class Store:
         )
         obj["latest_version_id"] = version["id"]
         if kind == "recipe":
-            self._write_recipe_file(obj["storage_path"], version)
+            self._write_recipe_file(obj["storage_path"], version, recipe_markdown)
             self.save(conn, obj)
         return version
 
-    def _write_recipe_file(self, storage_path, version):
+    def _write_recipe_file(self, storage_path, version, markdown=None):
         if (
             not re.fullmatch(r"[A-Za-z0-9_-]+", version["object_id"])
             or not re.fullmatch(r"[A-Za-z0-9_-]+", version["id"])
             or storage_path != f"recipes/{version['object_id']}"
         ):
             raise InvalidState("invalid Recipe version storage path")
-        content = version["content"]
-        markdown = (
-            f"# {content['title']}\n\n"
-            f"## Applicability\n\n{content['applicability']}\n\n"
-            f"## Instructions\n\n{content['instructions']}\n"
-        )
+        if markdown is None:
+            content = version["content"]
+            frontmatter = (
+                "---\n"
+                f"name: {json.dumps(content['name'], ensure_ascii=False)}\n"
+                f"description: {json.dumps(content['description'], ensure_ascii=False)}\n"
+                "---\n"
+            )
+            body = content["instructions"]
+            markdown = f"{frontmatter}\n{body}" if body else frontmatter
+            if not markdown.endswith("\n"):
+                markdown += "\n"
         directory = self.root / storage_path / version["id"]
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", dir=directory, delete=False
+                mode="w", encoding="utf-8", newline="", dir=directory, delete=False
             ) as stream:
                 temporary = Path(stream.name)
                 stream.write(markdown)
@@ -803,3 +829,11 @@ class Store:
 
     def has_pending(self, credentials=None):
         return self.pending_execution(credentials) is not None
+
+    def pending_count(self, credential):
+        with self.connect() as conn:
+            return conn.execute(
+                """SELECT COUNT(*) FROM executions WHERE status IN ('queued','running')
+                   AND json_extract(details, '$.runtime_config.model.api_key_env') = ?""",
+                (credential,),
+            ).fetchone()[0]

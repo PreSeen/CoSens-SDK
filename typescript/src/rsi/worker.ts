@@ -18,9 +18,7 @@ export async function drain(
   reservedSlot?: string,
 ) {
   const { store, config } = client;
-  const credentials = runtime
-    ? undefined
-    : Object.keys(process.env).filter((name) => process.env[name]);
+  const credentials = runtime ? undefined : client.credentialNames();
   const slot =
     reservedSlot ??
     store.reserve('worker', owner, config.max_executions, config.lease_seconds);
@@ -55,6 +53,7 @@ export async function drain(
           const emptied = store.tx(() => {
             // A detached worker can pick up an interrupted job once its lease expires.
             const pending = reservedSlot
+              || credentials
               ? store.has_pending(credentials)
               : store.db
                   .prepare(
@@ -130,9 +129,7 @@ async function waitForWorkerSlot(
   waitingSlot: string,
 ) {
   const { store, config } = client;
-  const credentials = Object.keys(process.env).filter(
-    (name) => process.env[name],
-  );
+  const credentials = client.credentialNames();
   let nextHeartbeat = 0;
   try {
     for (;;) {

@@ -86,6 +86,11 @@ class FileRef(Contract):
     description: str = ""
 
 
+class RecipeReference(Contract):
+    path: str = Field(min_length=1)
+    recipe_id: Annotated[str, Field(min_length=1)] | None = None
+
+
 class MaterialManifest(Contract):
     context_path: str
     files: list[FileRef] = Field(default_factory=list, max_length=1000)
@@ -210,10 +215,16 @@ class NamedAnalysis(Analysis):
     recipe_name: RecipeName
 
 
-class RecipeContent(Contract):
-    title: str = Field(min_length=1)
-    applicability: str = Field(min_length=1)
-    instructions: str = Field(min_length=1)
+RecipeText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
+class RecipeMetadata(Contract):
+    name: RecipeText
+    description: RecipeText
+
+
+class RecipeContent(RecipeMetadata):
+    instructions: str = Field(pattern=r"\S")
 
 
 class ObjectiveCheck(Contract):

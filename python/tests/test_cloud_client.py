@@ -6,7 +6,7 @@ import json
 import httpx
 import pytest
 
-from cosens.rsi import CloudRSIClient, Conflict, NotFound, RSIClient
+from cosens.rsi import CloudRSIClient, Conflict, InvalidState, NotFound, RSIClient
 
 
 def recording(responses=None):
@@ -37,9 +37,13 @@ def test_create_uploads_only_the_named_files(tmp_path):
     (tmp_path / "context.txt").write_text("[user] weekly report")
     (tmp_path / "sales.csv").write_text("region,amount\n")
     (tmp_path / "chart.png").write_bytes(b"\x89PNG\x00\xff")
+    (tmp_path / "RECIPE.md").write_text("Group sales by region.")
     (tmp_path / "unrelated.txt").write_text("stays local")
     transport, seen = recording()
     client = CloudRSIClient(api_key="k", base_url="https://rsi.example/api", transport=transport)
+    with pytest.raises(InvalidState, match="requires local mode"):
+        client.recipe_insert(tmp_path / "RECIPE.md")
+    assert seen == []
     client.execution_create(
         evidence={
             "context_path": str(tmp_path / "context.txt"),
@@ -49,6 +53,7 @@ def test_create_uploads_only_the_named_files(tmp_path):
             ],
         },
         idempotency_key="delivery-1",
+        recipe_reference={"path": str(tmp_path / "RECIPE.md"), "recipe_id": "recipe_1"},
     )
     request = seen[0]
     assert (request["method"], request["path"]) == ("POST", "/api/executions")
@@ -57,9 +62,17 @@ def test_create_uploads_only_the_named_files(tmp_path):
     body = request["body"]
     assert body["idempotency_key"] == "delivery-1"
     assert body["context"] == {"name": "context.txt", "content": "[user] weekly report", "encoding": "utf-8"}
-    assert [f["name"] for f in body["files"]] == ["sales.csv", "chart.png"]
+    assert [f["name"] for f in body["files"]] == ["sales.csv", "chart.png", "RECIPE.md"]
     assert body["files"][1]["encoding"] == "base64"
     assert base64.b64decode(body["files"][1]["content"]) == b"\x89PNG\x00\xff"
+    assert body["files"][2] == {
+        "name": "RECIPE.md",
+        "content": "Group sales by region.",
+        "encoding": "utf-8",
+        "role": "recipe",
+        "recipe_id": "recipe_1",
+    }
+    assert "recipe_reference" not in body
     assert "stays local" not in json.dumps(body)
 
 

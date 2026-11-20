@@ -1,18 +1,21 @@
 """Host-facing API for local RSI."""
 
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import (
+    ConfigDict,
     Field,
     StrictBool,
     StrictInt,
     StringConstraints,
     TypeAdapter,
-    field_validator,
 )
 
 from ._queue_client import RSIClient as QueueClient
-from .models import Contract
+from .model_headers import bind_model_headers
+from .models import Contract, RecipeReference
+from .recipe_file import read_recipe_file
 
 Text = Annotated[str, StringConstraints(min_length=1)]
 Positive = Annotated[StrictInt, Field(gt=0)]
@@ -20,8 +23,11 @@ Offset = Annotated[StrictInt, Field(ge=0)]
 
 
 class ModelEndpoint(Contract):
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     model: Text
     base_url: Text
+    headers: dict[str, str] = Field(default_factory=dict)
     auto_start: StrictBool
     max_tokens: Positive | None = None
     timeout: Annotated[float, Field(gt=0, le=3600)] | None = None
@@ -35,24 +41,6 @@ class File(Contract):
 class ExecutionEvidence(Contract):
     context_path: Text
     files: list[File] = Field(max_length=1000)
-
-
-class RecipeFile(Contract):
-    path: Text
-    role: Literal["recipe"]
-    recipe_id: Text | None = None
-
-
-class CreationEvidence(Contract):
-    context_path: Text
-    files: list[File | RecipeFile] = Field(max_length=1000)
-
-    @field_validator("files")
-    @classmethod
-    def single_recipe(cls, files):
-        if sum(file.role == "recipe" for file in files) > 1:
-            raise ValueError("evidence can contain at most one recipe file")
-        return files
 
 
 class Page(Contract):
@@ -104,20 +92,26 @@ class RSIClient:
 
     def __init__(self, *, mode=None, data_dir, config: dict | None = None, api_key=None, base_url=None):
         settings = ModelEndpoint.model_validate(config) if config is not None else None
+        binding = (
+            bind_model_headers(settings.base_url, settings.model, settings.headers)
+            if settings is not None else None
+        )
         self._queue = QueueClient(
             data_dir=data_dir,
             config={
                 "model": {
                     "model": settings.model,
                     "base_url": settings.base_url,
+                    "api_key_env": binding[0],
                     **settings.model_dump(
                         include={"max_tokens", "timeout"}, exclude_none=True
                     ),
                 }
             }
-            if settings
+            if settings and binding
             else None,
             auto_start=settings.auto_start if settings else True,
+            model_header_binding=binding,
         )
 
     @property
@@ -155,24 +149,16 @@ class RSIClient:
             ],
         }
 
-    def execution_create(self, *, evidence, idempotency_key):
+    def execution_create(self, *, evidence, idempotency_key, recipe_reference=None):
         submission_id = _TEXT.validate_python(idempotency_key)
-        submission = CreationEvidence.model_validate(evidence)
-        recipe_id = next(
-            (
-                file.recipe_id
-                for file in submission.files
-                if isinstance(file, RecipeFile)
-            ),
-            None,
-        )
+        submission = ExecutionEvidence.model_validate(evidence).model_dump()
+        recipe_id = None
+        if recipe_reference is not None:
+            reference = RecipeReference.model_validate(recipe_reference)
+            submission["files"].append({"path": reference.path, "role": "recipe"})
+            recipe_id = reference.recipe_id
         execution = self._queue.execution_create_with_evidence(
-            evidence={
-                "context_path": submission.context_path,
-                "files": [
-                    {"path": file.path, "role": file.role} for file in submission.files
-                ],
-            },
+            evidence=submission,
             confirmation_ref=submission_id,
             idempotency_key=submission_id,
             base={"kind": "recipe", "id": recipe_id} if recipe_id else None,
@@ -242,6 +228,10 @@ class RSIClient:
             }
             for row in self._queue.recipe_list_all(recipe_ids=recipe_ids)
         ]
+
+    def recipe_insert(self, path: str | Path):
+        content, markdown = read_recipe_file(path)
+        return self._queue.recipe_insert(content, markdown)
 
     def recipe_get(self, recipe_id, *, version):
         version = _TEXT.validate_python(version)

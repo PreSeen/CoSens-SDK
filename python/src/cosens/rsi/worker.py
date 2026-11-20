@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sqlite3
 import threading
 import time
@@ -41,11 +40,7 @@ def drain(client, *, runtime=None, owner=None, slot=None):
     from .runtime import ChatRuntime
 
     store, config = client.store, client.config
-    credentials = (
-        None
-        if runtime is not None
-        else [name for name, value in os.environ.items() if value]
-    )
+    credentials = None if runtime is not None else client.credential_names()
     owner = owner or uid("worker")
     detached = slot is not None
     slot = slot or store.reserve(
@@ -94,7 +89,7 @@ def drain(client, *, runtime=None, owner=None, slot=None):
                         # Detached workers can take over a running job after its lease expires.
                         pending = (
                             store.has_pending(credentials)
-                            if detached
+                            if detached or credentials is not None
                             else conn.execute(
                                 "SELECT 1 FROM executions WHERE status='queued' "
                                 "OR (status='running' AND lease_until<?) LIMIT 1",
@@ -154,7 +149,7 @@ def drain(client, *, runtime=None, owner=None, slot=None):
 
 def wait_for_worker_slot(client, owner, waiting_slot):
     store, config = client.store, client.config
-    credentials = [name for name, value in os.environ.items() if value]
+    credentials = client.credential_names()
     next_heartbeat = 0
     try:
         while True:

@@ -72,9 +72,15 @@ test('cloud create uploads only the named files', async () => {
   writeFileSync(join(dir, 'context.txt'), '[user] weekly report');
   writeFileSync(join(dir, 'sales.csv'), 'region,amount\n');
   writeFileSync(join(dir, 'chart.png'), Buffer.from([0x89, 0x50, 0x00, 0xff]));
+  writeFileSync(join(dir, 'RECIPE.md'), 'Group sales by region.');
   writeFileSync(join(dir, 'unrelated.txt'), 'stays local');
   await withService({}, async (base_url, seen) => {
     const client = new RSIClient({ mode: 'cloud', api_key: 'k', base_url });
+    await assert.rejects(
+      client.recipe_insert(join(dir, 'RECIPE.md')),
+      (error: unknown) => error instanceof RSIError && error.code === 'invalid_state',
+    );
+    assert.equal(seen.length, 0);
     await client.execution_create({
       evidence: {
         context_path: join(dir, 'context.txt'),
@@ -84,6 +90,7 @@ test('cloud create uploads only the named files', async () => {
         ],
       },
       idempotency_key: 'delivery-1',
+      recipe_reference: { path: join(dir, 'RECIPE.md'), recipe_id: 'recipe_1' },
     });
     const [request] = seen;
     assert.equal(request.method, 'POST');
@@ -97,9 +104,17 @@ test('cloud create uploads only the named files', async () => {
     });
     assert.deepEqual(
       request.body.files.map((file: { name: string }) => file.name),
-      ['sales.csv', 'chart.png'],
+      ['sales.csv', 'chart.png', 'RECIPE.md'],
     );
     assert.equal(request.body.files[1].encoding, 'base64');
+    assert.deepEqual(request.body.files[2], {
+      name: 'RECIPE.md',
+      content: 'Group sales by region.',
+      encoding: 'utf-8',
+      role: 'recipe',
+      recipe_id: 'recipe_1',
+    });
+    assert.equal('recipe_reference' in request.body, false);
     assert.equal(JSON.stringify(request.body).includes('stays local'), false);
   });
 });

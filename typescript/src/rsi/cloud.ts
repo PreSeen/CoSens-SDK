@@ -1,7 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { USER_AGENT } from './chat-completions.js';
-import { RSIError } from './models.js';
+import {
+  RecipeReferenceSchema,
+  RSIError,
+  type RecipeReference,
+} from './models.js';
 
 export const DEFAULT_CLOUD_BASE_URL = 'https://rsi.cosens.ai/api';
 /** The CoSens gateway accepts request bodies up to 10 MiB. */
@@ -11,7 +15,7 @@ export type CloudOptions = { api_key?: string; base_url?: string };
 
 type EvidenceInput = {
   context_path: string;
-  files: { path: string; role: string; recipe_id?: string }[];
+  files: { path: string; role: string }[];
 };
 
 type Upload = {
@@ -39,22 +43,26 @@ async function upload(
   return { name: basename(path), content, encoding, ...extra };
 }
 
-async function evidenceBody(evidence: EvidenceInput) {
+async function evidenceBody(
+  evidence: EvidenceInput,
+  recipeReference?: RecipeReference,
+) {
   if (!evidence?.context_path || !Array.isArray(evidence.files))
     throw new TypeError('evidence needs context_path and files');
   const files = [];
   for (const file of evidence.files) {
     if (!file?.path || !file.role)
       throw new TypeError('each evidence file needs path and role');
-    files.push(
-      await upload(file.path, {
-        role: file.role,
-        ...(file.recipe_id ? { recipe_id: file.recipe_id } : {}),
-      }),
-    );
+    if (file.role === 'recipe')
+      throw new TypeError(
+        'supply the Recipe using execution_create.recipe_reference',
+      );
+    files.push(await upload(file.path, { role: file.role }));
   }
-  if (files.filter((file) => file.role === 'recipe').length > 1)
-    throw new TypeError('evidence can contain at most one recipe file');
+  if (recipeReference !== undefined) {
+    const { path, recipe_id } = RecipeReferenceSchema.parse(recipeReference);
+    files.push(await upload(path, { role: 'recipe', recipe_id }));
+  }
   return { context: await upload(evidence.context_path), files };
 }
 
@@ -64,7 +72,7 @@ function segment(value: string) {
   return encodeURIComponent(value);
 }
 
-/** Cloud mode: the RSI atoms served by CoSens. Only files named in evidence are uploaded. */
+/** Cloud mode uploads the supplied evidence and optional Recipe reference to CoSens. */
 export class CloudClient {
   readonly #base: string;
   readonly #key: string;
@@ -129,13 +137,14 @@ export class CloudClient {
   async execution_create(request: {
     evidence: EvidenceInput;
     idempotency_key: string;
+    recipe_reference?: RecipeReference;
   }) {
     if (!request?.idempotency_key)
       throw new TypeError('idempotency_key must be a nonempty string');
     return this.request('POST', '/executions', {
       body: {
         idempotency_key: request.idempotency_key,
-        ...(await evidenceBody(request.evidence)),
+        ...(await evidenceBody(request.evidence, request.recipe_reference)),
       },
     });
   }
@@ -153,10 +162,6 @@ export class CloudClient {
 
   async execution_append_evidence(id: string, evidence: EvidenceInput) {
     const body = await evidenceBody(evidence);
-    if (body.files.some((file) => file.role === 'recipe'))
-      throw new TypeError(
-        'a recipe file can only be supplied when the execution is created',
-      );
     return this.request('POST', `/executions/${segment(id)}/evidence`, {
       body,
     });
@@ -196,6 +201,10 @@ export class CloudClient {
     return this.request('GET', '/recipes', {
       params: query ? { recipe_ids: query.recipe_ids.join(',') } : {},
     });
+  }
+
+  async recipe_insert(_path: string): Promise<never> {
+    throw new RSIError('invalid_state', 'recipe_insert requires local mode');
   }
 
   recipe_get(id: string, version: string) {

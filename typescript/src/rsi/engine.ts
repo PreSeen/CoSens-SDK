@@ -340,7 +340,7 @@ export class Engine {
         ),
       );
       if (typeof context.recipe_name === 'string')
-        content.title = context.recipe_name;
+        content.name = context.recipe_name;
       if (!literals.foundIn(Object.values(content))) break;
       if (attempt === 2)
         fail(
@@ -357,13 +357,13 @@ export class Engine {
         state.candidate?.recipe_id ?? current.recipe_id ?? base?.object_id;
       const recipe = recipeId
         ? this.store.get<Recipe>(recipeId, 'recipe')
-        : this.store.createRecipe(current.name ?? content.title);
+        : this.store.createRecipe(current.name ?? content.name);
       if (recipe.archived_at)
         fail('invalid_state', 'recipe was archived during learning');
-      const name = recipe.name ?? current.name ?? content.title;
+      const name = recipe.name ?? current.name ?? content.name;
       const version = this.store.append(
         { ...recipe, name },
-        { ...content, title: name },
+        { ...content, name },
         key,
         {
           execution_id: this.id,

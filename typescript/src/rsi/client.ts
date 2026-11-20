@@ -6,6 +6,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { authorizedTestFiles, snapshot } from './materials.js';
 import { restartExecution } from './progress.js';
 import { Store, uid, now, encode } from './store.js';
+import { isHeaderBinding } from './model-headers.js';
 import {
   readRecipeList,
   type RecipeListEntry,
@@ -49,21 +50,25 @@ export class RSIClient {
   readonly data_dir: string;
   readonly auto_start: boolean;
   private readonly node_executable: string;
+  private readonly model_header_binding?: { name: string; value: string };
   constructor({
     data_dir,
     config,
     auto_start = true,
     node_executable = process.execPath,
+    model_header_binding,
   }: {
     data_dir: string;
     config?: LocalConfigInput;
     auto_start?: boolean;
     node_executable?: string;
+    model_header_binding?: { name: string; value: string };
   }) {
     this.store = new Store(data_dir);
     this.data_dir = this.store.root;
     this.auto_start = auto_start;
     this.node_executable = node_executable;
+    this.model_header_binding = model_header_binding;
     try {
       this.suppliedConfig =
         config === undefined ? undefined : LocalConfigSchema.parse(config);
@@ -187,6 +192,20 @@ export class RSIClient {
     if (version && !include_content)
       delete (version as Partial<Version<C>>).content;
     return { ...obj, selected_version: version };
+  }
+  recipe_insert(content: RecipeContent, markdown: string) {
+    return this.store.tx(() => {
+      const recipe = this.store.createRecipe(content.name);
+      const version = this.store.append(
+        recipe,
+        content,
+        undefined,
+        { source: 'external' },
+        markdown,
+      );
+      this.store.publishRecipeVersion(recipe.id, version.id);
+      return { recipe_id: recipe.id, recipe_version_id: version.id };
+    });
   }
   recipe_get(
     id: string,
@@ -609,7 +628,9 @@ export class RSIClient {
               ? { test_request: parent.test_request }
               : {}),
           },
-          this.suppliedConfig ?? parent.runtime_config,
+          isHeaderBinding(parent.runtime_config.model.api_key_env)
+            ? parent.runtime_config
+            : this.suppliedConfig ?? parent.runtime_config,
         ).id;
         this.store.save({
           ...parent,
@@ -722,24 +743,22 @@ export class RSIClient {
     if (this.auto_start) await this.recover();
     return result;
   }
-  private check_runtime(config = this.config) {
-    if (!process.env[config.model.api_key_env])
-      fail(
-        'invalid_state',
-        'configured model credential environment variable is missing',
-      );
+  credentialNames() {
+    if (this.model_header_binding) return [this.model_header_binding.name];
+    const name = this.suppliedConfig?.model.api_key_env;
+    if (name && isHeaderBinding(name)) return process.env[name] ? [name] : [];
+    return Object.keys(process.env).filter((key) => !isHeaderBinding(key) && process.env[key]);
+  }
+  private check_runtime() {
+    if (!this.credentialNames().includes(this.config.model.api_key_env)) {
+      fail('invalid_state', 'Model headers are unavailable for this execution');
+    }
   }
   async recover(): Promise<{ started: number; scheduled?: true }> {
-    const first = this.store.pending_execution();
-    if (!first) return { started: 0 };
-    const credentials = Object.keys(process.env).filter(
-      (name) => process.env[name],
-    );
+    const credentials = this.credentialNames();
     const pending = this.store.pending_execution(credentials);
-    const config = LocalConfigSchema.parse(
-      JSON.parse((pending ?? first).config),
-    );
-    this.check_runtime(config);
+    if (!pending) return { started: 0 };
+    const config = LocalConfigSchema.parse(JSON.parse(pending.config));
     const worker = fileURLToPath(new URL('./worker.js', import.meta.url));
     if (!existsSync(worker))
       fail(
@@ -754,7 +773,7 @@ export class RSIClient {
           this.data_dir,
           owner,
           slot,
-          (pending ?? first).id,
+          pending.id,
         ];
         if (deferred) args.push('--wait-for-slot');
         const child = spawn(this.node_executable, args, {
@@ -762,6 +781,9 @@ export class RSIClient {
           stdio: 'ignore',
           env: {
             ...process.env,
+            ...(this.model_header_binding && {
+              [this.model_header_binding.name]: this.model_header_binding.value,
+            }),
             LANGSMITH_TRACING: 'false',
             LANGCHAIN_TRACING_V2: 'false',
             LANGCHAIN_VERBOSE: 'false',
@@ -778,8 +800,11 @@ export class RSIClient {
       }
     };
 
+    const workers = this.model_header_binding
+      ? Math.min(config.max_executions, this.store.pending_count(this.model_header_binding.name))
+      : config.max_executions;
     let started = 0;
-    for (let i = 0; i < config.max_executions; i++) {
+    for (let i = 0; i < workers; i++) {
       const owner = uid('worker');
       const slot = this.store.reserve(
         'worker',
@@ -797,7 +822,10 @@ export class RSIClient {
     const owner = uid('worker');
     const deferred = this.store.tx(() =>
       this.store.has_pending(credentials)
-        ? this.store.reserve('recovery', owner, 1, config.lease_seconds)
+        ? this.store.reserve(
+            this.model_header_binding ? `recovery:${this.model_header_binding.name}` : 'recovery',
+            owner, 1, config.lease_seconds,
+          )
         : null,
     );
     if (!deferred) return { started: 0 };

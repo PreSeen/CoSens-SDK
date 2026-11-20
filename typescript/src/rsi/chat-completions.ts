@@ -83,21 +83,20 @@ class ModelStatusError extends Error {
 
 export async function requestCompletion(
   config: LocalConfig['model'],
-  key: string,
+  headers: Record<string, string>,
   messages: Message[],
   tools: FunctionDefinition[],
 ): Promise<Assistant> {
   const base = config.base_url ?? 'https://api.openai.com/v1';
+  const requestHeaders = new Headers(headers);
+  if (!requestHeaders.has('content-type')) requestHeaders.set('content-type', 'application/json');
+  if (!requestHeaders.has('user-agent')) requestHeaders.set('user-agent', USER_AGENT);
   const signal = AbortSignal.timeout(Math.ceil(config.timeout * 1000));
   let response: Response;
   try {
     response = await fetch(base.replace(/\/+$/, '') + '/chat/completions', {
       method: 'POST',
-      headers: {
-        authorization: 'Bearer ' + key,
-        'content-type': 'application/json',
-        'user-agent': USER_AGENT,
-      },
+      headers: requestHeaders,
       body: JSON.stringify({
         model: config.model,
         ...(config.max_tokens === undefined

@@ -17,7 +17,7 @@ import type { AddressInfo } from 'node:net';
 import Database from 'better-sqlite3';
 import { RSIClient } from '../src/rsi/client.js';
 import { RSIClient as PublicRSIClient } from '../src/rsi/index.js';
-import type { Runtime } from '../src/rsi/models.js';
+import { RecipeSchema, type Runtime } from '../src/rsi/models.js';
 import { Engine } from '../src/rsi/engine.js';
 import { ChatRuntime } from '../src/rsi/runtime.js';
 import {
@@ -26,7 +26,7 @@ import {
   schema,
 } from '../src/rsi/store-schema.js';
 
-for (const version of [3, 4, 5]) {
+for (const version of [3, 4, 5, 6]) {
   test(`schema v${version} migration preserves the archived restoration target and the newer candidate`, async () => {
     const data_dir = mkdtempSync(join(tmpdir(), 'cosens-rsi-migrate-'));
     const recipeId = 'recipe_legacy';
@@ -48,6 +48,12 @@ for (const version of [3, 4, 5]) {
         INSERT INTO recipes VALUES ('recipe_unversioned', 2, 3, NULL, 5, 'Waiting Recipe',
           NULL, NULL, NULL, '{"description":"Description without a version"}');
         `);
+        } else if (version === 6) {
+          db.exec(schema);
+          db.exec(`
+          INSERT INTO recipes VALUES ('recipe_legacy', 1, 2, NULL, 'Legacy Recipe', 'recipes/recipe_legacy');
+          INSERT INTO recipes VALUES ('recipe_unversioned', 2, 3, NULL, 'Waiting Recipe', 'recipes/recipe_unversioned');
+          `);
         } else {
           db.exec(schema.replace(',\n    storage_path TEXT NOT NULL', ''));
           db.exec(`
@@ -67,7 +73,7 @@ for (const version of [3, 4, 5]) {
             FROM recipes r LEFT JOIN recipe_api_metadata m ON m.recipe_id = r.id;
         `);
         }
-        if (version === 5) db.exec(recipeProjection);
+        if (version >= 5) db.exec(recipeProjection);
         db.pragma(`user_version = ${version}`);
         const insert = db.prepare(
           'INSERT INTO versions (id,recipe_id,number,data) VALUES (?,?,?,?)',
@@ -113,11 +119,16 @@ for (const version of [3, 4, 5]) {
               join(data_dir, recipe.storage_path, id, 'RECIPE.md'),
               'utf8',
             ),
-            '# Legacy Recipe\n\n## Applicability\n\nFixture\n\n## Instructions\n\nProduce output\n',
+            '---\nname: "Legacy Recipe"\ndescription: "Fixture"\n---\n\nProduce output\n',
           );
         assert.equal('revision' in recipe, false);
         assert.equal('description' in recipe, false);
         assert.equal(recipe.selected_version?.id, 'version_second');
+        assert.deepEqual(recipe.selected_version?.content, {
+          name: 'Legacy Recipe',
+          description: 'Fixture',
+          instructions: 'Produce output',
+        });
         const unversioned = (await host.recipe_get('recipe_unversioned', 'latest'));
         assert.equal('revision' in unversioned, false);
         assert.equal('description' in unversioned, false);
@@ -159,7 +170,7 @@ for (const version of [3, 4, 5]) {
               .all(),
             ['available', 'candidate'],
           );
-          assert.equal(migrated.pragma('user_version', { simple: true }), 6);
+          assert.equal(migrated.pragma('user_version', { simple: true }), 7);
           assert.equal(
             migrated
               .prepare(
@@ -181,6 +192,108 @@ for (const version of [3, 4, 5]) {
   });
 }
 
+test('recipe_insert requires Skill metadata and creates a fresh available Recipe', async () => {
+  const data_dir = mkdtempSync(join(tmpdir(), 'cosens-rsi-import-'));
+  const client = new PublicRSIClient({ data_dir, config: null });
+  try {
+    const path = join(data_dir, 'SKILL.md');
+    const metadata = {
+      name: 'order-export',
+      description: 'Export orders: "CSV"\nUse when requested.',
+    };
+    const instructions = '    existing Markdown code block\r\n';
+    const generated = { ...metadata, instructions };
+    for (const field of ['name', 'description'] as const) {
+      const missing: Partial<typeof generated> = { ...generated };
+      delete missing[field];
+      assert.equal(RecipeSchema.safeParse(missing).success, false);
+      const blank = { ...generated, [field]: ' \t ' };
+      assert.equal(RecipeSchema.safeParse(blank).success, false);
+    }
+    for (const [source, error] of [
+      ['# Recipe\n\nNo frontmatter', /delimited by ---/],
+      ['---\nname: order-export\ndescription: Export orders\n', /delimited by ---/],
+      ['---\nname: [broken\ndescription: Export orders\n---', /valid YAML mapping/],
+      ['---\nname: first\nname: duplicate\ndescription: Export orders\n---', /valid YAML mapping/],
+      ['---\nname: order-export\n---', /name and description/],
+      ['---\nname: " "\ndescription: Export orders\n---', /name and description/],
+      ['---\nname: order-export\ndescription: 42\n---', /name and description/],
+    ] as const) {
+      writeFileSync(path, source);
+      await assert.rejects(client.recipe_insert(path), error);
+    }
+    writeFileSync(path, Buffer.from([0x80]));
+    await assert.rejects(client.recipe_insert(path), /readable UTF-8 Markdown file/);
+    await assert.rejects(client.recipe_insert(data_dir), /readable UTF-8 Markdown file/);
+    assert.deepEqual(await client.recipe_list(), []);
+
+    const source = [
+      '\uFEFF---',
+      'name: order-export',
+      'description: |-',
+      '  Export orders: "CSV"',
+      '  Use when requested.',
+      'metadata:',
+      '  version: "1.0"',
+      '---',
+      '',
+    ].join('\r\n') + '\r\n' + instructions;
+    writeFileSync(path, source);
+    const firstIds = await client.recipe_insert(path);
+    const secondIds = await client.recipe_insert(path);
+    assert.notEqual(firstIds.recipe_id, secondIds.recipe_id);
+    assert.notEqual(firstIds.recipe_version_id, secondIds.recipe_version_id);
+    const first = await client.recipe_get(firstIds.recipe_id, firstIds.recipe_version_id);
+    const version = first.selected_version!;
+    assert.equal(version.id, firstIds.recipe_version_id);
+    assert.equal(version.number, 1);
+    assert.deepEqual(version.content, generated);
+    assert.deepEqual(version.provenance, { source: 'external' });
+    assert.equal(first.active_version_id, version.id);
+    assert.deepEqual(await client.recipe_get(first.id, 'active'), first);
+    assert.deepEqual(await client.execution_list(), []);
+    const [row] = await client.recipe_list({ recipe_ids: [first.id] });
+    assert.equal(row.status, 'active');
+    assert.deepEqual(row.execution_ids, []);
+    const file = readFileSync(
+      join(data_dir, first.storage_path, version.id, 'RECIPE.md'),
+      'utf8',
+    );
+    assert.equal(file, source);
+
+    writeFileSync(path, '---\nname: minimal\ndescription: Metadata only\n---');
+    const minimal = await client.recipe_insert(path);
+    const detail = await client.recipe_get(minimal.recipe_id, minimal.recipe_version_id);
+    assert.equal(detail.selected_version?.content.instructions, '');
+  } finally {
+    client.close();
+    rmSync(data_dir, { recursive: true, force: true });
+  }
+});
+
+test('recover leaves pending work for the Client with matching headers', async () => {
+  const data_dir = mkdtempSync(join(tmpdir(), 'cosens-rsi-header-bind-'));
+  const config = { model: 'fixture', base_url: 'http://localhost:9/v1', auto_start: false };
+  const client = new PublicRSIClient({ data_dir, config: { ...config, headers: { 'X-Api-Key': 'a' } } });
+  const other = new PublicRSIClient({ data_dir, config: { ...config, headers: { 'X-Api-Key': 'b' } } });
+  const readOnly = new PublicRSIClient({ data_dir, config: null });
+  try {
+    const path = join(data_dir, 'context.md');
+    writeFileSync(path, 'Task transcript');
+    const execution = await client.execution_create({
+      evidence: { context_path: path, files: [] }, idempotency_key: 'example',
+    });
+    assert.deepEqual(await other.recover(), { started: 0 });
+    assert.deepEqual(await readOnly.recover(), { started: 0 });
+    assert.equal((await client.execution_get(execution.id)).status, 'queued');
+  } finally {
+    client.close();
+    other.close();
+    readOnly.close();
+    rmSync(data_dir, { recursive: true, force: true });
+  }
+});
+
 test('independent Node hooks enqueue work that persists and passes a file test after the hooks exit', async (t) => {
   const directory = mkdtempSync(join(tmpdir(), 'cosens-rsi-ts-'));
   const data_dir = join(directory, 'rsi');
@@ -196,6 +309,15 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       const chunks = [];
       for await (const chunk of req) chunks.push(chunk);
       const input = JSON.parse(Buffer.concat(chunks).toString());
+      const key = input.model.slice(-1);
+      if (key === 'a') {
+        assert.equal(req.headers.authorization, 'Bearer fixture-gateway-a');
+        assert.equal(req.headers['x-friday-auth-type'], 'access_token');
+        assert.equal(req.headers['x-api-key'], undefined);
+      } else if (key === 'b' || key === 'c') {
+        assert.equal(req.headers['x-api-key'], 'fixture-provider-' + key);
+        assert.equal(req.headers.authorization, undefined);
+      }
       const { context, evidence_catalog } = JSON.parse(
         input.messages.find((m: { role: string }) => m.role === 'user').content,
       );
@@ -250,7 +372,16 @@ test('independent Node hooks enqueue work that persists and passes a file test a
               },
             ]
           : [];
-      if (tools.has('FeedbackExtraction') && afterTool) {
+      const longAnalysis = tools.has('Analysis') && evidence.size > 4 * 1024 * 1024;
+      const analysisPages = longAnalysis ? input.messages
+        .filter((message: { role: string }) => message.role === 'tool')
+        .map((message: { content: string }) => JSON.parse(message.content)) : [];
+      if (longAnalysis && analysisPages.length < 3) {
+        const args = { locator: evidence.locator, limit: 512, offset: 0, query: undefined as string | undefined };
+        if (analysisPages.length === 1) args.offset = analysisPages[0].next_offset;
+        if (analysisPages.length === 2) args.query = 'TAIL_FINAL_RULE';
+        call = { name: 'read_evidence', args };
+      } else if (tools.has('FeedbackExtraction') && afterTool) {
         assert.deepEqual(
           evidence_catalog.map((entry: { role: string }) => entry.role),
           ['context', 'feedback'],
@@ -296,6 +427,13 @@ test('independent Node hooks enqueue work that persists and passes a file test a
             }
           : { name: 'read_evidence', args: { locator: evidence.locator } };
       } else if (tools.has('Analysis')) {
+        if (longAnalysis) {
+          assert.equal(analysisPages[0].text_omitted, true);
+          assert.equal(analysisPages[1].offset, analysisPages[0].next_offset);
+          assert.ok(analysisPages[2].match_offset > 4 * 1024 * 1024);
+          assert.match(analysisPages[2].text, /TAIL_FINAL_RULE/);
+          assert.equal(analysisPages[2].end_offset, analysisPages[2].total_chars);
+        }
         assert.ok(
           evidence_catalog.some(
             (entry: { role: string }) => entry.role === 'reference',
@@ -343,11 +481,15 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         };
       } else if (tools.has('RecipeContent')) {
         assert.deepEqual(context.analysis.attribution, attribution);
+        const corrected = input.messages.some(
+          (m: { role: string; content: string }) =>
+            m.role === 'tool' && m.content.includes('matching its schema'),
+        );
         call = {
           name: 'RecipeContent',
           args: {
-            title: 'Write answer',
-            applicability: 'Text output',
+            name: 'Write answer',
+            ...(corrected ? { description: 'Text output' } : {}),
             instructions: 'Write 42 to answer.txt',
           },
         };
@@ -446,6 +588,8 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       path,
       'Produce answer.txt with 42. The user corrected the prior output from 24 to 42.',
     );
+    const longPath = join(directory, 'long-context.jsonl');
+    writeFileSync(longPath, 'session trace\n'.repeat(330_000) + 'TAIL_FINAL_RULE: Write only 42.\n');
     const feedbackPath = join(directory, 'feedback.md');
     writeFileSync(feedbackPath, 'User: Put only the answer in the file.');
     const currentPath = join(directory, 'current.txt');
@@ -469,7 +613,10 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       import { RSIClient } from 'cosens-sdk/rsi';
       const [data_dir, evidenceText, key, configText] = process.argv.slice(1);
       const { model, base_url } = JSON.parse(configText).model;
-      const client = new RSIClient({ data_dir, config: { model: model + '-' + key, base_url, auto_start: true } });
+      const headers = key === 'a'
+        ? { Authorization: 'Bearer fixture-gateway-a', 'X-Friday-Auth-Type': 'access_token' }
+        : { 'X-Api-Key': 'fixture-provider-' + key };
+      const client = new RSIClient({ data_dir, config: { model: model + '-' + key, base_url, headers, auto_start: true } });
       const execution = await client.execution_create({
         evidence: JSON.parse(evidenceText), idempotency_key: key,
       });
@@ -512,7 +659,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         runHook(script, [
           data_dir,
           JSON.stringify({
-            context_path: path,
+            context_path: key === 'c' ? longPath : path,
             files: [
               { path: feedbackPath, role: 'feedback' },
               { path: referencePath, role: 'reference' },
@@ -538,6 +685,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         run.runtime_config.model.model,
         'fixture-' + ['a', 'b', 'c'][ids.indexOf(id)],
       );
+      assert.doesNotMatch(JSON.stringify(run.runtime_config), /fixture-(?:gateway|provider)/);
       assert.equal(
         JSON.parse(readFileSync(run.test_results[0].trace_path!, 'utf8')).model,
         run.runtime_config.model.model,
@@ -648,7 +796,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       }
     }
     assert.equal(peak, 2);
-    assert.equal(requests, 36);
+    assert.equal(requests, 41); // Includes two more pages for the long context.
     const db = new Database(join(data_dir, 'rsi-ts.sqlite3'), {
       readonly: true,
     });
@@ -925,8 +1073,8 @@ test('all clarification answers create one continuation and only the corrected v
           assert.ok(!('test_task' in (context.policy as object)));
           if (!context.portability_feedback) {
             return {
-              title: 'Number format',
-              applicability: 'Format a number',
+              name: 'Number format',
+              description: 'Format a number',
               instructions: 'Read old-orders.csv as a worked example.',
             };
           }
@@ -961,8 +1109,8 @@ test('all clarification answers create one continuation and only the corrected v
             assert.equal(client.execution_list().length, 2);
           }
           return {
-            title: 'Number format',
-            applicability: 'Format a number',
+            name: 'Number format',
+            description: 'Format a number',
             instructions:
               generationCalls === 1 ? 'Write decimal' : 'Write hexadecimal',
           };
@@ -1032,7 +1180,7 @@ test('all clarification answers create one continuation and only the corrected v
     assert.equal(result.name, 'Format numbers');
     const recipe = client.recipe_get(result.recipe_id!);
     assert.equal(recipe.name, result.name);
-    assert.equal(recipe.selected_version?.content.title, result.name);
+    assert.equal(recipe.selected_version?.content.name, result.name);
     assert.equal(recipe.selected_version?.number, 1);
   } finally {
     client.close();
@@ -1085,8 +1233,8 @@ test('an expired worker lease resumes the graph without regenerating the candida
       async generate() {
         generated++;
         return {
-          title: 'Write answer',
-          applicability: 'Text output',
+          name: 'Write answer',
+          description: 'Text output',
           instructions: 'Write answer.txt',
         };
       },
@@ -1147,31 +1295,28 @@ test('an expired worker lease resumes the graph without regenerating the candida
       const recipePath = join(directory, 'prior-recipe.md');
       const recipeText = 'Write the response as a plain text file.';
       writeFileSync(recipePath, recipeText);
-      const recipeFile = {
+      const recipeReference = {
         path: recipePath,
-        role: 'recipe' as const,
         recipe_id: after.recipe_id!,
       };
       const submission = {
-        evidence: { context_path: path, files: [recipeFile] },
+        evidence: { context_path: path, files: [] },
         idempotency_key: 'follow-up',
+        recipe_reference: recipeReference,
       };
       await assert.rejects(
         host.execution_create({
           ...submission,
-          evidence: {
-            context_path: path,
-            files: [{ ...recipeFile, recipe_id: after.id }],
-          },
+          recipe_reference: { ...recipeReference, recipe_id: after.id },
         }),
         /recipe not found/,
       );
       await assert.rejects(
         host.execution_create({
           ...submission,
-          evidence: { context_path: path, files: [recipeFile, recipeFile] },
+          recipe_reference: { path: '' },
         }),
-        /at most one recipe file/,
+        /recipe_reference/,
       );
       const followUp = await host.execution_create(submission);
       assert.equal(followUp.recipe_id, after.recipe_id);
@@ -1251,7 +1396,7 @@ test('an expired worker lease resumes the graph without regenerating the candida
           join(host.data_dir, recipe.storage_path, id, 'RECIPE.md'),
           'utf8',
         );
-        assert.match(file, /## Instructions\n\n/);
+        assert.match(file, /^---\nname: .+\ndescription: .+\n---\n\n/);
       }
       assert.equal((await host.execution_create(submission)).id, followUp.id);
       assert.equal(
@@ -1338,8 +1483,8 @@ test('recipe_list shows first-time learning and preserves the usable version dur
     }
 
     const content = {
-      title: 'Output',
-      applicability: 'Sample',
+      name: 'Output',
+      description: 'Sample',
       instructions: 'Write the output',
     };
     for (const method of [
@@ -1461,17 +1606,9 @@ test('recipe_list shows first-time learning and preserves the usable version dur
     });
     try {
       const submission = {
-        evidence: {
-          context_path,
-          files: [
-            {
-              path: context_path,
-              role: 'recipe' as const,
-              recipe_id: recipe.id,
-            },
-          ],
-        },
+        evidence: { context_path, files: [] },
         idempotency_key: 'revise-available-version',
+        recipe_reference: { path: context_path, recipe_id: recipe.id },
       };
       const revision = await host.execution_create(submission);
       assert.equal(revision.recipe_id, recipe.id);

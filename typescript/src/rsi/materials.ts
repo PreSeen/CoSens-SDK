@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  copyFileSync,
+  openSync,
+  closeSync,
+  readSync,
   mkdirSync,
   readFileSync,
   realpathSync,
@@ -24,6 +28,22 @@ import {
 import { uid, encode } from './store.js';
 export const digest = (data: Uint8Array) =>
   createHash('sha256').update(data).digest('hex');
+
+function measureFile(path: string) {
+  const hash = createHash('sha256');
+  const buffer = Buffer.alloc(64 * 1024);
+  const fd = openSync(path, 'r');
+  let size = 0;
+  try {
+    for (let count; (count = readSync(fd, buffer)) > 0;) {
+      hash.update(buffer.subarray(0, count));
+      size += count;
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return { sha256: hash.digest('hex'), size };
+}
 
 export function authorizedTestFiles(
   files: EvidenceFile[],
@@ -73,7 +93,16 @@ export function snapshot(
     for (const [index, ref] of refs.entries()) {
       const path = realpathSync(ref.path);
       const info = statSync(path);
-      if (!info.isFile() || info.size > config.max_file_bytes)
+      if (!info.isFile()) fail('invalid_argument', 'material must be a regular file');
+      const target = join(directory, String(index) + extname(path).toLowerCase());
+      const file = { ...ref, path, snapshot: target, locator: `${id}/${index}` };
+      if (ref.role === 'context') {
+        copyFileSync(path, target);
+        chmodSync(target, 0o400);
+        files.push({ ...file, ...measureFile(target) });
+        continue;
+      }
+      if (info.size > config.max_file_bytes)
         fail(
           'invalid_argument',
           'material must be a regular file within max_file_bytes',
@@ -85,17 +114,10 @@ export function snapshot(
         total > config.max_bundle_bytes
       )
         fail('invalid_argument', 'material bundle exceeds size limit');
-      const target = join(
-        directory,
-        String(index) + extname(path).toLowerCase(),
-      );
       writeFileSync(target, data, { mode: 0o400 });
       chmodSync(target, 0o400);
       files.push({
-        ...ref,
-        path,
-        snapshot: target,
-        locator: `${id}/${index}`,
+        ...file,
         sha256: digest(data),
         size: data.length,
       });
@@ -112,7 +134,7 @@ export function snapshot(
     throw error;
   }
 }
-export function read_snapshot(file: EvidenceFile) {
+export function read_snapshot_text(file: EvidenceFile): string {
   const data = readFileSync(file.snapshot);
   if (digest(data) !== file.sha256)
     fail('invalid_argument', 'evidence snapshot integrity check failed');
@@ -156,11 +178,41 @@ export function read_snapshot(file: EvidenceFile) {
     if (text.includes('\0'))
       fail('invalid_argument', 'binary evidence requires a text extraction');
   }
+  return text;
+}
+
+export function read_snapshot(file: EvidenceFile) {
+  const text = read_snapshot_text(file);
   return {
     text: text.slice(0, 100000),
     truncated: text.length > 100000,
     sha256: file.sha256,
     locator: file.locator,
+  };
+}
+
+export const EVIDENCE_PAGE_CHARS = 8192;
+
+export function evidencePage(text: string, offset: number, limit: number, query?: string) {
+  const total_chars = text.length;
+  offset = Math.min(offset, total_chars);
+  const match = query === undefined ? null : text.indexOf(query, offset);
+  if (match === -1) {
+    return { text: '', offset, end_offset: offset, next_offset: null, total_chars, match_offset: null, truncated: offset < total_chars };
+  }
+  if (match !== null) offset = Math.max(offset, match - Math.min(512, Math.floor(limit / 4)));
+  if (/[\uDC00-\uDFFF]/u.test(text[offset] ?? '')) offset--;
+  let end = Math.min(offset + limit, total_chars);
+  if (/[\uDC00-\uDFFF]/u.test(text[end] ?? '')) end++;
+  const next = match === null ? end : match + query!.length;
+  return {
+    text: text.slice(offset, end),
+    offset,
+    end_offset: end,
+    next_offset: next < total_chars ? next : null,
+    total_chars,
+    match_offset: match,
+    truncated: offset > 0 || end < total_chars,
   };
 }
 export function atomic_json(path: string, value: unknown) {

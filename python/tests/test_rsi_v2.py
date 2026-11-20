@@ -7,13 +7,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from pydantic import ValidationError
 
 pytest.importorskip("langgraph")
 
 from cosens.rsi import Conflict, InvalidState, NotFound
 from cosens.rsi._queue_client import RSIClient
 from cosens.rsi.materials import atomic_json, read_snapshot
-from cosens.rsi.models import LeaseLost, RubricsContent
+from cosens.rsi.models import LeaseLost, RecipeContent, RubricsContent
 from cosens.rsi.store_schema import LEGACY_RECIPES, RECIPE_PROJECTION, SCHEMA
 
 
@@ -130,8 +131,8 @@ class FileRuntime:
         if self.fail:
             raise RuntimeError("secret-upstream-key-must-not-be-stored")
         result = {
-            "title": "Answer writer",
-            "applicability": "Write a fixed task answer",
+            "name": "Answer writer",
+            "description": "Write a fixed task answer",
             "instructions": "Write 42 into answer.txt",
         }
         atomic_json(trace_path, result)
@@ -402,7 +403,7 @@ def test_version_availability_archive_and_restore(client, tmp_path):
     assert recipe["storage_path"] == f"recipes/{recipe_id}"
     for exported_id in (version_id, new_id):
         path = reopened.data_dir / recipe["storage_path"] / exported_id / "RECIPE.md"
-        assert "## Instructions\n\nWrite 42" in path.read_text(encoding="utf-8")
+        assert "---\n\nWrite 42" in path.read_text(encoding="utf-8")
 
     assert reopened.recipe_get(recipe_id, version=version_id)["selected_version"][
         "archived"
@@ -417,7 +418,81 @@ def test_version_availability_archive_and_restore(client, tmp_path):
         )
 
 
-@pytest.mark.parametrize("schema_version", [3, 4, 5])
+def test_recipe_insert_requires_skill_metadata_and_creates_available_version(tmp_path):
+    from cosens.rsi import RSIClient as PublicClient
+
+    host = PublicClient(data_dir=tmp_path)
+    path = tmp_path / "SKILL.md"
+    metadata = {
+        "name": "order-export",
+        "description": 'Export orders: "CSV"\nUse when requested.',
+    }
+    instructions = "    existing Markdown code block\r\n"
+    generated = {**metadata, "instructions": instructions}
+    for field in ("name", "description"):
+        missing = {key: value for key, value in generated.items() if key != field}
+        with pytest.raises(ValidationError):
+            RecipeContent.model_validate(missing)
+        with pytest.raises(ValidationError):
+            RecipeContent.model_validate({**generated, field: " \t "})
+    for source, error in (
+        ("# Recipe\n\nNo frontmatter", "delimited by ---"),
+        ("---\nname: order-export\ndescription: Export orders\n", "delimited by ---"),
+        ("---\nname: [broken\ndescription: Export orders\n---", "valid YAML mapping"),
+        (
+            "---\nname: first\nname: duplicate\ndescription: Export orders\n---",
+            "valid YAML mapping",
+        ),
+        ("---\nname: order-export\n---", "name and description"),
+        ('---\nname: " "\ndescription: Export orders\n---', "name and description"),
+        ("---\nname: order-export\ndescription: 42\n---", "name and description"),
+    ):
+        path.write_text(source, encoding="utf-8")
+        with pytest.raises(ValueError, match=error):
+            host.recipe_insert(path)
+    path.write_bytes(b"\x80")
+    with pytest.raises(ValueError, match="readable UTF-8 Markdown file"):
+        host.recipe_insert(path)
+    with pytest.raises(ValueError, match="readable UTF-8 Markdown file"):
+        host.recipe_insert(tmp_path)
+    assert host.recipe_list() == []
+
+    source = (
+        "\ufeff---\r\nname: order-export\r\ndescription: |-\r\n"
+        '  Export orders: "CSV"\r\n  Use when requested.\r\n'
+        'metadata:\r\n  version: "1.0"\r\n---\r\n\r\n' + instructions
+    )
+    path.write_bytes(source.encode("utf-8"))
+    first_ids = host.recipe_insert(path)
+    second_ids = host.recipe_insert(str(path))
+    assert first_ids["recipe_id"] != second_ids["recipe_id"]
+    assert first_ids["recipe_version_id"] != second_ids["recipe_version_id"]
+    first = host.recipe_get(
+        first_ids["recipe_id"], version=first_ids["recipe_version_id"]
+    )
+    version = first["selected_version"]
+    assert version["id"] == first_ids["recipe_version_id"]
+    assert version["number"] == 1
+    assert version["content"] == generated
+    assert version["provenance"] == {"source": "external"}
+    assert first["active_version_id"] == version["id"]
+    assert host.recipe_get(first["id"], version="active") == first
+    assert host.execution_list() == []
+    [row] = host.recipe_list(query={"recipe_ids": [first["id"]]})
+    assert row["status"] == "active"
+    assert row["execution_ids"] == []
+    stored = tmp_path / first["storage_path"] / version["id"] / "RECIPE.md"
+    assert stored.read_bytes() == source.encode("utf-8")
+
+    path.write_text(
+        "---\nname: minimal\ndescription: Metadata only\n---", encoding="utf-8"
+    )
+    minimal = host.recipe_insert(path)
+    detail = host.recipe_get(minimal["recipe_id"], version=minimal["recipe_version_id"])
+    assert detail["selected_version"]["content"]["instructions"] == ""
+
+
+@pytest.mark.parametrize("schema_version", [3, 4, 5, 6])
 def test_recipe_migration_preserves_archived_target_and_candidate(
     tmp_path, schema_version
 ):
@@ -444,6 +519,14 @@ def test_recipe_migration_preserves_archived_target_and_candidate(
                   NULL, NULL, NULL, '{"description":"Description without a version"}');
                 """
             )
+        elif schema_version == 6:
+            conn.executescript(
+                SCHEMA
+                + """
+                INSERT INTO recipes VALUES ('recipe_legacy', 1, 2, NULL, 'Legacy Recipe', 'recipes/recipe_legacy');
+                INSERT INTO recipes VALUES ('recipe_unversioned', 2, 3, NULL, 'Waiting Recipe', 'recipes/recipe_unversioned');
+                """
+            )
         else:
             conn.executescript(
                 SCHEMA.replace(",\n    storage_path TEXT NOT NULL", "")
@@ -465,7 +548,7 @@ def test_recipe_migration_preserves_archived_target_and_candidate(
                     FROM recipes r LEFT JOIN recipe_api_metadata m ON m.recipe_id = r.id;
                 """
             )
-        if schema_version == 5:
+        if schema_version >= 5:
             conn.executescript(RECIPE_PROJECTION)
         conn.execute(f"PRAGMA user_version = {schema_version}")
         for version_id, number in (("version_first", 1), ("version_second", 2)):
@@ -502,11 +585,16 @@ def test_recipe_migration_preserves_archived_target_and_candidate(
     for version_id in ("version_first", "version_second"):
         path = tmp_path / recipe["storage_path"] / version_id / "RECIPE.md"
         assert path.read_text(encoding="utf-8") == (
-            "# Legacy Recipe\n\n## Applicability\n\nFixture\n\n## Instructions\n\nProduce output\n"
+            '---\nname: "Legacy Recipe"\ndescription: "Fixture"\n---\n\nProduce output\n'
         )
     assert "revision" not in recipe
     assert "description" not in recipe
     assert recipe["selected_version"]["id"] == "version_second"
+    assert recipe["selected_version"]["content"] == {
+        "name": "Legacy Recipe",
+        "description": "Fixture",
+        "instructions": "Produce output",
+    }
     unversioned = host.recipe_get("recipe_unversioned", version="latest")
     assert "revision" not in unversioned
     assert "description" not in unversioned
@@ -537,7 +625,7 @@ def test_recipe_migration_preserves_archived_target_and_candidate(
             "available",
             "candidate",
         ]
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 7
         assert (
             migrated.execute(
                 "SELECT name FROM sqlite_schema WHERE name='recipe_api_metadata'"
@@ -603,7 +691,7 @@ def test_uncovered_criteria_excluded_from_scoring_and_iteration(
             record_progress()
             assert context["recipe_name"] == "Format signed answers"
             result = super().generate(context, files, trace_path)
-            return {**result, "title": f"Alternative title {self.generation_count}"}
+            return {**result, "name": f"Alternative name {self.generation_count}"}
 
         def execute(self, *args):
             record_progress()
@@ -643,7 +731,7 @@ def test_uncovered_criteria_excluded_from_scoring_and_iteration(
         version = client.recipe_get(recipe_id, version_id=test["version_id"])[
             "selected_version"
         ]
-        assert version["content"]["title"] == result["name"]
+        assert version["content"]["name"] == result["name"]
         assert test["score"] == covered_score
         assert test["scores"][1]["status"] == "unverified"
         assert test["scores"][1]["score"] is None
@@ -774,7 +862,7 @@ def test_last_answer_during_generation_creates_one_child(client, tmp_path):
     assert runtime.generation_count == 2
     recipe = client.recipe_get(final["recipe_id"])
     assert final["name"] == recipe["name"] == "Format numbers"
-    assert recipe["selected_version"]["content"]["title"] == final["name"]
+    assert recipe["selected_version"]["content"]["name"] == final["name"]
     assert len(final["test_results"]) == 1
     assert final["result"]["published"]
 
@@ -828,8 +916,8 @@ def test_recipe_test_uses_existing_execution(client, tmp_path, leaked_from):
         "recipe",
         name="Existing",
         content={
-            "title": "Write",
-            "applicability": "test",
+            "name": "Write",
+            "description": "test",
             "instructions": {
                 "recipe": "copy A-12",
                 "filename_in_recipe": "read history.csv",
@@ -1024,7 +1112,7 @@ def test_concurrent_revisions_cannot_overwrite_active_pointer(client, tmp_path):
         client,
         "recipe",
         name="Base",
-        content={"title": "Base", "applicability": "task", "instructions": "Original"},
+        content={"name": "Base", "description": "task", "instructions": "Original"},
     )
     m = material(client, tmp_path)
     runs = [
@@ -1335,27 +1423,31 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
     recipe_path = tmp_path / "prior-recipe.md"
     recipe_text = "Write the response as a plain text file."
     recipe_path.write_text(recipe_text)
-    recipe_file = {
+    recipe_reference = {
         "path": str(recipe_path),
-        "role": "recipe",
         "recipe_id": recipe["id"],
     }
     submission = {
-        "evidence": {**manifest, "files": [*manifest["files"], recipe_file]},
+        "evidence": manifest,
         "idempotency_key": "same-delivery-revision",
+        "recipe_reference": recipe_reference,
     }
     with pytest.raises(NotFound, match="recipe not found"):
         client.execution_create(
-            evidence={
-                **manifest,
-                "files": [{**recipe_file, "recipe_id": finished["id"]}],
-            },
-            idempotency_key=submission["idempotency_key"],
+            **{
+                **submission,
+                "recipe_reference": {**recipe_reference, "recipe_id": finished["id"]},
+            }
         )
-    with pytest.raises(ValueError, match="at most one recipe file"):
+    with pytest.raises(ValueError, match="recipe"):
         client.execution_create(
-            evidence={**manifest, "files": [recipe_file, recipe_file]},
-            idempotency_key=submission["idempotency_key"],
+            **{
+                **submission,
+                "evidence": {
+                    **manifest,
+                    "files": [{"path": str(recipe_path), "role": "recipe"}],
+                },
+            }
         )
     with queue.store.transaction() as conn:
         stored_recipe = queue.store.get_in(conn, recipe["id"], "recipe")

@@ -80,6 +80,11 @@ export const ManifestSchema = z.strictObject({
   feedback_context: z.record(z.string(), z.unknown()).nullable().optional(),
 });
 export type MaterialManifest = z.input<typeof ManifestSchema>;
+export const RecipeReferenceSchema = z.strictObject({
+  path: text,
+  recipe_id: text.optional(),
+});
+export type RecipeReference = z.input<typeof RecipeReferenceSchema>;
 export const EvidenceSchema = z
   .strictObject({
     material_id: z.string().regex(/^material_[0-9a-f]{32}$/),
@@ -183,10 +188,14 @@ export const NamedAnalysisSchema = AnalysisSchema.safeExtend({
 export type Analysis = z.output<typeof AnalysisSchema> & {
   feedback?: z.output<typeof FeedbackExtractionSchema>['items'];
 };
+const recipeText = z.string().trim().min(1);
+export const RecipeMetadataSchema = z.object({
+  name: recipeText,
+  description: recipeText,
+});
 export const RecipeSchema = z.strictObject({
-  title: text,
-  applicability: text,
-  instructions: text,
+  ...RecipeMetadataSchema.shape,
+  instructions: z.string().regex(/\S/u),
 });
 export type RecipeContent = z.output<typeof RecipeSchema>;
 export const CheckSchema = z

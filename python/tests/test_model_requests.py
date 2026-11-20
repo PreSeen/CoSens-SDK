@@ -49,9 +49,9 @@ def endpoint():
 
 def test_budget_is_left_to_the_endpoint_unless_configured(endpoint):
     base_url, seen = endpoint
-    request_completion(ModelConfig(model="m", base_url=base_url), "k", [], [])
+    request_completion(ModelConfig(model="m", base_url=base_url), {}, [], [])
     request_completion(
-        ModelConfig(model="m", base_url=base_url, max_tokens=16384), "k", [], []
+        ModelConfig(model="m", base_url=base_url, max_tokens=16384), {}, [], []
     )
     assert "max_tokens" not in seen[0]["body"]
     assert seen[1]["body"]["max_tokens"] == 16384
@@ -59,10 +59,14 @@ def test_budget_is_left_to_the_endpoint_unless_configured(endpoint):
 
 def test_requests_name_the_sdk_in_the_user_agent(endpoint):
     base_url, seen = endpoint
-    request_completion(ModelConfig(model="m", base_url=base_url), "k", [], [])
+    request_completion(
+        ModelConfig(model="m", base_url=base_url), {"X-Api-Key": "test-token"}, [], []
+    )
     agent = seen[0]["headers"]["User-Agent"]
     assert agent.startswith("cosens-sdk-python/")
     assert "urllib" not in agent.lower()
+    assert seen[0]["headers"]["X-Api-Key"] == "test-token"
+    assert "Authorization" not in seen[0]["headers"]
 
 
 def test_public_config_carries_budget_and_timeout(tmp_path):
@@ -83,6 +87,24 @@ def test_public_config_carries_budget_and_timeout(tmp_path):
         config={"model": "m", "base_url": "http://127.0.0.1:9/v1", "auto_start": False},
     )
     assert default._queue.config.model.max_tokens is None
+
+
+def test_recover_leaves_pending_tasks_for_their_original_headers(tmp_path):
+    path = tmp_path / "context.md"
+    path.write_text("Task transcript")
+    config = {"model": "m", "base_url": "http://127.0.0.1:9/v1", "auto_start": False}
+    client = RSIClient(
+        data_dir=tmp_path, config={**config, "headers": {"X-Api-Key": "a"}}
+    )
+    execution = client.execution_create(
+        evidence={"context_path": str(path), "files": []}, idempotency_key="example"
+    )
+    other = RSIClient(
+        data_dir=tmp_path, config={**config, "headers": {"X-Api-Key": "b"}}
+    )
+    assert other.recover() == {"started": 0}
+    assert RSIClient(data_dir=tmp_path).recover() == {"started": 0}
+    assert client.execution_get(execution["id"])["status"] == "queued"
 
 
 class Criterion(BaseModel):
@@ -119,10 +141,17 @@ class Analysis(BaseModel):
 
 def test_null_spelled_as_text_is_decoded_and_remaining_errors_are_reported():
     parsed, problem = parse_structured(
-        Analysis, json.dumps({"hypothesis": "None", "criteria": json.dumps([{"id": "c", "required": True}])})
+        Analysis,
+        json.dumps(
+            {
+                "hypothesis": "None",
+                "criteria": json.dumps([{"id": "c", "required": True}]),
+            }
+        ),
     )
     assert problem is None and parsed.hypothesis is None
     parsed, problem = parse_structured(
-        Analysis, json.dumps({"hypothesis": "None", "criteria": json.dumps([{"id": "c"}])})
+        Analysis,
+        json.dumps({"hypothesis": "None", "criteria": json.dumps([{"id": "c"}])}),
     )
     assert "criteria.0.required" in problem and "valid list" not in problem

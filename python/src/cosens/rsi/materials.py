@@ -18,6 +18,17 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def _copy_context(source, target):
+    hash_ = hashlib.sha256()
+    size = 0
+    with source.open("rb") as stream, target.open("wb") as output:
+        for data in iter(lambda: stream.read(64 * 1024), b""):
+            output.write(data)
+            hash_.update(data)
+            size += len(data)
+    return {"sha256": hash_.hexdigest(), "size": size}
+
+
 def authorized_test_files(files, task):
     """Resolve an explicit test catalog against the attached Material snapshots."""
     if task is None:
@@ -57,6 +68,17 @@ def snapshot(root, manifest, config):
             source = Path(ref["path"]).expanduser().resolve(strict=True)
             if not source.is_file():
                 raise ValueError("material paths must be regular files")
+            target = directory / (str(index) + source.suffix.lower())
+            file = {
+                **ref,
+                "path": str(source),
+                "locator": f"{material_id}/{index}",
+                "snapshot": str(target),
+            }
+            if ref["role"] == "context":
+                files.append({**file, **_copy_context(source, target)})
+                os.chmod(target, 0o400)
+                continue
             with source.open("rb") as stream:
                 data = stream.read(config.max_file_bytes + 1)
             if len(data) > config.max_file_bytes:
@@ -64,15 +86,11 @@ def snapshot(root, manifest, config):
             total += len(data)
             if total > config.max_bundle_bytes:
                 raise ValueError("material bundle exceeds max_bundle_bytes")
-            target = directory / (str(index) + source.suffix.lower())
             target.write_bytes(data)
             os.chmod(target, 0o400)
             files.append(
                 {
-                    **ref,
-                    "path": str(source),
-                    "locator": f"{material_id}/{index}",
-                    "snapshot": str(target),
+                    **file,
                     "sha256": digest(data),
                     "size": len(data),
                 }
@@ -89,7 +107,7 @@ def snapshot(root, manifest, config):
         raise
 
 
-def read_snapshot(file, *, max_chars=100000):
+def read_snapshot_text(file):
     data = Path(file["snapshot"]).read_bytes()
     if digest(data) != file["sha256"]:
         raise ValueError("evidence snapshot integrity check failed")
@@ -123,11 +141,48 @@ def read_snapshot(file, *, max_chars=100000):
             ) from None
         if "\x00" in text:
             raise ValueError("binary evidence requires a text extraction")
+    return text
+
+
+def read_snapshot(file, *, max_chars=100000):
+    text = read_snapshot_text(file)
     return {
         "text": text[:max_chars],
         "truncated": len(text) > max_chars,
         "sha256": file["sha256"],
         "locator": file["locator"],
+    }
+
+
+EVIDENCE_PAGE_CHARS = 8192
+
+
+def evidence_page(text, offset, limit, query=None):
+    total_chars = len(text)
+    offset = min(offset, total_chars)
+    match = text.find(query, offset) if query is not None else None
+    if match == -1:
+        return {
+            "text": "",
+            "offset": offset,
+            "end_offset": offset,
+            "next_offset": None,
+            "total_chars": total_chars,
+            "match_offset": None,
+            "truncated": offset < total_chars,
+        }
+    if match is not None:
+        offset = max(offset, match - min(512, limit // 4))
+    end = min(offset + limit, total_chars)
+    next_offset = end if match is None else match + len(query)
+    return {
+        "text": text[offset:end],
+        "offset": offset,
+        "end_offset": end,
+        "next_offset": next_offset if next_offset < total_chars else None,
+        "total_chars": total_chars,
+        "match_offset": match,
+        "truncated": offset > 0 or end < total_chars,
     }
 
 

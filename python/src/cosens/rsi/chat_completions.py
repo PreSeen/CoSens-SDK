@@ -100,14 +100,14 @@ class Tool:
         return self.handler(**args.model_dump())
 
 
-def request_completion(config, key, messages, tools):
+def request_completion(config, headers, messages, tools):
     base = config.base_url or "https://api.openai.com/v1"
     request = Request(
         base.rstrip("/") + "/chat/completions",
         headers={
-            "Authorization": "Bearer " + key,
-            "Content-Type": "application/json",
-            "User-Agent": USER_AGENT,
+            "content-type": "application/json",
+            "user-agent": USER_AGENT,
+            **{name.lower(): value for name, value in headers.items()},
         },
         method="POST",
         data=json.dumps(

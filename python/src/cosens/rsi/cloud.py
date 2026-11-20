@@ -1,8 +1,7 @@
 """Cloud RSI: the same atoms as the local client, served by CoSens.
 
-Learning runs on the CoSens service with CoSens models. Only the files named in
-`evidence` leave the machine: `execution_create` and
-`execution_append_evidence` read and upload them. Authentication uses
+Learning runs on the CoSens service with CoSens models. The SDK uploads files
+listed in `evidence` and the optional `recipe_reference`. Authentication uses
 `COSENS_API_KEY`, as the Memory functions do.
 """
 
@@ -16,7 +15,7 @@ from urllib.parse import quote
 import httpx
 
 from .chat_completions import USER_AGENT
-from .models import Conflict, InvalidState, NotFound, RSIError
+from .models import Conflict, InvalidState, NotFound, RecipeReference, RSIError
 
 DEFAULT_BASE_URL = "https://rsi.cosens.ai/api"
 # The CoSens gateway accepts request bodies up to 10 MiB.
@@ -40,19 +39,22 @@ def _upload(path, extra=None):
     return {"name": file.name, "content": content, "encoding": encoding, **(extra or {})}
 
 
-def _evidence(evidence):
+def _evidence(evidence, recipe_reference=None):
     if not isinstance(evidence, dict) or not evidence.get("context_path"):
         raise ValueError("evidence needs context_path and files")
     files = []
     for item in evidence.get("files", []):
         if not isinstance(item, dict) or not item.get("path") or not item.get("role"):
             raise ValueError("each evidence file needs path and role")
-        extra = {"role": item["role"]}
-        if item.get("recipe_id"):
-            extra["recipe_id"] = item["recipe_id"]
-        files.append(_upload(item["path"], extra))
-    if sum(file["role"] == "recipe" for file in files) > 1:
-        raise ValueError("evidence can contain at most one recipe file")
+        if item["role"] == "recipe":
+            raise ValueError("supply the Recipe using execution_create.recipe_reference")
+        files.append(_upload(item["path"], {"role": item["role"]}))
+    if recipe_reference is not None:
+        reference = RecipeReference.model_validate(recipe_reference)
+        extra = {"role": "recipe"}
+        if reference.recipe_id is not None:
+            extra["recipe_id"] = reference.recipe_id
+        files.append(_upload(reference.path, extra))
     return {"context": _upload(evidence["context_path"]), "files": files}
 
 
@@ -119,10 +121,10 @@ class CloudRSIClient:
 
     # Execution
 
-    def execution_create(self, *, evidence, idempotency_key):
+    def execution_create(self, *, evidence, idempotency_key, recipe_reference=None):
         if not isinstance(idempotency_key, str) or not idempotency_key:
             raise ValueError("idempotency_key must be a nonempty string")
-        body = {"idempotency_key": idempotency_key, **_evidence(evidence)}
+        body = {"idempotency_key": idempotency_key, **_evidence(evidence, recipe_reference)}
         return self._request("POST", "/executions", json=body)
 
     def execution_get(self, execution_id):
@@ -141,8 +143,6 @@ class CloudRSIClient:
 
     def execution_append_evidence(self, execution_id, *, evidence):
         body = _evidence(evidence)
-        if any(file["role"] == "recipe" for file in body["files"]):
-            raise ValueError("a recipe file can only be supplied when the execution is created")
         return self._request("POST", f"/executions/{_segment(execution_id)}/evidence", json=body)
 
     def execution_cancel(self, execution_id):
@@ -175,6 +175,9 @@ class CloudRSIClient:
                 return []
             params = {"recipe_ids": ",".join(ids)}
         return self._request("GET", "/recipes", params=params)
+
+    def recipe_insert(self, path: str | Path):
+        raise InvalidState("recipe_insert requires local mode")
 
     def recipe_get(self, recipe_id, *, version):
         return self._request("GET", f"/recipes/{_segment(recipe_id)}", params={"version": version})
