@@ -1,15 +1,16 @@
+import { selectedVirtualUser, type VirtualUserSelection } from './virtual-user.js';
+
 const SERVICE_URL = 'https://rsi.cosens.ai/api/v1/memory';
 
 export interface MemoryEndpointOptions { baseUrl?: string; apiKey?: string }
 
-export interface MemoryIngest extends MemoryEndpointOptions {
+export interface MemoryIngest extends MemoryEndpointOptions, VirtualUserSelection {
   content: string;
   requestKey: string;
   sourceKind?: string;
   durable?: boolean;
   sourceId?: string;
   expectedRevision?: number;
-  virtualUserId?: string;
 }
 export interface MemoryRecallResult extends Record<string, unknown> {
   items: Record<string, unknown>[];
@@ -42,16 +43,16 @@ export function memoryRecall({
   query,
   tokenBudget = 1000,
   virtualUserId,
+  virtual_user_id,
   baseUrl, apiKey,
-}: MemoryEndpointOptions & {
+}: MemoryEndpointOptions & VirtualUserSelection & {
   query: string;
   tokenBudget?: number;
-  virtualUserId?: string;
 }) {
   return request<MemoryRecallResult>('POST', '/recall', {
     query,
     token_budget: boundedInteger(tokenBudget, 'tokenBudget', 1, 8000),
-  }, virtualUserId, { baseUrl, apiKey });
+  }, { virtualUserId, virtual_user_id }, { baseUrl, apiKey });
 }
 
 export function memoryIngest({
@@ -62,6 +63,7 @@ export function memoryIngest({
   sourceId,
   expectedRevision,
   virtualUserId,
+  virtual_user_id,
   baseUrl, apiKey,
 }: MemoryIngest) {
   if (
@@ -97,26 +99,26 @@ export function memoryIngest({
             Number.MAX_SAFE_INTEGER,
           ),
         }),
-  }, virtualUserId, { baseUrl, apiKey });
+  }, { virtualUserId, virtual_user_id }, { baseUrl, apiKey });
 }
 
-export function getMemoryItems({ limit = 200, virtualUserId, baseUrl, apiKey }: MemoryEndpointOptions & { limit?: number; virtualUserId?: string } = {}) {
+export function getMemoryItems({ limit = 200, virtualUserId, virtual_user_id, baseUrl, apiKey }: MemoryEndpointOptions & VirtualUserSelection & { limit?: number } = {}) {
   return request(
     'GET',
     `/items?limit=${boundedInteger(limit, 'limit', 1, 500)}`,
-    undefined, virtualUserId, { baseUrl, apiKey },
+    undefined, { virtualUserId, virtual_user_id }, { baseUrl, apiKey },
   );
 }
 
-export function getMemoryJob(jobId: string, { virtualUserId, baseUrl, apiKey }: MemoryEndpointOptions & { virtualUserId?: string } = {}) {
-  return request('GET', `/jobs/${pathPart(jobId)}`, undefined, virtualUserId, { baseUrl, apiKey });
+export function getMemoryJob(jobId: string, { virtualUserId, virtual_user_id, baseUrl, apiKey }: MemoryEndpointOptions & VirtualUserSelection = {}) {
+  return request('GET', `/jobs/${pathPart(jobId)}`, undefined, { virtualUserId, virtual_user_id }, { baseUrl, apiKey });
 }
 
 export function getMemoryExperience(
   experienceId: string,
-  { revision, virtualUserId }: { revision?: number; virtualUserId?: string } = {},
+  { revision, virtualUserId, virtual_user_id }: { revision?: number } & VirtualUserSelection = {},
 ) {
-  if (virtualUserId !== undefined) throw new TypeError("Virtual User selection is not supported for experience details");
+  if (virtualUserId !== undefined || virtual_user_id !== undefined) throw new TypeError("Virtual User selection is not supported for experience details");
   const suffix =
     revision === undefined
       ? ''
@@ -124,8 +126,8 @@ export function getMemoryExperience(
   return request('GET', `/experiences/${pathPart(experienceId)}${suffix}`);
 }
 
-export function getMemory({ virtualUserId }: { virtualUserId?: string } = {}) {
-  if (virtualUserId !== undefined) throw new TypeError("Virtual User selection is not supported for memory overview");
+export function getMemory({ virtualUserId, virtual_user_id }: VirtualUserSelection = {}) {
+  if (virtualUserId !== undefined || virtual_user_id !== undefined) throw new TypeError("Virtual User selection is not supported for memory overview");
   return request('GET', '');
 }
 
@@ -157,11 +159,10 @@ async function request<T = Record<string, unknown>>(
   method: 'GET' | 'POST',
   path: string,
   body?: object,
-  virtualUserId?: string,
+  selection: VirtualUserSelection = {},
   options: MemoryEndpointOptions = {},
 ): Promise<T> {
-  if (virtualUserId !== undefined && (typeof virtualUserId !== "string" || !virtualUserId || /[\s\x00-\x1f\x7f]/.test(virtualUserId)))
-    throw new TypeError("virtualUserId must be a nonempty header value");
+  const virtualUserId = selectedVirtualUser(selection);
   if ((options.baseUrl === undefined) !== (options.apiKey === undefined))
     throw new TypeError('baseUrl and apiKey must be supplied together');
   const base = options.baseUrl === undefined ? SERVICE_URL : serviceUrl(options.baseUrl);
