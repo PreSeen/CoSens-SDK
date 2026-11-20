@@ -105,3 +105,54 @@ def test_memory_errors_redact_key_and_reject_redirects(monkeypatch):
         assert exc.value.status == 302
 
     asyncio.run(run())
+
+
+def test_virtual_user_selection_is_per_call_and_unsupported_methods_reject(monkeypatch):
+    seen = []
+    def mock(request):
+        seen.append((request.url.path, request.headers.get("x-virtual-user-id")))
+        return httpx.Response(200, json={})
+    monkeypatch.setenv("COSENS_API_KEY", "fixture-key")
+    monkeypatch.setattr(httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(mock)))
+    async def run():
+        await asyncio.gather(
+            memory_recall(query="a", virtual_user_id="vu_a"),
+            memory_ingest(content="b", request_key="k", virtual_user_id="vu_b"),
+            get_memory_items(virtual_user_id="vu_b"), get_memory_job("j", virtual_user_id="vu_a"), get_memory_items(),
+        )
+        with pytest.raises(ValueError):
+            await get_memory(virtual_user_id="vu_a")
+        with pytest.raises(ValueError):
+            await get_memory_experience("e", virtual_user_id="vu_a")
+    asyncio.run(run())
+    assert set(seen) == {("/api/v1/memory/recall", "vu_a"), ("/api/v1/memory/ingest", "vu_b"), ("/api/v1/memory/items", None), ("/api/v1/memory/items", "vu_b"), ("/api/v1/memory/jobs/j", "vu_a")}
+
+
+def test_explicit_service_and_key_are_per_call_and_fail_closed(monkeypatch):
+    requests = []
+    def mock(request):
+        requests.append((str(request.url), request.headers['authorization'], request.headers.get('x-cosens-auth-type'), request.headers.get('x-virtual-user-id')))
+        return httpx.Response(200, json={})
+    monkeypatch.setenv('COSENS_API_KEY', 'ambient-key')
+    monkeypatch.setattr(httpx, 'AsyncClient', partial(httpx.AsyncClient, transport=httpx.MockTransport(mock)))
+    async def run():
+        await asyncio.gather(
+            memory_recall(query='a', base_url='https://regional.example/v1/memory', api_key='region-key', virtual_user_id='vu_a'),
+            get_memory_items(),
+            memory_ingest(content='b', request_key='k', base_url='https://stage.example/api/v1/memory/', api_key='stage-key'),
+            get_memory_job('j', base_url='https://regional.example/v1/memory', api_key='region-key'),
+        )
+        for url in ['http://example.test/v1/memory', 'https://user:pw@example.test/a', 'https://example.test/a?x=1', 'https://example.test/a#x', 'https://example.test/a/../b', 'https://example.test/a/%2e%2e/b', 'https://example.test/a%2fb', 'https://example.test/a\\b', 'https://@example.test/a', 'https://example.test/a/%00b']:
+            with pytest.raises(ValueError):
+                await memory_recall(query='a', base_url=url, api_key='explicit')
+        with pytest.raises(ValueError):
+            await memory_recall(query='a', base_url='https://regional.example/v1/memory')
+        with pytest.raises(ValueError):
+            await memory_recall(query='a', api_key='explicit')
+    asyncio.run(run())
+    assert set(requests) == {
+        ('https://regional.example/v1/memory/recall','Bearer region-key','api_key','vu_a'),
+        ('https://rsi.cosens.ai/api/v1/memory/items?limit=200','Bearer ambient-key',None,None),
+        ('https://stage.example/api/v1/memory/ingest','Bearer stage-key','api_key',None),
+        ('https://regional.example/v1/memory/jobs/j','Bearer region-key','api_key',None),
+    }

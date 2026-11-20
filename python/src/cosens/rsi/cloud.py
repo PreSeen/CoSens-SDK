@@ -61,16 +61,19 @@ def _evidence(evidence, recipe_reference=None):
 class CloudRSIClient:
     """Cloud mode of RSIClient, backed by the CoSens service."""
 
-    def __init__(self, *, api_key=None, base_url=None, timeout=60.0, transport=None):
+    def __init__(self, *, api_key=None, base_url=None, timeout=60.0, transport=None, virtual_user_id=None):
         key = api_key or os.environ.get("COSENS_API_KEY")
         if not key:
             raise ValueError("cloud mode needs COSENS_API_KEY (or api_key=...)")
+        if virtual_user_id is not None and (not isinstance(virtual_user_id, str) or not virtual_user_id or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in virtual_user_id)):
+            raise ValueError("virtual_user_id must be a nonempty header value")
         self._http = httpx.Client(
             base_url=(base_url or os.environ.get("COSENS_RSI_BASE_URL") or DEFAULT_BASE_URL).rstrip("/"),
             headers={
                 "Authorization": f"Bearer {key}",
                 "X-Auth-Type": "api_key",
                 "User-Agent": USER_AGENT,
+                **({"X-Virtual-User-Id": virtual_user_id} if virtual_user_id is not None else {}),
             },
             timeout=timeout,
             transport=transport,

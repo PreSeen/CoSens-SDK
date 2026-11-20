@@ -59,3 +59,9 @@ Use `config: null` for read-only clients. After a token refresh, create a Client
 To explicitly retry a timed-out local execution, call `recover({ recipe_id: recipeId, retry_key: requestId })`. Reuse the key if the request is submitted again.
 
 See the [complete TS and Python interface reference](../python/docs/local-rsi.md). Run `npm run check` to build, typecheck and test the public package.
+
+### Virtual User selection
+
+For cloud RSI, use `new RSIClient({ mode: 'cloud', virtualUserId: 'vu_...' })` to bind this client to a Virtual User. Use separate clients for separate Virtual Users. Local RSI does not accept this option. Memory's `memoryRecall`, `memoryIngest`, `getMemoryItems`, and `getMemoryJob` take `virtualUserId` in their per-call options. `getMemory` and `getMemoryExperience` do not support Virtual User selection and reject it. Calls without a selection use the authenticated account. The server checks each caller's current grant; availability depends on the service deployment.
+
+For a different Memory deployment, pass both `baseUrl` (the HTTPS Memory API URL, including its deployment-specific path) and `apiKey` to `memoryRecall`, `memoryIngest`, `getMemoryItems`, or `getMemoryJob`. For example, `await memoryRecall({ query: '...', baseUrl: 'https://memory.example/v1/memory', apiKey: '...' })`. The explicit key is used only for that call and must be a non-empty string; invalid explicit keys never fall back to the environment key. The configured URL cannot contain credentials, a query, a fragment, or path traversal, and redirects are not followed.

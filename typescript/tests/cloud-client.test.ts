@@ -157,3 +157,17 @@ test('cloud reads map to routes and errors keep their codes', async () => {
     },
   );
 });
+
+test('virtual user selection is isolated per cloud client', async (t) => {
+  const seen: Array<string | null> = [];
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    seen.push(new Headers(init?.headers).get('x-virtual-user-id'));
+    return Response.json({});
+  });
+  const a = new RSIClient({ mode: 'cloud', api_key: 'k', virtualUserId: 'vu_a' });
+  const b = new RSIClient({ mode: 'cloud', api_key: 'k', virtualUserId: 'vu_b' });
+  const ordinary = new RSIClient({ mode: 'cloud', api_key: 'k' });
+  await Promise.all([a.execution_get('a'), b.execution_get('b'), ordinary.execution_get('c')]);
+  assert.deepEqual(seen, ['vu_a', 'vu_b', null]);
+  assert.throws(() => new RSIClient({ data_dir: '/tmp/nope', config: null, virtualUserId: 'vu_a' } as never));
+});

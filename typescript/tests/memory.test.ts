@@ -107,3 +107,69 @@ test('Memory atoms redact authentication and refuse gateway redirects', async (t
     status: 302,
   });
 });
+
+test('virtual user selection is per call and unsupported operations reject', async (t) => {
+  useFixtureKey(t);
+  const seen: Array<[string, string | null]> = [];
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    seen.push([new URL(String(url)).pathname, new Headers(init?.headers).get('x-virtual-user-id')]);
+    return Response.json({});
+  });
+  await Promise.all([
+    memoryRecall({ query: 'a', virtualUserId: 'vu_a' }),
+    memoryIngest({ content: 'b', requestKey: 'k', virtualUserId: 'vu_b' }),
+    getMemoryItems({ virtualUserId: 'vu_b' }), getMemoryJob('j', { virtualUserId: 'vu_a' }), getMemoryItems(),
+  ]);
+  assert.deepEqual(seen, [
+    ['/api/v1/memory/recall', 'vu_a'], ['/api/v1/memory/ingest', 'vu_b'],
+    ['/api/v1/memory/items', 'vu_b'], ['/api/v1/memory/jobs/j', 'vu_a'], ['/api/v1/memory/items', null],
+  ]);
+  assert.throws(() => getMemory({ virtualUserId: 'vu_a' }), TypeError);
+  assert.throws(() => getMemoryExperience('e', { virtualUserId: 'vu_a' }), TypeError);
+});
+
+test('explicit Memory service and key are per call and fail closed', async (t) => {
+  useFixtureKey(t);
+  const seen: Array<[string, string | null, string | null, string | null]> = [];
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    const h = new Headers(init?.headers);
+    seen.push([String(url), h.get('authorization'), h.get('x-cosens-auth-type'), h.get('x-virtual-user-id')]);
+    assert.equal(init?.redirect, 'manual');
+    return Response.json({});
+  });
+  await Promise.all([
+    memoryRecall({ query: 'a', baseUrl: 'https://regional.example/v1/memory', apiKey: 'region-key', virtualUserId: 'vu_a' }),
+    getMemoryItems(),
+    memoryIngest({content: 'b', requestKey: 'k', baseUrl: 'https://stage.example/api/v1/memory/', apiKey: 'stage-key'}),
+    getMemoryJob('j', {baseUrl: 'https://regional.example/v1/memory', apiKey: 'region-key'}),
+  ]);
+  assert.deepEqual(seen, [
+    ['https://regional.example/v1/memory/recall', 'Bearer region-key', 'api_key', 'vu_a'],
+    ['https://rsi.cosens.ai/api/v1/memory/items?limit=200', 'Bearer fixture-key', null, null],
+    ['https://stage.example/api/v1/memory/ingest', 'Bearer stage-key', 'api_key', null],
+    ['https://regional.example/v1/memory/jobs/j', 'Bearer region-key', 'api_key', null],
+  ]);
+  for (const baseUrl of ['http://example.test/a', 'https://u:p@example.test/a', 'https://example.test/a?x=1', 'https://example.test/a#x', 'https://example.test/a/../b', 'https://example.test/a/%2e%2e/b', 'https://example.test/a%2fb', 'https://example.test/a\\b', 'https://@example.test/a', 'https://example.test/a/%00b'])
+    await assert.rejects(memoryRecall({query:'a', baseUrl, apiKey:'explicit'}), TypeError);
+  await assert.rejects(memoryRecall({query:'a', baseUrl:'https://regional.example/v1/memory'}), TypeError);
+  await assert.rejects(memoryRecall({query:'a', apiKey:'explicit'}), TypeError);
+  assert.equal(seen.length, 4);
+});
+
+test('a null explicit key never sends the ambient key to a custom service', async (t) => {
+  useFixtureKey(t);
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    return Response.json({});
+  });
+  await assert.rejects(
+    memoryRecall({
+      query: 'a',
+      baseUrl: 'https://regional.example/v1/memory',
+      apiKey: null as unknown as string,
+    }),
+    TypeError,
+  );
+  assert.equal(calls, 0);
+});
