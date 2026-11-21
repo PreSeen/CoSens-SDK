@@ -6,9 +6,13 @@ Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned
 
 ### Breaking
 
-- TypeScript: the `virtual_user_id` alias for `virtualUserId` in cloud `RSIClient` options and Memory calls is removed, with no fallback. Passing `virtual_user_id` is a type error and is not read at runtime. `virtualUserId` (TypeScript) and `virtual_user_id=` (Python) remain the client options that set the `X-Virtual-User-Id` request header, the only way the service identifies a Virtual User.
+- TypeScript: the `virtual_user_id` alias for `virtualUserId` in cloud `RSIClient` options and Memory calls is removed, with no fallback. Passing `virtual_user_id` is rejected at compile time (a type error) and at runtime (a `TypeError` before any request is sent), in every cloud `RSIClient` and Memory entry point. `virtualUserId` (TypeScript) and `virtual_user_id=` (Python) remain the client options that set the `X-Virtual-User-Id` request header, the only way the service identifies a Virtual User.
 
-## Python 0.9.1 (TypeScript unreleased)
+## Python 0.9.2
+
+- Cloud `recipe_insert(path)` uploads your own Recipe: the SDK validates the Skill Markdown file locally (YAML frontmatter with nonempty `name` and `description`) and sends it to `POST /recipes`, which publishes it as version 1. Local mode is unchanged.
+
+## Python 0.9.1
 
 - Supported Memory calls can specify an HTTPS service URL and explicit API key per call.
 - Python and TypeScript cloud RSI clients support explicit Virtual User selection. Supported Memory calls accept a per-call selection; unsupported Memory overview and experience calls reject it.
