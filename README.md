@@ -10,10 +10,10 @@ Host Hook → SDK → (cloud service | local SQLite queue) → worker
 → extract user feedback → analyze evidence → generate candidate → execute test → score → save result
 ```
 
-| Host | Import | Guide |
-| --- | --- | --- |
-| Node.js / TypeScript | `import { RSIClient } from 'cosens-sdk/rsi'` | [TypeScript](typescript/README.md) |
-| Python | `from cosens.rsi import RSIClient` | [Python](python/docs/local-rsi.md) |
+| Host | Install | Import | Guide |
+| --- | --- | --- | --- |
+| Node.js 22.12+ / TypeScript | `npm install cosens-sdk` | `import { RSIClient } from 'cosens-sdk/rsi'` | [TypeScript](typescript/README.md) |
+| Python 3.10+ | `pip install cosens-sdk` | `from cosens.rsi import RSIClient` | [Python](python/docs/local-rsi.md) |
 
 The host confirms the deliverable and selects the task trajectory. It submits the context and file paths to `execution_create`, then uses the returned ID to read status or answer clarification questions. The worker continues after the Hook returns.
 

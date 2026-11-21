@@ -2,14 +2,22 @@
 
 Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned separately.
 
-## Python 0.10.0 and TypeScript 0.5.4-rsi.25
+## TypeScript 0.10.0
+
+The first npm release of the RSI SDK: `npm install cosens-sdk`. It has the same atoms and results as Python 0.10.0, including the breaking changes listed under Python 0.10.0 below: cloud `RSIClient` by default and the local Worker with `data_dir` and `config`; Executions, Rubrics, Recipes (with `recipe_insert`) and clarification answers; and the six Memory functions. The npm versions 0.1.0 to 0.5.3 of `cosens-sdk` were an earlier SDK; they were unpublished on 2026-11-14 and those version numbers cannot be reused.
+
+- Cloud `RSIError` carries the HTTP `status` of a service error, as Python's errors do.
+- Cloud `RSIClient({ mode: 'cloud', timeout })` sets the request timeout in seconds (default 60), as Python's `timeout=` does.
+- Package: Apache-2.0 `license` metadata; an ES module that CommonJS loads with `require()` (Node.js 22.12 or later, now the minimum); entry points `cosens-sdk`, `cosens-sdk/rsi`, `cosens-sdk/memory`; published from CI with npm provenance.
+
+## Python 0.10.0 and TypeScript 0.10.0
 
 ### Breaking
 
 - Python and TypeScript: Memory calls use `https://rsi.cosens.ai/api/memory` (no `/v1`). The service no longer answers `/api/v1/memory`, so earlier releases' Memory calls stop working once it is live; upgrade, or pass the new URL as `base_url` / `baseUrl`.
 - TypeScript: the `virtual_user_id` alias for `virtualUserId` in cloud `RSIClient` options and Memory calls is removed, with no fallback. Passing `virtual_user_id` is rejected at compile time (a type error) and at runtime (a `TypeError` before any request is sent), in every cloud `RSIClient` and Memory entry point. `virtualUserId` (TypeScript) and `virtual_user_id=` (Python) remain the client options that set the `X-Virtual-User-Id` request header, the only way the service identifies a Virtual User.
 
-- TypeScript: the Recipe result naming rule below also applies to the TypeScript local and cloud clients (unreleased on npm).
+- TypeScript: the Recipe result naming rule below also applies to the TypeScript local and cloud clients.
 
 ## Python 0.10.0
 

@@ -5,6 +5,8 @@ export class RSIError extends Error {
   constructor(
     public readonly code: string,
     message: string,
+    /** HTTP status of a cloud service error; undefined for local errors. */
+    public readonly status?: number,
   ) {
     super(message);
     this.name = 'RSIError';
