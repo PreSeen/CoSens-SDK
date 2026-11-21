@@ -141,7 +141,15 @@ def test_explicit_service_and_key_are_per_call_and_fail_closed(monkeypatch):
             get_memory_items(),
             memory_ingest(content='b', request_key='k', base_url='https://stage.example/api/memory/', api_key='stage-key'),
             get_memory_job('j', base_url='https://regional.example/memory', api_key='region-key'),
+            get_memory_experience('e', revision=2, base_url='https://regional.example/memory', api_key='region-key'),
+            get_memory(base_url='https://stage.example/api/memory/', api_key='stage-key'),
         )
+        with pytest.raises(ValueError):
+            await get_memory(base_url='https://regional.example/memory')
+        with pytest.raises(ValueError):
+            await get_memory_experience('e', api_key='explicit')
+        with pytest.raises(ValueError):
+            await get_memory(base_url='http://example.test/memory', api_key='explicit')
         for url in ['http://example.test/memory', 'https://user:pw@example.test/a', 'https://example.test/a?x=1', 'https://example.test/a#x', 'https://example.test/a/../b', 'https://example.test/a/%2e%2e/b', 'https://example.test/a%2fb', 'https://example.test/a\\b', 'https://@example.test/a', 'https://example.test/a/%00b']:
             with pytest.raises(ValueError):
                 await memory_recall(query='a', base_url=url, api_key='explicit')
@@ -155,4 +163,6 @@ def test_explicit_service_and_key_are_per_call_and_fail_closed(monkeypatch):
         ('https://rsi.cosens.ai/api/memory/items?limit=200','Bearer ambient-key',None,None),
         ('https://stage.example/api/memory/ingest','Bearer stage-key','api_key',None),
         ('https://regional.example/memory/jobs/j','Bearer region-key','api_key',None),
+        ('https://regional.example/memory/experiences/e?revision=2','Bearer region-key','api_key',None),
+        ('https://stage.example/api/memory','Bearer stage-key','api_key',None),
     }

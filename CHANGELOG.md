@@ -2,6 +2,10 @@
 
 Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned separately.
 
+## Python 0.10.1
+
+- `get_memory` and `get_memory_experience` accept `base_url` and `api_key`, like the other Memory functions. Both must be supplied together; the call then goes to that Memory deployment with that key. Virtual User selection is still rejected for these two calls.
+
 ## TypeScript 0.10.0
 
 The first npm release of the RSI SDK: `npm install cosens-sdk`. It has the same atoms and results as Python 0.10.0, including the breaking changes listed under Python 0.10.0 below: cloud `RSIClient` by default and the local Worker with `data_dir` and `config`; Executions, Rubrics, Recipes (with `recipe_insert`) and clarification answers; and the six Memory functions. The npm versions 0.1.0 to 0.5.3 of `cosens-sdk` were an earlier SDK; they were unpublished on 2026-11-14 and those version numbers cannot be reused.

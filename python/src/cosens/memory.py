@@ -91,17 +91,17 @@ async def get_memory_job(job_id, *, virtual_user_id=None, base_url=None, api_key
     return await _request("GET", f"/jobs/{_path_part(job_id)}", virtual_user_id=virtual_user_id, base_url=base_url, api_key=api_key)
 
 
-async def get_memory_experience(experience_id, *, revision=None, virtual_user_id=None):
+async def get_memory_experience(experience_id, *, revision=None, virtual_user_id=None, base_url=None, api_key=None):
     if virtual_user_id is not None:
         raise ValueError("Virtual User selection is not supported for experience details")
     suffix = "?" + urlencode({"revision": revision}) if revision is not None else ""
-    return await _request("GET", f"/experiences/{_path_part(experience_id)}{suffix}")
+    return await _request("GET", f"/experiences/{_path_part(experience_id)}{suffix}", base_url=base_url, api_key=api_key)
 
 
-async def get_memory(*, virtual_user_id=None):
+async def get_memory(*, virtual_user_id=None, base_url=None, api_key=None):
     if virtual_user_id is not None:
         raise ValueError("Virtual User selection is not supported for memory overview")
-    return await _request("GET", "")
+    return await _request("GET", "", base_url=base_url, api_key=api_key)
 
 
 def _service_url(base_url):
