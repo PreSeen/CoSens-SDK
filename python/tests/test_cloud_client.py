@@ -152,7 +152,7 @@ def test_virtual_user_is_instance_scoped_and_rejected_in_local_mode(tmp_path):
 def test_recipe_insert_uploads_the_validated_markdown(tmp_path):
     markdown = "---\nname: Weekly report\ndescription: Sales by region\n---\nGroup sales by region.\n"
     (tmp_path / "RECIPE.md").write_text(markdown, encoding="utf-8")
-    reply = {"recipe_id": "recipe_1", "recipe_version_id": "version_1"}
+    reply = {"id": "recipe_1", "active_version_id": "version_1"}
     transport, seen = recording({("POST", "/api/recipes"): (200, reply)})
     client = CloudRSIClient(api_key="k", base_url="https://rsi.example/api", transport=transport)
     assert client.recipe_insert(tmp_path / "RECIPE.md") == reply

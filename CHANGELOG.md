@@ -9,6 +9,8 @@ Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned
 - Python and TypeScript: Memory calls use `https://rsi.cosens.ai/api/memory` (no `/v1`). The service no longer answers `/api/v1/memory`, so earlier releases' Memory calls stop working once it is live; upgrade, or pass the new URL as `base_url` / `baseUrl`.
 - TypeScript: the `virtual_user_id` alias for `virtualUserId` in cloud `RSIClient` options and Memory calls is removed, with no fallback. Passing `virtual_user_id` is rejected at compile time (a type error) and at runtime (a `TypeError` before any request is sent), in every cloud `RSIClient` and Memory entry point. `virtualUserId` (TypeScript) and `virtual_user_id=` (Python) remain the client options that set the `X-Virtual-User-Id` request header, the only way the service identifies a Virtual User.
 
+- Recipe results use one naming rule: an object's own ID is `id`, and a reference to another object is `<object>_id`. `recipe_insert(path)` now returns the same Recipe object as `recipe_get` (read `id` and `active_version_id`) instead of `{recipe_id, recipe_version_id}`. `recipe_list()` rows rename `available_version_id` to `active_version_id`, matching `recipe_get`; rows keep `recipe_id` because a first-learning row has no Recipe yet. `recipe_get(recipe_id)` now defaults `version` to `"active"`. Python and TypeScript, local and cloud.
+
 ## Python 0.9.2
 
 - Cloud `recipe_insert(path)` uploads your own Recipe: the SDK validates the Skill Markdown file locally (YAML frontmatter with nonempty `name` and `description`) and sends it to `POST /recipes`, which publishes it as version 1. Local mode is unchanged.

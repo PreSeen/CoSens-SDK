@@ -138,7 +138,7 @@ for (const version of [3, 4, 5, 6]) {
           archived: false,
         }));
         assert.equal(
-          (await host.recipe_list())[0].available_version_id,
+          (await host.recipe_list())[0].active_version_id,
           'version_first',
         );
         assert.equal(
@@ -239,13 +239,13 @@ test('recipe_insert requires Skill metadata and creates a fresh available Recipe
       '',
     ].join('\r\n') + '\r\n' + instructions;
     writeFileSync(path, source);
-    const firstIds = await client.recipe_insert(path);
-    const secondIds = await client.recipe_insert(path);
-    assert.notEqual(firstIds.recipe_id, secondIds.recipe_id);
-    assert.notEqual(firstIds.recipe_version_id, secondIds.recipe_version_id);
-    const first = await client.recipe_get(firstIds.recipe_id, firstIds.recipe_version_id);
+    const first = await client.recipe_insert(path);
+    const second = await client.recipe_insert(path);
+    assert.notEqual(first.id, second.id);
+    assert.notEqual(first.active_version_id, second.active_version_id);
+    assert.deepEqual(await client.recipe_get(first.id, first.active_version_id!), first);
+    assert.deepEqual(await client.recipe_get(first.id), first);
     const version = first.selected_version!;
-    assert.equal(version.id, firstIds.recipe_version_id);
     assert.equal(version.number, 1);
     assert.deepEqual(version.content, generated);
     assert.deepEqual(version.provenance, { source: 'external' });
@@ -263,8 +263,7 @@ test('recipe_insert requires Skill metadata and creates a fresh available Recipe
 
     writeFileSync(path, '---\nname: minimal\ndescription: Metadata only\n---');
     const minimal = await client.recipe_insert(path);
-    const detail = await client.recipe_get(minimal.recipe_id, minimal.recipe_version_id);
-    assert.equal(detail.selected_version?.content.instructions, '');
+    assert.equal(minimal.selected_version?.content.instructions, '');
   } finally {
     client.close();
     rmSync(data_dir, { recursive: true, force: true });
@@ -791,7 +790,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           execution_ids: [run.id],
           name: run.name,
           status: 'passed',
-          available_version_id: run.recipe_version_id,
+          active_version_id: run.recipe_version_id,
           created_at: detail.created_at,
           updated_at: detail.updated_at,
         });
@@ -802,7 +801,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         }));
         const archived = (await host.recipe_list())
           .find((row) => row.recipe_id === run.recipe_id);
-        assert.equal(archived?.available_version_id, null);
+        assert.equal(archived?.active_version_id, null);
         assert.equal(
           (await host.recipe_get(run.recipe_id!, version_id)).selected_version
             ?.archived,
@@ -819,7 +818,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         assert.equal(
           (await host.recipe_get(
             available!.recipe_id!,
-            available!.available_version_id!,
+            available!.active_version_id!,
           )).selected_version?.id,
           run.recipe_version_id,
         );
@@ -1676,7 +1675,7 @@ test('an expired worker lease resumes the graph without regenerating the candida
         /terminal inputs are immutable/,
       );
       assert.equal(
-        (await host.recipe_list())[0].available_version_id,
+        (await host.recipe_list())[0].active_version_id,
         after.recipe_version_id,
       );
       await client.run_pending({
@@ -1723,7 +1722,7 @@ test('an expired worker lease resumes the graph without regenerating the candida
         100,
       );
       assert.equal(
-        (await host.recipe_list())[0].available_version_id,
+        (await host.recipe_list())[0].active_version_id,
         next.recipe_version_id,
       );
       assert.equal(
@@ -1786,7 +1785,7 @@ test('recipe_list shows first-time learning and preserves the usable version dur
           execution_ids: [execution.id],
           name: '首次学习',
           status: 'queued',
-          available_version_id: null,
+          active_version_id: null,
           created_at: execution.created_at,
           updated_at: execution.updated_at,
         },
@@ -1935,7 +1934,7 @@ test('recipe_list shows first-time learning and preserves the usable version dur
             execution_ids: [revision.id, previousContinuationId, execution.id],
             name: 'Output Recipe',
             status: 'queued',
-            available_version_id: active,
+            active_version_id: active,
             created_at: detail.created_at,
             updated_at: detail.updated_at,
           },

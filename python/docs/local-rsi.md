@@ -62,8 +62,8 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 | `rubrics_list` | `offset`（非负整数）、`archived`（布尔值） | 无 | 分页列出评分标准及最新版本 ID。 |
 | `rubrics_get` | `rubrics_id`（字符串）、`version`（`"latest"` 或版本 ID） | 无 | 返回选中的评分标准版本。 |
 | `recipe_list` | 无 | `query`，提供时须含 `recipe_ids: string[]`（Python 为 `list[str]`）。 | 返回首次学习条目和现有 Recipe 的摘要。 |
-| `recipe_insert` | `path`（本地 Recipe 文件路径） | 无 | 验证文件，创建新 Recipe 和可用 v1，返回 `recipe_id` 和 `recipe_version_id`。云端模式先在本地验证，再上传文件内容（`POST /recipes`）。 |
-| `recipe_get` | `recipe_id`（字符串）、`version`（`"active"`、`"latest"` 或版本 ID） | 无 | 返回 Recipe 和 `selected_version`。 |
+| `recipe_insert` | `path`（本地 Recipe 文件路径） | 无 | 验证文件，创建新 Recipe 和可用 v1，返回与 `recipe_get` 相同的 Recipe 对象。云端模式先在本地验证，再上传文件内容（`POST /recipes`）。 |
+| `recipe_get` | `recipe_id`（字符串） | `version`（`"active"`、`"latest"` 或版本 ID，默认 `"active"`） | 返回 Recipe 和 `selected_version`。 |
 | `recipe_test` | `execution_id`、`recipe_id`、`version_id`、`rubrics_version_id`（均为字符串） | 无 | 在活动 Execution 内安排指定版本测试。 |
 | `recipe_version_set_archived` | `recipe_id`、`version_id`（字符串）、`archived`（布尔值） | 无 | `true` 归档版本，`false` 恢复最近发布的版本。返回两个 ID 和归档状态。 |
 
@@ -112,16 +112,16 @@ run = client.execution_create(
 
 `recipe_insert(path)` 只接收一个本地文件路径。TS 传路径字符串，Python 接受字符串或 `Path`。文件须是 UTF-8，开头是由两行 `---` 包围的 YAML 映射，包含非空字符串 `name` 和 `description`。Markdown 正文可以为空。格式校验失败时本地库不会新增记录。
 
-每次成功导入都会创建新的 Recipe 和可用的 v1，直接返回 `recipe_id` 和 `recipe_version_id`。SDK 将原文件保存为对应版本目录下的 `RECIPE.md`，包括额外的 YAML 字段。用返回的两个 ID 调 `recipe_get()` 可以读取版本，`selected_version.provenance.source` 为 `external`。导入无需模型配置，`recipe_list()` 中的 `execution_ids` 为 `[]`。
+每次成功导入都会创建新的 Recipe 和可用的 v1，返回与 `recipe_get()` 相同的 Recipe 对象：`id` 是 Recipe ID，`active_version_id` 和 `selected_version.id` 是新版本 ID。SDK 将原文件保存为对应版本目录下的 `RECIPE.md`，包括额外的 YAML 字段。`selected_version.provenance.source` 为 `external`。导入无需模型配置，`recipe_list()` 中的 `execution_ids` 为 `[]`。
 
 ```ts
-const { recipe_id, recipe_version_id } = await client.recipe_insert('/local/order-export/SKILL.md');
-const recipe = await client.recipe_get(recipe_id, recipe_version_id);
+const recipe = await client.recipe_insert('/local/order-export/SKILL.md');
+console.log(recipe.id, recipe.active_version_id);
 ```
 
 ```python
-result = client.recipe_insert('/local/order-export/SKILL.md')
-recipe = client.recipe_get(result['recipe_id'], version=result['recipe_version_id'])
+recipe = client.recipe_insert('/local/order-export/SKILL.md')
+print(recipe['id'], recipe['active_version_id'])
 ```
 
 导入和模型生成都要求 `name` 和 `description`。模型生成的 `instructions` 也必须是非空 Markdown。`selected_version.content` 使用这三个字段。示例文件如下。
@@ -174,15 +174,17 @@ recipe_file = (
 | `execution_ids` | 字符串数组 | 关联的未归档 Execution ID。首项对应当前展示状态，可用 `execution_get` 查看进度、澄清问题和候选版本 ID。 |
 | `name` | 字符串 | 条目显示名称。 |
 | `status` | 字符串 | 当前展示状态，例如 `testing`、`needs_clarification` 或 `passed`。 |
-| `available_version_id` | 字符串或 `null` | 当前可用版本，可和 `recipe_id` 一起传给 `recipe_get`。 |
+| `active_version_id` | 字符串或 `null` | 当前可用版本，可和 `recipe_id` 一起传给 `recipe_get`。 |
 | `created_at` | 数字 | 创建时间，Unix 秒。已绑定 Recipe 时取 Recipe 记录，未绑定的历史条目取 Execution 记录。 |
 | `updated_at` | 数字 | 更新时间，Unix 秒，取同一条 Recipe 或 Execution 记录。 |
+
+命名规则：对象自身的 ID 叫 `id`，引用其他对象时用 `<对象>_id`。`recipe_get()` 和 `recipe_insert()` 返回 Recipe 对象，所以 ID 在 `id`；列表条目可能是还没有 Recipe 的首次学习，所以用 `recipe_id` 引用 Recipe。两处的可用版本都叫 `active_version_id`。
 
 首次学习时，`execution_ids` 包含本次 Execution 的 ID。已有 Recipe 没有关联执行时返回 `[]`。数组优先排列待回答、排队、分析、生成和测试中的执行，再排列已结束的执行。每组按创建时间从新到旧排序。
 
 状态取值为 `active`、`inactive`、`queued`、`analyzing`、`generating`、`testing`、`needs_clarification`、`passed`、`test_failed`、`unverifiable`、`completed`、`failed`、`cancelled`。
 
-例如 v2 待回答而 v1 仍可用时，`status` 为 `needs_clarification`，`available_version_id` 仍指向 v1。手动归档后条目仍在列表，可用版本 ID 变为 `null`。恢复时可用 `recipe_get(recipe_id, "latest")`（Python 用 `version="latest"`）读取 `latest_qualified_version_id`，再调用 `recipe_version_set_archived`。
+例如 v2 待回答而 v1 仍可用时，`status` 为 `needs_clarification`，`active_version_id` 仍指向 v1。手动归档后条目仍在列表，可用版本 ID 变为 `null`。恢复时可用 `recipe_get(recipe_id, "latest")`（Python 用 `version="latest"`）读取 `latest_qualified_version_id`，再调用 `recipe_version_set_archived`。
 
 在没有未决澄清时，上一个可用版本保留到编号更高的版本验证通过。切换和旧版归档在同一个事务完成。旧版可按 ID 读取，`selected_version.archived` 表示所查版本的归档状态。恢复仅支持最近发布的版本，包括通过 `recipe_insert()` 导入的 v1。手动归档只作用于指定版本，更新的版本通过验证后仍会自动可用。
 
@@ -253,7 +255,7 @@ TS 用 `execution_list({ execution_ids: [id1, id2] })`，Python 用 `execution_l
 | `slots` | 协调同一数据目录内的 Worker 和模型调用并发。 |
 | `idempotency` | 保存幂等请求及其响应，用于安全重试。 |
 
-TS 和 Python 使用相同的表结构。查询时，`latest_version_id` 取版本号最大的一条，`active_version_id` 取唯一可用版本，`latest_qualified_version_id` 取可用及已归档版本中编号最大的一条。`recipe_list()` 继续返回 `available_version_id`。
+TS 和 Python 使用相同的表结构。查询时，`latest_version_id` 取版本号最大的一条，`active_version_id` 取唯一可用版本，`latest_qualified_version_id` 取可用及已归档版本中编号最大的一条。`recipe_list()` 行里的 `active_version_id` 与 `recipe_get()` 的同名字段取值相同。
 
 新版本验证通过并发布后，较早版本在同一事务中归档。手动归档当前可用版本后，可用版本 ID 为空。只允许恢复最近发布的版本。
 

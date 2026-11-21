@@ -200,8 +200,8 @@ export class RSIClient {
       delete (version as Partial<Version<C>>).content;
     return { ...obj, selected_version: version };
   }
-  recipe_insert(content: RecipeContent, markdown: string) {
-    return this.store.tx(() => {
+  recipe_insert(content: RecipeContent, markdown: string): Recipe {
+    const { recipeId, versionId } = this.store.tx(() => {
       const recipe = this.store.createRecipe(content.name);
       const version = this.store.append(
         recipe,
@@ -211,8 +211,9 @@ export class RSIClient {
         markdown,
       );
       this.store.publishRecipeVersion(recipe.id, version.id);
-      return { recipe_id: recipe.id, recipe_version_id: version.id };
+      return { recipeId: recipe.id, versionId: version.id };
     });
+    return this.recipe_get(recipeId, { version_id: versionId });
   }
   recipe_get(
     id: string,

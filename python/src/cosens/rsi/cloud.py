@@ -185,7 +185,7 @@ class CloudRSIClient:
         _, markdown = read_recipe_file(path)
         return self._request("POST", "/recipes", json={"markdown": markdown})
 
-    def recipe_get(self, recipe_id, *, version):
+    def recipe_get(self, recipe_id, *, version="active"):
         return self._request("GET", f"/recipes/{_segment(recipe_id)}", params={"version": version})
 
     def recipe_test(self, *, execution_id, recipe_id, version_id, rubrics_version_id):
