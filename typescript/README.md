@@ -1,10 +1,12 @@
 # CoSens TypeScript RSI SDK
 
-Use Node.js 22 or later. Install the SDK tarball from your Agent project.
+Use Node.js 22.12 or later. Install the SDK from npm in your Agent project.
 
 ```sh
-npm install /path/to/cosens-sdk-<version>.tgz
+npm install cosens-sdk
 ```
+
+The package is an ES module. CommonJS code can load it with `require('cosens-sdk/rsi')`, which Node.js supports for ES modules from 22.12. The entry points are `cosens-sdk` (everything), `cosens-sdk/rsi` and `cosens-sdk/memory`.
 
 Cloud mode is the default. `new RSIClient()` uses the CoSens service with `COSENS_API_KEY` and uploads the supplied `evidence` and optional `recipe_reference`.
 
@@ -18,7 +20,7 @@ const run = await cloud.execution_create({
 });
 ```
 
-All methods are async in both modes. For local mode, pass `data_dir` and your own model as below.
+All methods are async in both modes. `new RSIClient({ mode: 'cloud', ... })` takes `api_key`, `base_url` (default `https://rsi.cosens.ai/api`), `timeout` in seconds (default 60) and `virtualUserId`. Service errors are `RSIError` with the service's `code` and the HTTP `status`. For local mode, pass `data_dir` and your own model as below.
 
 In local mode, pass the host's model request headers in `config.headers`. The model must support Chat Completions and tool calls. If you package a standalone Node with the host, set `RSI_NODE_EXECUTABLE` and include the SDK worker and the matching `better-sqlite3` native dependency.
 
@@ -58,7 +60,7 @@ Use `config: null` for read-only clients. After a token refresh, create a Client
 
 To explicitly retry a timed-out local execution, call `recover({ recipe_id: recipeId, retry_key: requestId })`. Reuse the key if the request is submitted again.
 
-See the [complete TS and Python interface reference](../python/docs/local-rsi.md). Run `npm run check` to build, typecheck and test the public package.
+See the [complete TS and Python interface reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/local-rsi.md) and the [CoSens docs](https://cosens.ai/docs/). Run `npm run check` to build, typecheck and test the public package.
 
 ### Virtual User selection
 

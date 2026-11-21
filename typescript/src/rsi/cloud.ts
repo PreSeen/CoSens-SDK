@@ -14,7 +14,12 @@ export const DEFAULT_CLOUD_BASE_URL = 'https://rsi.cosens.ai/api';
 /** The CoSens gateway accepts request bodies up to 10 MiB. */
 export const MAX_CLOUD_REQUEST_BYTES = 10 * 1024 * 1024;
 
-export type CloudOptions = { api_key?: string; base_url?: string } & VirtualUserSelection;
+export type CloudOptions = {
+  api_key?: string;
+  base_url?: string;
+  /** Request timeout in seconds (default 60). */
+  timeout?: number;
+} & VirtualUserSelection;
 
 type EvidenceInput = {
   context_path: string;
@@ -80,6 +85,7 @@ export class CloudClient {
   readonly #base: string;
   readonly #key: string;
   readonly #virtualUserId?: string;
+  readonly #timeoutMs: number;
 
   constructor(options: CloudOptions = {}) {
     const key = options.api_key ?? process.env.COSENS_API_KEY;
@@ -87,6 +93,10 @@ export class CloudClient {
       throw new TypeError('cloud mode needs COSENS_API_KEY (or api_key)');
     this.#key = key;
     this.#virtualUserId = selectedVirtualUser(options);
+    const timeout = options.timeout ?? 60;
+    if (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0)
+      throw new TypeError('timeout must be a positive number of seconds');
+    this.#timeoutMs = timeout * 1000;
     this.#base = (
       options.base_url ??
       process.env.COSENS_RSI_BASE_URL ??
@@ -120,7 +130,7 @@ export class CloudClient {
         },
         body: payload,
         redirect: 'error',
-        signal: AbortSignal.timeout(60_000),
+        signal: AbortSignal.timeout(this.#timeoutMs),
       });
     } catch {
       throw new RSIError(
@@ -137,7 +147,7 @@ export class CloudClient {
       detail?.message ?? `CoSens RSI returned HTTP ${response.status}`;
     if (response.status === 422 && code === 'invalid_request')
       throw new TypeError(message);
-    throw new RSIError(code, message);
+    throw new RSIError(code, message, response.status);
   }
 
   async execution_create(request: {

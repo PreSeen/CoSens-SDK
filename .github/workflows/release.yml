@@ -4,8 +4,10 @@
 #
 # PyPI uses Trusted Publishing (OIDC); no PyPI token is stored. The PyPI project must
 # list this repository, this workflow file (release.yml) and the "pypi" environment as
-# a Trusted Publisher. npm publishes with provenance using the organization secret
-# NPM_TOKEN from an npm organization account, scoped to the "npm" environment.
+# a Trusted Publisher. npm publishes with provenance using the secret NPM_TOKEN (an npm
+# granular access token with read and write permission that bypasses 2FA), stored in the
+# "npm" environment or as an organization secret available to this repository.
+# CONTRIBUTING.md describes the release steps.
 name: Release
 
 on:
@@ -71,8 +73,22 @@ jobs:
         run: |
           version=$(node -p "require('./package.json').version")
           test "typescript-v${version}" = "${GITHUB_REF_NAME}" || { echo "Tag ${GITHUB_REF_NAME} does not match version ${version}"; exit 1; }
-      - run: npm ci
-      - run: npm run check
-      - run: npm publish --provenance --access public
+      - name: Check the npm token is configured
+        run: test -n "${NODE_AUTH_TOKEN}" || { echo "Secret NPM_TOKEN is not set for the npm environment"; exit 1; }
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Install
+        run: npm ci
+      - name: Build and test
+        run: npm run check
+      - name: Publish
+        # A prerelease version (for example 0.11.0-rc.1) goes to the "next" dist-tag, not "latest".
+        run: |
+          version=$(node -p "require('./package.json').version")
+          case "${version}" in
+            *-*) tag=next ;;
+            *) tag=latest ;;
+          esac
+          npm publish --provenance --access public --tag "${tag}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -147,7 +147,9 @@ test('cloud reads map to routes and errors keep their codes', async () => {
       await assert.rejects(
         client.execution_get('missing'),
         (error: unknown) =>
-          error instanceof RSIError && error.code === 'not_found',
+          error instanceof RSIError &&
+          error.code === 'not_found' &&
+          error.status === 404,
       );
     },
   );
@@ -208,4 +210,29 @@ test('cloud recipe_insert uploads the validated Markdown', async () => {
     );
     assert.equal(seen.length, 1);
   });
+});
+
+test('cloud timeout is in seconds and must be positive', async () => {
+  assert.throws(
+    () => new RSIClient({ mode: 'cloud', api_key: 'k', timeout: 0 }),
+    /timeout must be a positive number of seconds/,
+  );
+  const server = createServer(() => {});
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const { port } = server.address() as AddressInfo;
+  try {
+    const client = new RSIClient({
+      mode: 'cloud',
+      api_key: 'k',
+      base_url: `http://127.0.0.1:${port}/api`,
+      timeout: 0.2,
+    });
+    await assert.rejects(client.execution_get('slow'), {
+      code: 'service_unavailable',
+    });
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
 });
