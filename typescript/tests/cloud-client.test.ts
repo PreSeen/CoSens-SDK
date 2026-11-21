@@ -167,27 +167,23 @@ test('virtual user selection is isolated per cloud client', async (t) => {
   assert.throws(() => new RSIClient({ data_dir: '/tmp/nope', config: null, virtualUserId: 'vu_a' } as never));
 });
 
-test('virtual_user_id is accepted as an alias for virtualUserId', async (t) => {
+test('virtual_user_id is not read; only virtualUserId sets the header', async (t) => {
   const seen: Array<string | null> = [];
   t.mock.method(globalThis, 'fetch', async (_url, init) => {
     seen.push(new Headers(init?.headers).get('x-virtual-user-id'));
     return Response.json({});
   });
-  const alias = new RSIClient({ mode: 'cloud', api_key: 'k', virtual_user_id: 'vu_a' });
-  const both = new RSIClient({ mode: 'cloud', api_key: 'k', virtualUserId: 'vu_b', virtual_user_id: 'vu_b' });
-  await alias.execution_get('a');
-  await both.execution_get('b');
-  assert.deepEqual(seen, ['vu_a', 'vu_b']);
-  assert.throws(
-    () => new RSIClient({ mode: 'cloud', api_key: 'k', virtualUserId: 'vu_a', virtual_user_id: 'vu_b' }),
-    { name: 'TypeError', message: /virtualUserId and virtual_user_id differ/ },
-  );
+  const snake = new RSIClient({ mode: 'cloud', api_key: 'k', virtual_user_id: 'vu_a' } as never);
+  const camel = new RSIClient({ mode: 'cloud', api_key: 'k', virtualUserId: 'vu_b', virtual_user_id: 'vu_c' } as never);
+  await snake.execution_get('a');
+  await camel.execution_get('b');
+  assert.deepEqual(seen, [null, 'vu_b']);
+  assert.doesNotThrow(() => new RSIClient({ mode: 'cloud', api_key: 'k', virtual_user_id: '' } as never));
   for (const bad of ['', 'vu a', 'vu\n', 7])
     assert.throws(
-      () => new RSIClient({ mode: 'cloud', api_key: 'k', virtual_user_id: bad as never }),
-      { name: 'TypeError', message: /virtual_user_id must be a nonempty header value/ },
+      () => new RSIClient({ mode: 'cloud', api_key: 'k', virtualUserId: bad as never }),
+      { name: 'TypeError', message: /virtualUserId must be a nonempty header value/ },
     );
-  assert.throws(() => new RSIClient({ data_dir: '/tmp/nope', config: null, virtual_user_id: 'vu_a' } as never));
 });
 
 test('cloud recipe_insert uploads the validated Markdown', async () => {

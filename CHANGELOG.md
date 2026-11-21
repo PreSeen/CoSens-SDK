@@ -2,11 +2,16 @@
 
 Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned separately.
 
+## Unreleased
+
+### Breaking
+
+- TypeScript: the `virtual_user_id` alias for `virtualUserId` in cloud `RSIClient` options and Memory calls is removed, with no fallback. Passing `virtual_user_id` is a type error and is not read at runtime. `virtualUserId` (TypeScript) and `virtual_user_id=` (Python) remain the client options that set the `X-Virtual-User-Id` request header, the only way the service identifies a Virtual User.
+
 ## Python 0.9.1 (TypeScript unreleased)
 
 - Supported Memory calls can specify an HTTPS service URL and explicit API key per call.
 - Python and TypeScript cloud RSI clients support explicit Virtual User selection. Supported Memory calls accept a per-call selection; unsupported Memory overview and experience calls reject it.
-- TypeScript: cloud `RSIClient` options and Memory calls accept `virtual_user_id` as an alias for `virtualUserId`, so a snake_case selection is no longer silently ignored. Different values for the two throw a `TypeError`.
 - Local clarification continuations can start automatically with refreshed headers from the same credential scope and model endpoint.
 - Local `recover` accepts a Recipe ID and `retry_key` to resume a timed-out execution with its existing checkpoints and idempotent dispatch.
 - Local Recipe tests can run Python in an isolated Docker workspace when a trusted local image is configured. Publication requires actual execution evidence when the task calls for Python.

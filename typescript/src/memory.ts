@@ -43,7 +43,6 @@ export function memoryRecall({
   query,
   tokenBudget = 1000,
   virtualUserId,
-  virtual_user_id,
   baseUrl, apiKey,
 }: MemoryEndpointOptions & VirtualUserSelection & {
   query: string;
@@ -52,7 +51,7 @@ export function memoryRecall({
   return request<MemoryRecallResult>('POST', '/recall', {
     query,
     token_budget: boundedInteger(tokenBudget, 'tokenBudget', 1, 8000),
-  }, { virtualUserId, virtual_user_id }, { baseUrl, apiKey });
+  }, { virtualUserId }, { baseUrl, apiKey });
 }
 
 export function memoryIngest({
@@ -63,7 +62,6 @@ export function memoryIngest({
   sourceId,
   expectedRevision,
   virtualUserId,
-  virtual_user_id,
   baseUrl, apiKey,
 }: MemoryIngest) {
   if (
@@ -99,26 +97,26 @@ export function memoryIngest({
             Number.MAX_SAFE_INTEGER,
           ),
         }),
-  }, { virtualUserId, virtual_user_id }, { baseUrl, apiKey });
+  }, { virtualUserId }, { baseUrl, apiKey });
 }
 
-export function getMemoryItems({ limit = 200, virtualUserId, virtual_user_id, baseUrl, apiKey }: MemoryEndpointOptions & VirtualUserSelection & { limit?: number } = {}) {
+export function getMemoryItems({ limit = 200, virtualUserId, baseUrl, apiKey }: MemoryEndpointOptions & VirtualUserSelection & { limit?: number } = {}) {
   return request(
     'GET',
     `/items?limit=${boundedInteger(limit, 'limit', 1, 500)}`,
-    undefined, { virtualUserId, virtual_user_id }, { baseUrl, apiKey },
+    undefined, { virtualUserId }, { baseUrl, apiKey },
   );
 }
 
-export function getMemoryJob(jobId: string, { virtualUserId, virtual_user_id, baseUrl, apiKey }: MemoryEndpointOptions & VirtualUserSelection = {}) {
-  return request('GET', `/jobs/${pathPart(jobId)}`, undefined, { virtualUserId, virtual_user_id }, { baseUrl, apiKey });
+export function getMemoryJob(jobId: string, { virtualUserId, baseUrl, apiKey }: MemoryEndpointOptions & VirtualUserSelection = {}) {
+  return request('GET', `/jobs/${pathPart(jobId)}`, undefined, { virtualUserId }, { baseUrl, apiKey });
 }
 
 export function getMemoryExperience(
   experienceId: string,
-  { revision, virtualUserId, virtual_user_id }: { revision?: number } & VirtualUserSelection = {},
+  { revision, virtualUserId }: { revision?: number } & VirtualUserSelection = {},
 ) {
-  if (virtualUserId !== undefined || virtual_user_id !== undefined) throw new TypeError("Virtual User selection is not supported for experience details");
+  if (virtualUserId !== undefined) throw new TypeError("Virtual User selection is not supported for experience details");
   const suffix =
     revision === undefined
       ? ''
@@ -126,8 +124,8 @@ export function getMemoryExperience(
   return request('GET', `/experiences/${pathPart(experienceId)}${suffix}`);
 }
 
-export function getMemory({ virtualUserId, virtual_user_id }: VirtualUserSelection = {}) {
-  if (virtualUserId !== undefined || virtual_user_id !== undefined) throw new TypeError("Virtual User selection is not supported for memory overview");
+export function getMemory({ virtualUserId }: VirtualUserSelection = {}) {
+  if (virtualUserId !== undefined) throw new TypeError("Virtual User selection is not supported for memory overview");
   return request('GET', '');
 }
 
