@@ -1,4 +1,4 @@
-import { selectedVirtualUser, type VirtualUserSelection } from './virtual-user.js';
+import { rejectVirtualUser, selectedVirtualUser, type VirtualUserSelection } from './virtual-user.js';
 
 const SERVICE_URL = 'https://rsi.cosens.ai/api/v1/memory';
 
@@ -39,33 +39,30 @@ function pathPart(id: string) {
   return encodeURIComponent(id);
 }
 
-export function memoryRecall({
-  query,
-  tokenBudget = 1000,
-  virtualUserId,
-  virtual_user_id,
-  baseUrl, apiKey,
-}: MemoryEndpointOptions & VirtualUserSelection & {
+// Each call passes its whole options object as the Virtual User selection, so
+// selectedVirtualUser sees (and rejects) any `virtual_user_id` key.
+
+export function memoryRecall(options: MemoryEndpointOptions & VirtualUserSelection & {
   query: string;
   tokenBudget?: number;
 }) {
+  const { query, tokenBudget = 1000, baseUrl, apiKey } = options;
   return request<MemoryRecallResult>('POST', '/recall', {
     query,
     token_budget: boundedInteger(tokenBudget, 'tokenBudget', 1, 8000),
-  }, { virtualUserId, virtual_user_id }, { baseUrl, apiKey });
+  }, options, { baseUrl, apiKey });
 }
 
-export function memoryIngest({
-  content,
-  requestKey,
-  sourceKind = 'decision',
-  durable = true,
-  sourceId,
-  expectedRevision,
-  virtualUserId,
-  virtual_user_id,
-  baseUrl, apiKey,
-}: MemoryIngest) {
+export function memoryIngest(options: MemoryIngest) {
+  const {
+    content,
+    requestKey,
+    sourceKind = 'decision',
+    durable = true,
+    sourceId,
+    expectedRevision,
+    baseUrl, apiKey,
+  } = options;
   if (
     typeof requestKey !== 'string' ||
     !requestKey.trim() ||
@@ -99,26 +96,29 @@ export function memoryIngest({
             Number.MAX_SAFE_INTEGER,
           ),
         }),
-  }, { virtualUserId, virtual_user_id }, { baseUrl, apiKey });
+  }, options, { baseUrl, apiKey });
 }
 
-export function getMemoryItems({ limit = 200, virtualUserId, virtual_user_id, baseUrl, apiKey }: MemoryEndpointOptions & VirtualUserSelection & { limit?: number } = {}) {
+export function getMemoryItems(options: MemoryEndpointOptions & VirtualUserSelection & { limit?: number } = {}) {
+  const { limit = 200, baseUrl, apiKey } = options;
   return request(
     'GET',
     `/items?limit=${boundedInteger(limit, 'limit', 1, 500)}`,
-    undefined, { virtualUserId, virtual_user_id }, { baseUrl, apiKey },
+    undefined, options, { baseUrl, apiKey },
   );
 }
 
-export function getMemoryJob(jobId: string, { virtualUserId, virtual_user_id, baseUrl, apiKey }: MemoryEndpointOptions & VirtualUserSelection = {}) {
-  return request('GET', `/jobs/${pathPart(jobId)}`, undefined, { virtualUserId, virtual_user_id }, { baseUrl, apiKey });
+export function getMemoryJob(jobId: string, options: MemoryEndpointOptions & VirtualUserSelection = {}) {
+  const { baseUrl, apiKey } = options;
+  return request('GET', `/jobs/${pathPart(jobId)}`, undefined, options, { baseUrl, apiKey });
 }
 
 export function getMemoryExperience(
   experienceId: string,
-  { revision, virtualUserId, virtual_user_id }: { revision?: number } & VirtualUserSelection = {},
+  options: { revision?: number } & VirtualUserSelection = {},
 ) {
-  if (virtualUserId !== undefined || virtual_user_id !== undefined) throw new TypeError("Virtual User selection is not supported for experience details");
+  rejectVirtualUser(options, 'experience details');
+  const { revision } = options;
   const suffix =
     revision === undefined
       ? ''
@@ -126,8 +126,8 @@ export function getMemoryExperience(
   return request('GET', `/experiences/${pathPart(experienceId)}${suffix}`);
 }
 
-export function getMemory({ virtualUserId, virtual_user_id }: VirtualUserSelection = {}) {
-  if (virtualUserId !== undefined || virtual_user_id !== undefined) throw new TypeError("Virtual User selection is not supported for memory overview");
+export function getMemory(options: VirtualUserSelection = {}) {
+  rejectVirtualUser(options, 'memory overview');
   return request('GET', '');
 }
 

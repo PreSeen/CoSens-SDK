@@ -1,19 +1,22 @@
-/**
- * Virtual User selection. `virtual_user_id` is accepted as an alias for
- * `virtualUserId` because it is the Python, MCP and HTTP name.
- */
-export type VirtualUserSelection = { virtualUserId?: string; virtual_user_id?: string };
+/** Virtual User selection, sent as the `X-Virtual-User-Id` request header. */
+export type VirtualUserSelection = { virtualUserId?: string };
 
-function checked(value: unknown, name: string): string | undefined {
-  if (value !== undefined && (typeof value !== 'string' || !value || /[\s\x00-\x1f\x7f]/.test(value)))
-    throw new TypeError(`${name} must be a nonempty header value`);
-  return value;
+/**
+ * Returns the selected Virtual User, or undefined for the authenticated
+ * account. `virtual_user_id` is not an option: it is rejected, never read, so
+ * a snake_case selection cannot quietly use the account's own space instead.
+ */
+export function selectedVirtualUser(selection: VirtualUserSelection = {}): string | undefined {
+  if ('virtual_user_id' in selection)
+    throw new TypeError('virtual_user_id is not an option; use virtualUserId (sent as X-Virtual-User-Id)');
+  const { virtualUserId } = selection;
+  if (virtualUserId !== undefined && (typeof virtualUserId !== 'string' || !virtualUserId || /[\s\x00-\x1f\x7f]/.test(virtualUserId)))
+    throw new TypeError('virtualUserId must be a nonempty header value');
+  return virtualUserId;
 }
 
-export function selectedVirtualUser(selection: VirtualUserSelection = {}): string | undefined {
-  const camel = checked(selection.virtualUserId, 'virtualUserId');
-  const snake = checked(selection.virtual_user_id, 'virtual_user_id');
-  if (camel !== undefined && snake !== undefined && camel !== snake)
-    throw new TypeError('virtualUserId and virtual_user_id differ; give only one');
-  return camel ?? snake;
+/** Throws when an operation without Virtual User support is given a selection. */
+export function rejectVirtualUser(selection: VirtualUserSelection, operation: string): void {
+  if (selectedVirtualUser(selection) !== undefined)
+    throw new TypeError(`Virtual User selection is not supported for ${operation}`);
 }
