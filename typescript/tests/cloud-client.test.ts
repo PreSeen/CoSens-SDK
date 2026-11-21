@@ -167,23 +167,24 @@ test('virtual user selection is isolated per cloud client', async (t) => {
   assert.throws(() => new RSIClient({ data_dir: '/tmp/nope', config: null, virtualUserId: 'vu_a' } as never));
 });
 
-test('virtual_user_id is not read; only virtualUserId sets the header', async (t) => {
-  const seen: Array<string | null> = [];
-  t.mock.method(globalThis, 'fetch', async (_url, init) => {
-    seen.push(new Headers(init?.headers).get('x-virtual-user-id'));
-    return Response.json({});
-  });
-  const snake = new RSIClient({ mode: 'cloud', api_key: 'k', virtual_user_id: 'vu_a' } as never);
-  const camel = new RSIClient({ mode: 'cloud', api_key: 'k', virtualUserId: 'vu_b', virtual_user_id: 'vu_c' } as never);
-  await snake.execution_get('a');
-  await camel.execution_get('b');
-  assert.deepEqual(seen, [null, 'vu_b']);
-  assert.doesNotThrow(() => new RSIClient({ mode: 'cloud', api_key: 'k', virtual_user_id: '' } as never));
+test('virtual_user_id is rejected before any request; only virtualUserId sets the header', async (t) => {
+  const fetch = t.mock.method(globalThis, 'fetch', async () => Response.json({}));
+  const snake = { name: 'TypeError', message: /virtual_user_id is not an option; use virtualUserId/ };
+  for (const options of [
+    { virtual_user_id: 'vu_a' },
+    { virtual_user_id: '' },
+    { virtual_user_id: undefined },
+    { virtualUserId: 'vu_b', virtual_user_id: 'vu_b' },
+    { virtualUserId: 'vu_b', virtual_user_id: 'vu_c' },
+  ])
+    assert.throws(() => new RSIClient({ mode: 'cloud', api_key: 'k', ...options } as never), snake);
   for (const bad of ['', 'vu a', 'vu\n', 7])
     assert.throws(
       () => new RSIClient({ mode: 'cloud', api_key: 'k', virtualUserId: bad as never }),
       { name: 'TypeError', message: /virtualUserId must be a nonempty header value/ },
     );
+  assert.equal(fetch.mock.callCount(), 0);
+  assert.throws(() => new RSIClient({ data_dir: '/tmp/nope', config: null, virtual_user_id: 'vu_a' } as never));
 });
 
 test('cloud recipe_insert uploads the validated Markdown', async () => {
