@@ -323,13 +323,13 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           res.writeHead(401).end();
           return;
         }
-        assert.equal(req.headers['x-friday-auth-type'], 'access_token');
+        assert.equal(req.headers['x-auth-type'], 'access_token');
         assert.equal(input.max_tokens, 4096);
       }
       const key = input.model.slice(-1);
       if (key === 'a') {
         assert.equal(req.headers.authorization, 'Bearer fixture-gateway-a');
-        assert.equal(req.headers['x-friday-auth-type'], 'access_token');
+        assert.equal(req.headers['x-auth-type'], 'access_token');
         assert.equal(req.headers['x-api-key'], undefined);
       } else if (key === 'b' || key === 'c') {
         assert.equal(req.headers['x-api-key'], 'fixture-provider-' + key);
@@ -659,7 +659,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       const [data_dir, evidenceText, key, configText] = process.argv.slice(1);
       const { model, base_url } = JSON.parse(configText).model;
       const headers = key === 'a'
-        ? { Authorization: 'Bearer fixture-gateway-a', 'X-Friday-Auth-Type': 'access_token' }
+        ? { Authorization: 'Bearer fixture-gateway-a', 'X-Auth-Type': 'access_token' }
         : { 'X-Api-Key': 'fixture-provider-' + key };
       const client = new RSIClient({ data_dir, config: { model: model + '-' + key, base_url, headers, auto_start: true } });
       const execution = await client.execution_create({
@@ -1021,7 +1021,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         [dataDir, JSON.stringify(request)],
         process.env.RSI_TEST_BUN_EXECUTABLE,
       ).then(JSON.parse);
-      const headers = () => ({ Authorization: clarificationToken, 'X-Friday-Auth-Type': 'access_token' });
+      const headers = () => ({ Authorization: clarificationToken, 'X-Auth-Type': 'access_token' });
       try {
         const first = await callHook({
           config: { ...config, headers: headers() },

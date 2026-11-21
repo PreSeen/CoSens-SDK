@@ -74,7 +74,7 @@ def gateway(monkeypatch):
                         assert (
                             self.headers["Authorization"] == "Bearer fixture-gateway-0"
                         )
-                        assert self.headers["X-Friday-Auth-Type"] == "access_token"
+                        assert self.headers["X-Auth-Type"] == "access_token"
                         assert "X-Api-Key" not in self.headers
                     else:
                         assert (
@@ -353,7 +353,7 @@ from cosens.rsi import RSIClient
 config = json.loads(sys.argv[4])["model"]
 config["model"] += "-" + sys.argv[3]
 session = sys.argv[3].rsplit("-", 1)[-1]
-config["headers"] = ({"Authorization": "Bearer fixture-gateway-0", "X-Friday-Auth-Type": "access_token"}
+config["headers"] = ({"Authorization": "Bearer fixture-gateway-0", "X-Auth-Type": "access_token"}
     if session == "0" else {"X-Api-Key": "fixture-provider-" + session})
 c = RSIClient(data_dir=sys.argv[1], config={**config, "auto_start": True})
 run = c.execution_create(evidence=json.loads(sys.argv[2]),
