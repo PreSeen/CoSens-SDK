@@ -255,7 +255,7 @@ TS 用 `execution_list({ execution_ids: [id1, id2] })`，Python 用 `execution_l
 | `slots` | 协调同一数据目录内的 Worker 和模型调用并发。 |
 | `idempotency` | 保存幂等请求及其响应，用于安全重试。 |
 
-TS 和 Python 使用相同的表结构。查询时，`latest_version_id` 取版本号最大的一条，`active_version_id` 取唯一可用版本，`latest_qualified_version_id` 取可用及已归档版本中编号最大的一条。`recipe_list()` 继续返回 `active_version_id`。
+TS 和 Python 使用相同的表结构。查询时，`latest_version_id` 取版本号最大的一条，`active_version_id` 取唯一可用版本，`latest_qualified_version_id` 取可用及已归档版本中编号最大的一条。`recipe_list()` 行里的 `active_version_id` 与 `recipe_get()` 的同名字段取值相同。
 
 新版本验证通过并发布后，较早版本在同一事务中归档。手动归档当前可用版本后，可用版本 ID 为空。只允许恢复最近发布的版本。
 
