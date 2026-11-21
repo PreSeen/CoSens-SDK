@@ -167,18 +167,26 @@ test('explicit Memory service and key are per call and fail closed', async (t) =
     getMemoryItems(),
     memoryIngest({content: 'b', requestKey: 'k', baseUrl: 'https://stage.example/api/memory/', apiKey: 'stage-key'}),
     getMemoryJob('j', {baseUrl: 'https://regional.example/memory', apiKey: 'region-key'}),
+    getMemoryExperience('e', {revision: 2, baseUrl: 'https://regional.example/memory', apiKey: 'region-key'}),
+    getMemory({baseUrl: 'https://stage.example/api/memory/', apiKey: 'stage-key'}),
   ]);
   assert.deepEqual(seen, [
     ['https://regional.example/memory/recall', 'Bearer region-key', 'api_key', 'vu_a'],
     ['https://rsi.cosens.ai/api/memory/items?limit=200', 'Bearer fixture-key', null, null],
     ['https://stage.example/api/memory/ingest', 'Bearer stage-key', 'api_key', null],
     ['https://regional.example/memory/jobs/j', 'Bearer region-key', 'api_key', null],
+    ['https://regional.example/memory/experiences/e?revision=2', 'Bearer region-key', 'api_key', null],
+    ['https://stage.example/api/memory', 'Bearer stage-key', 'api_key', null],
   ]);
+  await assert.rejects(getMemory({baseUrl: 'https://regional.example/memory'}), TypeError);
+  await assert.rejects(getMemoryExperience('e', {apiKey: 'explicit'}), TypeError);
+  await assert.rejects(getMemory({baseUrl: 'http://example.test/memory', apiKey: 'explicit'}), TypeError);
+  assert.throws(() => getMemory({baseUrl: 'https://regional.example/memory', apiKey: 'explicit', virtualUserId: 'vu_a'}), TypeError);
   for (const baseUrl of ['http://example.test/a', 'https://u:p@example.test/a', 'https://example.test/a?x=1', 'https://example.test/a#x', 'https://example.test/a/../b', 'https://example.test/a/%2e%2e/b', 'https://example.test/a%2fb', 'https://example.test/a\\b', 'https://@example.test/a', 'https://example.test/a/%00b'])
     await assert.rejects(memoryRecall({query:'a', baseUrl, apiKey:'explicit'}), TypeError);
   await assert.rejects(memoryRecall({query:'a', baseUrl:'https://regional.example/memory'}), TypeError);
   await assert.rejects(memoryRecall({query:'a', apiKey:'explicit'}), TypeError);
-  assert.equal(seen.length, 4);
+  assert.equal(seen.length, 6);
 });
 
 test('a null explicit key never sends the ambient key to a custom service', async (t) => {

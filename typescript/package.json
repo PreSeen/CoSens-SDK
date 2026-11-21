@@ -1,6 +1,6 @@
 {
   "name": "cosens-sdk",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "CoSens TypeScript SDK for cloud and local RSI, reusable Recipes and Memory",
   "keywords": [
     "cosens",

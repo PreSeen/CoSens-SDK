@@ -2,6 +2,10 @@
 
 Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned separately.
 
+## TypeScript 0.10.1
+
+- `getMemory` and `getMemoryExperience` accept `baseUrl` and `apiKey`, like the other Memory functions and like Python 0.10.1. Both must be supplied together; the call then goes to that HTTPS Memory deployment with that key and sends `X-CoSens-Auth-Type: api_key`. Virtual User selection is still rejected for these two calls.
+
 ## Python 0.10.1
 
 - `get_memory` and `get_memory_experience` accept `base_url` and `api_key`, like the other Memory functions. Both must be supplied together; the call then goes to that Memory deployment with that key. Virtual User selection is still rejected for these two calls.

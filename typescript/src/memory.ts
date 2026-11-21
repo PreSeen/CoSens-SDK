@@ -115,20 +115,21 @@ export function getMemoryJob(jobId: string, options: MemoryEndpointOptions & Vir
 
 export function getMemoryExperience(
   experienceId: string,
-  options: { revision?: number } & VirtualUserSelection = {},
+  options: MemoryEndpointOptions & { revision?: number } & VirtualUserSelection = {},
 ) {
   rejectVirtualUser(options, 'experience details');
-  const { revision } = options;
+  const { revision, baseUrl, apiKey } = options;
   const suffix =
     revision === undefined
       ? ''
       : `?${new URLSearchParams({ revision: String(revision) })}`;
-  return request('GET', `/experiences/${pathPart(experienceId)}${suffix}`);
+  return request('GET', `/experiences/${pathPart(experienceId)}${suffix}`, undefined, {}, { baseUrl, apiKey });
 }
 
-export function getMemory(options: VirtualUserSelection = {}) {
+export function getMemory(options: MemoryEndpointOptions & VirtualUserSelection = {}) {
   rejectVirtualUser(options, 'memory overview');
-  return request('GET', '');
+  const { baseUrl, apiKey } = options;
+  return request('GET', '', undefined, {}, { baseUrl, apiKey });
 }
 
 function serviceUrl(baseUrl: string): string {
