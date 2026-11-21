@@ -166,7 +166,7 @@ class RSIClient:
                 recipe_markdown=markdown,
             )
             self.store.publish_recipe_version(conn, recipe["id"], version["id"])
-        return {"recipe_id": recipe["id"], "recipe_version_id": version["id"]}
+        return self.recipe_get(recipe["id"], version_id=version["id"])
 
     def recipe_get(
         self, recipe_id, *, version_id=None, version_selector=None, include_content=True

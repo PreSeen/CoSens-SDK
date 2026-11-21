@@ -193,7 +193,7 @@ test('cloud recipe_insert uploads the validated Markdown', async () => {
     '---\nname: Weekly report\ndescription: Sales by region\n---\nGroup sales by region.\n';
   writeFileSync(join(dir, 'RECIPE.md'), markdown);
   writeFileSync(join(dir, 'bad.md'), 'Group sales by region.');
-  const reply = { recipe_id: 'recipe_1', recipe_version_id: 'version_1' };
+  const reply = { id: 'recipe_1', active_version_id: 'version_1' };
   await withService({ 'POST /api/recipes': [200, reply] }, async (base_url, seen) => {
     const client = new RSIClient({ mode: 'cloud', api_key: 'k', base_url });
     assert.deepEqual(await client.recipe_insert(join(dir, 'RECIPE.md')), reply);

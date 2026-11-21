@@ -28,7 +28,6 @@ interface RecipeListProgress {
   candidate_version_id: string | null;
   candidate_version_number: number | null;
   pending_question_count: number;
-  available_version_id: string | null;
   archived: boolean;
 }
 
@@ -49,7 +48,7 @@ export type RecipeListEntry =
 
 type RecipeListRow = Omit<
   RecipeListProgress,
-  'available_version_id' | 'archived' | 'execution_ids'
+  'archived' | 'execution_ids'
 > & {
   id: string;
   kind: RecipeListEntry['kind'];
@@ -97,7 +96,6 @@ export function readRecipeList(
           execution_id: id,
           execution_ids: [id],
           active_version_id: null,
-          available_version_id: null,
           archived: false,
           latest_version_id: null,
         };
@@ -111,7 +109,6 @@ export function readRecipeList(
         recipe_id: id,
         execution_id,
         execution_ids: JSON.parse(execution_ids) as string[],
-        available_version_id: recipe.active_version_id ?? null,
         archived:
           !!recipe.latest_qualified_version_id && !recipe.active_version_id,
       };

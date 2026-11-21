@@ -368,7 +368,7 @@ def test_version_availability_archive_and_restore(client, tmp_path):
     recipe_id, version_id = result["recipe_id"], result["recipe_version_id"]
     host = PublicClient(data_dir=client.data_dir, config=None)
     assert not hasattr(host, "recipe_activate")
-    assert host.recipe_list()[0]["available_version_id"] == version_id
+    assert host.recipe_list()[0]["active_version_id"] == version_id
     assert not host.recipe_get(recipe_id, version=version_id)["selected_version"][
         "archived"
     ]
@@ -377,7 +377,7 @@ def test_version_availability_archive_and_restore(client, tmp_path):
     ) == {"recipe_id": recipe_id, "version_id": version_id, "archived": True}
     reopened = PublicClient(data_dir=client.data_dir, config=None)
     [row] = reopened.recipe_list()
-    assert row["available_version_id"] is None
+    assert row["active_version_id"] is None
     assert (
         reopened.recipe_get(recipe_id, version="latest")["latest_qualified_version_id"]
         == version_id
@@ -390,15 +390,15 @@ def test_version_availability_archive_and_restore(client, tmp_path):
     reopened.recipe_version_set_archived(
         recipe_id, version_id=version_id, archived=False
     )
-    assert reopened.recipe_list()[0]["available_version_id"] == version_id
+    assert reopened.recipe_list()[0]["active_version_id"] == version_id
 
     revision = client.execution_create(
         material_ids=[source["id"]], policy=policy(), base_recipe_version_id=version_id
     )
-    assert reopened.recipe_list()[0]["available_version_id"] == version_id
+    assert reopened.recipe_list()[0]["active_version_id"] == version_id
     client.run_pending(runtime=FileRuntime())
     new_id = client.execution_get(revision["id"])["recipe_version_id"]
-    assert reopened.recipe_list()[0]["available_version_id"] == new_id
+    assert reopened.recipe_list()[0]["active_version_id"] == new_id
     recipe = reopened.recipe_get(recipe_id, version="active")
     assert recipe["storage_path"] == f"recipes/{recipe_id}"
     for exported_id in (version_id, new_id):
@@ -411,7 +411,7 @@ def test_version_availability_archive_and_restore(client, tmp_path):
     reopened.recipe_version_set_archived(
         recipe_id, version_id=version_id, archived=True
     )
-    assert reopened.recipe_list()[0]["available_version_id"] == new_id
+    assert reopened.recipe_list()[0]["active_version_id"] == new_id
     with pytest.raises(InvalidState, match="only the latest qualified"):
         reopened.recipe_version_set_archived(
             recipe_id, version_id=version_id, archived=False
@@ -463,15 +463,13 @@ def test_recipe_insert_requires_skill_metadata_and_creates_available_version(tmp
         'metadata:\r\n  version: "1.0"\r\n---\r\n\r\n' + instructions
     )
     path.write_bytes(source.encode("utf-8"))
-    first_ids = host.recipe_insert(path)
-    second_ids = host.recipe_insert(str(path))
-    assert first_ids["recipe_id"] != second_ids["recipe_id"]
-    assert first_ids["recipe_version_id"] != second_ids["recipe_version_id"]
-    first = host.recipe_get(
-        first_ids["recipe_id"], version=first_ids["recipe_version_id"]
-    )
+    first = host.recipe_insert(path)
+    second = host.recipe_insert(str(path))
+    assert first["id"] != second["id"]
+    assert first["active_version_id"] != second["active_version_id"]
+    assert host.recipe_get(first["id"], version=first["active_version_id"]) == first
+    assert host.recipe_get(first["id"]) == first
     version = first["selected_version"]
-    assert version["id"] == first_ids["recipe_version_id"]
     assert version["number"] == 1
     assert version["content"] == generated
     assert version["provenance"] == {"source": "external"}
@@ -488,8 +486,7 @@ def test_recipe_insert_requires_skill_metadata_and_creates_available_version(tmp
         "---\nname: minimal\ndescription: Metadata only\n---", encoding="utf-8"
     )
     minimal = host.recipe_insert(path)
-    detail = host.recipe_get(minimal["recipe_id"], version=minimal["recipe_version_id"])
-    assert detail["selected_version"]["content"]["instructions"] == ""
+    assert minimal["selected_version"]["content"]["instructions"] == ""
 
 
 @pytest.mark.parametrize("schema_version", [3, 4, 5, 6])
@@ -602,7 +599,7 @@ def test_recipe_migration_preserves_archived_target_and_candidate(
     host.recipe_version_set_archived(
         recipe_id, version_id="version_first", archived=False
     )
-    assert host.recipe_list()[0]["available_version_id"] == "version_first"
+    assert host.recipe_list()[0]["active_version_id"] == "version_first"
     assert (
         host.recipe_get(recipe_id, version="active")["selected_version"]["id"]
         == "version_first"
@@ -1354,7 +1351,7 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
             "execution_ids": [created["id"]],
             "name": "首次学习",
             "status": "queued",
-            "available_version_id": None,
+            "active_version_id": None,
             "created_at": draft["created_at"],
             "updated_at": draft["updated_at"],
         }
@@ -1421,19 +1418,19 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
         ]
         == recipe["selected_version"]
     )
-    [available] = [row for row in client.recipe_list() if row["available_version_id"]]
+    [available] = [row for row in client.recipe_list() if row["active_version_id"]]
     assert available == {
         "recipe_id": recipe["id"],
         "execution_ids": [finished["id"]],
         "name": recipe["name"],
         "status": "passed",
-        "available_version_id": recipe["latest_version_id"],
+        "active_version_id": recipe["latest_version_id"],
         "created_at": recipe["created_at"],
         "updated_at": recipe["updated_at"],
     }
     assert (
         client.recipe_get(
-            available["recipe_id"], version=available["available_version_id"]
+            available["recipe_id"], version=available["active_version_id"]
         )["selected_version"]
         == recipe["selected_version"]
     )
@@ -1489,7 +1486,7 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
             "execution_ids": [revised["id"], finished["id"]],
             "name": recipe["name"],
             "status": "queued",
-            "available_version_id": finished["recipe_version_id"],
+            "active_version_id": finished["recipe_version_id"],
             "created_at": detail["created_at"],
             "updated_at": detail["updated_at"],
         }
