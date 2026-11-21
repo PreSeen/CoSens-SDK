@@ -2,7 +2,7 @@
 
 Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned separately.
 
-## Unreleased
+## Python 0.10.0 and TypeScript 0.5.4-rsi.25
 
 ### Breaking
 
