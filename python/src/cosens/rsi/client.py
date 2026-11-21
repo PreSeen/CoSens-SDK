@@ -234,7 +234,7 @@ class RSIClient:
                 "execution_ids": row["execution_ids"],
                 "name": row["name"] or "",
                 "status": row["status"],
-                "available_version_id": row["available_version_id"],
+                "active_version_id": row.get("active_version_id"),
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
             }
@@ -245,7 +245,7 @@ class RSIClient:
         content, markdown = read_recipe_file(path)
         return self._queue.recipe_insert(content, markdown)
 
-    def recipe_get(self, recipe_id, *, version):
+    def recipe_get(self, recipe_id, *, version="active"):
         version = _TEXT.validate_python(version)
         if version in {"active", "latest"}:
             return self._queue.recipe_get(recipe_id, version_selector=version)

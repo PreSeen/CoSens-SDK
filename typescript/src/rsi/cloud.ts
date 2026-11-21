@@ -208,15 +208,13 @@ export class CloudClient {
     });
   }
 
-  async recipe_insert(
-    path: string,
-  ): Promise<{ recipe_id: string; recipe_version_id: string }> {
+  async recipe_insert(path: string) {
     // Validate locally first, so a malformed file fails the same way in both modes.
     const { markdown } = await readRecipeFile(path);
     return this.request('POST', '/recipes', { body: { markdown } });
   }
 
-  recipe_get(id: string, version: string) {
+  recipe_get(id: string, version = 'active') {
     return this.request('GET', `/recipes/${segment(id)}`, {
       params: { version },
     });

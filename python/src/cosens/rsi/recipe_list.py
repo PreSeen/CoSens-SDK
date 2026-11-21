@@ -24,10 +24,9 @@ def read_recipe_list(conn, *, q, active_only, archived, limit, offset, recipe_id
             entry.update(active_version_id=None, latest_version_id=None)
         else:
             entry = {**json.loads(metadata), **entry}
-        entry["available_version_id"] = entry.get("active_version_id")
         entry["archived"] = bool(
             entry.get("latest_qualified_version_id")
-            and not entry["available_version_id"]
+            and not entry.get("active_version_id")
         )
         entries.append(entry)
     return entries

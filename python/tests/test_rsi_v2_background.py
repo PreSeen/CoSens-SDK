@@ -880,7 +880,7 @@ def test_recover_retry_key_resumes_timed_out_checkpoint_once(
     job = initial.execution_create(
         evidence=evidence,
         idempotency_key="model-timeout",
-        recipe_reference={"path": str(skill), "recipe_id": recipe["recipe_id"]},
+        recipe_reference={"path": str(skill), "recipe_id": recipe["id"]},
     )
     recipe_id = job["recipe_id"]
     execution_id = job["id"]
@@ -890,7 +890,7 @@ def test_recover_retry_key_resumes_timed_out_checkpoint_once(
     assert failed["error"]["stage"] == "test"
     assert (
         initial.recipe_get(recipe_id, version="active")["selected_version"]["id"]
-        == recipe["recipe_version_id"]
+        == recipe["active_version_id"]
     )
     assert initial.recover(recipe_id=recipe_id) == {"started": 0}
 

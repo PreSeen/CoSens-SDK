@@ -104,7 +104,7 @@ export type RecipeListEntry = {
   execution_ids: string[];
   name: string;
   status: RecipeListStatus;
-  available_version_id: string | null;
+  active_version_id: string | null;
   created_at: number;
   updated_at: number;
 };
@@ -317,7 +317,7 @@ export class RSIClient {
       execution_ids: row.execution_ids,
       name: row.name ?? '',
       status: row.status,
-      available_version_id: row.available_version_id,
+      active_version_id: row.active_version_id ?? null,
       created_at: row.created_at,
       updated_at: row.updated_at,
     }));
@@ -329,7 +329,7 @@ export class RSIClient {
     return this.#queue.recipe_insert(content, markdown);
   }
 
-  async recipe_get(id: string, version: string) {
+  async recipe_get(id: string, version = 'active') {
     if (this.#cloud) return this.#cloud.recipe_get(id, version);
     return this.#queue.recipe_get(
       id,
