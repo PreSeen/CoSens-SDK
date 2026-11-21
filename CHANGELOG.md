@@ -2,7 +2,11 @@
 
 Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned separately.
 
-## Python 0.9.1 (TypeScript unreleased)
+## Python 0.9.2
+
+- Cloud `recipe_insert(path)` uploads your own Recipe: the SDK validates the Skill Markdown file locally (YAML frontmatter with nonempty `name` and `description`) and sends it to `POST /recipes`, which publishes it as version 1. Local mode is unchanged.
+
+## Python 0.9.1
 
 - Supported Memory calls can specify an HTTPS service URL and explicit API key per call.
 - Python and TypeScript cloud RSI clients support explicit Virtual User selection. Supported Memory calls accept a per-call selection; unsupported Memory overview and experience calls reject it.
