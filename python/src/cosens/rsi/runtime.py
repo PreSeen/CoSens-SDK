@@ -142,6 +142,7 @@ class ChatRuntime:
         by_locator = {f["locator"]: f for f in files}
         reads = []
         python_runs = []
+        python_enabled = workspace is not None and context.get("requires_python") is True
         last_file = None
         long_page_messages = {}
 
@@ -216,11 +217,6 @@ class ChatRuntime:
                 self.check_alive()
                 return output_path(path).read_text(encoding="utf-8")[:100000]
 
-            def execute_python(path, args):
-                """Execute a staged scripts/*.py with optional arguments in the isolated test sandbox and return its receipt."""
-                self.check_alive()
-                return run_python(path, args, root, files, self.client.config, self.check_alive)
-
             tools.extend(
                 [
                     Tool(
@@ -232,11 +228,22 @@ class ChatRuntime:
                     Tool(
                         "read_output", read_output.__doc__, ReadOutputArgs, read_output
                     ),
-                    Tool(
-                        "run_python", execute_python.__doc__, RunPythonArgs, execute_python
-                    ),
                 ]
             )
+            if python_enabled:
+
+                def execute_python(path, args):
+                    """Execute a staged scripts/*.py with optional arguments in the isolated test sandbox and return its receipt."""
+                    self.check_alive()
+                    return run_python(
+                        path, args, root, files, self.client.config, self.check_alive
+                    )
+
+                tools.append(
+                    Tool(
+                        "run_python", execute_python.__doc__, RunPythonArgs, execute_python
+                    )
+                )
 
         catalog = [
             {
@@ -247,7 +254,7 @@ class ChatRuntime:
                 "material_id": f["locator"].split("/")[0]
                 if f["locator"].startswith("material_")
                 else None,
-                **({"sandbox_path": sandbox_path(f)} if workspace is not None else {}),
+                **({"sandbox_path": sandbox_path(f)} if python_enabled else {}),
             }
             for f in files
         ]
@@ -361,7 +368,7 @@ class ChatRuntime:
                                         output = (
                                             "Tool could not complete the operation."
                                         )
-                            if workspace is not None and call.function.name == "run_python":
+                            if tool is not None and call.function.name == "run_python":
                                 if isinstance(output, str):
                                     output = {
                                         "status": "rejected", "exit_code": None,
@@ -486,18 +493,25 @@ class ChatRuntime:
         )
 
     def execute(self, context, files, workspace, trace_path):
+        python_instruction = (
+            "Write a script under scripts/ with write_output, then call run_python with that path and any arguments. "
+            "Use catalog sandbox_path values to read the authorized inputs and write deliverables to the current output directory. "
+            if context.get("requires_python") is True
+            else ""
+        )
         return self._call(
             stage="recipe test executor",
             context=context,
             files=files,
             workspace=workspace,
             trace_path=trace_path,
-            instruction="Actually perform test_task using recipe.instructions. Read task inputs with read_evidence; "
-            "write the resulting deliverable files with write_output. Use only the authorized input and shared reference files in this catalog. "
-            "When actual Python execution is required, write a script under scripts/ with write_output, then call run_python with that path and any arguments. "
-            "Python may read only the input and shared reference sandbox_path values in the catalog and should write deliverables to its current output directory. "
-            "The scripts directory is for execution only. For every required check, execute it and report its observed result. "
-            "If these tools cannot perform the task, explain the missing capability. Claim completion only when the required work was executed successfully. No shell or network tools exist.",
+            instruction=(
+                "Actually perform test_task using recipe.instructions. Read task inputs with read_evidence; "
+                "write the resulting deliverable files with write_output. Use only the authorized input and shared reference files in this catalog. "
+                f"{python_instruction}"
+                "For every required check, execute it and report its observed result. "
+                "If these tools cannot perform the task, explain the missing capability. Claim completion only when the required work was executed successfully. No shell or network tools exist."
+            ),
         )
 
     def assess(self, context, files, trace_path):

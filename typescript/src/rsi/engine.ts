@@ -427,15 +427,16 @@ export class Engine {
     result: TestResult,
     task: NonNullable<Execution['policy']['test_task']>,
   ) {
-    const attempt = join(this.directory(state.revision), uid('test-attempt'));
-    const workspace = join(attempt, 'outputs');
-    mkdirSync(workspace, { recursive: true, mode: 0o700 });
     const recipe = this.store.version<RecipeContent>(
       result.recipe_id,
       result.version_id,
     );
     const rubricVersion = this.store.version_by_id(state.rubric, 'rubrics');
     const rubrics = RubricsSchema.parse(rubricVersion.content);
+    if (rubrics.requires_python && !this.client.config.test_python_image) {
+      result.reason = 'Required Python execution is not configured (set test_python_image)';
+      return;
+    }
     const literals = this.learningLiterals(
       execution,
       recipe.provenance.execution_id,
@@ -457,6 +458,9 @@ export class Engine {
       })),
     };
     const inputs = this.evidence(execution, true);
+    const attempt = join(this.directory(state.revision), uid('test-attempt'));
+    const workspace = join(attempt, 'outputs');
+    mkdirSync(workspace, { recursive: true, mode: 0o700 });
     const trace = join(attempt, 'executor-trace.json');
     atomic_json(join(attempt, 'test-input.json'), {
       test_task: task,
@@ -488,15 +492,17 @@ export class Engine {
         ),
       );
     const latestRuns = new Map<string, PythonRun>();
-    if (summary && typeof summary === 'object' && 'python_runs' in summary &&
-      Array.isArray(summary.python_runs)) {
+    if (
+      rubrics.requires_python && summary && typeof summary === 'object' &&
+      'python_runs' in summary && Array.isArray(summary.python_runs)
+    ) {
       for (const run of summary.python_runs as PythonRun[]) latestRuns.set(run.path, run);
     }
     const runs = [...latestRuns.values()];
     const unavailable = runs.find((run) => run.status === 'unavailable');
     const failed = runs.find((run) => run.exit_code !== 0);
-    if (unavailable || (rubrics.requires_python && !this.client.config.test_python_image)) {
-      result.reason = unavailable?.stderr ?? 'Required Python execution is not configured';
+    if (unavailable) {
+      result.reason = unavailable.stderr;
       atomic_json(join(attempt, 'result.json'), result);
       return;
     }

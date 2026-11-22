@@ -230,7 +230,7 @@ TS 用 `execution_list({ execution_ids: [id1, id2] })`，Python 用 `execution_l
 
 ### 测试中运行 Python
 
-本地 Client 配置 `test_python_image` 后，测试模型可用 `write_output` 把脚本写到 `scripts/`，再调用 `run_python({ path, args })`。`path` 是脚本相对路径，`args` 是参数数组，省略时为 `[]`。Docker 使用本机已有镜像。脚本在 `/workspace/outputs` 中运行，从 `/workspace/inputs` 读取本轮获准测试的只读文件。工具将真实退出码、标准输出和标准错误写入测试轨迹。测试产物由隔离工作区收集，待运行脚本与产物分开。
+当 Rubric 要求运行 Python 且本地 Client 配置了 `test_python_image`，测试模型可用 `write_output` 把脚本写到 `scripts/`，再调用 `run_python({ path, args })`。`path` 是脚本相对路径，`args` 是参数数组，省略时为 `[]`。Docker 使用本机已有镜像。脚本在 `/workspace/outputs` 中运行，从 `/workspace/inputs` 读取本轮获准测试的只读文件。工具将真实退出码、标准输出和标准错误写入测试轨迹。测试产物由隔离工作区收集，待运行脚本与产物分开。
 
 容器禁用网络并限制运行时间和资源。使用未声明 `VOLUME` 的可信镜像，由镜像预装任务所需的依赖，例如读取 Excel 所需的库。模型请求头、宿主的其他路径和学习材料不会挂载到容器。
 
