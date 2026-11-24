@@ -623,7 +623,7 @@ def test_recipe_migration_preserves_archived_target_and_candidate(
             "available",
             "candidate",
         ]
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 9
         assert (
             migrated.execute(
                 "SELECT name FROM sqlite_schema WHERE name='recipe_api_metadata'"

@@ -1,5 +1,6 @@
 """Read and validate a local Recipe written in the Skill Markdown format."""
 
+import json
 import re
 from pathlib import Path
 
@@ -47,3 +48,15 @@ def read_recipe_file(path: str | Path):
 
     instructions = re.sub(r"\A\r?\n", "", markdown[header.end() :])
     return {**recipe.model_dump(), "instructions": instructions}, markdown
+
+
+def render_recipe_markdown(content):
+    frontmatter = (
+        "---\n"
+        f"name: {json.dumps(content['name'], ensure_ascii=False)}\n"
+        f"description: {json.dumps(content['description'], ensure_ascii=False)}\n"
+        "---\n"
+    )
+    body = content["instructions"]
+    markdown = f"{frontmatter}\n{body}" if body else frontmatter
+    return markdown if markdown.endswith("\n") else markdown + "\n"

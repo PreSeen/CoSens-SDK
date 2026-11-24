@@ -85,6 +85,39 @@ function segment(value: string) {
   return encodeURIComponent(value);
 }
 
+export async function openRecipeZip(path: string | URL) {
+  let localPath: string;
+  if (path instanceof URL || /^file:/i.test(path)) {
+    const uri = new URL(path);
+    if (uri.protocol !== 'file:' || (uri.hostname && uri.hostname !== 'localhost') || uri.search || uri.hash)
+      throw new TypeError('Recipe file URI must refer to a local path');
+    localPath = fileURLToPath(uri);
+  } else {
+    localPath = path;
+  }
+  const zip = await openAsBlob(localPath, { type: 'application/zip' });
+  if (zip.size === 0 || zip.size > MAX_RECIPE_ZIP_BYTES)
+    throw new TypeError('Recipe ZIP must be nonempty and at most 8 MiB');
+  return { file: zip, filename: basename(localPath) };
+}
+
+export function validateRecipeUpsertOptions({ recipe_id, idempotency_key }: RecipeUpsertOptions) {
+  if (
+    recipe_id !== undefined
+    && (typeof recipe_id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(recipe_id))
+  ) {
+    throw new TypeError('recipe_id must contain 1–64 letters, digits, underscores or hyphens');
+  }
+  if (
+    idempotency_key !== undefined
+    && (typeof idempotency_key !== 'string'
+      || !/^[\x20-\x7e]+$/.test(idempotency_key)
+      || idempotency_key.trim() !== idempotency_key)
+  ) {
+    throw new TypeError('idempotency_key must be a nonempty HTTP header value');
+  }
+}
+
 /** Cloud mode uploads the supplied evidence and optional Recipe reference to CoSens. */
 export class CloudClient {
   readonly #base: string;
@@ -160,8 +193,11 @@ export class CloudClient {
     const code = detail?.code ?? `http_${response.status}`;
     const message =
       detail?.message ?? `CoSens RSI returned HTTP ${response.status}`;
-    if (response.status === 422 && code === 'invalid_request')
-      throw new TypeError(message);
+    if (response.status === 422 && code === 'invalid_request') {
+      const error = new TypeError(message);
+      Object.defineProperty(error, 'status', { value: response.status });
+      throw error;
+    }
     throw new RSIError(code, message, response.status);
   }
 
@@ -242,36 +278,18 @@ export class CloudClient {
 
   async recipes_upsert(
     path: string | URL,
-    { recipe_id, idempotency_key }: RecipeUpsertOptions = {},
+    options: RecipeUpsertOptions = {},
   ): Promise<RecipeUpsertResult> {
-    let localPath: string;
-    if (path instanceof URL || /^file:/i.test(path)) {
-      const uri = new URL(path);
-      if (uri.protocol !== 'file:' || (uri.hostname && uri.hostname !== 'localhost') || uri.search || uri.hash)
-        throw new TypeError('Recipe file URI must refer to a local path');
-      localPath = fileURLToPath(uri);
-    } else {
-      localPath = path;
-    }
-    if (
-      recipe_id !== undefined
-      && (typeof recipe_id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(recipe_id))
-    ) {
-      throw new TypeError('recipe_id must contain 1–64 letters, digits, underscores or hyphens');
-    }
-    if (
-      idempotency_key !== undefined
-      && (typeof idempotency_key !== 'string'
-        || !/^[\x20-\x7e]+$/.test(idempotency_key)
-        || idempotency_key.trim() !== idempotency_key)
-    ) {
-      throw new TypeError('idempotency_key must be a nonempty HTTP header value');
-    }
-    const zip = await openAsBlob(localPath, { type: 'application/zip' });
-    if (zip.size === 0 || zip.size > MAX_RECIPE_ZIP_BYTES)
-      throw new TypeError('Recipe ZIP must be nonempty and at most 8 MiB');
+    validateRecipeUpsertOptions(options);
+    return this.uploadRecipeZip(await openRecipeZip(path), options);
+  }
+
+  async uploadRecipeZip(
+    { file, filename }: { file: Blob; filename: string },
+    { recipe_id, idempotency_key }: RecipeUpsertOptions,
+  ): Promise<RecipeUpsertResult> {
     const multipart = new FormData();
-    multipart.set('file', zip, basename(localPath));
+    multipart.set('file', file, filename);
     if (recipe_id !== undefined) multipart.set('recipe_id', recipe_id);
     return this.request('POST', '/recipes_upsert', { multipart, idempotency_key });
   }

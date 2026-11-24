@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { isMap, parseDocument } from 'yaml';
-import { fail, RecipeMetadataSchema } from './models.js';
+import { fail, RecipeMetadataSchema, type RecipeContent } from './models.js';
 
 export async function readRecipeFile(path: string) {
   if (typeof path !== 'string' || !path.trim()) {
@@ -61,4 +61,10 @@ export async function readRecipeFile(path: string) {
     },
     markdown,
   };
+}
+
+export function formatRecipeMarkdown({ name, description, instructions }: RecipeContent): string {
+  const frontmatter = `---\nname: ${JSON.stringify(name)}\ndescription: ${JSON.stringify(description)}\n---\n`;
+  if (!instructions) return frontmatter;
+  return frontmatter + '\n' + instructions + (instructions.endsWith('\n') ? '' : '\n');
 }

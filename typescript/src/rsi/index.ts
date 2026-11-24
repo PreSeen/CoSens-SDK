@@ -1,10 +1,11 @@
 export { RSIClient } from './public-client.js';
 export { CloudClient, DEFAULT_CLOUD_BASE_URL } from './cloud.js';
-export type { CloudOptions } from './cloud.js';
+export type { CloudOptions, RecipeUpsertOptions, RecipeUpsertResult } from './cloud.js';
 export type {
   RSIConfig,
   RSIClientOptions,
   LocalOptions,
+  LocalRecipeUpsertOptions,
   ExecutionEvidence,
   Execution,
   ExecutionCreate,

@@ -170,7 +170,7 @@ for (const version of [3, 4, 5, 6]) {
               .all(),
             ['available', 'candidate'],
           );
-          assert.equal(migrated.pragma('user_version', { simple: true }), 7);
+          assert.equal(migrated.pragma('user_version', { simple: true }), 9);
           assert.equal(
             migrated
               .prepare(
@@ -267,6 +267,82 @@ test('recipe_insert requires Skill metadata and creates a fresh available Recipe
   } finally {
     client.close();
     rmSync(data_dir, { recursive: true, force: true });
+  }
+});
+
+test('schema v7 upgrades while preserving IDs for an unsynchronized Recipe', async (t) => {
+  const data_dir = mkdtempSync(join(tmpdir(), 'cosens-rsi-migrate-v7-'));
+  t.after(() => rmSync(data_dir, { recursive: true, force: true }));
+  const draft = join(data_dir, 'RECIPE.md');
+  const markdown = '---\nname: Report\ndescription: Read a report\n---\nExisting body\n';
+  writeFileSync(draft, markdown);
+  const client = new PublicRSIClient({ data_dir, config: null });
+  const recipe = await client.recipe_insert(draft);
+  client.close();
+  const db = new Database(join(data_dir, 'rsi-ts.sqlite3'));
+  db.pragma('user_version=7');
+  db.close();
+  const migrated = new PublicRSIClient({ data_dir, config: null });
+  t.after(() => migrated.close());
+  assert.deepEqual(await migrated.recipe_get(recipe.id), recipe);
+  assert.equal(readFileSync(join(data_dir, recipe.storage_path, recipe.active_version_id!, 'RECIPE.md'), 'utf8'), markdown);
+  const proof = new Database(join(data_dir, 'rsi-ts.sqlite3'), { readonly: true });
+  try {
+    assert.equal(proof.pragma('user_version', { simple: true }), 9);
+    assert.equal(proof.prepare('SELECT id FROM recipes').pluck().get(), recipe.id);
+  } finally {
+    proof.close();
+  }
+});
+
+test('schema v8 adopts previously synchronized Recipe and version IDs', async (t) => {
+  const data_dir = mkdtempSync(join(tmpdir(), 'cosens-rsi-migrate-v8-'));
+  t.after(() => rmSync(data_dir, { recursive: true, force: true }));
+  const draft = join(data_dir, 'RECIPE.md');
+  const markdown = '---\nname: Report\ndescription: Read a report\n---\nExisting body\n';
+  writeFileSync(draft, markdown);
+  const client = new PublicRSIClient({ data_dir, config: null });
+  const recipe = await client.recipe_insert(draft);
+  client.close();
+  const localVersion = recipe.active_version_id!;
+  const receipt = { recipe_id: 'recipe_synced', recipe_version_id: 'version_synced' };
+  const plan = {
+    local_recipe_id: recipe.id, local_recipe_version_id: localVersion,
+    zip_sha256: 'fixture', idempotency_key: 'old-key', cloud_recipe_id: null,
+    base_url: 'https://rsi.example/api', virtual_user_id: null,
+  };
+  const db = new Database(join(data_dir, 'rsi-ts.sqlite3'));
+  try {
+    db.exec(`
+      ALTER TABLE recipes ADD COLUMN cloud_recipe_id TEXT;
+      ALTER TABLE recipes ADD COLUMN cloud_recipe_version_id TEXT;
+      ALTER TABLE versions ADD COLUMN cloud_recipe_version_id TEXT;
+      PRAGMA user_version=8;
+    `);
+    db.prepare('UPDATE recipes SET cloud_recipe_id=?,cloud_recipe_version_id=? WHERE id=?')
+      .run(receipt.recipe_id, receipt.recipe_version_id, recipe.id);
+    db.prepare('UPDATE versions SET cloud_recipe_version_id=? WHERE id=?')
+      .run(receipt.recipe_version_id, localVersion);
+    db.prepare('INSERT INTO idempotency VALUES (?,?,?,?)')
+      .run('recipe_cloud_upload_receipt', localVersion, JSON.stringify(plan), JSON.stringify(receipt));
+  } finally {
+    db.close();
+  }
+  const migrated = new PublicRSIClient({ data_dir, config: null });
+  t.after(() => migrated.close());
+  const canonical = await migrated.recipe_get(recipe.id, localVersion);
+  assert.equal(canonical.id, receipt.recipe_id);
+  assert.equal(canonical.selected_version?.id, receipt.recipe_version_id);
+  assert.equal(readFileSync(join(data_dir, canonical.storage_path, receipt.recipe_version_id, 'RECIPE.md'), 'utf8'), markdown);
+  const proof = new Database(join(data_dir, 'rsi-ts.sqlite3'), { readonly: true });
+  try {
+    assert.equal(proof.pragma('user_version', { simple: true }), 9);
+    assert.deepEqual(proof.prepare('SELECT id FROM recipes').pluck().all(), [receipt.recipe_id]);
+    assert.deepEqual(proof.prepare('SELECT id FROM versions').pluck().all(), [receipt.recipe_version_id]);
+    assert.equal(proof.prepare('SELECT key FROM idempotency WHERE scope=?').pluck().get('recipe_cloud_upload_receipt'), receipt.recipe_version_id);
+    assert.deepEqual(proof.pragma('foreign_key_check'), []);
+  } finally {
+    proof.close();
   }
 });
 

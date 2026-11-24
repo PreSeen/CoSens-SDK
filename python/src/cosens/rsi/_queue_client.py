@@ -20,6 +20,7 @@ from .models import (
     NotFound,
 )
 from .progress import restart_execution
+from .recipe_identity import journal_entry, recipe_id_for, version_id_for
 from .recipe_list import read_recipe_list
 from .store import Store, uid
 
@@ -125,6 +126,7 @@ class RSIClient:
         ):
             raise ValueError("invalid version selector")
         with self.store.connect() as conn:
+            conn.execute("BEGIN")
             obj = self.store.get_in(conn, object_id, kind)
             selected = version_id or obj.get(
                 "active_version_id"
@@ -196,6 +198,9 @@ class RSIClient:
 
     def recipe_list_all(self, *, recipe_ids=None):
         with self.store.connect() as conn:
+            conn.execute("BEGIN")
+            if recipe_ids is not None:
+                recipe_ids = list(dict.fromkeys(recipe_id_for(conn, value) for value in recipe_ids))
             return read_recipe_list(
                 conn,
                 q=None,
@@ -218,8 +223,10 @@ class RSIClient:
             [file for material in materials for file in material["files"]],
             request["policy"].get("test_task"),
         )
-        base_id = request.get("base_recipe_version_id")
+        base_id = version_id_for(conn, request.get("base_recipe_version_id"))
         if base_id:
+            if request["base_recipe_version_id"] != base_id:
+                request = {**request, "base_recipe_version_id": base_id}
             row = conn.execute(
                 "SELECT object_id FROM versions WHERE id=?", (base_id,)
             ).fetchone()
@@ -736,6 +743,7 @@ class RSIClient:
         with self.store.transaction() as conn:
             recipe = self.store.get_in(conn, recipe_id, "recipe")
             version = self.store.version_in(conn, recipe_id, version_id)
+            recipe_id, version_id = recipe["id"], version["id"]
             latest_id = recipe.get("latest_qualified_version_id")
             latest = (
                 self.store.version_in(conn, recipe_id, latest_id) if latest_id else None
@@ -788,12 +796,16 @@ class RSIClient:
 
     def _retry_timed_out_execution(self, recipe_id, retry_key):
         self._check_runtime()
-        request = {"recipe_id": recipe_id}
         with self.store.transaction() as conn:
             recipe = self.store.get_in(conn, recipe_id, "recipe")
+            recipe_id = recipe["id"]
+            request = {"recipe_id": recipe_id}
             if recipe["archived_at"] is not None:
                 raise InvalidState("Recipe is archived")
-            previous = self.store.replay(conn, "recipe_retry", retry_key, request)
+            saved = journal_entry(conn, "recipe_retry", retry_key)
+            if saved and recipe_id_for(conn, saved[0]["recipe_id"]) != recipe_id:
+                raise Conflict("idempotency key reused with different arguments")
+            previous = saved[1] if saved else None
             row = (
                 conn.execute(
                     "SELECT id,fence FROM executions WHERE recipe_id=? AND id=?",
@@ -875,8 +887,8 @@ class RSIClient:
                 raise InvalidState(
                     "test within an active execution; create a child for a terminal run"
                 )
-            self.store.get_in(conn, recipe_id, "recipe")
-            self.store.version_in(conn, recipe_id, version_id)
+            recipe_id = self.store.get_in(conn, recipe_id, "recipe")["id"]
+            version_id = self.store.version_in(conn, recipe_id, version_id)["id"]
             rubric_row = conn.execute(
                 "SELECT object_id FROM versions WHERE id=?", (rubrics_version_id,)
             ).fetchone()
@@ -956,6 +968,9 @@ class RSIClient:
                     "retry_key requires recipe_id and cannot be used with previous_headers"
                 )
             return self._retry_timed_out_execution(recipe_id, retry_key)
+        if recipe_id is not None:
+            with self.store.connect() as conn:
+                recipe_id = recipe_id_for(conn, recipe_id)
         if refresh and self._model_header_binding is not None:
             self.store.prepare_recovery(
                 self.config.model_dump(),

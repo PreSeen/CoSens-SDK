@@ -7,6 +7,8 @@ import {
   schema,
   storage,
 } from './store-schema.js';
+import { migrateMappedRecipes, recipeIdAlias, versionIdAlias } from './recipe-identity.js';
+import { formatRecipeMarkdown } from './recipe-file.js';
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import {
@@ -116,10 +118,15 @@ export class Store {
     chmodSync(path, 0o600);
   }
   private initialize() {
-    if (this.db.pragma('user_version', { simple: true }) === 7) return;
+    if (this.db.pragma('user_version', { simple: true }) === 9) return;
     this.tx(() => {
       const version = this.db.pragma('user_version', { simple: true });
-      if (version === 7) return;
+      if (version === 9) return;
+      if (version === 7 || version === 8) {
+        if (version === 8) migrateMappedRecipes(this);
+        this.db.pragma('user_version = 9');
+        return;
+      }
       if (
         version !== 0 &&
         version !== 1 &&
@@ -244,7 +251,7 @@ export class Store {
       }
       this.migrateRecipeContent();
       this.db.exec(recipeProjection);
-      this.db.pragma('user_version = 7');
+      this.db.pragma('user_version = 9');
     });
   }
 
@@ -321,6 +328,12 @@ export class Store {
         )
         .run(...fields);
   }
+  resolveRecipeId(id: string): string {
+    return this.replay<{ id: string }>(recipeIdAlias, id, {})?.id ?? id;
+  }
+  resolveVersionId(id: string): string {
+    return this.replay<{ id: string }>(versionIdAlias, id, {})?.id ?? id;
+  }
   private rubricMetadata<T>(row: { id: string; rubrics_metadata: string }): T {
     return {
       ...JSON.parse(row.rubrics_metadata),
@@ -340,12 +353,14 @@ export class Store {
       if (!row) return fail('not_found', 'rubrics not found');
       return this.rubricMetadata<T>(row);
     }
+    if (kind === 'recipe') id = this.resolveRecipeId(id);
     const table = kind === 'recipe' ? 'recipe_records' : storage[kind].table;
     const row = this.db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id) as
       | Record<string, unknown>
       | undefined;
     if (!row) fail('not_found', `${kind} not found`);
-    return kind === 'recipe' ? (row as T) : this.record<T>(row!);
+    if (kind !== 'recipe') return this.record<T>(row!);
+    return row as T;
   }
   executionRecipeName(execution: Execution): string | undefined {
     const recipeId =
@@ -386,7 +401,7 @@ export class Store {
     return obj;
   }
   save<T extends ObjectMetadata | Recipe>(obj: T): T {
-    const kind = this.kind(obj.id);
+    const kind = 'storage_path' in obj ? 'recipe' : this.kind(obj.id);
     if (kind === 'rubrics')
       return fail(
         'invalid_state',
@@ -466,13 +481,13 @@ export class Store {
   version<C = unknown>(object_id: string, version_id: string): Version<C> {
     const row = this.db
       .prepare('SELECT data FROM versions WHERE object_id=? AND id=?')
-      .get(object_id, version_id) as { data: string } | undefined;
+      .get(this.resolveRecipeId(object_id), this.resolveVersionId(version_id)) as { data: string } | undefined;
     if (!row)
-      fail(
+      return fail(
         'not_found',
         'version does not belong to this object or does not exist',
       );
-    return JSON.parse(row!.data);
+    return JSON.parse(row.data) as Version<C>;
   }
   publishRecipeVersion(recipeId: string, versionId: string): boolean {
     const recipe = this.get<Recipe>(recipeId, 'recipe');
@@ -482,13 +497,13 @@ export class Store {
       ? this.version(recipeId, recipe.latest_qualified_version_id)
       : null;
     if (latest && version.number <= latest.number)
-      return recipe.active_version_id === versionId;
+      return recipe.active_version_id === version.id;
     this.db
       .prepare(
         "UPDATE versions SET status='archived' WHERE recipe_id=? AND number<? AND status<>'archived'",
       )
-      .run(recipeId, version.number);
-    this.setRecipeVersionStatus(recipe, versionId, 'available');
+      .run(recipe.id, version.number);
+    this.setRecipeVersionStatus(recipe, version.id, 'available');
     return true;
   }
   setRecipeVersionStatus(
@@ -500,13 +515,13 @@ export class Store {
       .prepare(
         'UPDATE versions SET status=? WHERE recipe_id=? AND id=? AND status<>?',
       )
-      .run(status, recipe.id, versionId, status);
+      .run(status, recipe.id, this.resolveVersionId(versionId), status);
     if (result.changes) this.save(recipe);
   }
   version_by_id<C = unknown>(id: string, kind: Kind): Version<C> {
     const row = this.db
       .prepare('SELECT object_id FROM versions WHERE id=?')
-      .get(id) as { object_id: string } | undefined;
+      .get(this.resolveVersionId(id)) as { object_id: string } | undefined;
     if (!row) fail('not_found', 'version not found');
     this.get(row!.object_id, kind);
     return this.version(row!.object_id, id);
@@ -541,7 +556,7 @@ export class Store {
       provenance,
       created_at: now(),
     };
-    const kind = this.kind(obj.id);
+    const kind = 'storage_path' in obj ? 'recipe' : this.kind(obj.id);
     const { latest_version_id: _latest, ...metadata } = obj as Versioned;
     this.db
       .prepare(
@@ -582,19 +597,13 @@ export class Store {
     if (
       !/^[A-Za-z0-9_-]+$/u.test(version.object_id) ||
       !/^[A-Za-z0-9_-]+$/u.test(version.id) ||
-      storagePath !== `recipes/${version.object_id}`
+      !/^recipes\/[A-Za-z0-9_-]+$/u.test(storagePath)
     )
       fail('invalid_state', 'invalid Recipe version storage path');
     const directory = join(this.root, storagePath, version.id);
     const target = join(directory, 'RECIPE.md');
     const temporary = join(directory, `.${randomUUID()}.tmp`);
-    const { name, description, instructions } = version.content;
-    const frontmatter = `---\nname: ${JSON.stringify(name)}\ndescription: ${JSON.stringify(description)}\n---\n`;
-    const body =
-      instructions && !instructions.endsWith('\n')
-        ? `${instructions}\n`
-        : instructions;
-    const source = markdown ?? (body ? `${frontmatter}\n${body}` : frontmatter);
+    const source = markdown ?? formatRecipeMarkdown(version.content);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     try {
       writeFileSync(temporary, source, {

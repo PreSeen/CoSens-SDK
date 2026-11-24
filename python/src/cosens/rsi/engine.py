@@ -335,8 +335,8 @@ class Engine:
         result = {
             "id": test_id,
             "execution_id": self.execution_id,
-            "recipe_id": state["recipe_id"],
-            "version_id": state["version_id"],
+            "recipe_id": recipe["object_id"],
+            "version_id": recipe["id"],
             "rubrics_version_id": rubric["id"],
             "input_revision": state["input_revision"],
             "round": state["round"],

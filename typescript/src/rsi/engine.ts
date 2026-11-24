@@ -388,10 +388,16 @@ export class Engine {
   }
 
   private async test(state: State): Promise<{ test: TestResult }> {
-    const { recipe_id, version_id, round } = state.candidate!;
+    const candidate = state.candidate!;
+    const { round } = candidate;
+    const recipe_id = this.store.resolveRecipeId(candidate.recipe_id);
+    const version_id = this.store.resolveVersionId(candidate.version_id);
     const execution = this.inStage(state.revision, 'test', round);
-    const id = `test:${this.id}:${state.revision}:${round}:${version_id}`;
-    const previous = execution.test_results.find((test) => test.id === id);
+    const id = `test:${this.id}:${state.revision}:${round}:${candidate.version_id}`;
+    const previous = execution.test_results.find((test) => test.id === id || (
+      test.input_revision === state.revision && test.round === round
+      && test.recipe_id === recipe_id && test.version_id === version_id
+    ));
     if (previous) return { test: previous };
     const result: TestResult = {
       id,
@@ -663,8 +669,8 @@ export class Engine {
         progress_percent: 100,
         result,
         rubrics_version_id: state.rubric,
-        recipe_id: candidate.recipe_id,
-        recipe_version_id: candidate.version_id,
+        recipe_id: this.store.resolveRecipeId(candidate.recipe_id),
+        recipe_version_id: this.store.resolveVersionId(candidate.version_id),
       });
     });
     return {};

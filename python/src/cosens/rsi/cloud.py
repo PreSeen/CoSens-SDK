@@ -62,6 +62,39 @@ def _evidence(evidence, recipe_reference=None):
     return {"context": _upload(evidence["context_path"]), "files": files}
 
 
+def _read_recipe_zip(path):
+    if isinstance(path, str) and path.lower().startswith("file:"):
+        url = urlsplit(path)
+        if (
+            url.netloc.lower() not in {"", "localhost"}
+            or not url.path.startswith("/")
+            or url.query
+            or url.fragment
+        ):
+            raise ValueError("Recipe file URI must refer to a local path")
+        path = url2pathname(url.path)
+    file = Path(path)
+    with file.open("rb") as stream:
+        zip_bytes = stream.read(MAX_RECIPE_ZIP_BYTES + 1)
+    if not 0 < len(zip_bytes) <= MAX_RECIPE_ZIP_BYTES:
+        raise ValueError("Recipe ZIP must be nonempty and at most 8 MiB")
+    return file.name, zip_bytes
+
+
+def _validate_recipe_upload(recipe_id, idempotency_key):
+    if recipe_id is not None and (
+        not isinstance(recipe_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", recipe_id)
+    ):
+        raise ValueError("recipe_id must contain 1–64 letters, digits, underscores or hyphens")
+    if idempotency_key is not None and (
+        not isinstance(idempotency_key, str)
+        or not idempotency_key
+        or idempotency_key.strip() != idempotency_key
+        or any(not 32 <= ord(char) <= 126 for char in idempotency_key)
+    ):
+        raise ValueError("idempotency_key must be a nonempty HTTP header value")
+
+
 class CloudRSIClient:
     """Cloud mode of RSIClient, backed by the CoSens service."""
 
@@ -124,7 +157,9 @@ class CloudRSIClient:
         code = detail.get("code") or f"http_{response.status_code}"
         message = detail.get("message") or f"CoSens RSI returned HTTP {response.status_code}"
         if response.status_code == 422 and code == "invalid_request":
-            raise ValueError(message)
+            error = ValueError(message)
+            error.status = response.status_code
+            raise error
         error = _ERRORS.get(code, RSIError)(message)
         error.code = code
         error.status = response.status_code
@@ -196,36 +231,26 @@ class CloudRSIClient:
         self, path: str | Path, *, recipe_id: str | None = None, idempotency_key: str | None = None
     ) -> dict[str, str]:
         """Upload a Recipe ZIP as a new Recipe or a new version of an existing one."""
-        if isinstance(path, str) and path.lower().startswith("file:"):
-            url = urlsplit(path)
-            if (
-                url.netloc.lower() not in {"", "localhost"}
-                or not url.path.startswith("/")
-                or url.query
-                or url.fragment
-            ):
-                raise ValueError("Recipe file URI must refer to a local path")
-            path = url2pathname(url.path)
-        file = Path(path)
-        if recipe_id is not None and (
-            not isinstance(recipe_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", recipe_id)
-        ):
-            raise ValueError("recipe_id must contain 1–64 letters, digits, underscores or hyphens")
-        if idempotency_key is not None and (
-            not isinstance(idempotency_key, str)
-            or not idempotency_key
-            or idempotency_key.strip() != idempotency_key
-            or any(not 32 <= ord(char) <= 126 for char in idempotency_key)
-        ):
-            raise ValueError("idempotency_key must be a nonempty HTTP header value")
-        with file.open("rb") as stream:
-            zip_bytes = stream.read(MAX_RECIPE_ZIP_BYTES + 1)
-        if not 0 < len(zip_bytes) <= MAX_RECIPE_ZIP_BYTES:
-            raise ValueError("Recipe ZIP must be nonempty and at most 8 MiB")
+        filename, zip_bytes = _read_recipe_zip(path)
+        return self._recipes_upsert_bytes(
+            filename, zip_bytes, recipe_id=recipe_id, idempotency_key=idempotency_key
+        )
+
+    def _recipe_upload_destination(self):
+        url = self._http.base_url
+        if url.scheme not in {"http", "https"} or not url.host or url.userinfo or url.query or url.fragment:
+            raise ValueError("local Recipe upload requires a cloud base_url without credentials, query or fragment")
+        return {
+            "base_url": str(url).rstrip("/"),
+            "virtual_user_id": self._http.headers.get("X-Virtual-User-Id"),
+        }
+
+    def _recipes_upsert_bytes(self, filename, zip_bytes, *, recipe_id, idempotency_key):
+        _validate_recipe_upload(recipe_id, idempotency_key)
         return self._request(
             "POST",
             "/recipes_upsert",
-            files={"file": (file.name, zip_bytes, "application/zip")},
+            files={"file": (filename, zip_bytes, "application/zip")},
             data={"recipe_id": recipe_id} if recipe_id is not None else None,
             headers={"Idempotency-Key": idempotency_key} if idempotency_key is not None else None,
         )

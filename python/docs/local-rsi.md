@@ -1,6 +1,6 @@
 # CoSens RSI SDK 接口文档
 
-云端模式默认启用，本地模式使用 SQLite schema v7。云端和本地都支持 `recipe_insert()`，`recipe_get()` 另返回 Recipe 文件的 `storage_path`。TS 从 `cosens-sdk/rsi` 导入，Python 从 `cosens.rsi` 导入。
+云端模式默认启用，本地模式使用 SQLite schema v9。云端和本地都支持 `recipe_insert()`，`recipe_get()` 另返回 Recipe 文件的 `storage_path`。TS 从 `cosens-sdk/rsi` 导入，Python 从 `cosens.rsi` 导入。
 
 ```text
 Agent 启动 → recover()
@@ -63,7 +63,7 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 | `rubrics_get` | `rubrics_id`（字符串）、`version`（`"latest"` 或版本 ID） | 无 | 返回选中的评分标准版本。 |
 | `recipe_list` | 无 | `query`，提供时须含 `recipe_ids: string[]`（Python 为 `list[str]`）。 | 返回首次学习条目和现有 Recipe 的摘要。 |
 | `recipe_insert` | `path`（本地 Recipe 文件路径） | 无 | 验证文件，创建新 Recipe 和可用 v1，返回与 `recipe_get` 相同的 Recipe 对象。云端模式先在本地验证，再上传文件内容（`POST /recipes`）。 |
-| `recipes_upsert` | `path`（本地 Recipe ZIP 路径或 `file://` URI） | `recipe_id`、`idempotency_key`。 | 云端模式上传 ZIP。省略 `recipe_id` 时新建，传入时给该 Recipe 新增版本。返回 `recipe_id` 和 `recipe_version_id`。 |
+| `recipes_upsert` | ZIP 路径或 `file://` URI。本地模式还需 `local_recipe_id`、`local_recipe_version_id`。 | 云端模式可传 `recipe_id`。两种模式都可传 `idempotency_key`。 | 上传 ZIP 并返回正式的 `recipe_id`、`recipe_version_id`。本地模式同步更新 SQLite 的 Recipe 和版本主键。 |
 | `recipe_download` | `recipe_id`、`recipe_version_id`（TS 第二个位置参数对应版本 ID） | 无 | 云端模式读取指定版本的 ZIP，Python 返回 `bytes`，TS 返回 `Uint8Array`。 |
 | `recipe_get` | `recipe_id`（字符串） | `version`（`"active"`、`"latest"` 或版本 ID，默认 `"active"`） | 返回 Recipe 和 `selected_version`。 |
 | `recipe_test` | `execution_id`、`recipe_id`、`version_id`、`rubrics_version_id`（均为字符串） | 无 | 在活动 Execution 内安排指定版本测试。 |
@@ -139,11 +139,34 @@ description: "按用户要求将订单数据导出为 CSV。"
 按指定列顺序生成 CSV。
 ```
 
+### 从本地 Recipe 上传 ZIP
+
+对本地客户端调用 `recipes_upsert()` 时，指定该 ZIP 对应的本地 Recipe 和版本。首次上传建立云端 Recipe，上传成功后本地沿用回执中的正式 ID。上传同一 Recipe 的下一版本时，SDK 自动将已同步的 Recipe ID 传给云端。
+
+```python
+receipt = client.recipes_upsert(
+    "file:///path/to/recipe.zip",
+    local_recipe_id=recipe_id,
+    local_recipe_version_id=version_id,
+)
+```
+
+```ts
+const receipt = await client.recipes_upsert(new URL('file:///path/to/recipe.zip'), {
+  local_recipe_id: recipeId,
+  local_recipe_version_id: versionId,
+});
+```
+
+云端认证沿用 `COSENS_API_KEY` 和 `COSENS_RSI_BASE_URL`，也可以在上传时显式提供 `api_key` 和 `base_url`。上传成功后，SQLite 的 `recipes.id` 与回执的 `recipe_id` 一致，`versions.id` 与回执的 `recipe_version_id` 一致。关联的 Execution 使用正式 Recipe 和版本 ID，Execution 自身的 ID 保留。下一次调用可以直接使用回执中的正式 ID。
+
+同一版本用同一 ZIP 重试时，临时 ID 和正式 ID 均可定位同一上传回执。为同一个 Recipe 上传另一版本时，先完成当前待确认的上传。若同一 Recipe 的 Execution 正在排队或运行，等该执行结束后再同步。
+
 ### Recipe 详情返回结构
 
-本地 `recipe_get()` 返回 `id`、`name`、`created_at`、`updated_at`、`archived_at`、`storage_path`、`latest_version_id`、`active_version_id`、`latest_qualified_version_id`、`selected_version`。
+本地 `recipe_get()` 返回 `id`、`name`、`created_at`、`updated_at`、`archived_at`、`storage_path`、`latest_version_id`、`active_version_id`、`latest_qualified_version_id`、`selected_version`。已同步的 Recipe 和版本在 `id` 和 `selected_version.id` 返回云端正式 ID。
 
-`storage_path` 在入队时分配，值为相对于 `RSIClient.data_dir` 的 `recipes/<recipe_id>`。SDK 保存候选版本时创建目录和 Markdown 文件。用 `selected_version.id` 拼出具体版本文件 `<data_dir>/<storage_path>/<version_id>/RECIPE.md`。归档和恢复沿用原路径。SQLite 保存版本正文和状态，Markdown 文件供宿主读取和复用。
+`storage_path` 在入队时分配，值为相对于 `RSIClient.data_dir` 的固定目录。SDK 保存候选版本时创建目录和 Markdown 文件。用 `selected_version.id` 拼出具体版本文件 `<data_dir>/<storage_path>/<version_id>/RECIPE.md`。同步后目录仍由 `storage_path` 指定，原版本文件路径继续可读。SQLite 保存版本正文和状态，Markdown 文件供宿主读取和复用。
 
 ```ts
 import { join } from 'node:path';
@@ -251,17 +274,17 @@ TS 用 `execution_list({ execution_ids: [id1, id2] })`，Python 用 `execution_l
 | 表 | 内容 |
 | --- | --- |
 | `executions` | **业务主表。** 记录状态、阶段、进度、续接关系及关联版本。`created_at` 用于排队，`owner`、`lease_until`、`fence` 用于 Worker 认领、续租和接管。澄清、评分和错误等明细存于 `details`。 |
-| `recipes` | **业务主表。** 六列为 `id`、`name`、`created_at`、`updated_at`、`archived_at`、`storage_path`。`storage_path` 是相对于 `data_dir` 的固定目录。 |
-| `versions` | Recipe 和 Rubrics 的版本内容。通过 `recipe_id` 或 `rubrics_id` 归组。Recipe 版本的 `status` 为 `candidate`、`available` 或 `archived`。`rubrics_metadata` 保存评分标准名称、时间等元数据。 |
+| `recipes` | **业务主表。** 保存 `id`、`name`、`created_at`、`updated_at`、`archived_at`、`storage_path`。已同步的 `id` 为云端正式 Recipe ID。`storage_path` 是相对于 `data_dir` 的固定目录。 |
+| `versions` | Recipe 和 Rubrics 的版本内容。通过 `recipe_id` 或 `rubrics_id` 归组。Recipe 版本的 `status` 为 `candidate`、`available` 或 `archived`。`rubrics_metadata` 保存评分标准名称、时间等元数据。已同步的版本 `id` 为云端正式版本 ID。 |
 | `evidence_snapshots` | 保存 Execution 的上下文与文件快照元数据。 |
 | `slots` | 协调同一数据目录内的 Worker 和模型调用并发。 |
-| `idempotency` | 保存幂等请求及其响应，用于安全重试。 |
+| `idempotency` | 保存幂等请求、上传回执和用于重试的临时 ID 别名。 |
 
 TS 和 Python 使用相同的表结构。查询时，`latest_version_id` 取版本号最大的一条，`active_version_id` 取唯一可用版本，`latest_qualified_version_id` 取可用及已归档版本中编号最大的一条。`recipe_list()` 行里的 `active_version_id` 与 `recipe_get()` 的同名字段取值相同。
 
 新版本验证通过并发布后，较早版本在同一事务中归档。手动归档当前可用版本后，可用版本 ID 为空。只允许恢复最近发布的版本。
 
-初始化将旧库升级到 SQLite schema v7。v3 及更早的版本指针迁入版本状态，v4 的 `recipe_api_metadata` 在迁移中删除，v5 及更早的 Recipe 补齐 `storage_path`。v6 及更早的版本将 `title` 迁为 `name`、`applicability` 迁为 `description`，并在原路径按新格式导出 `RECIPE.md`。Recipe ID、版本 ID、Markdown 正文、版本状态、执行记录和 Worker 租约保留。升级前先停止使用同一数据库的旧版 Worker。
+初始化将旧库升级到 SQLite schema v9。v8 已同步的记录从原有回执取得正式主键，未同步的记录沿用原 ID。v3 及更早的版本指针迁入版本状态，v4 的 `recipe_api_metadata` 在迁移中删除，v5 及更早的 Recipe 补齐 `storage_path`。v6 及更早的版本将 `title` 迁为 `name`、`applicability` 迁为 `description`，并在原路径按新格式导出 `RECIPE.md`。升级前先停止使用同一数据库的旧版 Worker。
 
 ## 运行管理
 

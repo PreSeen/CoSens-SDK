@@ -8,6 +8,8 @@ import {
   type Execution as StoredExecution,
 } from './models.js';
 import { readRecipeFile } from './recipe-file.js';
+import { uploadLocalRecipe, type LocalRecipeUpsertOptions } from './local-recipe-upload.js';
+export type { LocalRecipeUpsertOptions } from './local-recipe-upload.js';
 import { bindModelHeaders, credentialScopeId } from './model-headers.js';
 import type { RecipeListStatus } from './recipe-list.js';
 
@@ -329,9 +331,15 @@ export class RSIClient {
     return this.#queue.recipe_insert(content, markdown);
   }
 
-  async recipes_upsert(path: string | URL, options?: RecipeUpsertOptions) {
-    if (!this.#cloud) return fail('invalid_state', 'recipes_upsert requires cloud mode');
-    return this.#cloud.recipes_upsert(path, options);
+  async recipes_upsert(path: string | URL, options?: RecipeUpsertOptions | LocalRecipeUpsertOptions) {
+    if (this.#cloud) {
+      if (options && 'local_recipe_id' in options)
+        return fail('invalid_argument', 'local Recipe IDs require a local RSIClient');
+      return this.#cloud.recipes_upsert(path, options);
+    }
+    if (!options || !('local_recipe_id' in options))
+      return fail('invalid_argument', 'local Recipe upload requires local_recipe_id and local_recipe_version_id');
+    return uploadLocalRecipe(this.#queue.store, path, options);
   }
 
   async recipe_get(id: string, version = 'active') {

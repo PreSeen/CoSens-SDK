@@ -20,6 +20,8 @@ from .execution_data import compact_analysis, upgrade_execution
 from .model_headers import bind_model_headers
 from .models import Conflict, InputChanged, InvalidState, LeaseLost, NotFound
 from .progress import stage_progress
+from .recipe_file import render_recipe_markdown
+from .recipe_identity import migrate_mapped_recipe_ids, recipe_id_for, version_id_for
 from .store_schema import (
     LEGACY_RECIPES,
     MIGRATE_RECIPE_VERSIONS,
@@ -91,11 +93,16 @@ class Store:
 
     def _initialize(self):
         with self.connect() as conn:
-            if conn.execute("PRAGMA user_version").fetchone()[0] == 7:
+            if conn.execute("PRAGMA user_version").fetchone()[0] == 9:
                 return
         with self.transaction() as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version == 7:
+            if version == 9:
+                return
+            if version in (7, 8):
+                if version == 8:
+                    migrate_mapped_recipe_ids(self, conn)
+                conn.execute("PRAGMA user_version = 9")
                 return
             if version not in (0, 1, 2, 3, 4, 5, 6):
                 raise InvalidState("unsupported RSI SQLite schema version")
@@ -205,7 +212,7 @@ class Store:
             for statement in RECIPE_PROJECTION.split(";"):
                 if statement.strip():
                     conn.execute(statement)
-            conn.execute("PRAGMA user_version = 7")
+            conn.execute("PRAGMA user_version = 9")
 
     def _migrate_recipe_content(self, conn):
         rows = conn.execute("""
@@ -294,11 +301,15 @@ class Store:
             return Store._rubrics_metadata(row)
         if kind not in STORAGE:
             raise NotFound(f"object not found: {object_id}")
+        if kind == "recipe":
+            object_id = recipe_id_for(conn, object_id)
         table = "recipe_records" if kind == "recipe" else STORAGE[kind][0]
         row = conn.execute(f"SELECT * FROM {table} WHERE id=?", (object_id,)).fetchone()
         if row is None:
             raise NotFound(f"{kind} not found: {object_id}")
-        return dict(row) if kind == "recipe" else Store._record(row)
+        if kind != "recipe":
+            return Store._record(row)
+        return dict(row)
 
     def get(self, object_id, kind=None):
         with self.connect() as conn:
@@ -352,7 +363,7 @@ class Store:
 
     @staticmethod
     def save(conn, data):
-        kind = data["id"].partition("_")[0]
+        kind = "recipe" if "storage_path" in data else data["id"].partition("_")[0]
         if kind == "rubrics":
             raise InvalidState("rubrics metadata is written with its version")
         data = {**data, "updated_at": time.time()}
@@ -401,6 +412,8 @@ class Store:
 
     @staticmethod
     def version_in(conn, object_id, version_id=None):
+        object_id = recipe_id_for(conn, object_id)
+        version_id = version_id_for(conn, version_id)
         row = (
             conn.execute(
                 "SELECT data FROM versions WHERE object_id=? AND id=?",
@@ -422,6 +435,7 @@ class Store:
 
     def version_by_id(self, version_id, kind=None):
         with self.connect() as conn:
+            version_id = version_id_for(conn, version_id)
             row = conn.execute(
                 "SELECT object_id FROM versions WHERE id=?", (version_id,)
             ).fetchone()
@@ -546,6 +560,8 @@ class Store:
             execution = self.guard(
                 conn, execution_id, owner, fence, state["input_revision"]
             )
+            recipe_id = recipe_id_for(conn, state["recipe_id"])
+            version_id = version_id_for(conn, state["version_id"])
             provisional = any(
                 f"{q['id']}:{q['revision']}" not in execution["answers"]
                 for q in execution["questions"]
@@ -556,17 +572,15 @@ class Store:
                 "published": False,
             }
             if state["test"]["status"] == "passed" and not provisional:
-                result["published"] = self.publish_recipe_version(
-                    conn, state["recipe_id"], state["version_id"]
-                )
+                result["published"] = self.publish_recipe_version(conn, recipe_id, version_id)
                 if result["published"] and on_published is not None:
                     on_published(conn)
             execution.update(
                 status="completed",
                 stage="done",
                 progress_percent=100,
-                recipe_id=state["recipe_id"],
-                recipe_version_id=state["version_id"],
+                recipe_id=recipe_id,
+                recipe_version_id=version_id,
                 rubrics_version_id=state["rubrics_version_id"],
                 result=result,
             )
@@ -578,6 +592,7 @@ class Store:
         if recipe["archived_at"]:
             return False
         version = self.version_in(conn, recipe_id, version_id)
+        recipe_id, version_id = recipe["id"], version["id"]
         latest_id = recipe.get("latest_qualified_version_id")
         if latest_id:
             latest = self.version_in(conn, recipe_id, latest_id)
@@ -628,7 +643,7 @@ class Store:
             "provenance": provenance or {},
             "created_at": time.time(),
         }
-        kind = obj["id"].partition("_")[0]
+        kind = "recipe" if "storage_path" in obj else obj["id"].partition("_")[0]
         metadata = None
         if kind == "rubrics":
             fields = {**obj, "revision": obj["revision"] + 1, "updated_at": time.time()}
@@ -657,21 +672,11 @@ class Store:
         if (
             not re.fullmatch(r"[A-Za-z0-9_-]+", version["object_id"])
             or not re.fullmatch(r"[A-Za-z0-9_-]+", version["id"])
-            or storage_path != f"recipes/{version['object_id']}"
+            or not re.fullmatch(r"recipes/[A-Za-z0-9_-]+", storage_path)
         ):
             raise InvalidState("invalid Recipe version storage path")
         if markdown is None:
-            content = version["content"]
-            frontmatter = (
-                "---\n"
-                f"name: {json.dumps(content['name'], ensure_ascii=False)}\n"
-                f"description: {json.dumps(content['description'], ensure_ascii=False)}\n"
-                "---\n"
-            )
-            body = content["instructions"]
-            markdown = f"{frontmatter}\n{body}" if body else frontmatter
-            if not markdown.endswith("\n"):
-                markdown += "\n"
+            markdown = render_recipe_markdown(version["content"])
         directory = self.root / storage_path / version["id"]
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         temporary = None

@@ -245,6 +245,36 @@ class RSIClient:
         content, markdown = read_recipe_file(path)
         return self._queue.recipe_insert(content, markdown)
 
+    def recipes_upsert(
+        self,
+        path: str | Path,
+        *,
+        local_recipe_id: str,
+        local_recipe_version_id: str,
+        idempotency_key: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        virtual_user_id: str | None = None,
+    ) -> dict[str, str]:
+        """Upload an existing local Recipe version and adopt the IDs from the cloud receipt."""
+        from .cloud import CloudRSIClient, _read_recipe_zip
+        from .recipe_sync import upload_recipe
+
+        filename, zip_bytes = _read_recipe_zip(path)
+        client = CloudRSIClient(api_key=api_key, base_url=base_url, virtual_user_id=virtual_user_id)
+        try:
+            return upload_recipe(
+                self._queue.store,
+                client,
+                filename,
+                zip_bytes,
+                _TEXT.validate_python(local_recipe_id),
+                _TEXT.validate_python(local_recipe_version_id),
+                idempotency_key,
+            )
+        finally:
+            client.close()
+
     def recipe_get(self, recipe_id, *, version="active"):
         version = _TEXT.validate_python(version)
         if version in {"active", "latest"}:

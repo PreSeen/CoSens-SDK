@@ -246,7 +246,9 @@ export class RSIClient {
     return readRecipeList(this.store, options);
   }
   recipe_list_all(recipe_ids?: string[]): RecipeListEntry[] {
-    return readRecipeList(this.store, { recipe_ids }, true);
+    return readRecipeList(this.store, {
+      recipe_ids: recipe_ids?.map((id) => this.store.resolveRecipeId(id)),
+    }, true);
   }
   private execution_insert(
     request: Omit<ExecutionCreate, 'idempotency_key'> & {
@@ -729,7 +731,7 @@ export class RSIClient {
           'invalid_state',
           'version is not eligible for archival or restoration',
         );
-      if (versionId !== latest!.id) {
+      if (version.id !== latest!.id) {
         if (!archived)
           fail(
             'invalid_state',
@@ -744,7 +746,7 @@ export class RSIClient {
           archived ? 'archived' : 'available',
         );
       }
-      return { recipe_id: id, version_id: versionId, archived };
+      return { recipe_id: recipe.id, version_id: version.id, archived };
     });
   }
   private async retryTimedOutExecution(recipeId: string, retryKey: string): Promise<RecoverResult> {
@@ -754,9 +756,12 @@ export class RSIClient {
     const { target, config, dispatch } = this.store.tx(() => {
       const recipe = this.store.get<Recipe>(recipeId, 'recipe');
       if (recipe.archived_at != null) fail('invalid_state', 'recipe is archived');
-      const replay = this.store.replay<RetryTarget>(
-        'recipe_retry', retryKey, request,
-      );
+      const saved = this.store.db.prepare(
+        "SELECT request,result FROM idempotency WHERE scope='recipe_retry' AND key=?",
+      ).get(retryKey) as { request: string; result: string } | undefined;
+      if (saved && this.store.resolveRecipeId(JSON.parse(saved.request).recipe_id) !== recipe.id)
+        fail('conflict', 'idempotency key reused with different arguments');
+      const replay = saved ? JSON.parse(saved.result) as RetryTarget : undefined;
       const selected = this.store.recipeExecution(recipeId, replay?.id);
       if (!selected || selected.execution.archived_at != null)
         return fail('invalid_state', 'no eligible execution for this Recipe');
@@ -847,9 +852,11 @@ export class RSIClient {
           'invalid_state',
           'test within active execution; create a child for a terminal run',
         );
-      if (this.store.get(recipe_id, 'recipe').archived_at)
-        fail('invalid_state', 'recipe is archived');
-      this.store.version(recipe_id, version_id);
+      const recipe = this.store.get<Recipe>(recipe_id, 'recipe');
+      if (recipe.archived_at) fail('invalid_state', 'recipe is archived');
+      const version = this.store.version(recipe.id, version_id);
+      recipe_id = recipe.id;
+      version_id = version.id;
       this.store.version_by_id(rubrics_version_id, 'rubrics');
       if (
         material_ids &&
@@ -938,6 +945,7 @@ export class RSIClient {
     recipeId?: string,
     override?: { previousHeaders?: Record<string, string>; retryKey?: string },
   ): Promise<RecoverResult> {
+    if (recipeId !== undefined) recipeId = this.store.resolveRecipeId(recipeId);
     if (override?.retryKey !== undefined) {
       if (recipeId === undefined || override.previousHeaders !== undefined)
         return fail('invalid_argument', 'retry_key requires recipe_id and cannot be combined with previous_headers');
