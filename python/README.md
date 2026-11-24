@@ -15,16 +15,20 @@ run = rsi.execution_create(
 print(rsi.execution_get(run["id"])["status"])
 ```
 
-The cloud SDK uploads files listed in `evidence` and the optional `recipe_reference`. For local mode, pass a data directory, the tool-calling model name and the host's model request `headers`.
+The cloud SDK uploads files listed in `evidence` and the optional `recipe_reference`. To run local RSI, pass a data directory and the model's `model_id`, `api_key`, and `base_url`.
 
 ```python
+import os
+
 rsi = RSIClient(
     data_dir="./.rsi-python",
-    config={"model": "your-model", "base_url": "http://127.0.0.1:8000/v1", "headers": {}, "auto_start": True},
+    model_id="your-model",
+    api_key=os.environ["RSI_MODEL_API_KEY"],
+    base_url="http://127.0.0.1:8000/v1",
 )
 ```
 
-After refreshing a token, create a Client with the same data directory and `credential_scope` and the new headers. `rsi.recover()` resumes that account's unfinished work with the new Client settings, and `rsi.recover(recipe_id=recipe_id)` limits recovery to one SDK Recipe. Local Recipe reads include a `storage_path` relative to `data_dir`. See the [atomic API and Hook lifecycle](docs/local-rsi.md) and the [Python Hook example](examples/05_rsi_sdk_v2.py).
+The model must support OpenAI-compatible Chat Completions and tool calls. Use `config.headers` for local Recipe ZIP uploads. After rotating the model key, create a Client with the same data directory and `config.credential_scope` and the new `api_key`. `rsi.recover()` resumes that account's unfinished work with the new Client settings, and `rsi.recover(recipe_id=recipe_id)` limits recovery to one SDK Recipe. Local Recipe reads include a `storage_path` relative to `data_dir`. See the [atomic API and Hook lifecycle](docs/local-rsi.md) and the [Python Hook example](examples/05_rsi_sdk_v2.py).
 
 ### Virtual User selection
 

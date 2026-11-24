@@ -28,24 +28,25 @@ TS 也可以直接 `new CloudClient({ api_key, base_url })`，配置对象和两
 
 ### 本地模式
 
-TS 用 `new RSIClient({ data_dir, config })`。Python 用 `RSIClient(data_dir=..., config=...)`，可显式传 `mode="local"`。
+TS 用 `new RSIClient({ data_dir, model_id, api_key, base_url, config })`。Python 用 `RSIClient(data_dir=..., model_id=..., api_key=..., base_url=..., config=...)`，可显式传 `mode="local"`。只读查询可只传 `data_dir`，也可同时传 `config: null`（TS）或 `config=None`（Python）。
 
 | 参数 | 必填条件 | 类型、默认值和用途 |
 | --- | --- | --- |
 | `data_dir` | 必填。 | TS 为路径字符串，Python 可传字符串或 `Path`。它是 SQLite、文件快照和 Recipe 文件的保存根目录。 |
-| `config` | 创建或恢复本地 Execution 时传入。TS 只读查询传 `null`，Python 可省略或传 `None`。 | 本地模型配置。 |
-| `config.model` | 提供配置对象时必填。 | 非空字符串，模型 ID。 |
-| `config.base_url` | 提供配置对象时必填。 | 支持工具调用的 OpenAI-compatible Chat Completions 基地址。 |
-| `config.headers` | 选填，省略等同 `{}`。 | 宿主提供的 HTTP 请求头，键和值都是字符串。模型请求和本地 Recipe 上传共用这份配置。 |
+| `model_id` | 运行本地 Execution 时必填。 | 非空字符串，传入 Chat Completions 请求体的 `model` 字段。 |
+| `api_key` | 运行本地 Execution 时必填。 | 模型 API Key，SDK 将它作为 Bearer token 发送。 |
+| `base_url` | 运行本地 Execution 时必填。 | 支持工具调用的 OpenAI-compatible Chat Completions 基地址。 |
+| `config` | 选填。 | 本地运行和 Recipe 上传选项。 |
+| `config.headers` | 选填，省略等同 `{}`。 | 本地 Recipe ZIP 上传的 HTTP 请求头，键和值都是字符串。 |
 | `config.credential_scope` | 选填。需要在 token 刷新后自动匹配同账号任务时传入。 | 宿主为已认证账号指定的稳定非空标识。同账号刷新 token 时沿用该值，共用 `data_dir` 的不同账号使用不同值。SQLite 保存标识的哈希。 |
-| `config.auto_start` | 提供配置对象时必填。 | 布尔值。为 `true` 时入队后自动调度 Worker，为 `false` 时由宿主调用 `recover()`。 |
+| `config.auto_start` | 选填，默认 `true`。 | 为 `true` 时入队后自动调度 Worker，为 `false` 时由宿主调用 `recover()`。 |
 | `config.max_tokens` | 选填。 | 正整数，限制单次模型调用的输出。省略时由模型服务决定。 |
 | `config.timeout` | 选填。 | 秒数，默认 120，有效范围为大于 0 且不超过 3600。 |
 | `config.test_python_image` | 选填。 | 本机已安装且由宿主信任的 Docker Python 镜像，例如 `python:3.12-slim`。设置后本地 Worker 可以在隔离容器中运行测试脚本。需要的依赖由镜像预装。 |
 
-本地模型请求直接使用 `headers`。例如网关可以接收 `Authorization: Bearer <access_token>` 和它要求的令牌类型头，其他模型可以接收 `X-Api-Key` 或供应商要求的请求头。请求头值只在 Client 和 Worker 进程使用，SQLite 只保存匹配标识。未指定 User-Agent 时默认使用 `cosens-sdk-python/<版本>` 或 `cosens-sdk-typescript/<版本>`。
+SDK 向 `<base_url>/chat/completions` 发送模型请求，使用 `Authorization: Bearer <api_key>`、`Content-Type: application/json` 和 SDK 的 `User-Agent`。模型 Key 只在 Client 和 Worker 进程使用，SQLite 只保存匹配标识。
 
-刷新 token 后，用原 `data_dir` 和 `credential_scope`、新的 `headers` 创建 Client，再调用 `recover()`。Worker 接手时使用本次 Client 的模型、地址、请求头、超时和输出预算。历史上依赖 `RSI_MODEL_API_KEY` 的执行仍可通过原环境变量恢复。TS 可通过 `RSI_NODE_EXECUTABLE` 指定 Worker 的 Node 可执行文件。
+更换模型 Key 后，用原 `data_dir` 和 `config.credential_scope`、新的 `api_key` 创建 Client，再调用 `recover()`。Worker 接手时使用本次 Client 的模型、地址、凭证、超时和输出预算。历史上依赖 `RSI_MODEL_API_KEY` 的执行仍可通过原环境变量恢复。TS 可通过 `RSI_NODE_EXECUTABLE` 指定 Worker 的 Node 可执行文件。
 
 ## 业务接口
 
@@ -269,7 +270,7 @@ TS 用 `execution_list({ execution_ids: [id1, id2] })`，Python 用 `execution_l
 - `question_id` 和 `question_revision` 来自 `execution_get().questions`。`answer` 为同一道题选中的选项 ID 数组或非空文本。多道题逐题提交到原 Execution。只要还有待回答的问题，SDK 就只保存答案，返回 `continuation_execution_id: null`。
 - 最后一道题回答后，SDK 创建一个继承全部答案的子 Execution，并返回 `continuation_execution_id`。原执行尚在排队或运行时，会停止并标记为 `cancelled`。原执行已经完成时，保留已有测试结果。重试最后一道相同答案将复用同一个子 Execution。
 - 宿主从返回的子 Execution ID 跟踪重新分析、生成和测试。子执行后续再次提出澄清问题时，按同样流程回答。
-- 同一账号刷新 token 后，用相同的 `credential_scope`、原任务的模型和 endpoint、新的 `headers` 创建 Client。最后一道答案通过归属校验后，SDK 用新的凭证自动启动同一 Recipe 的子 Execution。使用 `auto_start: true` 时，回答一次即可续跑。
+- 同一账号更换模型 Key 后，用相同的 `config.credential_scope`、原任务的 `model_id` 和 `base_url`、新的 `api_key` 创建 Client。最后一道答案通过归属校验后，SDK 用新的凭证自动启动同一 Recipe 的子 Execution。使用 `auto_start: true` 时，回答一次即可续跑。
 
 ## 本地 SQLite 存储
 
@@ -299,13 +300,13 @@ TS 的 RSI 业务接口及 `recover()` 用 `await`，`close()` 同步调用。Py
 
 TS 用 `await client.recover({ recipe_id: recipeId })`，Python 用 `client.recover(recipe_id=recipe_id)`。指定 SDK Recipe ID 时只接手该 Recipe。省略 ID 时恢复同一账号可接手的全部 Execution，包括排队中的任务、租约到期的任务，以及更换凭证后可以重试的 HTTP 401 或 403 失败任务。继续使用原 Execution ID 和已有断点。没有匹配任务时返回 `{ started: 0 }`。
 
-以前创建的任务如果没有 `credential_scope`，可用与创建时匹配的模型配置恢复。如果旧请求头已有变化，首次续跑可在 `recover()` 传入 `previous_headers`，用于匹配原绑定。若新 Client 也配置了 `credential_scope`，恢复成功后后续刷新 token 只需继续使用同一个标识。
+以前创建的任务如果没有 `credential_scope`，可用与创建时匹配的模型配置恢复。如果旧凭证与当前模型 Key 生成的 Bearer 请求头不同，首次续跑可在 `recover()` 传入 `previous_headers` 以匹配原绑定。模型调用使用当前 Client 的 `api_key`。若新 Client 也配置了 `credential_scope`，恢复成功后更换模型 Key 时可沿用该标识。
 
 ### 失败任务的显式重试
 
 任务卡片上的「重试」调用 `recover`，同时传入 `recipe_id` 和 `retry_key`。SDK 找到该 Recipe 最近的 Execution，接受状态为 `failed`、错误码为 `timeout` 的模型调用超时。旧版本仍可用时，也可以重试这条最近失败的 Execution。普通恢复调用沿用上面的条件。
 
-重试保留 Recipe ID、Execution ID、材料快照、已保存的候选版本和 LangGraph 断点。新 Client 使用原模型、原 endpoint、同一 `credential_scope` 和当前有效的 `headers`。旧任务没有 `credential_scope` 时，重试使用原请求头绑定。调用 `recover` 会调度 Worker，即使 Client 设置了 `auto_start: false`。
+重试保留 Recipe ID、Execution ID、材料快照、已保存的候选版本和 LangGraph 断点。新 Client 使用原 `model_id` 和 `base_url`、同一 `config.credential_scope` 和当前有效的 `api_key`。旧任务没有 `credential_scope` 时，重试匹配原凭证绑定。调用 `recover` 会调度 Worker，即使 Client 设置了 `auto_start: false`。
 
 ```ts
 const retry = await client.recover({ recipe_id: recipeId, retry_key: retryRequestId });

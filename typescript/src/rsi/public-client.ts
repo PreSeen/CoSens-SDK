@@ -19,20 +19,24 @@ const page = z.strictObject({
   archived: z.boolean(),
 });
 const revision = z.number().int().positive();
-const modelHeaders = z.record(z.string(), z.string());
-const config = z
-  .strictObject({
-    model: text,
-    base_url: text,
-    headers: modelHeaders.optional(),
-    credential_scope: z.string().trim().min(1).optional(),
-    auto_start: z.boolean(),
-    max_tokens: z.number().int().positive().optional(),
-    timeout: z.number().positive().max(3600).optional(),
-    test_python_image: text.optional(),
-  })
-  .nullable();
-const clientOptions = z.strictObject({ data_dir: text, config });
+const requestHeaders = z.record(z.string(), z.string());
+const config = z.strictObject({
+  headers: requestHeaders.optional(),
+  credential_scope: z.string().trim().min(1).optional(),
+  auto_start: z.boolean().optional(),
+  max_tokens: z.number().int().positive().optional(),
+  timeout: z.number().positive().max(3600).optional(),
+  test_python_image: text.optional(),
+});
+const connectionValue = z.string().trim().min(1);
+const localExecutionOptions = z.strictObject({
+  data_dir: text,
+  model_id: connectionValue,
+  api_key: connectionValue,
+  base_url: connectionValue,
+  config: config.nullish(),
+});
+const localReadOptions = z.strictObject({ data_dir: text, config: z.null().optional() });
 const versionArchive = z.strictObject({
   version_id: text,
   archived: z.boolean(),
@@ -59,7 +63,7 @@ const executionListQuery = z.strictObject({ execution_ids: z.array(text) });
 const recipeListQuery = z.strictObject({ recipe_ids: z.array(text) });
 const recoverOptions = z.strictObject({
   recipe_id: text.optional(),
-  previous_headers: modelHeaders.optional(),
+  previous_headers: requestHeaders.optional(),
   retry_key: text.optional(),
 });
 const recipeTest = z.strictObject({
@@ -69,7 +73,7 @@ const recipeTest = z.strictObject({
   rubrics_version_id: text,
 });
 
-export type RSIConfig = z.input<typeof config>;
+export type RSIConfig = z.input<typeof config> | null;
 export type ExecutionEvidence = z.input<typeof evidence>;
 export type Execution = Pick<
   StoredExecution,
@@ -115,21 +119,25 @@ export type ClarificationAnswer = z.input<typeof answer>;
 export type RecipeTest = z.input<typeof recipeTest>;
 
 /** Host API for the local RSI worker. Persisted records retain their storage format. */
-export type LocalOptions = { data_dir: string; config: RSIConfig };
+export type LocalOptions = z.input<typeof localExecutionOptions> | (z.input<typeof localReadOptions> & {
+  model_id?: never;
+  api_key?: never;
+  base_url?: never;
+});
 export type RSIClientOptions = LocalOptions | ({ mode: 'cloud' } & CloudOptions);
 
 /**
  * RSI atoms in cloud mode (default) or local mode.
  *
  * `new RSIClient()` uses the CoSens service with `COSENS_API_KEY`.
- * `new RSIClient({ data_dir, config })` runs the local Worker with your own
- * model. Both modes expose the same async methods. Local Recipe reads also
- * return a storage_path relative to data_dir.
+ * `new RSIClient({ data_dir, model_id, api_key, base_url })` runs the local
+ * Worker with your own model. Both modes expose the same async methods.
+ * Local Recipe reads also return a storage_path relative to data_dir.
  */
 export class RSIClient {
   readonly #queue!: QueueClient;
   readonly #cloud?: CloudClient;
-  readonly #modelHeaders?: Record<string, string>;
+  readonly #uploadHeaders?: Headers;
   readonly data_dir: string | null;
   readonly mode: 'cloud' | 'local';
 
@@ -142,36 +150,42 @@ export class RSIClient {
       return;
     }
     this.mode = 'local';
-    const { data_dir, config: settings } = clientOptions.parse(options);
-    this.#modelHeaders = settings?.headers;
+    const hasModel = 'model_id' in options || 'api_key' in options || 'base_url' in options || options.config != null;
+    const local = hasModel ? localExecutionOptions.parse(options) : localReadOptions.parse(options);
+    const { data_dir, config: settings } = local;
+    try {
+      this.#uploadHeaders = new Headers(settings?.headers);
+    } catch {
+      fail('invalid_argument', 'Invalid Recipe upload headers');
+    }
     const scope = settings?.credential_scope === undefined
       ? undefined
       : credentialScopeId(settings.credential_scope);
-    const binding = settings && bindModelHeaders(
-      settings.base_url, settings.model, settings.headers ?? {}, scope,
-    );
+    const binding = 'model_id' in local
+      ? bindModelHeaders(local.base_url, local.model_id, { Authorization: `Bearer ${local.api_key}` }, scope)
+      : undefined;
     this.#queue = new QueueClient({
       data_dir,
-      ...(settings && binding
+      ...('model_id' in local && binding
         ? {
             config: {
-              ...(settings.test_python_image === undefined
+              ...(settings?.test_python_image === undefined
                 ? {}
                 : { test_python_image: settings.test_python_image }),
               model: {
-                model: settings.model,
-                base_url: settings.base_url,
+                model: local.model_id,
+                base_url: local.base_url,
                 api_key_env: binding.name,
                 ...(scope === undefined ? {} : { credential_scope: scope }),
-                ...(settings.max_tokens === undefined
+                ...(settings?.max_tokens === undefined
                   ? {}
                   : { max_tokens: settings.max_tokens }),
-                ...(settings.timeout === undefined
+                ...(settings?.timeout === undefined
                   ? {}
                   : { timeout: settings.timeout }),
               },
             },
-            auto_start: settings.auto_start,
+            auto_start: settings?.auto_start,
             model_header_binding: binding,
           }
         : {}),
@@ -341,7 +355,7 @@ export class RSIClient {
     }
     if (!options || !('local_recipe_id' in options))
       return fail('invalid_argument', 'local Recipe upload requires local_recipe_id and local_recipe_version_id');
-    return uploadLocalRecipe(this.#queue.store, path, options, this.#modelHeaders);
+    return uploadLocalRecipe(this.#queue.store, path, options, this.#uploadHeaders);
   }
 
   async recipe_get(id: string, version = 'active') {

@@ -16,16 +16,21 @@ def credential_scope_id(scope):
     return hashlib.sha256(scope.encode()).hexdigest() if scope is not None else None
 
 
-def bind_model_headers(base_url, model, headers, *, credential_scope=None):
+def normalize_request_headers(headers):
     normalized = {}
     for name, value in headers.items():
         if not _HEADER_NAME.fullmatch(name) or _BAD_VALUE.search(value):
-            raise ValueError("Invalid model request headers")
+            raise ValueError("Invalid HTTP request headers")
         name, value = name.lower(), value.strip(" \t")
         if name in normalized:
             normalized[name] += ", " + value
         else:
             normalized[name] = value
+    return normalized
+
+
+def bind_model_headers(base_url, model, headers, *, credential_scope=None):
+    normalized = normalize_request_headers(headers)
     identity = [base_url.rstrip("/"), model, sorted(normalized.items())]
     if credential_scope is not None:
         identity.append(credential_scope)

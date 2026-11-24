@@ -54,7 +54,7 @@ def gateway(monkeypatch):
                 server.active += 1
                 server.peak = max(server.peak, server.active)
                 server.requests += 1
-                api_key = self.headers.get("X-Api-Key")
+                api_key = self.headers.get("Authorization", "").removeprefix("Bearer ") or None
                 server.model_requests.append(
                     (api_key, request["model"], request.get("max_tokens"))
                 )
@@ -70,17 +70,10 @@ def gateway(monkeypatch):
                 model = request["model"]
                 if "-session-" in model:
                     session = model.rsplit("-", 1)[-1]
-                    if session == "0":
-                        assert (
-                            self.headers["Authorization"] == "Bearer fixture-gateway-0"
-                        )
-                        assert self.headers["X-Auth-Type"] == "access_token"
-                        assert "X-Api-Key" not in self.headers
-                    else:
-                        assert (
-                            self.headers["X-Api-Key"] == "fixture-provider-" + session
-                        )
-                        assert "Authorization" not in self.headers
+                    assert self.path == "/v1/chat/completions"
+                    assert self.headers["Authorization"] == "Bearer fixture-model-" + session
+                    assert "X-Auth-Type" not in self.headers
+                    assert "X-Api-Key" not in self.headers
                 messages = request["messages"]
                 system = messages[0]["content"]
                 if (
@@ -350,12 +343,12 @@ def test_multiple_hook_processes_survive_exit_and_share_limits(
     script = """
 import json, sys
 from cosens.rsi import RSIClient
-config = json.loads(sys.argv[4])["model"]
-config["model"] += "-" + sys.argv[3]
+model = json.loads(sys.argv[4])["model"]
 session = sys.argv[3].rsplit("-", 1)[-1]
-config["headers"] = ({"Authorization": "Bearer fixture-gateway-0", "X-Auth-Type": "access_token"}
-    if session == "0" else {"X-Api-Key": "fixture-provider-" + session})
-c = RSIClient(data_dir=sys.argv[1], config={**config, "auto_start": True})
+c = RSIClient(data_dir=sys.argv[1], model_id=model["model"] + "-" + sys.argv[3],
+    base_url=model["base_url"], api_key="fixture-model-" + session,
+    config={"headers": {"Authorization": "Bearer fixture-upload-token",
+                        "X-Auth-Type": "access_token", "X-Api-Key": "fixture-upload-key"}})
 run = c.execution_create(evidence=json.loads(sys.argv[2]),
     idempotency_key='hook-' + sys.argv[3])
 print(json.dumps({'id': run['id']}))
@@ -580,14 +573,14 @@ def test_recover_recipe_leaves_other_recipes_queued(tmp_path, gateway, deferred)
     from cosens.rsi import RSIClient as HostClient
 
     config = {
-        "model": "local-test",
+        "model_id": "local-test",
         "base_url": f"http://127.0.0.1:{gateway.server_port}/v1",
-        "headers": {"X-Api-Key": "fixture"},
-        "auto_start": False,
+        "api_key": "fixture",
+        "config": {"auto_start": False},
     }
     context = tmp_path / "context.md"
     context.write_text("Write the answer 42 into answer.txt")
-    client = HostClient(data_dir=tmp_path / "rsi", config=config)
+    client = HostClient(data_dir=tmp_path / "rsi", **config)
     evidence = {"context_path": str(context), "files": []}
     other = client.execution_create(evidence=evidence, idempotency_key="other")
     target = client.execution_create(evidence=evidence, idempotency_key="target")
@@ -602,7 +595,7 @@ def test_recover_recipe_leaves_other_recipes_queued(tmp_path, gateway, deferred)
             1,
         )
 
-    restored = HostClient(data_dir=client.data_dir, config=config)
+    restored = HostClient(data_dir=client.data_dir, **config)
     assert restored.recover(recipe_id=target["recipe_id"]) == (
         {"started": 0, "scheduled": True} if deferred else {"started": 1}
     )
@@ -635,22 +628,23 @@ def test_explicit_recover_refreshes_rejected_credentials(tmp_path, gateway, scop
 
     gateway.rejected_keys["fixture-expired"] = 401
     initial_config = {
-        "model": "model-before-refresh",
+        "model_id": "model-before-refresh",
         "base_url": f"http://127.0.0.1:{gateway.server_port}/v1",
-        "headers": {"X-Api-Key": "fixture-expired"},
-        "auto_start": False,
+        "api_key": "fixture-expired",
     }
+    settings = {"auto_start": False}
     if scoped:
-        initial_config["credential_scope"] = "account-primary"
+        settings["credential_scope"] = "account-primary"
     root = tmp_path / "rsi"
     context = tmp_path / "context.md"
     context.write_text("Write the answer 42 into answer.txt")
     evidence = {"context_path": str(context), "files": []}
-    initial = HostClient(data_dir=root, config=initial_config)
+    initial = HostClient(data_dir=root, config=settings, **initial_config)
     target = initial.execution_create(evidence=evidence, idempotency_key="target")
     other_client = HostClient(
         data_dir=root,
-        config={**initial_config, "credential_scope": "account-secondary"},
+        config={**settings, "credential_scope": "account-secondary"},
+        **initial_config,
     )
     other = other_client.execution_create(evidence=evidence, idempotency_key="other")
 
@@ -662,11 +656,12 @@ def test_explicit_recover_refreshes_rejected_credentials(tmp_path, gateway, scop
 
     latest = HostClient(
         data_dir=root,
+        model_id="model-after-refresh",
+        api_key="fixture-refreshed",
+        base_url=initial_config["base_url"],
         config={
-            **initial_config,
+            **settings,
             "credential_scope": "account-primary",
-            "headers": {"X-Api-Key": "fixture-refreshed"},
-            "model": "model-after-refresh",
             "max_tokens": 2048,
             "timeout": 35,
         },
@@ -674,8 +669,8 @@ def test_explicit_recover_refreshes_rejected_credentials(tmp_path, gateway, scop
     proof = {}
     if not scoped:
         assert latest.recover() == {"started": 0}
-        assert latest.recover(previous_headers={"X-Api-Key": "wrong"}) == {"started": 0}
-        proof = {"previous_headers": {"x-api-key": "fixture-expired"}}
+        assert latest.recover(previous_headers={"Authorization": "Bearer wrong"}) == {"started": 0}
+        proof = {"previous_headers": {"authorization": "Bearer fixture-expired"}}
     assert latest.recover(**proof) == {"started": 1}
     result = latest._queue.wait(target["id"], timeout=20)
     assert result["status"] == "completed", result
@@ -698,14 +693,13 @@ def test_live_worker_hands_off_expired_credentials_after_public_recover(
     gateway.rejected_keys["fixture-expired"] = 403
     gateway.release_rejection = threading.Event()
     config = {
-        "model": "local-test",
+        "model_id": "local-test",
         "base_url": f"http://127.0.0.1:{gateway.server_port}/v1",
-        "headers": {"X-Api-Key": "fixture-expired"},
-        "credential_scope": "account-primary",
-        "auto_start": False,
+        "api_key": "fixture-expired",
+        "config": {"credential_scope": "account-primary", "auto_start": False},
     }
     root = tmp_path / "rsi"
-    initial = HostClient(data_dir=root, config=config)
+    initial = HostClient(data_dir=root, **config)
     context = tmp_path / "context.md"
     context.write_text("Write the answer 42 into answer.txt")
     target = initial.execution_create(
@@ -714,11 +708,7 @@ def test_live_worker_hands_off_expired_credentials_after_public_recover(
     assert initial.recover() == {"started": 1}
     latest = HostClient(
         data_dir=root,
-        config={
-            **config,
-            "headers": {"X-Api-Key": "fixture-refreshed"},
-            "model": "replacement-model",
-        },
+        **{**config, "api_key": "fixture-refreshed", "model_id": "replacement-model"},
     )
     try:
         assert gateway.rejection_started.wait(timeout=10)
@@ -740,35 +730,36 @@ def test_live_worker_hands_off_expired_credentials_after_public_recover(
 
 
 @pytest.mark.parametrize("replay", [False, True])
-def test_clarification_dispatch_uses_refreshed_headers_for_the_same_recipe(
+def test_clarification_dispatch_uses_refreshed_key_for_the_same_recipe(
     tmp_path, gateway, replay
 ):
     from cosens.rsi import RSIClient as HostClient
 
     gateway.ask_clarification = True
     config = {
-        "model": "local-test",
+        "model_id": "local-test",
         "base_url": f"http://127.0.0.1:{gateway.server_port}/v1",
-        "headers": {"X-Api-Key": "fixture-before-clarification"},
+        "api_key": "fixture-before-clarification",
+    }
+    settings = {
         "credential_scope": "account-primary",
         "max_tokens": 2048,
         "timeout": 23,
-        "auto_start": True,
     }
     root = tmp_path / "rsi"
     context = tmp_path / "context.md"
     context.write_text("Write the answer 42 into answer.txt")
     evidence = {"context_path": str(context), "files": []}
-    original = HostClient(data_dir=root, config=config)
+    original = HostClient(data_dir=root, config=settings, **config)
     first = original.execution_create(
         evidence=evidence, idempotency_key="clarification"
     )
     foreign_config = {
         **config,
-        "credential_scope": "account-secondary",
-        "headers": {"X-Api-Key": "fixture-other-account"},
+        "api_key": "fixture-other-account",
+        "config": {**settings, "credential_scope": "account-secondary", "auto_start": False},
     }
-    foreign = HostClient(data_dir=root, config={**foreign_config, "auto_start": False})
+    foreign = HostClient(data_dir=root, **foreign_config)
     unrelated = foreign.execution_create(
         evidence=evidence, idempotency_key="other-account"
     )
@@ -797,24 +788,21 @@ def test_clarification_dispatch_uses_refreshed_headers_for_the_same_recipe(
     fresh_config = {
         **config,
         "base_url": config["base_url"] + "/",
-        "headers": {"X-Api-Key": "fixture-after-clarification"},
-        "max_tokens": 4096,
-        "timeout": 61,
+        "api_key": "fixture-after-clarification",
+        "config": {**settings, "max_tokens": 4096, "timeout": 61},
     }
-    fresh = HostClient(data_dir=root, config=fresh_config)
+    fresh = HostClient(data_dir=root, **fresh_config)
 
     if replay:
-        stale = HostClient(data_dir=root, config={**config, "auto_start": False})
+        stale = HostClient(data_dir=root, config={**settings, "auto_start": False}, **config)
         queued = stale.execution_clarification_answer(parent["id"], **answer)
         queued_id = queued["continuation_execution_id"]
         for changes in (
             foreign_config,
-            {"model": "different-model"},
+            {"model_id": "different-model"},
             {"base_url": config["base_url"] + "/other"},
         ):
-            differing = HostClient(
-                data_dir=root, config={**fresh_config, **changes, "auto_start": False}
-            )
+            differing = HostClient(data_dir=root, **{**fresh_config, **changes})
             assert (
                 differing.execution_clarification_answer(parent["id"], **answer)
                 == queued
@@ -858,17 +846,18 @@ def test_recover_retry_key_resumes_timed_out_checkpoint_once(
 
     gateway.test_timeout_key = "fixture-timed-out"
     config = {
-        "model": "local-test",
+        "model_id": "local-test",
         "base_url": f"http://127.0.0.1:{gateway.server_port}/v1",
-        "headers": {"X-Api-Key": gateway.test_timeout_key},
+        "api_key": gateway.test_timeout_key,
+    }
+    settings = {
         "max_tokens": 2048,
         "timeout": 0.45,
-        "auto_start": True,
     }
     if scoped:
-        config["credential_scope"] = "account-primary"
+        settings["credential_scope"] = "account-primary"
     directory = tmp_path / "rsi"
-    initial = HostClient(data_dir=directory, config=config)
+    initial = HostClient(data_dir=directory, config=settings, **config)
     skill = tmp_path / "SKILL.md"
     skill.write_text(
         "---\nname: answer-writer\ndescription: Write an answer\n---\n\nWrite the answer 42.\n"
@@ -912,11 +901,10 @@ def test_recover_retry_key_resumes_timed_out_checkpoint_once(
     fresh_config = {
         **config,
         "base_url": config["base_url"] + "/",
-        "headers": {"X-Api-Key": fresh_token},
-        "max_tokens": 4096,
-        "timeout": 25,
+        "api_key": fresh_token,
+        "config": {**settings, "max_tokens": 4096, "timeout": 25},
     }
-    fresh = HostClient(data_dir=directory, config=fresh_config)
+    fresh = HostClient(data_dir=directory, **fresh_config)
     assert not hasattr(fresh, "recipe_retry")
     with pytest.raises(InvalidState, match="requires recipe_id"):
         fresh.recover(retry_key="retry")
@@ -925,15 +913,16 @@ def test_recover_retry_key_resumes_timed_out_checkpoint_once(
     with pytest.raises(ValueError):
         fresh.recover(recipe_id=recipe_id, retry_key="")
     for changes in (
-        {"credential_scope": "account-secondary"},
-        {"model": "different-model"},
+        {"config": {**fresh_config["config"], "credential_scope": "account-secondary"}},
+        {"model_id": "different-model"},
         {"base_url": config["base_url"] + "/other"},
     ):
-        wrong = HostClient(data_dir=directory, config={**fresh_config, **changes})
+        wrong = HostClient(data_dir=directory, **{**fresh_config, **changes})
         with pytest.raises(InvalidState):
             wrong.recover(recipe_id=recipe_id, retry_key="retry")
     queue_only = HostClient(
-        data_dir=directory, config={**fresh_config, "auto_start": False}
+        data_dir=directory,
+        **{**fresh_config, "config": {**fresh_config["config"], "auto_start": False}},
     )
     unrelated = queue_only.execution_create(
         evidence=evidence, idempotency_key="unrelated"

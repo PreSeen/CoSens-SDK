@@ -815,10 +815,10 @@ def test_last_answer_during_generation_creates_one_child(client, tmp_path):
     execution = run(client, material(client, tmp_path)["id"])
     latest = HostClient(
         data_dir=client.data_dir,
+        model_id="fixture-replacement",
+        api_key="fixture-refreshed",
+        base_url="http://127.0.0.1:1/v1",
         config={
-            "model": "fixture-replacement",
-            "base_url": "http://127.0.0.1:1/v1",
-            "headers": {"X-Api-Key": "fixture-refreshed"},
             "credential_scope": "account-primary",
             "auto_start": False,
         },
@@ -1317,11 +1317,10 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
 
     client = PublicClient(
         data_dir=tmp_path / "sdk",
-        config={
-            "model": "local-test",
-            "base_url": "http://127.0.0.1:1/v1",
-            "auto_start": False,
-        },
+        model_id="local-test",
+        api_key="fixture-key",
+        base_url="http://127.0.0.1:1/v1",
+        config={"auto_start": False},
     )
     context = tmp_path / "context.md"
     context.write_text("Write the answer to answer.txt")

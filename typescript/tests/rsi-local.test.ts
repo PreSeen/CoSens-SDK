@@ -346,11 +346,11 @@ test('schema v8 adopts previously synchronized Recipe and version IDs', async (t
   }
 });
 
-test('recover leaves pending work for the Client with matching headers', async () => {
+test('recover leaves pending work for the Client with the matching model key', async () => {
   const data_dir = mkdtempSync(join(tmpdir(), 'cosens-rsi-header-bind-'));
-  const config = { model: 'fixture', base_url: 'http://localhost:9/v1', auto_start: false };
-  const client = new PublicRSIClient({ data_dir, config: { ...config, headers: { 'X-Api-Key': 'a' } } });
-  const other = new PublicRSIClient({ data_dir, config: { ...config, headers: { 'X-Api-Key': 'b' } } });
+  const options = { data_dir, model_id: 'fixture', base_url: 'http://localhost:9/v1', config: { auto_start: false } };
+  const client = new PublicRSIClient({ ...options, api_key: 'a' });
+  const other = new PublicRSIClient({ ...options, api_key: 'b' });
   const readOnly = new PublicRSIClient({ data_dir, config: null });
   try {
     const path = join(data_dir, 'context.md');
@@ -399,17 +399,13 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           res.writeHead(401).end();
           return;
         }
-        assert.equal(req.headers['x-auth-type'], 'access_token');
         assert.equal(input.max_tokens, 4096);
       }
       const key = input.model.slice(-1);
-      if (key === 'a') {
-        assert.equal(req.headers.authorization, 'Bearer fixture-gateway-a');
-        assert.equal(req.headers['x-auth-type'], 'access_token');
+      if (['a', 'b', 'c'].includes(key)) {
+        assert.equal(req.headers.authorization, 'Bearer fixture-model-' + key);
+        assert.equal(req.headers['x-auth-type'], undefined);
         assert.equal(req.headers['x-api-key'], undefined);
-      } else if (key === 'b' || key === 'c') {
-        assert.equal(req.headers['x-api-key'], 'fixture-provider-' + key);
-        assert.equal(req.headers.authorization, undefined);
       }
       const { context, evidence_catalog } = JSON.parse(
         input.messages.find((m: { role: string }) => m.role === 'user').content,
@@ -422,7 +418,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           (tool: { function: { name: string } }) => tool.function.name,
         ),
       );
-      const token = req.headers['x-api-key'];
+      const token = req.headers.authorization?.replace(/^Bearer /, '');
       if (input.model === 'fixture-retry-model') {
         assert.equal(input.max_tokens, 4096);
         if (tools.has('RecipeContent') && token === 'timeout-b') retryGenerations++;
@@ -734,10 +730,12 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       import { RSIClient } from 'cosens-sdk/rsi';
       const [data_dir, evidenceText, key, configText] = process.argv.slice(1);
       const { model, base_url } = JSON.parse(configText).model;
-      const headers = key === 'a'
-        ? { Authorization: 'Bearer fixture-gateway-a', 'X-Auth-Type': 'access_token' }
-        : { 'X-Api-Key': 'fixture-provider-' + key };
-      const client = new RSIClient({ data_dir, config: { model: model + '-' + key, base_url, headers, auto_start: true } });
+      const client = new RSIClient({
+        data_dir, model_id: model + '-' + key, base_url, api_key: 'fixture-model-' + key,
+        config: { headers: {
+          Authorization: 'Bearer fixture-upload-token', 'X-Auth-Type': 'access_token', 'X-Api-Key': 'fixture-upload-key',
+        } },
+      });
       const execution = await client.execution_create({
         evidence: JSON.parse(evidenceText), idempotency_key: key,
       });
@@ -1018,19 +1016,21 @@ test('independent Node hooks enqueue work that persists and passes a file test a
     await t.test('refreshed model credentials resume the same checkpoint and isolate accounts', async () => {
       const { RSIClient: BuiltClient } = await import('cosens-sdk/rsi');
       const data_dir = join(directory, 'refresh-token');
-      const config = { model: 'fixture-expired-model', base_url: client.config.model.base_url!, auto_start: false };
-      const expiredHeaders = { 'X-Api-Key': 'fixture-expired' };
-      const freshConfig = {
-        ...config,
-        model: 'fixture-refreshed-model',
-        headers: { 'X-Api-Key': 'fixture-refreshed' },
-        max_tokens: 16384,
-        timeout: 600,
+      const expiredOptions = {
+        data_dir, model_id: 'fixture-expired-model', base_url: client.config.model.base_url!, api_key: 'fixture-expired',
+        config: { auto_start: false },
       };
-      const expired = new BuiltClient({ data_dir, config: { ...config, headers: expiredHeaders, credential_scope: 'account-a' } });
-      const refreshed = new BuiltClient({ data_dir, config: { ...freshConfig, credential_scope: 'account-a' } });
-      const other = new BuiltClient({ data_dir, config: { ...freshConfig, credential_scope: 'account-b' } });
-      const legacy = new BuiltClient({ data_dir, config: { ...config, headers: expiredHeaders } });
+      const expiredHeaders = { Authorization: `Bearer ${expiredOptions.api_key}` };
+      const freshOptions = {
+        ...expiredOptions,
+        model_id: 'fixture-refreshed-model',
+        api_key: 'fixture-refreshed',
+        config: { ...expiredOptions.config, max_tokens: 16384, timeout: 600 },
+      };
+      const expired = new BuiltClient({ ...expiredOptions, config: { ...expiredOptions.config, credential_scope: 'account-a' } });
+      const refreshed = new BuiltClient({ ...freshOptions, config: { ...freshOptions.config, credential_scope: 'account-a' } });
+      const other = new BuiltClient({ ...freshOptions, config: { ...freshOptions.config, credential_scope: 'account-b' } });
+      const legacy = new BuiltClient(expiredOptions);
       const reader = new RSIClient({ data_dir, auto_start: false });
       try {
         const evidence = {
@@ -1056,9 +1056,9 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         assert.equal(completed.status, 'completed', JSON.stringify(completed.error));
         assert.equal(completed.result?.test_status, 'passed');
         assert.equal(completed.recipe_version_id, failed.recipe_version_id);
-        assert.equal(completed.runtime_config.model.model, freshConfig.model);
-        assert.equal(completed.runtime_config.model.max_tokens, freshConfig.max_tokens);
-        assert.equal(completed.runtime_config.model.timeout, freshConfig.timeout);
+        assert.equal(completed.runtime_config.model.model, freshOptions.model_id);
+        assert.equal(completed.runtime_config.model.max_tokens, freshOptions.config.max_tokens);
+        assert.equal(completed.runtime_config.model.timeout, freshOptions.config.timeout);
         assert.equal(reader.execution_get(unrelated.id).status, 'queued');
         assert.equal(reader.execution_get(beforeScope.id).status, 'queued');
 
@@ -1075,19 +1075,17 @@ test('independent Node hooks enqueue work that persists and passes a file test a
     await t.test('answering with a new token starts the clarification continuation automatically', async () => {
       const dataDir = join(directory, 'refresh-clarification');
       const reader = new RSIClient({ data_dir: dataDir, auto_start: false });
-      const config = {
-        model: 'fixture-clarification-model',
+      const options = {
+        model_id: 'fixture-clarification-model',
         base_url: client.config.model.base_url!,
-        credential_scope: 'fixture-account',
-        auto_start: true,
-        max_tokens: 4096,
+        config: { credential_scope: 'fixture-account', max_tokens: 4096 },
       };
       const callHook = (request: object) => runHook(
         `
         import { RSIClient } from 'cosens-sdk/rsi';
         const [data_dir, payload] = process.argv.slice(-2);
-        const { config, create, answer } = JSON.parse(payload);
-        const client = new RSIClient({ data_dir, config });
+        const { options, create, answer } = JSON.parse(payload);
+        const client = new RSIClient({ data_dir, ...options });
         const result = create
           ? await client.execution_create(create)
           : await client.execution_clarification_answer(answer.execution_id, answer.value);
@@ -1097,10 +1095,9 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         [dataDir, JSON.stringify(request)],
         process.env.RSI_TEST_BUN_EXECUTABLE,
       ).then(JSON.parse);
-      const headers = () => ({ Authorization: clarificationToken, 'X-Auth-Type': 'access_token' });
       try {
         const first = await callHook({
-          config: { ...config, headers: headers() },
+          options: { ...options, api_key: clarificationToken.slice('Bearer '.length) },
           create: {
             idempotency_key: 'clarification-token-rotation',
             evidence: {
@@ -1121,7 +1118,10 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         clarificationToken = 'Bearer fixture-clarification-new';
 
         const request = {
-          config: { ...config, base_url: config.base_url + '/', max_tokens: 8192, headers: headers() },
+          options: {
+            ...options, base_url: options.base_url + '/', api_key: clarificationToken.slice('Bearer '.length),
+            config: { ...options.config, max_tokens: 8192 },
+          },
           answer: {
             execution_id: parent.id,
             value: { question_id: question.id, question_revision: question.revision, answer: ['plain'] },
@@ -1133,8 +1133,8 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         assert.equal(child.status, 'completed', JSON.stringify(child.error));
         assert.equal(child.result?.published, true);
         assert.equal(child.recipe_id, parent.recipe_id);
-        assert.equal(child.runtime_config.model.base_url, config.base_url);
-        assert.equal(child.runtime_config.model.max_tokens, config.max_tokens);
+        assert.equal(child.runtime_config.model.base_url, options.base_url);
+        assert.equal(child.runtime_config.model.max_tokens, options.config.max_tokens);
         assert.equal(rejectedClarificationRequests, 0);
         assert.deepEqual(await callHook(request), submitted);
         assert.equal(reader.store.db.prepare('SELECT COUNT(*) FROM recipes').pluck().get(), 1);
@@ -1153,30 +1153,23 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       const { RSIClient: BuiltClient } = await import('cosens-sdk/rsi');
       const data_dir = join(directory, 'retry-timeout');
       const settings = {
-        model: 'fixture-retry-model',
+        data_dir,
+        model_id: 'fixture-retry-model',
         base_url: client.config.model.base_url!,
-        credential_scope: 'retry-account',
-        auto_start: true,
-        timeout: 1,
-        max_tokens: 4096,
+        config: { credential_scope: 'retry-account', timeout: 1, max_tokens: 4096 },
       };
-      const original = new BuiltClient({
-        data_dir, config: { ...settings, headers: { 'X-Api-Key': 'timeout-a' } },
-      });
+      const original = new BuiltClient({ ...settings, api_key: 'timeout-a' });
       const freshSettings = {
         ...settings,
         base_url: settings.base_url + '/',
-        headers: { 'X-Api-Key': 'timeout-b' },
-        max_tokens: 8192,
-        auto_start: false,
+        api_key: 'timeout-b',
+        config: { ...settings.config, max_tokens: 8192, auto_start: false },
       };
-      const refreshed = new BuiltClient({ data_dir, config: freshSettings });
+      const refreshed = new BuiltClient(freshSettings);
       const other = new BuiltClient({
-        data_dir, config: { ...freshSettings, credential_scope: 'other-account' },
+        ...freshSettings, config: { ...freshSettings.config, credential_scope: 'other-account' },
       });
-      const wrongRoute = new BuiltClient({
-        data_dir, config: { ...freshSettings, model: 'wrong-model' },
-      });
+      const wrongRoute = new BuiltClient({ ...freshSettings, model_id: 'wrong-model' });
       const reader = new RSIClient({ data_dir, auto_start: false });
       try {
         const request = {
@@ -1212,7 +1205,7 @@ test('independent Node hooks enqueue work that persists and passes a file test a
 
         const executable = process.env.RSI_NODE_EXECUTABLE;
         process.env.RSI_NODE_EXECUTABLE = join(data_dir, 'missing-worker-runtime');
-        const brokenLauncher = new BuiltClient({ data_dir, config: freshSettings });
+        const brokenLauncher = new BuiltClient(freshSettings);
         if (executable === undefined) delete process.env.RSI_NODE_EXECUTABLE;
         else process.env.RSI_NODE_EXECUTABLE = executable;
         try {
@@ -1673,11 +1666,10 @@ test('an expired worker lease resumes the graph without regenerating the candida
     assert.equal(after.test_results.length, 1);
     const host = new PublicRSIClient({
       data_dir: client.data_dir,
-      config: {
-        model: 'fixture',
-        base_url: 'http://127.0.0.1:1/v1',
-        auto_start: false,
-      },
+      model_id: 'fixture',
+      base_url: 'http://127.0.0.1:1/v1',
+      api_key: 'fixture-key',
+      config: { auto_start: false },
     });
     try {
       const recipePath = join(directory, 'prior-recipe.md');
@@ -1986,11 +1978,10 @@ test('recipe_list shows first-time learning and preserves the usable version dur
     client.execution_cancel(previousContinuationId);
     const host = new PublicRSIClient({
       data_dir: client.data_dir,
-      config: {
-        model: 'fixture',
-        base_url: 'http://127.0.0.1:1/v1',
-        auto_start: false,
-      },
+      model_id: 'fixture',
+      base_url: 'http://127.0.0.1:1/v1',
+      api_key: 'fixture-key',
+      config: { auto_start: false },
     });
     try {
       const submission = {

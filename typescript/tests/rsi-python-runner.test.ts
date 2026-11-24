@@ -159,10 +159,10 @@ for (const mode of ['run', 'skip', 'unavailable', 'unconfigured', 'nonzero', 'te
     await once(server, 'listening');
     const client = new RSIClient({
       data_dir,
+      model_id: 'python-runner-fixture',
+      base_url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`,
+      api_key: 'fixture',
       config: {
-        model: 'python-runner-fixture',
-        base_url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`,
-        headers: { Authorization: 'Bearer fixture' },
         auto_start: true,
         ...(mode === 'unconfigured' || mode === 'text' ? {} : {
           test_python_image: mode === 'unavailable' ? 'cosens-rsi-test:missing-' + process.pid : image,

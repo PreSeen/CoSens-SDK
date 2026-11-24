@@ -220,10 +220,10 @@ print('Read-only input and calculated quantity verified')
     with gateway(completion) if detached else nullcontext("http://127.0.0.1:1/v1") as url:
         client = RSIClient(
             data_dir=tmp_path / "db",
+            model_id="fixture",
+            base_url=url,
+            api_key="synthetic-fixture",
             config={
-                "model": "fixture",
-                "base_url": url,
-                "headers": {"Authorization": "Bearer synthetic-fixture"},
                 "auto_start": detached,
                 **({"test_python_image": image} if mode not in {"unconfigured", "text"} else {}),
             },

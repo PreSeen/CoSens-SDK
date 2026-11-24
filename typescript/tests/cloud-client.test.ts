@@ -75,6 +75,11 @@ test('new RSIClient() is cloud; data_dir selects local', () => {
     local.close();
     delete process.env.COSENS_API_KEY;
     assert.throws(() => new RSIClient(), /COSENS_API_KEY/);
+    const connection = { model_id: 'fixture', api_key: 'fixture-key', base_url: 'http://localhost:9/v1' };
+    for (const field of Object.keys(connection)) {
+      const partial = Object.fromEntries(Object.entries(connection).filter(([name]) => name !== field));
+      assert.throws(() => new RSIClient({ data_dir: dir, ...partial } as never), new RegExp(field));
+    }
   } finally {
     if (previous === undefined) delete process.env.COSENS_API_KEY;
     else process.env.COSENS_API_KEY = previous;
@@ -312,8 +317,9 @@ test('local ZIP upload adopts cloud Recipe and version IDs and keeps Execution l
   writeFileSync(zip, new Uint8Array([0x50, 0x4b, 0x03, 0x04, 1]));
   const local = new RSIClient({
     data_dir,
+    model_id: 'fixture', base_url: 'http://localhost:9/v1', api_key: 'fixture-model-key',
     config: {
-      model: 'fixture', base_url: 'http://localhost:9/v1', auto_start: false,
+      auto_start: false,
       headers: {
         Authorization: 'Bearer fixture-access-token',
         'X-Auth-Type': 'access_token',

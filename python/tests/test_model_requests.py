@@ -5,7 +5,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from cosens.rsi import RSIClient
 from cosens.rsi.chat_completions import request_completion
@@ -70,11 +70,11 @@ def test_requests_name_the_sdk_in_the_user_agent(endpoint):
 
 
 def test_public_config_carries_budget_and_timeout(tmp_path):
+    connection = {"model_id": "m", "api_key": "fixture-key", "base_url": "http://127.0.0.1:9/v1"}
     client = RSIClient(
         data_dir=tmp_path,
+        **connection,
         config={
-            "model": "m",
-            "base_url": "http://127.0.0.1:9/v1",
             "auto_start": False,
             "max_tokens": 16384,
             "timeout": 600,
@@ -82,26 +82,26 @@ def test_public_config_carries_budget_and_timeout(tmp_path):
     )
     model = client._queue.config.model
     assert (model.max_tokens, model.timeout) == (16384, 600)
-    default = RSIClient(
-        data_dir=tmp_path / "default",
-        config={"model": "m", "base_url": "http://127.0.0.1:9/v1", "auto_start": False},
-    )
+    default = RSIClient(data_dir=tmp_path / "default", **connection)
     assert default._queue.config.model.max_tokens is None
+    for field in connection:
+        partial = {name: value for name, value in connection.items() if name != field}
+        with pytest.raises(ValidationError, match=field):
+            RSIClient(data_dir=tmp_path, **partial)
 
 
-def test_recover_leaves_pending_tasks_for_their_original_headers(tmp_path):
+def test_recover_leaves_pending_tasks_for_their_original_model_key(tmp_path):
     path = tmp_path / "context.md"
     path.write_text("Task transcript")
-    config = {"model": "m", "base_url": "http://127.0.0.1:9/v1", "auto_start": False}
-    client = RSIClient(
-        data_dir=tmp_path, config={**config, "headers": {"X-Api-Key": "a"}}
-    )
+    options = {
+        "data_dir": tmp_path, "model_id": "m", "base_url": "http://127.0.0.1:9/v1",
+        "config": {"auto_start": False},
+    }
+    client = RSIClient(**options, api_key="a")
     execution = client.execution_create(
         evidence={"context_path": str(path), "files": []}, idempotency_key="example"
     )
-    other = RSIClient(
-        data_dir=tmp_path, config={**config, "headers": {"X-Api-Key": "b"}}
-    )
+    other = RSIClient(**options, api_key="b")
     assert other.recover() == {"started": 0}
     assert other.recover(recipe_id=execution["recipe_id"]) == {"started": 0}
     assert RSIClient(data_dir=tmp_path).recover() == {"started": 0}

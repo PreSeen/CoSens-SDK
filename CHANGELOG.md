@@ -2,6 +2,12 @@
 
 Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned separately.
 
+## Unreleased
+
+### Breaking
+
+- Local `RSIClient` now requires `model_id`, `api_key`, and `base_url` as constructor arguments when configured to run an Execution. Move the model ID and URL out of `config` and supply the model key as `api_key`. The SDK sends the key as a Bearer token to the OpenAI-compatible model endpoint. `config.headers` is used only for local Recipe ZIP uploads.
+
 ## TypeScript 0.10.1
 
 - `getMemory` and `getMemoryExperience` accept `baseUrl` and `apiKey`, like the other Memory functions and like Python 0.10.1. Both must be supplied together; the call then goes to that HTTPS Memory deployment with that key and sends `X-CoSens-Auth-Type: api_key`. Virtual User selection is still rejected for these two calls.

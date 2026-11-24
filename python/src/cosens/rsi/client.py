@@ -1,6 +1,5 @@
 """Host-facing API for local RSI."""
 
-import json
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -14,11 +13,16 @@ from pydantic import (
 )
 
 from ._queue_client import RSIClient as QueueClient
-from .model_headers import bind_model_headers, credential_scope_id
+from .model_headers import (
+    bind_model_headers,
+    credential_scope_id,
+    normalize_request_headers,
+)
 from .models import Contract, PythonImage, RecipeReference
 from .recipe_file import read_recipe_file
 
 Text = Annotated[str, StringConstraints(min_length=1)]
+NonBlankText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Positive = Annotated[StrictInt, Field(gt=0)]
 Offset = Annotated[StrictInt, Field(ge=0)]
 
@@ -26,11 +30,17 @@ Offset = Annotated[StrictInt, Field(ge=0)]
 class ModelEndpoint(Contract):
     model_config = ConfigDict(hide_input_in_errors=True)
 
-    model: Text
-    base_url: Text
+    model_id: NonBlankText
+    api_key: NonBlankText
+    base_url: NonBlankText
+
+
+class LocalOptions(Contract):
+    model_config = ConfigDict(hide_input_in_errors=True)
+
     headers: dict[str, str] = Field(default_factory=dict)
     credential_scope: Text | None = None
-    auto_start: StrictBool
+    auto_start: StrictBool = True
     max_tokens: Positive | None = None
     timeout: Annotated[float, Field(gt=0, le=3600)] | None = None
     test_python_image: PythonImage | None = None
@@ -70,50 +80,61 @@ class RSIClient:
     """RSI atoms in cloud mode (default) or local mode.
 
     `RSIClient()` uses the CoSens service with `COSENS_API_KEY`.
-    `RSIClient(data_dir=..., config=...)` (or `mode="local"`) runs the local
-    Worker with your own model. Local Recipe reads include a storage_path
-    relative to data_dir.
+    `RSIClient(data_dir=..., model_id=..., api_key=..., base_url=...)` runs
+    the local Worker with your own model. Local Recipe reads include a
+    storage_path relative to data_dir.
     """
 
-    def __new__(cls, *, mode=None, data_dir=None, config=None, api_key=None, base_url=None, virtual_user_id=None):
+    def __new__(
+        cls, *, mode=None, data_dir=None, config=None, model_id=None,
+        api_key=None, base_url=None, virtual_user_id=None,
+    ):
         if mode is None:
-            mode = "local" if data_dir is not None or config is not None else "cloud"
+            mode = "local" if any(value is not None for value in (data_dir, config, model_id)) else "cloud"
         if mode == "cloud":
-            if data_dir is not None or config is not None:
-                raise ValueError("data_dir and config are for mode='local'")
+            if any(value is not None for value in (data_dir, config, model_id)):
+                raise ValueError("data_dir, config and model_id are for mode='local'")
             from .cloud import CloudRSIClient
 
             return CloudRSIClient(api_key=api_key, base_url=base_url, virtual_user_id=virtual_user_id)
         if mode != "local":
             raise ValueError("mode must be 'cloud' or 'local'")
-        if api_key is not None or base_url is not None or virtual_user_id is not None:
-            raise ValueError("api_key and base_url are for mode='cloud'")
+        if virtual_user_id is not None:
+            raise ValueError("virtual_user_id is for mode='cloud'")
         if data_dir is None:
             raise ValueError("mode='local' needs data_dir")
         return super().__new__(cls)
 
     mode = "local"
 
-    def __init__(self, *, mode=None, data_dir, config: dict | None = None, api_key=None, base_url=None, virtual_user_id=None):
-        settings = ModelEndpoint.model_validate(config) if config is not None else None
-        scope = credential_scope_id(settings.credential_scope) if settings else None
-        binding = (
-            bind_model_headers(
-                settings.base_url,
-                settings.model,
-                settings.headers,
-                credential_scope=scope,
-            )
-            if settings is not None
+    def __init__(
+        self, *, mode=None, data_dir, config: dict | None = None, model_id=None,
+        api_key=None, base_url=None, virtual_user_id=None,
+    ):
+        settings = LocalOptions.model_validate(config if config is not None else {})
+        endpoint = (
+            ModelEndpoint(model_id=model_id, api_key=api_key, base_url=base_url)
+            if any(value is not None for value in (config, model_id, api_key, base_url))
             else None
         )
-        self._model_headers = json.loads(binding[1]) if binding else None
+        scope = credential_scope_id(settings.credential_scope)
+        binding = (
+            bind_model_headers(
+                endpoint.base_url,
+                endpoint.model_id,
+                {"Authorization": f"Bearer {endpoint.api_key}"},
+                credential_scope=scope,
+            )
+            if endpoint is not None
+            else None
+        )
+        self._upload_headers = normalize_request_headers(settings.headers)
         self._queue = QueueClient(
             data_dir=data_dir,
             config={
                 "model": {
-                    "model": settings.model,
-                    "base_url": settings.base_url,
+                    "model": endpoint.model_id,
+                    "base_url": endpoint.base_url,
                     "api_key_env": binding[0],
                     "credential_scope": scope,
                     **settings.model_dump(
@@ -122,9 +143,9 @@ class RSIClient:
                 },
                 **settings.model_dump(include={"test_python_image"}, exclude_none=True),
             }
-            if settings and binding
+            if endpoint and binding
             else None,
-            auto_start=settings.auto_start if settings else True,
+            auto_start=settings.auto_start,
             model_header_binding=binding,
         )
 
@@ -267,7 +288,7 @@ class RSIClient:
             api_key=api_key,
             base_url=base_url,
             virtual_user_id=virtual_user_id,
-            _shared_headers=self._model_headers,
+            _shared_headers=self._upload_headers,
         )
         try:
             return upload_recipe(

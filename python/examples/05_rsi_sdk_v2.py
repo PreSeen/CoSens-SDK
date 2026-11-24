@@ -1,9 +1,8 @@
 """Host Hook integration. Runs only after the host has confirmed the artifact.
 
 Install: pip install -e ./python
-Configure RSI_MODEL_NAME, RSI_MODEL_BASE_URL and optional RSI_MODEL_HEADERS_JSON
-in the Hook's environment. The example reads JSON headers from the host and the
-model must support OpenAI-compatible chat completions and tool calling.
+Configure RSI_MODEL_NAME, RSI_MODEL_API_KEY and RSI_MODEL_BASE_URL in the Hook's
+environment. The model must support OpenAI-compatible chat completions and tool calling.
 """
 
 from __future__ import annotations
@@ -45,12 +44,9 @@ def main():
     args = parser.parse_args()
     client = RSIClient(
         data_dir=args.data_dir,
-        config={
-            "model": os.environ["RSI_MODEL_NAME"],
-            "base_url": os.environ["RSI_MODEL_BASE_URL"],
-            "headers": json.loads(os.environ.get("RSI_MODEL_HEADERS_JSON", "{}")),
-            "auto_start": True,
-        },
+        model_id=os.environ["RSI_MODEL_NAME"],
+        api_key=os.environ["RSI_MODEL_API_KEY"],
+        base_url=os.environ["RSI_MODEL_BASE_URL"],
     )
     inputs = [str(Path(p).resolve()) for p in args.input]
     execution = client.execution_create(

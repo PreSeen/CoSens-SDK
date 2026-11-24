@@ -86,7 +86,7 @@ export async function uploadLocalRecipe(
   store: Store,
   path: string | URL,
   options: LocalRecipeUpsertOptions,
-  modelHeaders?: Record<string, string>,
+  uploadHeaders?: Headers,
 ): Promise<RecipeUpsertResult> {
   const { local_recipe_id, local_recipe_version_id, idempotency_key, ...cloudOptions } = optionsSchema.parse(options);
   validateRecipeUpsertOptions({ idempotency_key });
@@ -94,8 +94,7 @@ export async function uploadLocalRecipe(
   if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash)
     throw new TypeError('base_url must be an HTTP(S) address without embedded credentials, query or fragment');
   const base_url = base.href.replace(/\/+$/, '');
-  const headers = new Headers(modelHeaders);
-  const virtual_user_id = selectedVirtualUser(cloudOptions) ?? headers.get('X-Virtual-User-Id');
+  const virtual_user_id = selectedVirtualUser(cloudOptions) ?? uploadHeaders?.get('X-Virtual-User-Id') ?? null;
   const destination = { base_url, virtual_user_id };
   const { file, filename } = await openRecipeZip(path);
   // Send the same immutable bytes used to derive the idempotency key.
@@ -121,7 +120,7 @@ export async function uploadLocalRecipe(
     const identity = journal<Destination>(store, recipeIdentityScope, recipe.id);
     if (identity && !sameDestination(identity.request, destination))
       return fail('conflict', 'local Recipe was synchronized to a different cloud endpoint or Virtual User');
-    const cloud = new CloudClient({ ...cloudOptions, base_url }, headers);
+    const cloud = new CloudClient({ ...cloudOptions, base_url }, uploadHeaders);
     const plan: UploadPlan = pending?.request ?? {
       ...request,
       local_recipe_id: recipe.id,

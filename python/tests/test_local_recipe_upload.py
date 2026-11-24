@@ -18,8 +18,8 @@ V1 = {"recipe_id": "recipe_cloud", "recipe_version_id": "version_cloud_1"}
 V2 = {"recipe_id": "recipe_cloud", "recipe_version_id": "version_cloud_2"}
 
 
-def _fixture_recipe(tmp_path, config=None):
-    client = RSIClient(data_dir=tmp_path, config=config)
+def _fixture_recipe(tmp_path, **options):
+    client = RSIClient(data_dir=tmp_path, **options)
     path = tmp_path / "RECIPE.md"
     path.write_text(MARKDOWN, encoding="utf-8")
     first = client.recipe_insert(path)
@@ -121,11 +121,9 @@ def _completed_execution(client, recipe_id, version_id):
         )["id"]
 
 
-def test_local_upload_reuses_model_headers(tmp_path, monkeypatch):
+def test_local_upload_uses_upload_headers(tmp_path, monkeypatch):
     monkeypatch.delenv("COSENS_API_KEY", raising=False)
     config = {
-        "model": "fixture",
-        "base_url": "https://model.example/v1",
         "auto_start": False,
         "headers": {
             "Authorization": "Bearer fixture-access-token",
@@ -136,7 +134,10 @@ def test_local_upload_reuses_model_headers(tmp_path, monkeypatch):
             "Idempotency-Key": "model-key",
         },
     }
-    client, recipe = _fixture_recipe(tmp_path, config)
+    client, recipe = _fixture_recipe(
+        tmp_path, model_id="fixture", api_key="fixture-model-key",
+        base_url="https://model.example/v1", config=config,
+    )
     path = _zip(tmp_path / "recipe.zip")
 
     def receive(request, calls):
