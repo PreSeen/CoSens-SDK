@@ -121,16 +121,23 @@ export function validateRecipeUpsertOptions({ recipe_id, idempotency_key }: Reci
 /** Cloud mode uploads the supplied evidence and optional Recipe reference to CoSens. */
 export class CloudClient {
   readonly #base: string;
-  readonly #key: string;
-  readonly #virtualUserId?: string;
+  readonly #headers: Headers;
   readonly #timeoutMs: number;
 
-  constructor(options: CloudOptions = {}) {
-    const key = options.api_key ?? process.env.COSENS_API_KEY;
-    if (!key)
-      throw new TypeError('cloud mode needs COSENS_API_KEY (or api_key)');
-    this.#key = key;
-    this.#virtualUserId = selectedVirtualUser(options);
+  constructor(options: CloudOptions = {}, sharedHeaders?: Headers) {
+    this.#headers = new Headers(sharedHeaders);
+    if (this.#headers.keys().next().done) {
+      const key = options.api_key ?? process.env.COSENS_API_KEY;
+      if (!key)
+        throw new TypeError('cloud mode needs COSENS_API_KEY (or api_key)');
+      this.#headers.set('Authorization', `Bearer ${key}`);
+      this.#headers.set('X-Auth-Type', 'api_key');
+    }
+    for (const name of ['Content-Type', 'Content-Length', 'Transfer-Encoding', 'Idempotency-Key'])
+      this.#headers.delete(name);
+    if (!this.#headers.has('User-Agent')) this.#headers.set('User-Agent', USER_AGENT);
+    const virtualUserId = selectedVirtualUser(options);
+    if (virtualUserId !== undefined) this.#headers.set('X-Virtual-User-Id', virtualUserId);
     const timeout = options.timeout ?? 60;
     if (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0)
       throw new TypeError('timeout must be a positive number of seconds');
@@ -163,18 +170,14 @@ export class CloudClient {
     const url = new URL(this.#base + path);
     for (const [key, value] of Object.entries(params ?? {}))
       url.searchParams.set(key, value);
+    const headers = new Headers(this.#headers);
+    if (payload !== undefined) headers.set('Content-Type', 'application/json');
+    if (idempotency_key !== undefined) headers.set('Idempotency-Key', idempotency_key);
     let response: Response;
     try {
       response = await fetch(url, {
         method,
-        headers: {
-          authorization: `Bearer ${this.#key}`,
-          'x-auth-type': 'api_key',
-          ...(this.#virtualUserId === undefined ? {} : { 'X-Virtual-User-Id': this.#virtualUserId }),
-          'user-agent': USER_AGENT,
-          ...(payload === undefined ? {} : { 'content-type': 'application/json' }),
-          ...(idempotency_key === undefined ? {} : { 'Idempotency-Key': idempotency_key }),
-        },
+        headers,
         body: multipart ?? payload,
         redirect: 'error',
         signal: AbortSignal.timeout(this.#timeoutMs),

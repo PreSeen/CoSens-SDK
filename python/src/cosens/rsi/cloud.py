@@ -98,20 +98,26 @@ def _validate_recipe_upload(recipe_id, idempotency_key):
 class CloudRSIClient:
     """Cloud mode of RSIClient, backed by the CoSens service."""
 
-    def __init__(self, *, api_key=None, base_url=None, timeout=60.0, transport=None, virtual_user_id=None):
-        key = api_key or os.environ.get("COSENS_API_KEY")
-        if not key:
-            raise ValueError("cloud mode needs COSENS_API_KEY (or api_key=...)")
+    def __init__(
+        self, *, api_key=None, base_url=None, timeout=60.0, transport=None,
+        virtual_user_id=None, _shared_headers=None,
+    ):
+        headers = httpx.Headers(_shared_headers, encoding="iso-8859-1")
+        if not headers:
+            key = api_key or os.environ.get("COSENS_API_KEY")
+            if not key:
+                raise ValueError("cloud mode needs COSENS_API_KEY (or api_key=...)")
+            headers.update({"Authorization": f"Bearer {key}", "X-Auth-Type": "api_key"})
+        for name in ("Content-Type", "Content-Length", "Transfer-Encoding", "Idempotency-Key"):
+            headers.pop(name, None)
+        headers.setdefault("User-Agent", USER_AGENT)
         if virtual_user_id is not None and (not isinstance(virtual_user_id, str) or not virtual_user_id or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in virtual_user_id)):
             raise ValueError("virtual_user_id must be a nonempty header value")
+        if virtual_user_id is not None:
+            headers["X-Virtual-User-Id"] = virtual_user_id
         self._http = httpx.Client(
             base_url=(base_url or os.environ.get("COSENS_RSI_BASE_URL") or DEFAULT_BASE_URL).rstrip("/"),
-            headers={
-                "Authorization": f"Bearer {key}",
-                "X-Auth-Type": "api_key",
-                "User-Agent": USER_AGENT,
-                **({"X-Virtual-User-Id": virtual_user_id} if virtual_user_id is not None else {}),
-            },
+            headers=headers,
             timeout=timeout,
             transport=transport,
         )

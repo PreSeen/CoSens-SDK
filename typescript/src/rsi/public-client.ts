@@ -129,6 +129,7 @@ export type RSIClientOptions = LocalOptions | ({ mode: 'cloud' } & CloudOptions)
 export class RSIClient {
   readonly #queue!: QueueClient;
   readonly #cloud?: CloudClient;
+  readonly #modelHeaders?: Record<string, string>;
   readonly data_dir: string | null;
   readonly mode: 'cloud' | 'local';
 
@@ -142,6 +143,7 @@ export class RSIClient {
     }
     this.mode = 'local';
     const { data_dir, config: settings } = clientOptions.parse(options);
+    this.#modelHeaders = settings?.headers;
     const scope = settings?.credential_scope === undefined
       ? undefined
       : credentialScopeId(settings.credential_scope);
@@ -339,7 +341,7 @@ export class RSIClient {
     }
     if (!options || !('local_recipe_id' in options))
       return fail('invalid_argument', 'local Recipe upload requires local_recipe_id and local_recipe_version_id');
-    return uploadLocalRecipe(this.#queue.store, path, options);
+    return uploadLocalRecipe(this.#queue.store, path, options, this.#modelHeaders);
   }
 
   async recipe_get(id: string, version = 'active') {

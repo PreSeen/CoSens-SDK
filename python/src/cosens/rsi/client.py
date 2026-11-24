@@ -1,5 +1,6 @@
 """Host-facing API for local RSI."""
 
+import json
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -106,6 +107,7 @@ class RSIClient:
             if settings is not None
             else None
         )
+        self._model_headers = json.loads(binding[1]) if binding else None
         self._queue = QueueClient(
             data_dir=data_dir,
             config={
@@ -261,7 +263,12 @@ class RSIClient:
         from .recipe_sync import upload_recipe
 
         filename, zip_bytes = _read_recipe_zip(path)
-        client = CloudRSIClient(api_key=api_key, base_url=base_url, virtual_user_id=virtual_user_id)
+        client = CloudRSIClient(
+            api_key=api_key,
+            base_url=base_url,
+            virtual_user_id=virtual_user_id,
+            _shared_headers=self._model_headers,
+        )
         try:
             return upload_recipe(
                 self._queue.store,

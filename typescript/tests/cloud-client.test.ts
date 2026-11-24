@@ -311,7 +311,18 @@ test('local ZIP upload adopts cloud Recipe and version IDs and keeps Execution l
   writeFileSync(path, firstMarkdown);
   writeFileSync(zip, new Uint8Array([0x50, 0x4b, 0x03, 0x04, 1]));
   const local = new RSIClient({
-    data_dir, config: { model: 'fixture', base_url: 'http://localhost:9/v1', auto_start: false },
+    data_dir,
+    config: {
+      model: 'fixture', base_url: 'http://localhost:9/v1', auto_start: false,
+      headers: {
+        Authorization: 'Bearer fixture-access-token',
+        'X-Auth-Type': 'access_token',
+        'X-Virtual-User-Id': 'vu_fixture',
+        'Content-Type': 'application/json',
+        'Content-Length': '0',
+        'Idempotency-Key': 'model-key',
+      },
+    },
   });
   t.after(() => local.close());
   const recipe = await local.recipe_insert(path);
@@ -328,7 +339,7 @@ test('local ZIP upload adopts cloud Recipe and version IDs and keeps Execution l
   const second = { recipe_id: 'recipe_cloud', recipe_version_id: 'version_cloud_2' };
   const replies: Record<string, [number, unknown]> = { 'POST /api/recipes_upsert': [200, first] };
   await withService(replies, async (base_url, seen) => {
-    const initial = { base_url, api_key: 'fixture-api-key', local_recipe_id: recipe.id, local_recipe_version_id: firstLocalVersion };
+    const initial = { base_url, local_recipe_id: recipe.id, local_recipe_version_id: firstLocalVersion };
     await assert.rejects(local.recipes_upsert(zip, initial), /finish the pending Recipe execution/);
     assert.equal(seen.length, 0);
     const setup = new Database(join(data_dir, 'rsi-ts.sqlite3'));
@@ -346,7 +357,13 @@ test('local ZIP upload adopts cloud Recipe and version IDs and keeps Execution l
       setup.close();
     }
     assert.deepEqual(await local.recipes_upsert(pathToFileURL(zip), initial), first);
+    assert.deepEqual(await local.recipes_upsert(zip, { ...initial, virtualUserId: 'vu_fixture' }), first);
+    await assert.rejects(local.recipes_upsert(zip, { ...initial, virtualUserId: 'vu_other' }), /different arguments/);
     assert.equal(seen[0].body.get('recipe_id'), null);
+    assert.equal(seen[0].headers.authorization, 'Bearer fixture-access-token');
+    assert.equal(seen[0].headers['x-auth-type'], 'access_token');
+    assert.equal(seen[0].headers['x-virtual-user-id'], 'vu_fixture');
+    assert.match(String(seen[0].headers['content-type']), /^multipart\/form-data; boundary=/);
     assert.match(String(seen[0].headers['idempotency-key']), /^local-recipe-upload-[0-9a-f]{64}$/);
     const synced = await local.recipe_get(recipe.id, firstLocalVersion);
     assert.equal(synced.id, first.recipe_id);

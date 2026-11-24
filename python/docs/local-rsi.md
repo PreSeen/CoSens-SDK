@@ -36,7 +36,7 @@ TS 用 `new RSIClient({ data_dir, config })`。Python 用 `RSIClient(data_dir=..
 | `config` | 创建或恢复本地 Execution 时传入。TS 只读查询传 `null`，Python 可省略或传 `None`。 | 本地模型配置。 |
 | `config.model` | 提供配置对象时必填。 | 非空字符串，模型 ID。 |
 | `config.base_url` | 提供配置对象时必填。 | 支持工具调用的 OpenAI-compatible Chat Completions 基地址。 |
-| `config.headers` | 选填，省略等同 `{}`。 | 宿主提供的 HTTP 请求头，键和值都是字符串。认证方案及凭证格式由宿主决定。 |
+| `config.headers` | 选填，省略等同 `{}`。 | 宿主提供的 HTTP 请求头，键和值都是字符串。模型请求和本地 Recipe 上传共用这份配置。 |
 | `config.credential_scope` | 选填。需要在 token 刷新后自动匹配同账号任务时传入。 | 宿主为已认证账号指定的稳定非空标识。同账号刷新 token 时沿用该值，共用 `data_dir` 的不同账号使用不同值。SQLite 保存标识的哈希。 |
 | `config.auto_start` | 提供配置对象时必填。 | 布尔值。为 `true` 时入队后自动调度 Worker，为 `false` 时由宿主调用 `recover()`。 |
 | `config.max_tokens` | 选填。 | 正整数，限制单次模型调用的输出。省略时由模型服务决定。 |
@@ -158,7 +158,9 @@ const receipt = await client.recipes_upsert(new URL('file:///path/to/recipe.zip'
 });
 ```
 
-云端认证沿用 `COSENS_API_KEY` 和 `COSENS_RSI_BASE_URL`，也可以在上传时显式提供 `api_key` 和 `base_url`。上传成功后，SQLite 的 `recipes.id` 与回执的 `recipe_id` 一致，`versions.id` 与回执的 `recipe_version_id` 一致。关联的 Execution 使用正式 Recipe 和版本 ID，Execution 自身的 ID 保留。下一次调用可以直接使用回执中的正式 ID。
+本地 `recipes_upsert` 把非空的 `config.headers` 发给上传地址。上传地址依次取调用时的 `base_url`、`COSENS_RSI_BASE_URL`、默认 CoSens 地址。`config.headers` 为空时，上传使用调用时的 `api_key` 或环境变量 `COSENS_API_KEY`。SDK 生成 multipart 请求头和 `Idempotency-Key`。调用时显式指定的 Virtual User 优先于 `config.headers` 中的 `X-Virtual-User-Id`。
+
+上传成功后，SQLite 的 `recipes.id` 与回执的 `recipe_id` 一致，`versions.id` 与回执的 `recipe_version_id` 一致。关联的 Execution 使用正式 Recipe 和版本 ID，Execution 自身的 ID 保留。下一次调用可以直接使用回执中的正式 ID。
 
 同一版本用同一 ZIP 重试时，临时 ID 和正式 ID 均可定位同一上传回执。为同一个 Recipe 上传另一版本时，先完成当前待确认的上传。若同一 Recipe 的 Execution 正在排队或运行，等该执行结束后再同步。
 

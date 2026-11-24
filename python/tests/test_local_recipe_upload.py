@@ -18,8 +18,8 @@ V1 = {"recipe_id": "recipe_cloud", "recipe_version_id": "version_cloud_1"}
 V2 = {"recipe_id": "recipe_cloud", "recipe_version_id": "version_cloud_2"}
 
 
-def _fixture_recipe(tmp_path):
-    client = RSIClient(data_dir=tmp_path)
+def _fixture_recipe(tmp_path, config=None):
+    client = RSIClient(data_dir=tmp_path, config=config)
     path = tmp_path / "RECIPE.md"
     path.write_text(MARKDOWN, encoding="utf-8")
     first = client.recipe_insert(path)
@@ -50,12 +50,12 @@ def _local_new_version(client, recipe):
     return version["id"], markdown
 
 
-def _transport(monkeypatch, handler):
+def _transport(monkeypatch, handler, *, authorization="Bearer fixture-key"):
     calls = []
 
     def receive(request):
         assert request.method == "POST" and request.url.path == "/api/recipes_upsert"
-        assert request.headers["Authorization"] == "Bearer fixture-key"
+        assert request.headers["Authorization"] == authorization
         message = BytesParser(policy=policy.default).parsebytes(
             f"Content-Type: {request.headers['Content-Type']}\r\n\r\n".encode()
             + request.content
@@ -119,6 +119,45 @@ def _completed_execution(client, recipe_id, version_id):
                 "error": None,
             },
         )["id"]
+
+
+def test_local_upload_reuses_model_headers(tmp_path, monkeypatch):
+    monkeypatch.delenv("COSENS_API_KEY", raising=False)
+    config = {
+        "model": "fixture",
+        "base_url": "https://model.example/v1",
+        "auto_start": False,
+        "headers": {
+            "Authorization": "Bearer fixture-access-token",
+            "X-Auth-Type": "access_token",
+            "X-Virtual-User-Id": "vu_fixture",
+            "Content-Type": "application/json",
+            "Content-Length": "0",
+            "Idempotency-Key": "model-key",
+        },
+    }
+    client, recipe = _fixture_recipe(tmp_path, config)
+    path = _zip(tmp_path / "recipe.zip")
+
+    def receive(request, calls):
+        assert request.headers["X-Auth-Type"] == "access_token"
+        assert request.headers["X-Virtual-User-Id"] == "vu_fixture"
+        assert request.headers["Content-Type"].startswith("multipart/form-data; boundary=")
+        assert calls[-1] == ("upload-key", {"file": path.read_bytes()})
+        return httpx.Response(200, json=V1)
+
+    calls = _transport(monkeypatch, receive, authorization="Bearer fixture-access-token")
+    options = {
+        "local_recipe_id": recipe["id"],
+        "local_recipe_version_id": recipe["active_version_id"],
+        "base_url": "https://rsi.example/api",
+        "idempotency_key": "upload-key",
+    }
+    assert client.recipes_upsert(path, **options) == V1
+    assert client.recipes_upsert(path, **options, virtual_user_id="vu_fixture") == V1
+    with pytest.raises(Conflict):
+        client.recipes_upsert(path, **options, virtual_user_id="vu_other")
+    assert len(calls) == 1
 
 
 def test_local_upload_promotes_primary_keys_and_replays_old_version(
