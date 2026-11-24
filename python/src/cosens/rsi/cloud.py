@@ -226,7 +226,8 @@ class CloudRSIClient:
             if not ids:
                 return []
             params = {"recipe_ids": ",".join(ids)}
-        return self._request("GET", "/recipes", params=params)
+        rows = self._request("GET", "/recipes", params=params)
+        return [{key: value for key, value in row.items() if key != "status"} for row in rows]
 
     def recipe_insert(self, path: str | Path):
         # Validate locally first, so a malformed file fails the same way in both modes.

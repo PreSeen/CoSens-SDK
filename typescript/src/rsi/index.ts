@@ -10,6 +10,7 @@ export type {
   Execution,
   ExecutionCreate,
   ExecutionListQuery,
+  TaskRestartOptions,
   Page,
   ClarificationAnswer,
   RecipeTest,
@@ -18,6 +19,7 @@ export type {
   RecipeListRecipeEntry,
   RecoverOptions,
 } from './public-client.js';
+export type { Task, TaskArtifact, TaskClarification, TaskQuestion, TaskSummary } from './task.js';
 export { RSIError } from './models.js';
 export type {
   EvidenceFile,

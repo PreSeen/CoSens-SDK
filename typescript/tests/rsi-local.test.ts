@@ -253,7 +253,7 @@ test('recipe_insert requires Skill metadata and creates a fresh available Recipe
     assert.deepEqual(await client.recipe_get(first.id, 'active'), first);
     assert.deepEqual(await client.execution_list(), []);
     const [row] = await client.recipe_list({ recipe_ids: [first.id] });
-    assert.equal(row.status, 'active');
+    assert.equal('status' in row, false);
     assert.deepEqual(row.execution_ids, []);
     const file = readFileSync(
       join(data_dir, first.storage_path, version.id, 'RECIPE.md'),
@@ -835,6 +835,8 @@ test('independent Node hooks enqueue work that persists and passes a file test a
         [captured.files[0].locator, captured.files[1].locator],
       );
       assert.equal(run.result?.published, true);
+      const taskPackage = join(data_dir, 'task-packages', `${run.id}.zip`);
+      assert.ok(readFileSync(taskPackage).length > 0);
       assert.equal(
         readFileSync(run.test_results[0].artifacts[0].path, 'utf8'),
         '42',
@@ -845,6 +847,10 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       );
       const host = new PublicRSIClient({ data_dir, config: null });
       try {
+        const task = await host.task_get(run.id);
+        assert.equal(task.artifact?.zip_path, taskPackage);
+        assert.equal(task.artifact?.local_recipe_version_id, run.recipe_version_id);
+        await assert.rejects(host.task_restart(run.id, { idempotency_key: 'already-approved' }), /approved Task/);
         const available = (await host.recipe_list())
           .find((row) => row.recipe_id === run.recipe_id);
         assert.equal('recipe_activate' in host, false);
@@ -863,7 +869,6 @@ test('independent Node hooks enqueue work that persists and passes a file test a
           recipe_id: run.recipe_id,
           execution_ids: [run.id],
           name: run.name,
-          status: 'passed',
           active_version_id: run.recipe_version_id,
           created_at: detail.created_at,
           updated_at: detail.updated_at,
@@ -1852,7 +1857,6 @@ test('recipe_list shows first-time learning and preserves the usable version dur
           recipe_id: null,
           execution_ids: [execution.id],
           name: '首次学习',
-          status: 'queued',
           active_version_id: null,
           created_at: execution.created_at,
           updated_at: execution.updated_at,
@@ -2000,7 +2004,6 @@ test('recipe_list shows first-time learning and preserves the usable version dur
             recipe_id: recipe.id,
             execution_ids: [revision.id, previousContinuationId, execution.id],
             name: 'Output Recipe',
-            status: 'queued',
             active_version_id: active,
             created_at: detail.created_at,
             updated_at: detail.updated_at,
@@ -2042,7 +2045,7 @@ test('recipe_list shows first-time learning and preserves the usable version dur
       client.store.save({ ...client.execution_get(execution.id), answers: {} });
       const [card] = await host.recipe_list({ recipe_ids: [recipe.id] });
       assert.deepEqual(card.execution_ids, [revision.id, execution.id]);
-      assert.equal(card.status, 'cancelled');
+      assert.equal('status' in card, false);
       assert.equal(card.active_version_id, active);
 
       // An archived recipe has no available version.

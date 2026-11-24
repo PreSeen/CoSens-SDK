@@ -450,16 +450,17 @@ export class Store {
       kind === 'recipe' ? (row as T) : this.record<T>(row),
     );
   }
-  listExecutions(executionIds?: string[]): Execution[] {
+  listExecutions(executionIds?: string[], includeArchived = false): Execution[] {
     const rows = this.db
       .prepare(
         `SELECT * FROM executions
-       WHERE (@ids IS NULL AND archived_at IS NULL)
+       WHERE (@ids IS NULL AND (@include_archived OR archived_at IS NULL))
           OR id IN (SELECT value FROM json_each(@ids))
        ORDER BY created_at, id`,
       )
       .all({
         ids: executionIds === undefined ? null : encode(executionIds),
+        include_archived: Number(includeArchived),
       }) as Record<string, unknown>[];
     return rows.map((row) => this.record<Execution>(row));
   }

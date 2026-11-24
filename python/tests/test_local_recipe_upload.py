@@ -5,12 +5,13 @@ import json
 import sqlite3
 from email import policy
 from email.parser import BytesParser
+from pathlib import Path
 from zipfile import ZipFile
 
 import httpx
 import pytest
 
-from cosens.rsi import CloudRSIClient, Conflict, RSIClient, cloud
+from cosens.rsi import CloudRSIClient, Conflict, InvalidState, RSIClient, cloud
 from cosens.rsi.models import RSIError
 
 MARKDOWN = "---\nname: test-recipe\ndescription: Evaluate data\n---\n\nInstructions\n"
@@ -26,12 +27,14 @@ def _fixture_recipe(tmp_path, **options):
     return client, first
 
 
-def _zip(path, markdown=MARKDOWN):
+def _zip(path, markdown=MARKDOWN, *, resources=None):
+    files = {"RECIPE.md": markdown, **(resources or {})}
     with ZipFile(path, "w") as package:
-        package.writestr("RECIPE.md", markdown)
+        for name, contents in files.items():
+            package.writestr(name, contents)
         package.writestr(
             "manifest.json",
-            json.dumps({"entrypoint": "RECIPE.md", "files": ["RECIPE.md"]}),
+            json.dumps({"entrypoint": "RECIPE.md", "files": sorted(files)}),
         )
     return path
 
@@ -170,7 +173,7 @@ def test_local_upload_promotes_primary_keys_and_replays_old_version(
     directory = tmp_path / first["storage_path"]
     (directory / original_version / "resources").mkdir()
     (directory / original_version / "resources" / "input.txt").write_text("sample")
-    first_zip = _zip(tmp_path / "initial.zip")
+    first_zip = _zip(tmp_path / "initial.zip", resources={"resources/input.txt": "sample"})
     calls = _transport(
         monkeypatch,
         lambda _, seen: httpx.Response(200, json=V1 if len(seen) == 1 else V2),
@@ -445,13 +448,19 @@ def test_upload_replays_same_reservation_if_execution_starts_during_network_call
 
 
 def test_upload_restores_pruned_version_entrypoint(tmp_path, monkeypatch):
+    from cosens.rsi.recipe_file import render_recipe_markdown
+
     client, recipe = _fixture_recipe(tmp_path)
     version_id = recipe["active_version_id"]
     directory = tmp_path / recipe["storage_path"]
     original = directory / version_id
     (original / "helper.txt").write_text("keep this")
     (original / "RECIPE.md").unlink()
-    package = _zip(tmp_path / "base.zip")
+    package = _zip(
+        tmp_path / "base.zip",
+        render_recipe_markdown(recipe["selected_version"]["content"]),
+        resources={"helper.txt": "keep this"},
+    )
     _transport(monkeypatch, lambda _, __: httpx.Response(200, json=V1))
 
     assert _upload(client, recipe["id"], version_id, package) == V1
@@ -460,3 +469,89 @@ def test_upload_restores_pruned_version_entrypoint(tmp_path, monkeypatch):
     assert (formal / "RECIPE.md").read_text() == (
         '---\nname: "test-recipe"\ndescription: "Evaluate data"\n---\n\nInstructions\n'
     )
+
+
+def test_upload_rejects_different_version_bytes_before_network(tmp_path, monkeypatch):
+    client, recipe = _fixture_recipe(tmp_path)
+    wrong = _zip(tmp_path / "wrong.zip", MARKDOWN.replace("Instructions", "Different"))
+    calls = _transport(monkeypatch, lambda *_: pytest.fail("unexpected upload"))
+
+    with pytest.raises(ValueError, match="local Recipe version"):
+        _upload(client, recipe["id"], recipe["active_version_id"], wrong)
+
+    assert calls == []
+    assert client.recipe_get(recipe["id"]) == recipe
+
+
+def test_worker_candidate_requires_approved_execution_before_upload(tmp_path, monkeypatch):
+    client, recipe = _fixture_recipe(tmp_path)
+    recipe_id = recipe["id"]
+    store = client._queue.store
+    with store.transaction() as conn:
+        candidate = store.append_version(
+            conn, recipe, recipe["selected_version"]["content"], recipe_markdown=MARKDOWN,
+            provenance={"execution_id": "execution_unapproved"},
+        )
+    package = _zip(tmp_path / "candidate.zip")
+    calls = _transport(monkeypatch, lambda *_: pytest.fail("unexpected upload"))
+
+    with pytest.raises(InvalidState, match="approved final Task"):
+        _upload(client, recipe_id, candidate["id"], package)
+    assert calls == []
+
+
+def test_task_final_zip_survives_reload_and_cloud_identity_adoption(tmp_path, monkeypatch):
+    client, recipe = _fixture_recipe(tmp_path)
+    execution_id = _completed_execution(client, recipe["id"], recipe["active_version_id"])
+    directory = tmp_path / recipe["storage_path"] / recipe["active_version_id"]
+    (directory / "PACKAGE.zip").write_bytes(b"version resource")
+    task = client.task_get(execution_id)
+    artifact = task["artifact"]
+    assert task["recipe_id"] is None and task["recipe_version_id"] is None
+    expected = {
+        "zip_path": str(tmp_path / "task-packages" / f"{execution_id}.zip"),
+        "local_recipe_id": recipe["id"],
+        "local_recipe_version_id": recipe["active_version_id"],
+    }
+    assert artifact == expected
+    with ZipFile(artifact["zip_path"]) as package:
+        assert package.read("RECIPE.md") == MARKDOWN.encode()
+        assert package.read("PACKAGE.zip") == b"version resource"
+    frozen_file = Path(artifact["zip_path"])
+    frozen_bytes = frozen_file.read_bytes()
+    frozen_file.write_bytes(b"tampered")
+    with pytest.raises(Conflict, match="final Recipe ZIP contents changed"):
+        client.task_get(execution_id)
+    frozen_file.write_bytes(frozen_bytes)
+
+    calls = _transport(monkeypatch, lambda *_: httpx.Response(200, json=V1))
+    repacked = _zip(tmp_path / "repacked.zip", resources={"PACKAGE.zip": b"version resource"})
+    with pytest.raises(Conflict, match="frozen Task archive"):
+        _upload(client, recipe["id"], recipe["active_version_id"], repacked)
+    assert calls == []
+    assert _upload(client, recipe["id"], recipe["active_version_id"], artifact["zip_path"]) == V1
+    assert len(calls) == 1
+    reopened = RSIClient(data_dir=tmp_path)
+    final = reopened.task_get(execution_id)
+    assert final["recipe_id"] == V1["recipe_id"]
+    assert final["recipe_version_id"] == V1["recipe_version_id"]
+    assert final["artifact"]["zip_path"] == artifact["zip_path"]
+    with pytest.raises(InvalidState, match="already has a final Recipe"):
+        reopened.task_restart(execution_id, idempotency_key="restart-final")
+    frozen_file.write_bytes(b"changed")
+    cloud_only = reopened.task_get(execution_id)
+    assert cloud_only["artifact"] is None
+    assert cloud_only["recipe_version_id"] == V1["recipe_version_id"]
+
+
+def test_historical_upload_preserves_formal_ids_without_reconstructing_different_zip(tmp_path, monkeypatch):
+    client, recipe = _fixture_recipe(tmp_path)
+    execution_id = _completed_execution(client, recipe["id"], recipe["active_version_id"])
+    legacy_package = _zip(tmp_path / "legacy.zip")
+    _transport(monkeypatch, lambda *_: httpx.Response(200, json=V1))
+    assert _upload(client, recipe["id"], recipe["active_version_id"], legacy_package) == V1
+
+    detail = RSIClient(data_dir=tmp_path).task_get(execution_id)
+    assert (detail["recipe_id"], detail["recipe_version_id"]) == (V1["recipe_id"], V1["recipe_version_id"])
+    assert detail["artifact"] is None
+    assert not (tmp_path / "task-packages" / f"{execution_id}.zip").exists()

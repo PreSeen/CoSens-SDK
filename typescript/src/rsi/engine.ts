@@ -17,6 +17,7 @@ import {
 import { LearningLiterals, rubricRuleText } from './portability.js';
 import { uid } from './store.js';
 import { stageProgress } from './progress.js';
+import { freezeTaskArtifact } from './task.js';
 import type { PythonRun } from './test-python.js';
 import {
   AnalysisSchema,
@@ -279,6 +280,7 @@ export class Engine {
         ...current,
         name: this.store.executionRecipeName(current) ?? analysis.recipe_name,
         questions: analysis.questions,
+        question_history: [...(current.question_history ?? []), ...current.questions],
         analysis: compactAnalysis(analysis),
         analyzed_input_revision: state.revision,
         rubrics_version_id: rubric,
@@ -661,7 +663,7 @@ export class Engine {
           candidate.recipe_id,
           candidate.version_id,
         );
-      this.store.save({
+      const completed = this.store.save<Execution>({
         ...execution,
         recovery_config: undefined,
         status: 'completed',
@@ -672,6 +674,7 @@ export class Engine {
         recipe_id: this.store.resolveRecipeId(candidate.recipe_id),
         recipe_version_id: this.store.resolveVersionId(candidate.version_id),
       });
+      freezeTaskArtifact(this.store, completed);
     });
     return {};
   }

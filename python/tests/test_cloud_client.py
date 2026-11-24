@@ -77,11 +77,13 @@ def test_create_uploads_only_the_named_files(tmp_path):
 
 
 def test_reads_and_queries_map_to_routes():
-    transport, seen = recording()
+    transport, seen = recording({
+        ("GET", "/api/recipes"): (200, [{"recipe_id": "r1", "status": "active"}]),
+    })
     client = CloudRSIClient(api_key="k", base_url="https://rsi.example/api", transport=transport)
     client.execution_get("e/1")
     client.execution_list(query={"execution_ids": ["a", "b"]})
-    client.recipe_list()
+    assert client.recipe_list() == [{"recipe_id": "r1"}]
     client.recipe_get("r1", version="active")
     client.rubrics_list(offset=50, archived=True)
     client.recipe_version_set_archived("r1", version_id="v1", archived=True)

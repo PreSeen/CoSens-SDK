@@ -587,7 +587,10 @@ class Engine:
         return "commit"
 
     def commit(self, state):
-        self.store.complete(self.execution_id, self.owner, self.fence, state)
+        self.store.complete(
+            self.execution_id, self.owner, self.fence, state,
+            freeze_task_artifact=not self.package_recipes,
+        )
         return {}
 
     def run(self):

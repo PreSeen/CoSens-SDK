@@ -4,8 +4,12 @@ Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned
 
 ## Unreleased
 
+- Local RSI in Python and TypeScript adds `task_list()`, `task_get()`, and `task_restart()` for task cards, clarification history, and execution restarts. Task details expose a ZIP for the final qualified Recipe version.
+
 ### Breaking
 
+- `recipe_list()` no longer returns `status`. Use `task_list()` or `task_get()` for local task status and `active_version_id` to find the available Recipe version.
+- Local `recipes_upsert()` verifies that the ZIP contains the files of the specified local Recipe version.
 - Local `RSIClient` now requires `model_id`, `api_key`, and `base_url` as constructor arguments when configured to run an Execution. Move the model ID and URL out of `config` and supply the model key as `api_key`. The SDK sends the key as a Bearer token to the OpenAI-compatible model endpoint. `config.headers` is used only for local Recipe ZIP uploads.
 
 ## TypeScript 0.10.1

@@ -11,7 +11,7 @@ import { readRecipeFile } from './recipe-file.js';
 import { uploadLocalRecipe, type LocalRecipeUpsertOptions } from './local-recipe-upload.js';
 export type { LocalRecipeUpsertOptions } from './local-recipe-upload.js';
 import { bindModelHeaders, credentialScopeId } from './model-headers.js';
-import type { RecipeListStatus } from './recipe-list.js';
+import { readTask, readTaskSummary, readTasks } from './task.js';
 
 const text = z.string().min(1);
 const page = z.strictObject({
@@ -60,6 +60,10 @@ const answer = z.strictObject({
   answer: z.union([z.array(text).min(1), text]),
 });
 const executionListQuery = z.strictObject({ execution_ids: z.array(text) });
+const taskRestartOptions = z.strictObject({
+  idempotency_key: text,
+  evidence: evidence.optional(),
+});
 const recipeListQuery = z.strictObject({ recipe_ids: z.array(text) });
 const recoverOptions = z.strictObject({
   recipe_id: text.optional(),
@@ -103,13 +107,13 @@ export type Execution = Pick<
 export type ExecutionCreate = z.input<typeof executionCreate>;
 export type Page = z.input<typeof page>;
 export type ExecutionListQuery = z.input<typeof executionListQuery>;
+export type TaskRestartOptions = z.input<typeof taskRestartOptions>;
 export type RecipeListQuery = z.input<typeof recipeListQuery>;
 export type RecoverOptions = z.input<typeof recoverOptions>;
 export type RecipeListEntry = {
   recipe_id: string | null;
   execution_ids: string[];
   name: string;
-  status: RecipeListStatus;
   active_version_id: string | null;
   created_at: number;
   updated_at: number;
@@ -285,6 +289,24 @@ export class RSIClient {
       .map((row) => this.#presentExecution(row));
   }
 
+  async task_list() {
+    if (this.#cloud) return fail('invalid_state', 'task_list requires local mode');
+    return readTasks(this.#queue.store);
+  }
+
+  async task_get(taskId: string) {
+    if (this.#cloud) return fail('invalid_state', 'task_get requires local mode');
+    return readTask(this.#queue.store, text.parse(taskId));
+  }
+
+  async task_restart(taskId: string, options: TaskRestartOptions) {
+    if (this.#cloud) return fail('invalid_state', 'task_restart requires local mode');
+    const id = text.parse(taskId);
+    const { idempotency_key, evidence } = taskRestartOptions.parse(options);
+    const executionId = await this.#queue.task_restart(id, idempotency_key, evidence);
+    return readTaskSummary(this.#queue.store, id, executionId);
+  }
+
   async execution_append_evidence(
     id: string,
     submission: z.input<typeof evidence>,
@@ -334,7 +356,6 @@ export class RSIClient {
       recipe_id: row.recipe_id,
       execution_ids: row.execution_ids,
       name: row.name ?? '',
-      status: row.status,
       active_version_id: row.active_version_id ?? null,
       created_at: row.created_at,
       updated_at: row.updated_at,

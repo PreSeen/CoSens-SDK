@@ -12,6 +12,7 @@ from pydantic import (
     TypeAdapter,
 )
 
+from . import task
 from ._queue_client import RSIClient as QueueClient
 from .model_headers import (
     bind_model_headers,
@@ -212,6 +213,24 @@ class RSIClient:
         rows = self._queue.execution_list_all(execution_ids=execution_ids)
         return [self._present_execution(row) for row in rows]
 
+    def task_list(self):
+        """List local Tasks with the current Execution for each Task."""
+        return task.task_list(self._queue.store)
+
+    def task_get(self, task_id: str):
+        """Read a local Task by its original Execution ID."""
+        store = self._queue.store
+        with store.transaction() as conn:
+            return task.detail(store, conn, task.task_chain(store, conn, _TEXT.validate_python(task_id)))
+
+    def task_restart(self, task_id: str, *, idempotency_key: str, evidence=None):
+        """Start a fresh Execution in the same Task, carrying accepted answers and evidence."""
+        return self._queue.task_restart(
+            _TEXT.validate_python(task_id),
+            idempotency_key=_TEXT.validate_python(idempotency_key),
+            evidence=ExecutionEvidence.model_validate(evidence).model_dump() if evidence is not None else None,
+        )
+
     def execution_append_evidence(self, execution_id, *, evidence):
         return self._present_execution(
             self._queue.execution_append_evidence(
@@ -256,7 +275,6 @@ class RSIClient:
                 "recipe_id": row["recipe_id"],
                 "execution_ids": row["execution_ids"],
                 "name": row["name"] or "",
-                "status": row["status"],
                 "active_version_id": row.get("active_version_id"),
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],

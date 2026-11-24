@@ -15,7 +15,7 @@ import {
 export const DEFAULT_CLOUD_BASE_URL = 'https://rsi.cosens.ai/api';
 /** The CoSens gateway accepts request bodies up to 10 MiB. */
 export const MAX_CLOUD_REQUEST_BYTES = 10 * 1024 * 1024;
-const MAX_RECIPE_ZIP_BYTES = 8 * 1024 * 1024;
+export const MAX_RECIPE_ZIP_BYTES = 8 * 1024 * 1024;
 
 export type CloudOptions = {
   api_key?: string;
@@ -268,9 +268,10 @@ export class CloudClient {
 
   async recipe_list(query?: { recipe_ids: string[] }) {
     if (query && !query.recipe_ids.length) return [];
-    return this.request('GET', '/recipes', {
+    const rows: (import('./public-client.js').RecipeListEntry & { status?: unknown })[] = await this.request('GET', '/recipes', {
       params: query ? { recipe_ids: query.recipe_ids.join(',') } : {},
     });
+    return rows.map(({ status: _status, ...row }) => row);
   }
 
   async recipe_insert(path: string): Promise<Recipe> {

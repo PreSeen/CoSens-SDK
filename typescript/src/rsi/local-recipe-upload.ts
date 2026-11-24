@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { join } from 'node:path';
 import { z } from 'zod';
 import { selectedVirtualUser } from '../virtual-user.js';
 import {
@@ -17,6 +18,8 @@ import {
   uploadReceiptScope,
 } from './recipe-identity.js';
 import { encode, type Store } from './store.js';
+import { assertRecipePackageMatches } from './recipe-package.js';
+import { taskRecipePackageScope } from './task.js';
 
 const nonempty = z.string().min(1);
 const optionsSchema = z.strictObject({
@@ -116,6 +119,26 @@ export async function uploadLocalRecipe(
     const pending = journal<UploadPlan>(store, pendingUploadScope, recipe.id);
     if (pending && !sameUpload(store, pending.request, request))
       return fail('conflict', 'another upload is pending for this local Recipe');
+    if (typeof version.provenance?.execution_id === 'string') {
+      const approved = store.db.prepare(`
+        SELECT 1 FROM executions
+        WHERE recipe_id=? AND recipe_version_id=? AND status='completed'
+          AND json_extract(details, '$.result.test_status')='passed'
+          AND json_extract(details, '$.result.published')=1
+          AND json_extract(details, '$.result.provisional')=0
+        LIMIT 1
+      `).get(recipe.id, version.id);
+      const origin = store.db.prepare('SELECT 1 FROM executions WHERE id=?').get(version.provenance.execution_id);
+      if (!approved && (origin || recipe.active_version_id !== version.id))
+        return fail('invalid_state', 'a Task Recipe version must be approved before upload');
+    }
+    assertRecipePackageMatches(join(store.root, recipe.storage_path, version.id), new Uint8Array(bytes));
+    const mismatchedArtifact = store.db.prepare(`
+      SELECT 1 FROM idempotency p JOIN executions e ON e.id=json_extract(p.request, '$.execution_id')
+      WHERE p.scope=? AND e.recipe_version_id=? AND json_extract(p.result, '$.sha256')<>?
+      LIMIT 1
+    `).get(taskRecipePackageScope, version.id, zip_sha256);
+    if (mismatchedArtifact) return fail('conflict', 'upload must use the frozen Task Recipe ZIP');
     assertRecipeIdle(store, recipe.id);
     const identity = journal<Destination>(store, recipeIdentityScope, recipe.id);
     if (identity && !sameDestination(identity.request, destination))

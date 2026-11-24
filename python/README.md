@@ -36,4 +36,4 @@ For cloud RSI, use `RSIClient(virtual_user_id="vu_...")` to bind this client to 
 
 For a different Memory deployment, pass both `base_url` (the HTTPS Memory API URL, including its deployment-specific path) and `api_key` to any Memory function: `memory_recall`, `memory_ingest`, `get_memory_items`, `get_memory_job`, `get_memory_experience`, or `get_memory`. For example, `await memory_recall(query="...", base_url="https://memory.example/memory", api_key="...")`. The explicit key is used only for that call; the configured URL cannot contain credentials, a query, a fragment, or path traversal, and redirects are not followed.
 
-To explicitly retry a timed-out local execution, call `rsi.recover(recipe_id=recipe_id, retry_key=request_id)`. Reuse the key if the request is submitted again.
+Use `rsi.task_list()` for local task cards and `rsi.task_get(task_id)` for clarification history and the final ZIP. To start a fresh Execution in the same task, call `rsi.task_restart(task_id, idempotency_key=request_id)`. Reuse the key when resending the same restart request.

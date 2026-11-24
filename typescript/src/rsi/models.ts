@@ -337,6 +337,7 @@ export interface Execution extends ObjectMetadata {
   material_ids: string[];
   policy: z.output<typeof PolicySchema>;
   base_execution_id: string | null;
+  continuation_execution_id?: string;
   rubrics_version_id: string | null;
   base_recipe_version_id?: string | null;
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
@@ -344,6 +345,7 @@ export interface Execution extends ObjectMetadata {
   progress_percent: number;
   input_revision: number;
   questions: Question[];
+  question_history?: Question[];
   answers: Record<string, ExecutionAnswer>;
   recipe_id: string | null;
   recipe_version_id: string | null;

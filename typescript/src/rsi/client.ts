@@ -7,6 +7,7 @@ import { authorizedTestFiles, snapshot } from './materials.js';
 import { restartExecution } from './progress.js';
 import { Store, uid, now, encode, type RetryTarget } from './store.js';
 import { isHeaderBinding } from './model-headers.js';
+import { hasApprovedResult, readTaskChain } from './task.js';
 import {
   readRecipeList,
   type RecipeListEntry,
@@ -475,6 +476,67 @@ export class RSIClient {
     return result;
   }
 
+  async task_restart(taskId: string, idempotencyKey: string, evidence?: MaterialManifest): Promise<string> {
+    const scope = 'task_restart';
+    const request = { task_id: taskId, evidence };
+    const replay = () => this.store.replay<{ execution_id: string }>(scope, idempotencyKey, request);
+    const previous = replay();
+    if (previous) {
+      if (this.auto_start) await this.recover();
+      return previous.execution_id;
+    }
+
+    const restart = (data?: ReturnType<typeof snapshot>) => {
+      const saved = replay();
+      if (saved) return { execution: this.store.get<Execution>(saved.execution_id, 'execution'), attached: false };
+      const [root, ...continuations] = readTaskChain(this.store, taskId);
+      const current = continuations.at(-1) ?? root;
+      if (root.archived_at != null || current.archived_at != null || hasApprovedResult(current))
+        return fail('invalid_state', 'an archived or approved Task cannot be restarted');
+
+      const inherited = current.recovery_config ?? current.runtime_config;
+      const config = isHeaderBinding(inherited.model.api_key_env)
+        ? this.refreshClarificationHeaders(current, inherited)
+        : this.suppliedConfig ?? inherited;
+      if (this.auto_start) this.check_runtime(config);
+      const material_ids = [...current.material_ids];
+      const task = current.policy.test_task;
+      let policy = current.policy;
+      if (data) {
+        const files = [...this.execution_evidence(current), ...data.files];
+        const learningPaths = new Set(files.filter(({ role }) => role !== 'input').map(({ path }) => path));
+        const inputs = files.filter(({ role }) => role === 'input');
+        if (inputs.some(({ path }) => learningPaths.has(path)))
+          return fail('invalid_argument', 'current case inputs cannot also have a learning-only role');
+        material_ids.push(this.store.insert<Material>('material', data).id);
+        if (task?.replay_current_case) {
+          policy = { ...policy, test_task: { ...task, input_locators: inputs.map(({ locator }) => locator) } };
+        }
+      }
+      const parent = TERMINAL.has(current.status) ? current : this.cancelExecution(current);
+      const execution = this.execution_insert({
+        material_ids,
+        policy,
+        base_execution_id: parent.id,
+        base_recipe_version_id: root.base_recipe_version_id,
+        recipe_id: parent.recipe_id,
+        name: this.store.executionRecipeName(parent),
+        input_revision: Math.max(parent.input_revision, ...Object.values(parent.answers).map(({ question_revision }) => question_revision)) + 1,
+        answers: parent.answers,
+      }, config);
+      this.store.save({ ...parent, continuation_execution_id: execution.id });
+      this.store.remember(scope, idempotencyKey, request, { execution_id: execution.id });
+      return { execution, attached: !!data };
+    };
+
+    const current = readTaskChain(this.store, taskId).at(-1)!;
+    const execution = evidence
+      ? this.writeExecutionEvidence(evidence, current.recovery_config ?? current.runtime_config, restart)
+      : this.store.tx(() => restart().execution);
+    if (this.auto_start) await this.recover();
+    return execution.id;
+  }
+
   execution_evidence(execution: Execution) {
     return execution.material_ids.flatMap((id) => this.material_get(id).files);
   }
@@ -660,6 +722,10 @@ export class RSIClient {
           continuation_execution_id: continuation_execution_id ?? null,
         };
       }
+      if (obj.continuation_execution_id)
+        return fail('conflict', 'the Task has already continued in another execution');
+      if (args.question_revision !== obj.input_revision)
+        return fail('conflict', 'question is missing or stale');
       const answers = { ...obj.answers, [key]: answer };
       let child_id: string | null = null;
       const active = !TERMINAL.has(obj.status);
@@ -697,6 +763,7 @@ export class RSIClient {
         ).id;
         this.store.save({
           ...parent,
+          continuation_execution_id: child_id,
           answers: {
             ...answers,
             [key]: { ...answer, continuation_execution_id: child_id },
@@ -897,8 +964,8 @@ export class RSIClient {
     if (name && isHeaderBinding(name)) return process.env[name] ? [name] : [];
     return Object.keys(process.env).filter((key) => !isHeaderBinding(key) && process.env[key]);
   }
-  private check_runtime() {
-    if (!this.credentialNames().includes(this.config.model.api_key_env)) {
+  private check_runtime(config = this.config) {
+    if (!this.credentialNames().includes(config.model.api_key_env)) {
       fail('invalid_state', 'Model headers are unavailable for this execution');
     }
   }

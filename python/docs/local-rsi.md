@@ -6,8 +6,8 @@
 Agent 启动 → recover()
 任务开始 → recipe_list() → Agent 选择可用版本 → recipe_get(recipe_id, version_id)
 交付确认 → execution_create（上下文和文件）
-查看进度 → recipe_list() → execution_get(id)
-测试通过且澄清完成 → SDK 自动发布版本 → 旧版本自动归档
+查看任务卡片 → task_list() → task_get(task_id)
+测试通过且澄清完成 → SDK 激活本地版本并打包 ZIP → App 按需上传
 ```
 
 ## 初始化
@@ -57,6 +57,9 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 | `execution_create` | `evidence`（对象）、`idempotency_key`（非空字符串） | `recipe_reference`（对象），提供时 `path` 必填，`recipe_id` 选填。 | 排队创建 Execution，立即返回执行的 `id` 和关联的 `recipe_id`。 |
 | `execution_get` | `execution_id`（字符串） | 无 | 读取名称、阶段、进度、问题、测试结果和错误。 |
 | `execution_list` | 无 | `query`，提供时须含 `execution_ids: string[]`（Python 为 `list[str]`）。 | 返回 Execution 列表。 |
+| `task_list` | 无 | 无 | 本地模式。每个任务返回一条卡片摘要，包含当前执行的状态、进度和待答问题数量。 |
+| `task_get` | `task_id`（首次 Execution ID） | 无 | 本地模式。返回当前执行、历次澄清问答及就绪的最终产物。 |
+| `task_restart` | `task_id`、`idempotency_key` | `evidence`（新材料）。 | 本地模式。创建后续 Execution，从分析开始，保留原执行的历史。 |
 | `execution_append_evidence` | `execution_id`（字符串）、`evidence`（对象） | 无顶层选填项。`evidence` 字段要求见下表。 | 给进行中的 Execution 追加证据并重新分析。 |
 | `execution_cancel` | `execution_id`（字符串） | 无 | 取消排队或进行中的 Execution。 |
 | `execution_clarification_answer` | `execution_id`、`question_id`（字符串）、`question_revision`（正整数）、`answer`（非空文本或非空选项 ID 数组） | 无 | 提交单题答案，返回原执行 ID 和可空的子执行 ID。 |
@@ -140,23 +143,36 @@ description: "按用户要求将订单数据导出为 CSV。"
 按指定列顺序生成 CSV。
 ```
 
+### 任务卡片和重新开始
+
+首次 `execution_create()` 返回的 `id` 是稳定的 `task_id`。`task_list()` 按任务返回当前的 `execution_id`、状态、阶段、进度、`test_status` 和待答问题数。用 `task_get(task_id)` 读取 `execution_ids`、`pending_questions` 和 `clarification_history`。历史执行状态可凭各自的 ID 通过 `execution_get()` 查看。续跑时历史问题及已提交的答案仍可查看，只有当前有效的问题可以回答。提交答案仍调用 `execution_clarification_answer()`，使用当前执行 ID、问题 ID 和修订号。
+
+主动重新开始时，TS 调用 `task_restart(taskId, { idempotency_key, evidence })`，Python 调用 `task_restart(task_id, idempotency_key=..., evidence=...)`。可以省略新证据。SDK 创建下一条 Execution，继承材料和已提交的答案，从分析开始。重试同一次重启请求时沿用幂等键。最终产物已经确认的任务保留历史结果，后续更新 Recipe 通过 `execution_create()` 创建新任务。
+
+通过验证且无需澄清的最终版本打包成 ZIP 后，`task_get()` 的 `artifact` 返回 `zip_path`、`local_recipe_id` 和 `local_recipe_version_id`。候选版本仍可在执行状态和测试详情中查看。云端正式版本写入后，按原任务 ID 查询可读取正式 ID。历史任务只有上传回执且本机缺少原始 ZIP 时，仍返回正式 ID，可用云端 `recipe_download()` 获取该版本。
+
 ### 从本地 Recipe 上传 ZIP
 
-对本地客户端调用 `recipes_upsert()` 时，指定该 ZIP 对应的本地 Recipe 和版本。首次上传建立云端 Recipe，上传成功后本地沿用回执中的正式 ID。上传同一 Recipe 的下一版本时，SDK 自动将已同步的 Recipe ID 传给云端。
+对本地客户端调用 `recipes_upsert()` 时，指定该 ZIP 对应的本地 Recipe 和版本。SDK 在发送前校验 ZIP 内的文件及其内容与指定版本一致。首次上传建立云端 Recipe，上传成功后本地沿用回执中的正式 ID。上传同一 Recipe 的下一版本时，SDK 自动将已同步的 Recipe ID 传给云端。
 
 ```python
-receipt = client.recipes_upsert(
-    "file:///path/to/recipe.zip",
-    local_recipe_id=recipe_id,
-    local_recipe_version_id=version_id,
-)
+artifact = client.task_get(task_id)["artifact"]
+if artifact:
+    receipt = client.recipes_upsert(
+        artifact["zip_path"],
+        local_recipe_id=artifact["local_recipe_id"],
+        local_recipe_version_id=artifact["local_recipe_version_id"],
+    )
 ```
 
 ```ts
-const receipt = await client.recipes_upsert(new URL('file:///path/to/recipe.zip'), {
-  local_recipe_id: recipeId,
-  local_recipe_version_id: versionId,
-});
+const { artifact } = await client.task_get(taskId);
+if (artifact) {
+  const receipt = await client.recipes_upsert(artifact.zip_path, {
+    local_recipe_id: artifact.local_recipe_id,
+    local_recipe_version_id: artifact.local_recipe_version_id,
+  });
+}
 ```
 
 本地 `recipes_upsert` 把非空的 `config.headers` 发给上传地址。上传地址依次取调用时的 `base_url`、`COSENS_RSI_BASE_URL`、默认 CoSens 地址。`config.headers` 为空时，上传使用调用时的 `api_key` 或环境变量 `COSENS_API_KEY`。SDK 生成 multipart 请求头和 `Idempotency-Key`。调用时显式指定的 Virtual User 优先于 `config.headers` 中的 `X-Virtual-User-Id`。
@@ -199,20 +215,17 @@ recipe_file = (
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
 | `recipe_id` | 字符串或 `null` | Recipe ID。尚未绑定 Recipe 的历史执行为 `null`。 |
-| `execution_ids` | 字符串数组 | 关联的未归档 Execution ID。首项对应当前展示状态，可用 `execution_get` 查看进度、澄清问题和候选版本 ID。 |
+| `execution_ids` | 字符串数组 | 关联的未归档 Execution ID。 |
 | `name` | 字符串 | 条目显示名称。 |
-| `status` | 字符串 | 当前展示状态，例如 `testing`、`needs_clarification` 或 `passed`。 |
 | `active_version_id` | 字符串或 `null` | 当前可用版本，可和 `recipe_id` 一起传给 `recipe_get`。 |
 | `created_at` | 数字 | 创建时间，Unix 秒。已绑定 Recipe 时取 Recipe 记录，未绑定的历史条目取 Execution 记录。 |
 | `updated_at` | 数字 | 更新时间，Unix 秒，取同一条 Recipe 或 Execution 记录。 |
 
 命名规则：对象自身的 ID 叫 `id`，引用其他对象时用 `<对象>_id`。`recipe_get()` 和 `recipe_insert()` 返回 Recipe 对象，所以 ID 在 `id`；列表条目可能是还没有 Recipe 的首次学习，所以用 `recipe_id` 引用 Recipe。两处的可用版本都叫 `active_version_id`。
 
-首次学习时，`execution_ids` 包含本次 Execution 的 ID。已有 Recipe 没有关联执行时返回 `[]`。未归档的 Execution 按创建时间从新到旧排序，创建时间相同时按 ID 倒序。列表的 `status` 取自首项，较早执行更新进度或等待澄清时也沿用这个顺序。
+首次学习时，`execution_ids` 包含本次 Execution 的 ID。已有 Recipe 没有关联执行时返回 `[]`。未归档的 Execution 按创建时间从新到旧排序，创建时间相同时按 ID 倒序。
 
-状态取值为 `active`、`inactive`、`queued`、`analyzing`、`generating`、`testing`、`needs_clarification`、`passed`、`test_failed`、`unverifiable`、`completed`、`failed`、`cancelled`。
-
-例如 v2 待回答而 v1 仍可用时，`status` 为 `needs_clarification`，`active_version_id` 仍指向 v1。手动归档后条目仍在列表，可用版本 ID 变为 `null`。恢复时可用 `recipe_get(recipe_id, "latest")`（Python 用 `version="latest"`）读取 `latest_qualified_version_id`，再调用 `recipe_version_set_archived`。
+`active_version_id` 表示 Recipe 当前可用的版本。例如学习 v2 时等待澄清，v1 仍可用，则此字段仍指向 v1。任务进度和澄清状态通过 `task_list()` 或 `task_get()` 读取。手动归档可用版本后，条目仍在列表，可用版本 ID 变为 `null`。恢复时可用 `recipe_get(recipe_id, "latest")`（Python 用 `version="latest"`）读取 `latest_qualified_version_id`，再调用 `recipe_version_set_archived`。
 
 在没有未决澄清时，上一个可用版本保留到编号更高的版本验证通过。切换和旧版归档在同一个事务完成。旧版可按 ID 读取，`selected_version.archived` 表示所查版本的归档状态。恢复仅支持最近发布的版本，包括通过 `recipe_insert()` 导入的 v1。手动归档只作用于指定版本，更新的版本通过验证后仍会自动可用。
 

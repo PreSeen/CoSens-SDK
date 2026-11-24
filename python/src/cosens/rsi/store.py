@@ -29,6 +29,7 @@ from .store_schema import (
     SCHEMA,
     STORAGE,
 )
+from .task import freeze_task_package, is_approved
 
 
 def uid(prefix):
@@ -489,8 +490,15 @@ class Store:
             )
             if name:
                 execution["name"] = name
+            history = {
+                (question["id"], question["revision"]): question
+                for question in [*execution.get("question_history", ()), *execution["questions"]]
+            }
+            for question in analysis["questions"]:
+                history.pop((question["id"], question["revision"]), None)
             execution.update(
                 questions=analysis["questions"],
+                question_history=list(history.values()),
                 rubrics_version_id=rubrics_version_id,
                 analysis=compact_analysis(analysis),
                 analyzed_input_revision=revision,
@@ -555,7 +563,7 @@ class Store:
                 execution["test_results"].append(result)
                 self.save(conn, execution)
 
-    def complete(self, execution_id, owner, fence, state, *, on_published=None):
+    def complete(self, execution_id, owner, fence, state, *, on_published=None, freeze_task_artifact=False):
         with self.transaction() as conn:
             execution = self.guard(
                 conn, execution_id, owner, fence, state["input_revision"]
@@ -584,6 +592,8 @@ class Store:
                 rubrics_version_id=state["rubrics_version_id"],
                 result=result,
             )
+            if freeze_task_artifact and is_approved(execution):
+                freeze_task_package(self, conn, execution)
             execution.pop("recovery_config", None)
             return self.save(conn, execution)
 

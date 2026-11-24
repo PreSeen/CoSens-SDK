@@ -6,7 +6,7 @@ import hashlib
 import re
 
 from .cloud import _validate_recipe_upload
-from .models import Conflict, RSIError
+from .models import Conflict, InvalidState, RSIError
 from .recipe_identity import (
     IDENTITY,
     PENDING,
@@ -17,6 +17,8 @@ from .recipe_identity import (
     require_idle_recipe,
     version_id_for,
 )
+from .recipe_package import assert_recipe_package_matches
+from .task import assert_frozen_package_matches
 
 _TERMINAL_UPLOAD_STATUS = {400, 403, 404, 409, 413, 422}
 
@@ -83,7 +85,7 @@ def upload_recipe(store, cloud, filename, zip_bytes, recipe_id, version_id, key)
     with store.transaction() as conn:
         recipe_id = recipe_id_for(conn, recipe_id)
         version_id = version_id_for(conn, version_id)
-        store.version_in(conn, recipe_id, version_id)
+        version = store.version_in(conn, recipe_id, version_id)
         saved = journal_entry(conn, RECEIPT, version_id)
         if saved:
             if not _same_request(
@@ -93,6 +95,24 @@ def upload_recipe(store, cloud, filename, zip_bytes, recipe_id, version_id, key)
                     "local Recipe version already has a cloud receipt for a different ZIP, key or destination"
                 )
             return saved[1]
+        if version.get("provenance", {}).get("execution_id") and not conn.execute(
+            """SELECT 1 FROM executions
+            WHERE recipe_id=? AND recipe_version_id=? AND status='completed'
+              AND json_extract(details,'$.result.test_status')='passed'
+              AND json_extract(details,'$.result.published')=1
+              AND json_extract(details,'$.result.provisional')=0 LIMIT 1""",
+            (recipe_id, version_id),
+        ).fetchone():
+            raise InvalidState("Only an approved final Task Recipe version can be uploaded")
+        assert_frozen_package_matches(conn, version_id, zip_sha256)
+        recipe = store.get_in(conn, recipe_id, "recipe")
+        directory = store.root / recipe["storage_path"] / version_id
+        entrypoint = directory / "RECIPE.md"
+        if not entrypoint.exists() and not any(
+            path.is_symlink() for path in (entrypoint, directory, directory.parent, directory.parent.parent)
+        ):
+            store._write_recipe_file(recipe["storage_path"], version)
+        assert_recipe_package_matches(directory, zip_bytes)
         plan = _plan_upload(
             store, conn, recipe_id, version_id, zip_sha256, key, destination
         )

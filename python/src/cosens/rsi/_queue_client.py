@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 
+from . import task
 from .materials import authorized_test_files, snapshot
 from .model_headers import is_header_binding
 from .models import (
@@ -479,6 +480,93 @@ class RSIClient:
     def execution_list_all(self, *, execution_ids=None):
         return self.store.list_executions(execution_ids=execution_ids)
 
+    def task_restart(self, task_id, *, idempotency_key, evidence=None):
+        request = {"task_id": task_id, "evidence": evidence}
+        scope = "task_restart"
+
+        def restart(conn, data=None):
+            prior = self.store.replay(conn, scope, idempotency_key, request)
+            if prior:
+                root = self.store.get_in(conn, task_id, "execution")
+                successor = self.store.get_in(conn, prior["execution_id"], "execution")
+                return task.summary(self.store, conn, [root, successor]), False
+
+            chain = task.task_chain(self.store, conn, task_id)
+            root, current = chain[0], chain[-1]
+            if task.is_approved(current):
+                raise InvalidState("Task already has a final Recipe; create a new Task to update it")
+            if current["archived_at"] is not None or root["archived_at"] is not None:
+                raise InvalidState("Task is archived")
+            config = self._task_restart_config(conn, current)
+            if self.auto_start:
+                self._check_runtime(config)
+            material_ids = list(current["material_ids"])
+            policy = current["policy"]
+            if data is not None:
+                files = [
+                    file
+                    for material_id in material_ids
+                    for file in self.store.get_in(conn, material_id, "material")["files"]
+                ] + data["files"]
+                learning_paths = {file["path"] for file in files if file["role"] != "input"}
+                if any(file["role"] == "input" and file["path"] in learning_paths for file in files):
+                    raise ValueError("current case inputs cannot also have a learning-only role")
+                material_ids.append(self.store.insert(conn, "material", data)["id"])
+                test_task = policy.get("test_task")
+                if test_task and test_task.get("replay_current_case"):
+                    policy = {
+                        **policy,
+                        "test_task": {
+                            **test_task,
+                            "input_locators": [file["locator"] for file in files if file["role"] == "input"],
+                        },
+                    }
+            if current["status"] not in TERMINAL:
+                current = self._cancel_execution(conn, current)
+            successor = self._execution_insert(
+                conn,
+                {
+                    "material_ids": material_ids,
+                    "policy": policy,
+                    "name": current.get("name"),
+                    "base_execution_id": current["id"],
+                    "recipe_id": current["recipe_id"],
+                    "base_recipe_version_id": root.get("base_recipe_version_id"),
+                    "publication_base_version_id": root.get("publication_base_version_id"),
+                    "input_revision": current["input_revision"] + 1,
+                    "answers": current["answers"],
+                },
+                config=config,
+            )
+            self.store.save(conn, {**current, "continuation_execution_id": successor["id"]})
+            self.store.remember(conn, scope, idempotency_key, request, {"execution_id": successor["id"]})
+            return task.summary(self.store, conn, [root, successor]), data is not None
+
+        if evidence is None:
+            with self.store.transaction() as conn:
+                result, _ = restart(conn)
+        else:
+            with self.store.connect() as conn:
+                prior = self.store.replay(conn, scope, idempotency_key, request)
+                if prior:
+                    result, _ = restart(conn)
+                else:
+                    current = task.task_chain(self.store, conn, task_id)[-1]
+                    config = self._task_restart_config(conn, current)
+            if not prior:
+                result = self._write_execution_evidence(evidence, config, restart)
+        if self.auto_start:
+            self.recover()
+        return result
+
+    def _task_restart_config(self, conn, execution):
+        config = LocalConfig.model_validate(execution.get("recovery_config") or execution["runtime_config"])
+        if is_header_binding(config.model.api_key_env):
+            return self._clarification_model_config(
+                conn, config, execution["recipe_id"], execution.get("base_recipe_version_id")
+            )
+        return self._supplied_config or config
+
     def execution_update(
         self, execution_id, *, material_ids=None, archived=None, expected_revision=None
     ):
@@ -680,6 +768,10 @@ class RSIClient:
                     "execution_id": execution_id,
                     "continuation_execution_id": continuation_id,
                 }
+            if task.continuation_ids(obj):
+                raise Conflict("Execution was superseded; answer the current Task question")
+            if question_revision != obj["input_revision"]:
+                raise Conflict("question revision is stale or question does not exist")
             answers = {**obj["answers"], key: answer}
             child_id = None
             active = obj["status"] not in TERMINAL
@@ -730,7 +822,7 @@ class RSIClient:
                     **answers,
                     key: {**answer, "continuation_execution_id": child_id},
                 }
-                obj = parent
+                obj = {**parent, "continuation_execution_id": child_id}
             self.store.save(conn, {**obj, "answers": answers})
             result = {
                 "execution_id": execution_id,

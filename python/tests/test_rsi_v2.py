@@ -478,7 +478,7 @@ def test_recipe_insert_requires_skill_metadata_and_creates_available_version(tmp
     assert host.recipe_get(first["id"], version="active") == first
     assert host.execution_list() == []
     [row] = host.recipe_list(query={"recipe_ids": [first["id"]]})
-    assert row["status"] == "active"
+    assert "status" not in row
     assert row["execution_ids"] == []
     stored = tmp_path / first["storage_path"] / version["id"] / "RECIPE.md"
     assert stored.read_bytes() == source.encode("utf-8")
@@ -1303,13 +1303,13 @@ def test_recipe_list_uses_latest_created_execution_for_status(client, tmp_path):
     host = PublicClient(data_dir=client.data_dir)
     [row] = host.recipe_list(query={"recipe_ids": [recipe_id]})
     assert row["execution_ids"] == [newer["id"], older["id"], learning["id"]]
-    assert row["status"] == "cancelled"
+    assert "status" not in row
     assert row["active_version_id"] == active_id
 
     client.execution_update(newer["id"], archived=True)
     [row] = host.recipe_list(query={"recipe_ids": [recipe_id]})
     assert row["execution_ids"] == [older["id"], learning["id"]]
-    assert row["status"] == "testing"
+    assert "status" not in row
 
 
 def test_public_required_inputs_preserve_test_and_revision(tmp_path):
@@ -1381,7 +1381,6 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
             "recipe_id": created["recipe_id"],
             "execution_ids": [created["id"]],
             "name": "首次学习",
-            "status": "queued",
             "active_version_id": None,
             "created_at": draft["created_at"],
             "updated_at": draft["updated_at"],
@@ -1433,6 +1432,9 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
     assert finished["recipe_id"] == created["recipe_id"]
     assert finished["result"]["test_status"] == "passed"
     assert finished["progress_percent"] == 100
+    final_zip = client.data_dir / "task-packages" / f"{created['id']}.zip"
+    assert final_zip.is_file()
+    assert client.task_get(created["id"])["artifact"]["zip_path"] == str(final_zip)
     assert (
         client.execution_list(query={"execution_ids": [created["id"]]})[0][
             "progress_percent"
@@ -1454,7 +1456,6 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
         "recipe_id": recipe["id"],
         "execution_ids": [finished["id"]],
         "name": recipe["name"],
-        "status": "passed",
         "active_version_id": recipe["latest_version_id"],
         "created_at": recipe["created_at"],
         "updated_at": recipe["updated_at"],
@@ -1516,7 +1517,6 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
             "recipe_id": recipe["id"],
             "execution_ids": [revised["id"], finished["id"]],
             "name": recipe["name"],
-            "status": "queued",
             "active_version_id": finished["recipe_version_id"],
             "created_at": detail["created_at"],
             "updated_at": detail["updated_at"],
