@@ -88,9 +88,7 @@ activities AS (
 ),
 latest_by_recipe AS (
     SELECT *, row_number() OVER (
-        PARTITION BY recipe_id ORDER BY
-            (status IN ('needs_clarification', 'queued', 'analyzing', 'generating', 'testing')) DESC,
-            created DESC, execution_id DESC
+        PARTITION BY recipe_id ORDER BY created DESC, execution_id DESC
     ) AS position
     FROM activities
     WHERE recipe_id IS NOT NULL AND archived_at IS NULL

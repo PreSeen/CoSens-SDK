@@ -2047,6 +2047,13 @@ test('recipe_list shows first-time learning and preserves the usable version dur
         [revision.id, execution.id],
       );
 
+      client.execution_cancel(revision.id);
+      client.store.save({ ...client.execution_get(execution.id), answers: {} });
+      const [card] = await host.recipe_list({ recipe_ids: [recipe.id] });
+      assert.deepEqual(card.execution_ids, [revision.id, execution.id]);
+      assert.equal(card.status, 'cancelled');
+      assert.equal(card.active_version_id, active);
+
       // An archived recipe has no available version.
       (await host.recipe_version_set_archived(recipe.id, {
         version_id: active,

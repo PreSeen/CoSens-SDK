@@ -1281,6 +1281,37 @@ def test_recipe_list_includes_learning_and_revision_status(client, tmp_path):
     assert restored["status"] == "passed"
 
 
+def test_recipe_list_uses_latest_created_execution_for_status(client, tmp_path):
+    from cosens.rsi import RSIClient as PublicClient
+
+    source = material(client, tmp_path)
+    learning = run(client, source["id"])
+    client.run_pending(runtime=FileRuntime())
+    first = client.execution_get(learning["id"])
+    recipe_id, active_id = first["recipe_id"], first["recipe_version_id"]
+    older, newer = [
+        client.execution_create(
+            material_ids=[source["id"]], policy=policy(), base_recipe_version_id=active_id
+        )
+        for _ in range(2)
+    ]
+    client.execution_cancel(newer["id"])
+    with client.store.transaction() as conn:
+        older = client.store.get_in(conn, older["id"], "execution")
+        client.store.save(conn, {**older, "status": "running", "stage": "test"})
+
+    host = PublicClient(data_dir=client.data_dir)
+    [row] = host.recipe_list(query={"recipe_ids": [recipe_id]})
+    assert row["execution_ids"] == [newer["id"], older["id"], learning["id"]]
+    assert row["status"] == "cancelled"
+    assert row["active_version_id"] == active_id
+
+    client.execution_update(newer["id"], archived=True)
+    [row] = host.recipe_list(query={"recipe_ids": [recipe_id]})
+    assert row["execution_ids"] == [older["id"], learning["id"]]
+    assert row["status"] == "testing"
+
+
 def test_public_required_inputs_preserve_test_and_revision(tmp_path):
     from cosens.rsi import RSIClient as PublicClient
 

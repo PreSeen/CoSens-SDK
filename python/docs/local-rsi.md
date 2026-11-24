@@ -207,7 +207,7 @@ recipe_file = (
 
 命名规则：对象自身的 ID 叫 `id`，引用其他对象时用 `<对象>_id`。`recipe_get()` 和 `recipe_insert()` 返回 Recipe 对象，所以 ID 在 `id`；列表条目可能是还没有 Recipe 的首次学习，所以用 `recipe_id` 引用 Recipe。两处的可用版本都叫 `active_version_id`。
 
-首次学习时，`execution_ids` 包含本次 Execution 的 ID。已有 Recipe 没有关联执行时返回 `[]`。数组优先排列待回答、排队、分析、生成和测试中的执行，再排列已结束的执行。每组按创建时间从新到旧排序。
+首次学习时，`execution_ids` 包含本次 Execution 的 ID。已有 Recipe 没有关联执行时返回 `[]`。未归档的 Execution 按创建时间从新到旧排序，创建时间相同时按 ID 倒序。列表的 `status` 取自首项，较早执行更新进度或等待澄清时也沿用这个顺序。
 
 状态取值为 `active`、`inactive`、`queued`、`analyzing`、`generating`、`testing`、`needs_clarification`、`passed`、`test_failed`、`unverifiable`、`completed`、`failed`、`cancelled`。
 
