@@ -396,6 +396,7 @@ class RSIClient:
                     if recipe
                     else self.store.create_recipe(conn)["id"],
                     "name": recipe["name"] if recipe else None,
+                    "publication_base_version_id": recipe["active_version_id"] if recipe else None,
                     "policy": policy,
                 },
             )
@@ -688,6 +689,9 @@ class RSIClient:
                     "policy": parent["policy"],
                     "base_execution_id": execution_id,
                     "recipe_id": parent["recipe_id"],
+                    "publication_base_version_id": parent.get(
+                        "publication_base_version_id", parent.get("base_recipe_version_id")
+                    ),
                     "base_recipe_version_id": parent["recipe_version_id"]
                     or parent.get("base_recipe_version_id"),
                     # Keep newly generated questions distinct from inherited answers.

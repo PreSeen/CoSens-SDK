@@ -58,6 +58,17 @@ class LearningLiterals:
         return False
 
 
+def recipe_rule_text(recipe):
+    fields = [recipe["name"], recipe["description"], recipe["instructions"]]
+    for resource in recipe.get("resources", []):
+        fields.extend(
+            value
+            for value in (resource.get("path"), resource.get("content"))
+            if isinstance(value, str)
+        )
+    return fields
+
+
 def rubric_rule_text(rubrics):
     return [
         value

@@ -208,7 +208,7 @@ def _installed_image(image):
     return None
 
 
-def _restore_output(workspace, payload, config):
+def _restore_output(workspace, payload, config, *, protected_files=()):
     if not isinstance(payload, dict) or len(payload) > 1000:
         raise ValueError("invalid sandbox output manifest")
     size = 0
@@ -226,6 +226,16 @@ def _restore_output(workspace, payload, config):
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             target.write_bytes(data)
             target.chmod(0o600)
+        for name in protected_files:
+            relative = _relative_path(name)
+            if relative.parts[0] == "scripts":
+                continue
+            result = restored / relative
+            if (
+                not result.is_file()
+                or result.read_bytes() != (workspace / relative).read_bytes()
+            ):
+                raise ValueError("Python code changed a Recipe package file")
         for path in workspace.iterdir():
             if path.name == "scripts":
                 continue
@@ -237,7 +247,7 @@ def _restore_output(workspace, payload, config):
             path.replace(workspace / path.name)
 
 
-def run_python(path, args, workspace, files, config, check_alive):
+def run_python(path, args, workspace, files, config, check_alive, *, protected_files=()):
     try:
         script = _relative_path(path)
         if script.parts[0] != "scripts" or script.suffix != ".py" or len(script.parts) < 2:
@@ -281,7 +291,10 @@ def run_python(path, args, workspace, files, config, check_alive):
                 raise ValueError("invalid Python sandbox receipt")
             if receipt["exit_code"] == 0:
                 check_alive()
-                _restore_output(workspace, receipt.get("outputs"), config)
+                _restore_output(
+                    workspace, receipt.get("outputs"), config,
+                    protected_files=protected_files,
+                )
             return {
                 "status": "rejected" if receipt["exit_code"] is None else "completed",
                 "exit_code": receipt["exit_code"],

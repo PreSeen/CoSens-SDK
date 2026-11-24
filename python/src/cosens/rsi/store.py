@@ -541,7 +541,7 @@ class Store:
                 execution["test_results"].append(result)
                 self.save(conn, execution)
 
-    def complete(self, execution_id, owner, fence, state):
+    def complete(self, execution_id, owner, fence, state, *, on_published=None):
         with self.transaction() as conn:
             execution = self.guard(
                 conn, execution_id, owner, fence, state["input_revision"]
@@ -559,6 +559,8 @@ class Store:
                 result["published"] = self.publish_recipe_version(
                     conn, state["recipe_id"], state["version_id"]
                 )
+                if result["published"] and on_published is not None:
+                    on_published(conn)
             execution.update(
                 status="completed",
                 stage="done",

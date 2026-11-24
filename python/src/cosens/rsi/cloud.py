@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
+from urllib.request import url2pathname
 
 import httpx
 
@@ -21,6 +23,7 @@ from .recipe_file import read_recipe_file
 DEFAULT_BASE_URL = "https://rsi.cosens.ai/api"
 # The CoSens gateway accepts request bodies up to 10 MiB.
 MAX_REQUEST_BYTES = 10 * 1024 * 1024
+MAX_RECIPE_ZIP_BYTES = 8 * 1024 * 1024
 _ERRORS = {"not_found": NotFound, "conflict": Conflict, "invalid_state": InvalidState}
 
 
@@ -86,12 +89,14 @@ class CloudRSIClient:
     def close(self):
         self._http.close()
 
-    def _request(self, method, path, *, json=None, params=None):
+    def _request(self, method, path, *, json=None, params=None, files=None, data=None, headers=None, binary=False):
         content = None
+        headers = dict(headers or {})
         if json is not None:
             import json as _json
 
             content = _json.dumps(json, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json"
             if len(content) > MAX_REQUEST_BYTES:
                 raise ValueError(
                     "upload exceeds the 10 MiB cloud request limit; send fewer or smaller files, or use local mode"
@@ -102,14 +107,16 @@ class CloudRSIClient:
                 path,
                 content=content,
                 params=params,
-                headers={"Content-Type": "application/json"} if content is not None else None,
+                files=files,
+                data=data,
+                headers=headers,
             )
         except httpx.HTTPError:
             error = RSIError("CoSens RSI service could not be reached")
             error.code = "service_unavailable"
             raise error from None
         if response.is_success:
-            return response.json()
+            return response.content if binary else response.json()
         try:
             detail = response.json().get("error") or {}
         except ValueError:
@@ -185,8 +192,54 @@ class CloudRSIClient:
         _, markdown = read_recipe_file(path)
         return self._request("POST", "/recipes", json={"markdown": markdown})
 
+    def recipes_upsert(
+        self, path: str | Path, *, recipe_id: str | None = None, idempotency_key: str | None = None
+    ) -> dict[str, str]:
+        """Upload a Recipe ZIP as a new Recipe or a new version of an existing one."""
+        if isinstance(path, str) and path.lower().startswith("file:"):
+            url = urlsplit(path)
+            if (
+                url.netloc.lower() not in {"", "localhost"}
+                or not url.path.startswith("/")
+                or url.query
+                or url.fragment
+            ):
+                raise ValueError("Recipe file URI must refer to a local path")
+            path = url2pathname(url.path)
+        file = Path(path)
+        if recipe_id is not None and (
+            not isinstance(recipe_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", recipe_id)
+        ):
+            raise ValueError("recipe_id must contain 1–64 letters, digits, underscores or hyphens")
+        if idempotency_key is not None and (
+            not isinstance(idempotency_key, str)
+            or not idempotency_key
+            or idempotency_key.strip() != idempotency_key
+            or any(not 32 <= ord(char) <= 126 for char in idempotency_key)
+        ):
+            raise ValueError("idempotency_key must be a nonempty HTTP header value")
+        with file.open("rb") as stream:
+            zip_bytes = stream.read(MAX_RECIPE_ZIP_BYTES + 1)
+        if not 0 < len(zip_bytes) <= MAX_RECIPE_ZIP_BYTES:
+            raise ValueError("Recipe ZIP must be nonempty and at most 8 MiB")
+        return self._request(
+            "POST",
+            "/recipes_upsert",
+            files={"file": (file.name, zip_bytes, "application/zip")},
+            data={"recipe_id": recipe_id} if recipe_id is not None else None,
+            headers={"Idempotency-Key": idempotency_key} if idempotency_key is not None else None,
+        )
+
     def recipe_get(self, recipe_id, *, version="active"):
         return self._request("GET", f"/recipes/{_segment(recipe_id)}", params={"version": version})
+
+    def recipe_download(self, recipe_id: str, *, recipe_version_id: str) -> bytes:
+        """Download the ZIP bytes for an exact Recipe version."""
+        return self._request(
+            "GET",
+            f"/recipes/{_segment(recipe_id)}/versions/{_segment(recipe_version_id)}/download",
+            binary=True,
+        )
 
     def recipe_test(self, *, execution_id, recipe_id, version_id, rubrics_version_id):
         return self._request(

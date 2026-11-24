@@ -43,11 +43,13 @@ def drain(
     recipe_id=None,
     execution_id=None,
     retry_fence=None,
+    engine_class=None,
 ):
     from ._queue_client import RSIClient
     from .engine import Engine
     from .runtime import ChatRuntime
 
+    engine_class = Engine if engine_class is None else engine_class
     store, config = client.store, client.config
     credentials = None if runtime is not None else client.credential_names()
     owner = owner or uid("worker")
@@ -143,7 +145,7 @@ def drain(
                 lease_seconds = work.config.lease_seconds
                 store.heartbeat(owner, lease_seconds, worker_slot=slot)
                 agent = runtime or ChatRuntime(work, owner, check_alive)
-                Engine(work, agent, owner, fence, claimed_id).run()
+                engine_class(work, agent, owner, fence, claimed_id).run()
             except LeaseLost:
                 pass
             except Exception as exc:  # noqa: BLE001 - isolate arbitrary model/tool failures at the job boundary
@@ -205,7 +207,7 @@ def wait_for_worker_slot(
             store.release(waiting_slot)
 
 
-def main():
+def main(*, engine_class=None):
     from ._queue_client import RSIClient
 
     parser = argparse.ArgumentParser(
@@ -257,6 +259,7 @@ def main():
             recipe_id=args.recipe_id,
             execution_id=execution_id,
             retry_fence=args.retry_fence,
+            engine_class=engine_class,
         )
     finally:
         if recovery_slot:

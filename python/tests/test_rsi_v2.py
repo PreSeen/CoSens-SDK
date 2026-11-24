@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -1560,3 +1561,99 @@ def test_public_required_inputs_preserve_test_and_revision(tmp_path):
     expected = [row for row in all_entries if row["recipe_id"] in selected_ids]
     recipe_ids = [row["recipe_id"] for row in reversed(expected)]
     assert client.recipe_list(query={"recipe_ids": recipe_ids}) == expected
+
+
+def test_opt_in_recipe_package_resources_are_staged_and_kept_out_of_artifacts(client, tmp_path):
+    from cosens.rsi.engine import Engine
+    from cosens.rsi.worker import drain
+
+    resource = {"path": "templates/answer.txt", "content": "42"}
+    publication = []
+
+    class PackageEngine(Engine):
+        package_recipes = True
+
+        def prepare_test_workspace(self, recipe, workspace, state):
+            assert state["version_id"] == recipe["id"]
+            for item in recipe["content"]["resources"]:
+                path = workspace / item["path"]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(item["content"], encoding="utf-8")
+
+        def commit(self, state):
+            def on_published(conn):
+                publication.append(conn.execute(
+                    "SELECT status FROM versions WHERE id=?", (state["version_id"],)
+                ).fetchone()[0])
+
+            self.store.complete(
+                self.execution_id, self.owner, self.fence, state, on_published=on_published
+            )
+            return {}
+
+    class PackageRuntime(FileRuntime):
+        def generate(self, context, files, trace_path):
+            assert context["package_recipes"] is True
+            return {**super().generate(context, files, trace_path), "resources": [resource]}
+
+        def execute(self, context, files, workspace, trace_path):
+            assert context["package_files"] == [resource["path"]]
+            assert (workspace / resource["path"]).read_text(encoding="utf-8") == "42"
+            return super().execute(context, files, workspace, trace_path)
+
+    execution = run(client, material(client, tmp_path)["id"])
+    drain(client, runtime=PackageRuntime(), engine_class=PackageEngine)
+
+    completed = client.execution_get(execution["id"])
+    assert completed["result"]["published"]
+    assert publication == ["available"]
+    assert client.store.version(
+        completed["recipe_id"], completed["recipe_version_id"]
+    )["content"]["resources"] == [resource]
+    assert [Path(item["path"]).name for item in completed["test_results"][0]["artifacts"]] == ["answer.txt"]
+
+
+def test_package_recipe_resource_schema_is_opt_in():
+    from cosens.rsi.models import BundledRecipeContent
+    from cosens.rsi.runtime import ChatRuntime, parse_structured
+
+    runtime = ChatRuntime(None, None, None)
+    runtime._call = lambda **options: options
+    assert runtime.generate({}, [], None)["schema"] is RecipeContent
+    packaged = runtime.generate({"package_recipes": True}, [], None)
+    assert packaged["schema"] is BundledRecipeContent
+    assert "resources" in packaged["instruction"]
+    content = {"name": "Name", "description": "Description", "instructions": "Instruction"}
+    assert BundledRecipeContent.model_validate(content).model_dump(exclude_defaults=True) == content
+    resource = {"path": "templates/data.json", "content": '{"value": 42}'}
+    parsed, error = parse_structured(
+        BundledRecipeContent, json.dumps({**content, "resources": json.dumps([resource])})
+    )
+    assert error is None
+    assert parsed.resources[0].model_dump() == resource
+    with pytest.raises(ValidationError, match="relative file"):
+        BundledRecipeContent.model_validate({
+            **content, "resources": [{"path": "scripts/../escape.py", "content": ""}]
+        })
+
+
+def test_python_restore_rejects_overwritten_package_files(tmp_path):
+    import base64
+
+    from cosens.rsi.models import LocalConfig
+    from cosens.rsi.python_runner import _restore_output
+
+    workspace = tmp_path / "workspace"
+    template = workspace / "templates" / "answer.txt"
+    template.parent.mkdir(parents=True)
+    template.write_text("42", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="changed a Recipe package file"):
+        _restore_output(
+            workspace,
+            {"templates/answer.txt": base64.b64encode(b"0").decode()},
+            LocalConfig.model_validate(settings()),
+            protected_files={"templates/answer.txt"},
+        )
+
+    assert template.read_text(encoding="utf-8") == "42"

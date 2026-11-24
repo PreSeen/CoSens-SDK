@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingHttpHeaders } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { RSIClient, RSIError } from '../src/rsi/index.js';
 
 type Seen = {
@@ -21,14 +22,19 @@ async function withService(
 ) {
   const seen: Seen[] = [];
   const server = createServer((request, response) => {
-    let text = '';
-    request.on('data', (chunk) => (text += chunk));
-    request.on('end', () => {
+    const chunks: Buffer[] = [];
+    request.on('data', (chunk: Buffer) => chunks.push(chunk));
+    request.on('end', async () => {
+      const content = Buffer.concat(chunks);
+      const contentType = request.headers['content-type'] ?? '';
+      const body = contentType.startsWith('multipart/form-data')
+        ? await new Response(new Uint8Array(content), { headers: { 'content-type': contentType } }).formData()
+        : content.length ? JSON.parse(content.toString('utf8')) : undefined;
       seen.push({
         method: request.method!,
         url: request.url!,
         headers: request.headers,
-        body: text ? JSON.parse(text) : undefined,
+        body,
       });
       const path = request.url!.split('?')[0];
       const [status, payload] = replies[`${request.method} ${path}`] ?? [
@@ -36,6 +42,11 @@ async function withService(
         { ok: true },
       ];
       response.statusCode = status;
+      if (payload instanceof Uint8Array) {
+        response.setHeader('content-type', 'application/zip');
+        response.end(payload);
+        return;
+      }
       response.setHeader('content-type', 'application/json');
       response.end(JSON.stringify(payload));
     });
@@ -235,4 +246,54 @@ test('cloud timeout is in seconds and must be positive', async () => {
     server.closeAllConnections();
     server.close();
   }
+});
+
+test('cloud recipes_upsert uploads ZIP bytes from a local path and file URI', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'rsi-cloud-zip-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, 'weekly report.zip');
+  const zip = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0xfe]);
+  writeFileSync(path, zip);
+  const reply = { recipe_id: 'recipe_1', recipe_version_id: 'version_1' };
+  await withService({ 'POST /api/recipes_upsert': [200, reply] }, async (base_url, seen) => {
+    const client = new RSIClient({ mode: 'cloud', api_key: 'k', base_url });
+    assert.deepEqual(await client.recipes_upsert(path), reply);
+    assert.deepEqual(await client.recipes_upsert(pathToFileURL(path).href, {
+      recipe_id: 'recipe_1', idempotency_key: 'update-1',
+    }), reply);
+
+    assert.equal(seen.length, 2);
+    for (const request of seen) {
+      assert.equal(request.method, 'POST');
+      assert.equal(request.url, '/api/recipes_upsert');
+      assert.equal(request.headers.authorization, 'Bearer k');
+      assert.match(String(request.headers['content-type']), /^multipart\/form-data; boundary=/);
+      const file = request.body.get('file') as File;
+      assert.equal(file.name, 'weekly report.zip');
+      assert.equal(file.type, 'application/zip');
+      assert.deepEqual(new Uint8Array(await file.arrayBuffer()), zip);
+    }
+    assert.equal(seen[0].body.get('recipe_id'), null);
+    assert.equal(seen[0].headers['idempotency-key'], undefined);
+    assert.equal(seen[1].body.get('recipe_id'), 'recipe_1');
+    assert.equal(seen[1].headers['idempotency-key'], 'update-1');
+  });
+});
+
+test('cloud recipe_download returns ZIP bytes for the requested version', async () => {
+  const zip = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0xfe]);
+  await withService({
+    'GET /api/recipes/recipe_1/versions/version_1/download': [200, zip],
+    'GET /api/recipes/recipe_1/versions/version_other/download': [
+      404, { error: { code: 'not_found', message: 'missing version' } },
+    ],
+  }, async (base_url, seen) => {
+    const client = new RSIClient({ mode: 'cloud', api_key: 'k', base_url });
+    assert.deepEqual(await client.recipe_download('recipe_1', 'version_1'), zip);
+    await assert.rejects(
+      client.recipe_download('recipe_1', 'version_other'),
+      (error: unknown) => error instanceof RSIError && error.code === 'not_found',
+    );
+    assert.equal(seen[0].url, '/api/recipes/recipe_1/versions/version_1/download');
+  });
 });

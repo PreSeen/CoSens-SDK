@@ -1,5 +1,7 @@
+import { openAsBlob } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { selectedVirtualUser, type VirtualUserSelection } from '../virtual-user.js';
 import { USER_AGENT } from './chat-completions.js';
 import { readRecipeFile } from './recipe-file.js';
@@ -13,6 +15,7 @@ import {
 export const DEFAULT_CLOUD_BASE_URL = 'https://rsi.cosens.ai/api';
 /** The CoSens gateway accepts request bodies up to 10 MiB. */
 export const MAX_CLOUD_REQUEST_BYTES = 10 * 1024 * 1024;
+const MAX_RECIPE_ZIP_BYTES = 8 * 1024 * 1024;
 
 export type CloudOptions = {
   api_key?: string;
@@ -20,6 +23,8 @@ export type CloudOptions = {
   /** Request timeout in seconds (default 60). */
   timeout?: number;
 } & VirtualUserSelection;
+export type RecipeUpsertOptions = { recipe_id?: string; idempotency_key?: string };
+export type RecipeUpsertResult = { recipe_id: string; recipe_version_id: string };
 
 type EvidenceInput = {
   context_path: string;
@@ -107,7 +112,15 @@ export class CloudClient {
   async request(
     method: string,
     path: string,
-    { body, params }: { body?: unknown; params?: Record<string, string> } = {},
+    {
+      body, params, multipart, idempotency_key, binary,
+    }: {
+      body?: unknown;
+      params?: Record<string, string>;
+      multipart?: FormData;
+      idempotency_key?: string;
+      binary?: boolean;
+    } = {},
   ): Promise<any> {
     const payload = body === undefined ? undefined : JSON.stringify(body);
     if (payload !== undefined && Buffer.byteLength(payload) > MAX_CLOUD_REQUEST_BYTES)
@@ -126,9 +139,10 @@ export class CloudClient {
           'x-auth-type': 'api_key',
           ...(this.#virtualUserId === undefined ? {} : { 'X-Virtual-User-Id': this.#virtualUserId }),
           'user-agent': USER_AGENT,
-          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+          ...(payload === undefined ? {} : { 'content-type': 'application/json' }),
+          ...(idempotency_key === undefined ? {} : { 'Idempotency-Key': idempotency_key }),
         },
-        body: payload,
+        body: multipart ?? payload,
         redirect: 'error',
         signal: AbortSignal.timeout(this.#timeoutMs),
       });
@@ -138,6 +152,7 @@ export class CloudClient {
         'CoSens RSI service could not be reached',
       );
     }
+    if (response.ok && binary) return new Uint8Array(await response.arrayBuffer());
     const answer = await response.json().catch(() => undefined);
     if (response.ok) return answer;
     const detail = (answer as { error?: { code?: string; message?: string } })
@@ -225,10 +240,54 @@ export class CloudClient {
     return this.request('POST', '/recipes', { body: { markdown } });
   }
 
+  async recipes_upsert(
+    path: string | URL,
+    { recipe_id, idempotency_key }: RecipeUpsertOptions = {},
+  ): Promise<RecipeUpsertResult> {
+    let localPath: string;
+    if (path instanceof URL || /^file:/i.test(path)) {
+      const uri = new URL(path);
+      if (uri.protocol !== 'file:' || (uri.hostname && uri.hostname !== 'localhost') || uri.search || uri.hash)
+        throw new TypeError('Recipe file URI must refer to a local path');
+      localPath = fileURLToPath(uri);
+    } else {
+      localPath = path;
+    }
+    if (
+      recipe_id !== undefined
+      && (typeof recipe_id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(recipe_id))
+    ) {
+      throw new TypeError('recipe_id must contain 1–64 letters, digits, underscores or hyphens');
+    }
+    if (
+      idempotency_key !== undefined
+      && (typeof idempotency_key !== 'string'
+        || !/^[\x20-\x7e]+$/.test(idempotency_key)
+        || idempotency_key.trim() !== idempotency_key)
+    ) {
+      throw new TypeError('idempotency_key must be a nonempty HTTP header value');
+    }
+    const zip = await openAsBlob(localPath, { type: 'application/zip' });
+    if (zip.size === 0 || zip.size > MAX_RECIPE_ZIP_BYTES)
+      throw new TypeError('Recipe ZIP must be nonempty and at most 8 MiB');
+    const multipart = new FormData();
+    multipart.set('file', zip, basename(localPath));
+    if (recipe_id !== undefined) multipart.set('recipe_id', recipe_id);
+    return this.request('POST', '/recipes_upsert', { multipart, idempotency_key });
+  }
+
   recipe_get(id: string, version = 'active'): Promise<Recipe> {
     return this.request('GET', `/recipes/${segment(id)}`, {
       params: { version },
     });
+  }
+
+  recipe_download(id: string, recipeVersionId: string): Promise<Uint8Array> {
+    return this.request(
+      'GET',
+      `/recipes/${segment(id)}/versions/${segment(recipeVersionId)}/download`,
+      { binary: true },
+    );
   }
 
   recipe_test(request: {

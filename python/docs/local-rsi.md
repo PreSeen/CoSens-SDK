@@ -63,6 +63,8 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 | `rubrics_get` | `rubrics_id`（字符串）、`version`（`"latest"` 或版本 ID） | 无 | 返回选中的评分标准版本。 |
 | `recipe_list` | 无 | `query`，提供时须含 `recipe_ids: string[]`（Python 为 `list[str]`）。 | 返回首次学习条目和现有 Recipe 的摘要。 |
 | `recipe_insert` | `path`（本地 Recipe 文件路径） | 无 | 验证文件，创建新 Recipe 和可用 v1，返回与 `recipe_get` 相同的 Recipe 对象。云端模式先在本地验证，再上传文件内容（`POST /recipes`）。 |
+| `recipes_upsert` | `path`（本地 Recipe ZIP 路径或 `file://` URI） | `recipe_id`、`idempotency_key`。 | 云端模式上传 ZIP。省略 `recipe_id` 时新建，传入时给该 Recipe 新增版本。返回 `recipe_id` 和 `recipe_version_id`。 |
+| `recipe_download` | `recipe_id`、`recipe_version_id`（TS 第二个位置参数对应版本 ID） | 无 | 云端模式读取指定版本的 ZIP，Python 返回 `bytes`，TS 返回 `Uint8Array`。 |
 | `recipe_get` | `recipe_id`（字符串） | `version`（`"active"`、`"latest"` 或版本 ID，默认 `"active"`） | 返回 Recipe 和 `selected_version`。 |
 | `recipe_test` | `execution_id`、`recipe_id`、`version_id`、`rubrics_version_id`（均为字符串） | 无 | 在活动 Execution 内安排指定版本测试。 |
 | `recipe_version_set_archived` | `recipe_id`、`version_id`（字符串）、`archived`（布尔值） | 无 | `true` 归档版本，`false` 恢复最近发布的版本。返回两个 ID 和归档状态。 |

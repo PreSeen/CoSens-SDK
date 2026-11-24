@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { RSIClient as QueueClient, type RecoverResult } from './client.js';
-import { CloudClient, type CloudOptions } from './cloud.js';
+import { CloudClient, type CloudOptions, type RecipeUpsertOptions } from './cloud.js';
 import {
   fail,
   RecipeReferenceSchema,
@@ -329,6 +329,11 @@ export class RSIClient {
     return this.#queue.recipe_insert(content, markdown);
   }
 
+  async recipes_upsert(path: string | URL, options?: RecipeUpsertOptions) {
+    if (!this.#cloud) return fail('invalid_state', 'recipes_upsert requires cloud mode');
+    return this.#cloud.recipes_upsert(path, options);
+  }
+
   async recipe_get(id: string, version = 'active') {
     if (this.#cloud) return this.#cloud.recipe_get(id, version);
     return this.#queue.recipe_get(
@@ -337,6 +342,11 @@ export class RSIClient {
         ? { version_selector: version }
         : { version_id: text.parse(version) },
     );
+  }
+
+  async recipe_download(id: string, recipeVersionId: string) {
+    if (!this.#cloud) return fail('invalid_state', 'recipe_download requires cloud mode');
+    return this.#cloud.recipe_download(id, recipeVersionId);
   }
 
   async recipe_test(request: RecipeTest) {

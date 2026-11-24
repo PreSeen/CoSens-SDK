@@ -236,6 +236,42 @@ class RecipeContent(RecipeMetadata):
     instructions: str = Field(pattern=r"\S")
 
 
+class RecipeResource(Contract):
+    path: str = Field(min_length=1, max_length=4096)
+    content: str
+
+    @model_validator(mode="after")
+    def safe_resource_path(self):
+        parts = self.path.split("/")
+        if (
+            len(parts) < 2
+            or parts[0] not in {"scripts", "templates", "references"}
+            or any(part in {"", ".", ".."} for part in parts)
+            or "\\" in self.path
+            or ":" in self.path
+            or any(ord(char) < 32 or ord(char) == 127 for char in self.path)
+        ):
+            raise ValueError(
+                "Recipe resource must be a relative file under scripts/, templates/ or references/"
+            )
+        return self
+
+
+class BundledRecipeContent(RecipeContent):
+    resources: list[RecipeResource] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def distinct_resources(self):
+        paths = {resource.path.casefold() for resource in self.resources}
+        if len(paths) != len(self.resources):
+            raise ValueError("Recipe resource paths must be unique")
+        for path in paths:
+            parts = path.split("/")
+            if any("/".join(parts[:n]) in paths for n in range(1, len(parts))):
+                raise ValueError("Recipe resource paths overlap")
+        return self
+
+
 class ObjectiveCheck(Contract):
     kind: Literal["exists", "text_equals", "text_contains", "sha256"]
     path: str = Field(min_length=1)

@@ -8,12 +8,13 @@ from .materials import atomic_json, authorized_test_files, digest, read_snapshot
 from .models import (
     Analysis,
     Assessment,
+    BundledRecipeContent,
     FeedbackExtraction,
     InputChanged,
     ModelOutputError,
     RecipeContent,
 )
-from .portability import LearningLiterals, rubric_rule_text
+from .portability import LearningLiterals, recipe_rule_text, rubric_rule_text
 from .store import uid
 
 
@@ -29,9 +30,14 @@ class State(TypedDict, total=False):
 
 
 class Engine:
+    package_recipes = False
+
     def __init__(self, client, runtime, owner, fence, execution_id):
         self.client, self.store, self.runtime = client, client.store, runtime
         self.owner, self.fence, self.execution_id = owner, fence, execution_id
+
+    def prepare_test_workspace(self, recipe, workspace, state):
+        """Allow the cloud engine to stage immutable Recipe package files."""
 
     def guard(self, revision=None):
         with self.store.transaction() as conn:
@@ -267,17 +273,29 @@ class Engine:
         literals = self.learning_literals(
             execution, base["provenance"].get("execution_id") if base else None
         )
+        schema = RecipeContent
+        if self.package_recipes:
+            context["package_recipes"] = True
+            schema = BundledRecipeContent
         for attempt in range(3):
-            content = RecipeContent.model_validate(
+            content = schema.model_validate(
                 self.runtime.generate(
                     context,
                     files,
                     self.directory(state) / f"generate-{round_number}.json",
                 )
-            ).model_dump()
+            ).model_dump(exclude_defaults=True)
             if recipe_name:
                 content["name"] = recipe_name
-            if not literals.found_in(content.values()):
+            resources = content.get("resources", [])
+            sizes = [len(resource["content"].encode("utf-8")) for resource in resources]
+            if any(size > self.client.config.max_file_bytes for size in sizes) or sum(
+                sizes
+            ) > self.client.config.max_bundle_bytes:
+                raise ModelOutputError(
+                    "Recipe resources exceed the configured file limits"
+                )
+            if not literals.found_in(recipe_rule_text(content)):
                 break
             if attempt == 2:
                 raise ModelOutputError("Recipe rules contain learning-only literals")
@@ -344,7 +362,7 @@ class Engine:
                 rubric["provenance"].get("execution_id"),
             )
             # Existing versions must pass the same boundary without rewriting their rules.
-            if literals.found_in(recipe["content"].values()) or literals.found_in(
+            if literals.found_in(recipe_rule_text(recipe["content"])) or literals.found_in(
                 rubric_rule_text(rubric["content"])
             ):
                 raise ModelOutputError("Test rules contain learning-only literals")
@@ -360,6 +378,16 @@ class Engine:
             attempt = self.directory(state) / ("test-" + uid("attempt"))
             workspace = attempt / "outputs"
             workspace.mkdir(parents=True, mode=0o700)
+            self.prepare_test_workspace(recipe, workspace, state)
+            package_files = {
+                path.relative_to(workspace).as_posix(): digest(path.read_bytes())
+                for path in workspace.rglob("*")
+                if path.is_file()
+            }
+            instructions = {
+                field: recipe["content"][field]
+                for field in ("name", "description", "instructions")
+            }
             atomic_json(
                 attempt / "test-input.json",
                 {
@@ -371,7 +399,8 @@ class Engine:
             executor_result = self.runtime.execute(
                 {
                     "test_task": {"instruction": task["instruction"]},
-                    "recipe": recipe["content"],
+                    "recipe": instructions,
+                    **({"package_files": sorted(package_files)} if package_files else {}),
                     **python_requirement,
                 },
                 test_files,
@@ -380,9 +409,19 @@ class Engine:
             )
             atomic_json(attempt / "executor-result.json", executor_result)
             self.guard(state["input_revision"])
+            for relative, expected in package_files.items():
+                path = workspace / relative
+                if (
+                    not path.is_file()
+                    or not path.resolve().is_relative_to(workspace.resolve())
+                    or path.is_symlink()
+                    or digest(path.read_bytes()) != expected
+                ):
+                    raise ModelOutputError("Test changed a staged Recipe package file")
             artifacts = []
             for path in sorted(workspace.rglob("*")):
-                if path.relative_to(workspace).parts[0] == "scripts":
+                relative = path.relative_to(workspace)
+                if relative.parts[0] == "scripts" or relative.as_posix() in package_files:
                     continue
                 if path.is_file():
                     if path.is_symlink() or not path.resolve().is_relative_to(
@@ -458,7 +497,7 @@ class Engine:
                             "test_task": task,
                             "rubrics": test_rubrics,
                             "objective_checks": checks,
-                            "recipe": recipe["content"],
+                            "recipe": instructions,
                         },
                         evaluator_files,
                         attempt / "evaluator-trace.json",

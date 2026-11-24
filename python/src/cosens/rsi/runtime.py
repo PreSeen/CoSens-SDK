@@ -22,6 +22,7 @@ from .model_headers import model_headers
 from .models import (
     Analysis,
     Assessment,
+    BundledRecipeContent,
     Contract,
     FeedbackExtraction,
     ModelOutputError,
@@ -40,19 +41,24 @@ class Runtime(Protocol):
     def assess(self, context, files, trace_path): ...
 
 
-def _decode_nested(value):
+def _decode_nested(value, *, literal_fields=()):
     """Decode object and array fields that a model sent as JSON strings."""
     if isinstance(value, dict):
-        return {key: _decode_nested(item) for key, item in value.items()}
+        return {
+            key: item if key in literal_fields else _decode_nested(item, literal_fields=literal_fields)
+            for key, item in value.items()
+        }
     if isinstance(value, list):
-        return [_decode_nested(item) for item in value]
+        return [_decode_nested(item, literal_fields=literal_fields) for item in value]
     if isinstance(value, str):
         text = value.strip()
         if text in ("None", "null"):
             return None
         if text[:1] in ("{", "["):
             try:
-                return _decode_nested(json.loads(text, strict=False))
+                return _decode_nested(
+                    json.loads(text, strict=False), literal_fields=literal_fields
+                )
             except ValueError:
                 return value
     return value
@@ -69,7 +75,8 @@ def parse_structured(schema, arguments):
     except ValidationError:
         pass
     try:
-        return schema.model_validate(_decode_nested(data)), None
+        literal_fields = ("content",) if schema is BundledRecipeContent else ()
+        return schema.model_validate(_decode_nested(data, literal_fields=literal_fields)), None
     except ValidationError as error:
         # Report what is still wrong after decoding nested JSON strings.
         issues = [
@@ -168,7 +175,7 @@ class ChatRuntime:
                 "read_evidence", read_evidence.__doc__, ReadEvidenceArgs, read_evidence
             )
         ]
-        if schema is RecipeContent:
+        if schema in (RecipeContent, BundledRecipeContent):
             from .web_search import create_web_search
 
             search = create_web_search(self.check_alive)
@@ -181,6 +188,7 @@ class ChatRuntime:
         if workspace is not None:
             root = Path(workspace).resolve()
             root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            package_files = frozenset(context.get("package_files", ()))
 
             def output_path(path):
                 candidate = (root / path).resolve()
@@ -196,6 +204,8 @@ class ChatRuntime:
                 """Write a UTF-8 test deliverable within the isolated workspace; no host files or shell."""
                 self.check_alive()
                 target = output_path(path)
+                if target.relative_to(root).as_posix() in package_files:
+                    raise ValueError("Recipe package files are read-only")
                 data = content.encode("utf-8")
                 if len(data) > self.client.config.max_file_bytes:
                     raise ValueError("output file exceeds max_file_bytes")
@@ -236,7 +246,13 @@ class ChatRuntime:
                     """Execute a staged scripts/*.py with optional arguments in the isolated test sandbox and return its receipt."""
                     self.check_alive()
                     return run_python(
-                        path, args, root, files, self.client.config, self.check_alive
+                        path,
+                        args,
+                        root,
+                        files,
+                        self.client.config,
+                        self.check_alive,
+                        protected_files=package_files,
                     )
 
                 tools.append(
@@ -279,9 +295,10 @@ class ChatRuntime:
                 ),
             },
         ]
-        final_name = (
-            "Analysis" if schema is NamedAnalysis else getattr(schema, "__name__", None)
-        )
+        final_name = {
+            NamedAnalysis: "Analysis",
+            BundledRecipeContent: "RecipeContent",
+        }.get(schema, getattr(schema, "__name__", None))
         by_name = {tool.name: tool for tool in tools}
         definitions = [tool.definition() for tool in tools]
         if final_name:
@@ -475,12 +492,19 @@ class ChatRuntime:
         )
 
     def generate(self, context, files, trace_path):
+        bundle_instruction = ""
+        if context.get("package_recipes"):
+            bundle_instruction = (
+                " Include reusable execution resources in resources if the procedure needs them. "
+                "Each resource supplies its relative path under scripts/, templates/ or references/ and its UTF-8 content. "
+                "Refer to each required resource using that exact path. Use only necessary, reusable material, with no learning records, case-specific input or credentials."
+            )
         return self._call(
             stage="recipe generation",
             context=context,
             files=files,
             trace_path=trace_path,
-            schema=RecipeContent,
+            schema=BundledRecipeContent if bundle_instruction else RecipeContent,
             instruction="Learn reusable requirements and procedures from the available evidence and accepted clarifications. "
             "Preserve existing requirements from a base Recipe when the evidence still supports them. "
             "Supply a nonempty name and description for the YAML frontmatter. Use the supplied recipe_name as the name when present. "
@@ -489,16 +513,31 @@ class ChatRuntime:
             "Preserve the exact terms and values of requirements that the evidence establishes as fixed across executions. "
             "Parameterize details supplied at execution time. A future executor must be able to apply the Recipe using the inputs available to that execution. "
             "Abstract evidence into rules and applicability conditions without copying case-specific details, evidence references or secrets. "
-            "Treat uncertain causes as hypotheses and use conditional checks where the evidence supports them.",
+            "Treat uncertain causes as hypotheses and use conditional checks where the evidence supports them."
+            + bundle_instruction,
         )
 
     def execute(self, context, files, workspace, trace_path):
-        python_instruction = (
-            "Write a script under scripts/ with write_output, then call run_python with that path and any arguments. "
-            "Use catalog sandbox_path values to read the authorized inputs and write deliverables to the current output directory. "
-            if context.get("requires_python") is True
-            else ""
-        )
+        file_instruction = "Use only the authorized input and shared reference files in this catalog. "
+        if context.get("package_files"):
+            file_instruction += (
+                "Use staged package_files at their exact paths through read_output. "
+                "Keep package files unchanged. "
+            )
+        python_instruction = ""
+        if context.get("requires_python") is True:
+            if context.get("package_files"):
+                python_instruction = (
+                    "Run supplied Python scripts with run_python without rewriting them. "
+                    "For a task-specific script, use write_output at a new scripts/ path. "
+                    "Use catalog sandbox_path values for inputs and workspace-relative paths for package assets. "
+                )
+            else:
+                python_instruction = (
+                    "Write a script under scripts/ with write_output, then call run_python with that path and any arguments. "
+                    "Use catalog sandbox_path values to read the authorized inputs. "
+                )
+            python_instruction += "Write deliverables to the current output directory. "
         return self._call(
             stage="recipe test executor",
             context=context,
@@ -507,8 +546,8 @@ class ChatRuntime:
             trace_path=trace_path,
             instruction=(
                 "Actually perform test_task using recipe.instructions. Read task inputs with read_evidence; "
-                "write the resulting deliverable files with write_output. Use only the authorized input and shared reference files in this catalog. "
-                f"{python_instruction}"
+                "write the resulting deliverable files with write_output. "
+                f"{file_instruction}{python_instruction}"
                 "For every required check, execute it and report its observed result. "
                 "If these tools cannot perform the task, explain the missing capability. Claim completion only when the required work was executed successfully. No shell or network tools exist."
             ),

@@ -2,6 +2,9 @@
 
 import base64
 import json
+from email import policy
+from email.parser import BytesParser
+from zipfile import ZipFile
 
 import httpx
 import pytest
@@ -163,3 +166,65 @@ def test_recipe_insert_uploads_the_validated_markdown(tmp_path):
     with pytest.raises(ValueError, match="frontmatter"):
         client.recipe_insert(tmp_path / "bad.md")
     assert len(seen) == 1
+
+
+def test_recipes_upsert_uploads_zip_from_path_and_file_uri(tmp_path):
+    path = tmp_path / "weekly report.zip"
+    with ZipFile(path, "w") as bundle:
+        bundle.writestr("RECIPE.md", "---\nname: Report\ndescription: Weekly report\n---\nSummarize.\n")
+        bundle.writestr("manifest.json", '{"entrypoint":"RECIPE.md","files":["RECIPE.md"]}')
+
+    seen = []
+
+    def handle(request):
+        assert request.method == "POST"
+        assert request.url.path == "/api/recipes_upsert"
+        assert request.headers["authorization"] == "Bearer k"
+        content_type = request.headers["content-type"]
+        assert content_type.startswith("multipart/form-data; boundary=")
+        message = BytesParser(policy=policy.default).parsebytes(
+            f"Content-Type: {content_type}\r\n\r\n".encode("ascii") + request.content
+        )
+        parts = {part.get_param("name", header="content-disposition"): part for part in message.iter_parts()}
+        file = parts.pop("file")
+        assert file.get_filename() == "weekly report.zip"
+        assert file.get_content_type() == "application/zip"
+        assert file.get_payload(decode=True) == path.read_bytes()
+        seen.append((parts.get("recipe_id").get_content() if parts else None, request.headers.get("idempotency-key")))
+        return httpx.Response(200, json={"recipe_id": "recipe_1", "recipe_version_id": f"version_{len(seen)}"})
+
+    client = CloudRSIClient(api_key="k", base_url="https://rsi.example/api", transport=httpx.MockTransport(handle))
+    assert client.recipes_upsert(path) == {"recipe_id": "recipe_1", "recipe_version_id": "version_1"}
+    assert client.recipes_upsert(path.as_uri(), recipe_id="recipe_1", idempotency_key="update-1") == {
+        "recipe_id": "recipe_1", "recipe_version_id": "version_2"
+    }
+    assert seen == [(None, None), ("recipe_1", "update-1")]
+
+
+def test_recipes_upsert_rejects_remote_file_uri_and_over_limit_zip(tmp_path):
+    transport, seen = recording()
+    client = CloudRSIClient(api_key="k", transport=transport)
+    with pytest.raises(ValueError, match="local path"):
+        client.recipes_upsert("file://remote.example/recipe.zip")
+    path = tmp_path / "too-large.zip"
+    with path.open("wb") as file:
+        file.truncate(8 * 1024 * 1024 + 1)
+    with pytest.raises(ValueError, match="8 MiB"):
+        client.recipes_upsert(path)
+    assert seen == []
+
+
+def test_recipe_download_reads_exact_zip_bytes_and_keeps_service_errors():
+    zip_bytes = b"PK\x03\x04\x00\xff\xfe"
+
+    def handle(request):
+        assert request.method == "GET"
+        assert request.url.path.startswith("/api/recipes/recipe_1/versions/")
+        if request.url.path.endswith("/version_1/download"):
+            return httpx.Response(200, content=zip_bytes, headers={"Content-Type": "application/zip"})
+        return httpx.Response(404, json={"error": {"code": "not_found", "message": "missing version"}})
+
+    client = CloudRSIClient(api_key="k", base_url="https://rsi.example/api", transport=httpx.MockTransport(handle))
+    assert client.recipe_download("recipe_1", recipe_version_id="version_1") == zip_bytes
+    with pytest.raises(NotFound, match="missing version"):
+        client.recipe_download("recipe_1", recipe_version_id="version_other")
