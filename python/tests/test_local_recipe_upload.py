@@ -771,9 +771,8 @@ def test_explicit_cloud_target_binds_recipe_and_is_used_by_later_implicit_upload
 
     other = client._queue.recipe_insert(*read_recipe_file(tmp_path / "RECIPE.md"))
     other_task = _completed_execution(client, other["id"], other["active_version_id"])
-    for conflicting in (target, local_id):
-        with pytest.raises(Conflict, match="another local Recipe or alias"):
-            publishing.recipes_upsert(other_task, recipe_id=conflicting)
+    with pytest.raises(Conflict, match="another local Recipe or alias"):
+        publishing.recipes_upsert(other_task, recipe_id=local_id)
 
     next_version, _ = _local_new_version(client, client.recipe_get(target))
     next_task = _completed_execution(client, target, next_version)
@@ -782,6 +781,124 @@ def test_explicit_cloud_target_binds_recipe_and_is_used_by_later_implicit_upload
     assert publishing.recipes_upsert(next_task) == V2
     assert calls[1][1]["recipe_id"] == target.encode()
     assert len(calls) == 2
+
+
+def test_upload_reuses_an_existing_target_for_only_the_requested_task(tmp_path, monkeypatch):
+    client, target_recipe = _fixture_recipe(tmp_path)
+    target_task = _completed_execution(client, target_recipe["id"], target_recipe["active_version_id"])
+    store = client._queue.store
+    source_receipt = {"recipe_id": "recipe_from_source", "recipe_version_id": "version_from_source"}
+
+    def receive(request, seen):
+        if len(seen) == 2:
+            raise httpx.ReadTimeout("fixture timeout", request=request)
+        if len(seen) == 3:
+            assert _publishing_client(tmp_path).recipes_upsert(task_id) == V2
+            raise httpx.ReadTimeout("fixture timeout after concurrent commit", request=request)
+        result = {1: V1, 4: V2, 5: source_receipt}[len(seen)]
+        return httpx.Response(200, json=result)
+
+    calls = _transport(monkeypatch, receive)
+    monkeypatch.setenv("COSENS_RSI_BASE_URL", RSI_URL)
+    publishing = _publishing_client(tmp_path)
+    assert publishing.recipes_upsert(target_task) == V1
+
+    with store.transaction() as conn:
+        target = store.get_in(conn, V1["recipe_id"], "recipe")
+        original = store.version_in(conn, target["id"], V1["recipe_version_id"])
+        draft = store.append_version(conn, target, original["content"])["id"]
+    source_markdown = tmp_path / "RECIPE.md"
+    source_markdown.write_text(MARKDOWN.replace("test-recipe", "source-recipe"), encoding="utf-8")
+    source = client._queue.recipe_insert(*read_recipe_file(source_markdown))
+    source_pair = (source["id"], source["active_version_id"])
+    resource = tmp_path / source["storage_path"] / source_pair[1] / "assets" / "note.txt"
+    resource.parent.mkdir()
+    resource.write_bytes(b"verified exact resource")
+    task_id = _completed_execution(client, *source_pair)
+    sibling_task = _completed_execution(client, *source_pair)
+    execution_before = client.execution_get(task_id)
+    before = client.task_get(task_id)
+    with pytest.raises(Conflict, match="target is linked to a different cloud destination"):
+        _publishing_client(tmp_path, headers={
+            "Authorization": "Bearer fixture-key", "X-Virtual-User-Id": "other-user",
+        }).recipes_upsert(task_id, recipe_id=V1["recipe_id"])
+    with store.transaction() as conn:
+        store.save(conn, {**target, "archived_at": 1})
+    with pytest.raises(InvalidState, match="archived Recipe"):
+        publishing.recipes_upsert(task_id, recipe_id=V1["recipe_id"])
+    with store.transaction() as conn:
+        store.save(conn, target)
+    with pytest.raises(RSIError, match="could not be reached"):
+        publishing.recipes_upsert(task_id, recipe_id=V1["recipe_id"])
+    with pytest.raises(Conflict, match="belongs to a different Task"):
+        publishing.recipes_upsert(sibling_task)
+    with pytest.raises(Conflict, match="different cloud Recipe target"):
+        publishing.recipes_upsert(task_id, recipe_id="recipe_other")
+
+    assert publishing.recipes_upsert(task_id) == V2
+    assert calls[1] == calls[2] == calls[3]
+    key, fields = calls[2]
+    assert fields["recipe_id"] == V1["recipe_id"].encode()
+    fingerprint = hashlib.sha256(fields["file"]).hexdigest()
+    binding = f"{source_pair[0]}\0{source_pair[1]}\0{fingerprint}\0{V1['recipe_id']}\0{task_id}"
+    assert key == "local-recipe-upload-" + hashlib.sha256(binding.encode()).hexdigest()
+    assert fields["file"] == Path(before["recipe_zip_path"]).read_bytes()
+    assert client.execution_get(task_id) == execution_before
+    assert client.recipe_get(source_pair[0])["active_version_id"] == source_pair[1]
+    assert client.task_get(sibling_task)["recipe_version_id"] == source_pair[1]
+    assert client.recipe_get(V1["recipe_id"])["active_version_id"] == V2["recipe_version_id"]
+    assert client.recipe_get(V1["recipe_id"])["name"] == "source-recipe"
+    assert (tmp_path / target["storage_path"] / V2["recipe_version_id"] / "assets" / "note.txt").read_bytes() == resource.read_bytes()
+    assert client.task_get(target_task)["recipe_version_id"] == V1["recipe_version_id"]
+    with store.connect() as conn:
+        statuses = dict(conn.execute("SELECT id,status FROM versions WHERE recipe_id=?", (V1["recipe_id"],)))
+        row = conn.execute("SELECT recipe_id, recipe_version_id FROM recipes WHERE id=?", (task_id,)).fetchone()
+    assert statuses == {V1["recipe_version_id"]: "archived", V2["recipe_version_id"]: "available", draft: "candidate"}
+    assert tuple(row) == (V2["recipe_id"], V2["recipe_version_id"])
+
+    with pytest.raises(Conflict, match="idempotency key is already used by another Recipe upload"):
+        publishing.recipes_upsert(sibling_task, recipe_id=V1["recipe_id"], idempotency_key=key)
+    assert publishing.recipes_upsert(sibling_task) == source_receipt
+    # A sibling's same-lineage adoption must not overwrite this Task's independent receipt.
+    with store.connect() as conn:
+        row = conn.execute("SELECT recipe_id, recipe_version_id FROM recipes WHERE id=?", (task_id,)).fetchone()
+    assert tuple(row) == (V2["recipe_id"], V2["recipe_version_id"])
+    after = client.task_get(task_id)
+    assert after["artifact"] == {**V2, "zip_path": before["recipe_zip_path"]}
+    Path(before["recipe_zip_path"]).unlink()
+    offline = RSIClient(data_dir=tmp_path)
+    assert offline.recipes_upsert(task_id, recipe_id=V2["recipe_id"]) == V2
+    with pytest.raises(Conflict, match="receipt for a different cloud Recipe"):
+        offline.recipes_upsert(task_id, recipe_id=source_receipt["recipe_id"])
+    with pytest.raises(Conflict, match="different ZIP, key or destination"):
+        offline.recipes_upsert(task_id, idempotency_key="wrong-key")
+    assert {key: offline.task_get(task_id)[key] for key in V2} == V2
+    assert offline.task_get(task_id)["recipe_zip_path"] is None
+    assert len(calls) == 5
+
+
+@pytest.mark.parametrize("target_pending_first", [True, False])
+def test_existing_upload_target_cannot_be_rekeyed_while_reserved(tmp_path, monkeypatch, target_pending_first):
+    client, target = _fixture_recipe(tmp_path)
+    source = client._queue.recipe_insert(*read_recipe_file(tmp_path / "RECIPE.md"))
+    target_task = _completed_execution(client, target["id"], target["active_version_id"])
+    source_task = _completed_execution(client, source["id"], source["active_version_id"])
+    monkeypatch.setenv("COSENS_RSI_BASE_URL", RSI_URL)
+    publishing = _publishing_client(tmp_path)
+
+    def receive(request, _):
+        raise httpx.ReadTimeout("fixture timeout", request=request)
+
+    calls = _transport(monkeypatch, receive)
+    attempts = [(target_task, None), (source_task, target["id"])]
+    if not target_pending_first:
+        attempts.reverse()
+    (first, first_target), (second, second_target) = attempts
+    with pytest.raises(RSIError, match="could not be reached"):
+        publishing.recipes_upsert(first, recipe_id=first_target)
+    with pytest.raises(Conflict, match="reserved by another local Recipe upload"):
+        publishing.recipes_upsert(second, recipe_id=second_target)
+    assert len(calls) == 1
 
 
 def test_explicit_target_reservation_cannot_be_changed_or_claimed_until_retry(tmp_path, monkeypatch):

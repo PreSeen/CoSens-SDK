@@ -5,7 +5,7 @@ import {
 import { dirname, join, relative, sep } from 'node:path';
 import { MAX_RECIPE_ZIP_BYTES, type RecipeUpsertResult } from './cloud.js';
 import { fail, RSIError, type Execution, type ExecutionAnswer, type Question, type Recipe } from './models.js';
-import { uploadReceiptScope } from './recipe-identity.js';
+import { taskUploadReceiptScope, uploadReceiptScope } from './recipe-identity.js';
 import { buildRecipePackage, readRecipePackage } from './recipe-package.js';
 import type { Store } from './store.js';
 
@@ -167,12 +167,16 @@ function frozenTaskPackage(store: Store, taskId: string, executionId: string): T
 
 type UploadedVersion = { zipSha256: string; result: RecipeUpsertResult };
 
-function uploadedVersion(store: Store, execution: Execution): UploadedVersion | undefined {
-  if (!hasApprovedResult(execution) || !execution.recipe_version_id) return;
+function readUploadReceipt(store: Store, scope: string, key: string): UploadedVersion | undefined {
   const receipt = store.db.prepare('SELECT request,result FROM idempotency WHERE scope=? AND key=?')
-    .get(uploadReceiptScope, store.resolveVersionId(execution.recipe_version_id)) as
-      { request: string; result: string } | undefined;
+    .get(scope, key) as { request: string; result: string } | undefined;
   if (receipt) return { zipSha256: JSON.parse(receipt.request).zip_sha256, result: JSON.parse(receipt.result) };
+}
+
+function uploadedVersion(store: Store, execution: Execution, taskId: string): UploadedVersion | undefined {
+  if (!hasApprovedResult(execution) || !execution.recipe_version_id) return;
+  return readUploadReceipt(store, taskUploadReceiptScope, taskId)
+    ?? readUploadReceipt(store, uploadReceiptScope, store.resolveVersionId(execution.recipe_version_id));
 }
 
 const digest = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
@@ -235,8 +239,8 @@ export function taskArtifact(store: Store, taskId: string, execution: Execution,
     }
   }
   if (!saved) store.remember(taskRecipePackageScope, taskId, request, { sha256, version_id: version.id });
-  saveTaskRecipe(store, taskId, execution, zip_path);
-  return { zip_path, recipe_id: recipe.id, recipe_version_id: version.id };
+  const uploaded = saveTaskRecipe(store, taskId, execution, zip_path);
+  return { zip_path, ...(uploaded ?? { recipe_id: recipe.id, recipe_version_id: version.id }) };
 }
 
 function availableArtifact(store: Store, taskId: string, execution: Execution, upload?: UploadedVersion) {
@@ -270,14 +274,17 @@ function taskRoot(store: Store, execution: Execution): Execution {
 }
 
 function saveTaskRecipe(store: Store, taskId: string, execution: Execution, zipPath?: string) {
-  const recipeId = execution.recipe_id === null ? null : store.resolveRecipeId(execution.recipe_id);
-  const versionId = hasApprovedResult(execution) ? store.resolveVersionId(execution.recipe_version_id) : null;
+  const uploaded = readUploadReceipt(store, taskUploadReceiptScope, taskId)?.result;
+  const recipeId = uploaded?.recipe_id ?? (execution.recipe_id === null ? null : store.resolveRecipeId(execution.recipe_id));
+  const versionId = uploaded?.recipe_version_id
+    ?? (hasApprovedResult(execution) ? store.resolveVersionId(execution.recipe_version_id) : null);
   const storedPath = zipPath ? relative(store.root, zipPath).split(sep).join('/') : null;
   store.db.prepare(`
     INSERT INTO recipes(id,recipe_id,recipe_version_id,recipe_zip_path) VALUES(?,?,?,?)
     ON CONFLICT(id) DO UPDATE SET recipe_id=excluded.recipe_id,
       recipe_version_id=excluded.recipe_version_id, recipe_zip_path=excluded.recipe_zip_path
   `).run(taskId, recipeId, versionId, storedPath);
+  return uploaded;
 }
 
 export function writeTaskRecipe(store: Store, execution: Execution, artifact?: TaskArtifact) {
@@ -298,7 +305,7 @@ export function backfillTaskRecipes(store: Store) {
         const journal = frozenTaskPackage(store, root.id, execution.id);
         const versionId = store.resolveVersionId(execution.recipe_version_id);
         const expected = journal && store.resolveVersionId(journal.version_id) === versionId
-          ? journal.sha256 : uploadedVersion(store, execution)?.zipSha256;
+          ? journal.sha256 : uploadedVersion(store, execution, root.id)?.zipSha256;
         const cached = expected && readFrozenPackage(candidate);
         if (cached && digest(cached) === expected) path = candidate;
       } catch (error) {
@@ -312,7 +319,7 @@ export function backfillTaskRecipes(store: Store) {
 export function freezeTaskArtifact(store: Store, execution: Execution) {
   if (!hasApprovedResult(execution)) return;
   const root = taskRoot(store, execution);
-  const artifact = availableArtifact(store, root.id, execution, uploadedVersion(store, execution));
+  const artifact = availableArtifact(store, root.id, execution, uploadedVersion(store, execution, root.id));
   if (!artifact) saveTaskRecipe(store, root.id, execution);
 }
 
@@ -350,7 +357,7 @@ export function readTask(store: Store, taskId: string): Task {
         });
       }
     }
-    const upload = uploadedVersion(store, current);
+    const upload = uploadedVersion(store, current, taskId);
     const artifact = availableArtifact(store, taskId, current, upload);
     if (!artifact) saveTaskRecipe(store, taskId, current);
     const formal = upload?.result;

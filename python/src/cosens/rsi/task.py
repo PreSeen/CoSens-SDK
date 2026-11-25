@@ -12,6 +12,7 @@ from .recipe_identity import (
     journal_entry,
     recipe_id_for,
     recipe_object_relation,
+    task_upload_receipt,
     version_id_for,
 )
 
@@ -149,6 +150,9 @@ def _save_task_recipe(store, conn, task_id, execution, path=None):
         return
     recipe_id = recipe_id_for(conn, execution.get("recipe_id"))
     version_id = version_id_for(conn, execution["recipe_version_id"]) if is_approved(execution) else None
+    if version_id and (receipt := task_upload_receipt(conn, task_id, recipe_id, version_id, execution["id"])):
+        recipe_id = receipt[1]["recipe_id"]
+        version_id = receipt[1]["recipe_version_id"]
     conn.execute(
         """INSERT INTO recipes(id,recipe_id,recipe_version_id,recipe_zip_path) VALUES(?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET recipe_id=excluded.recipe_id,
@@ -254,15 +258,16 @@ def freeze_task_package(store, conn, execution, *, expected_sha256=None):
     return path
 
 
-def assert_frozen_package_matches(conn, version_id, zip_sha256):
+def assert_frozen_package_matches(conn, version_id, zip_sha256, *, task_id=None):
     mismatch = conn.execute(
         """SELECT 1 FROM idempotency AS package
         LEFT JOIN idempotency AS alias
           ON alias.scope=? AND alias.key=json_extract(package.request,'$.version_id')
         WHERE package.scope=?
           AND COALESCE(json_extract(alias.result,'$.id'),json_extract(package.request,'$.version_id'))=?
+          AND (? IS NULL OR package.key=?)
           AND json_extract(package.request,'$.sha256')<>? LIMIT 1""",
-        (VERSION_ALIAS, _PACKAGE_SCOPE, version_id, zip_sha256),
+        (VERSION_ALIAS, _PACKAGE_SCOPE, version_id, task_id, task_id, zip_sha256),
     ).fetchone()
     if mismatch:
         raise Conflict("Recipe ZIP does not match the frozen Task archive")
@@ -296,7 +301,11 @@ def detail(store, conn, chain):
     recipe_id = recipe_id_for(conn, current.get("recipe_id"))
     version_id = version_id_for(conn, current.get("recipe_version_id"))
     approved = is_approved(current)
-    receipt = journal_entry(conn, RECEIPT, version_id) if approved else None
+    receipt = None
+    if approved:
+        receipt = task_upload_receipt(conn, chain[0]["id"], recipe_id, version_id, current["id"])
+        if receipt is None:
+            receipt = journal_entry(conn, RECEIPT, version_id)
     artifact = None
     if approved:
         path = None
@@ -308,6 +317,9 @@ def detail(store, conn, chain):
             except (Conflict, NotFound, OSError, ValueError):
                 # An already-published version can still be downloaded from the cloud.
                 pass
+        if receipt:
+            recipe_id = receipt[1]["recipe_id"]
+            version_id = receipt[1]["recipe_version_id"]
         if path is not None:
             artifact = {
                 "zip_path": str(path),
@@ -316,10 +328,6 @@ def detail(store, conn, chain):
             }
     if artifact is None:
         _save_task_recipe(store, conn, chain[0]["id"], current)
-    final_version_id = version_id if artifact else None
-    if receipt:
-        recipe_id = receipt[1]["recipe_id"]
-        final_version_id = receipt[1]["recipe_version_id"]
     return {
         **summary(store, conn, chain),
         "execution_ids": [execution["id"] for execution in chain],
@@ -329,6 +337,6 @@ def detail(store, conn, chain):
         "error": current.get("error"),
         "artifact": artifact,
         "recipe_id": recipe_id,
-        "recipe_version_id": final_version_id,
+        "recipe_version_id": version_id if artifact or receipt else None,
         "recipe_zip_path": artifact["zip_path"] if artifact else None,
     }

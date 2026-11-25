@@ -42,8 +42,8 @@ export function findLocalRecipeBase(store: Store, base: RecipeBase): LocalBase |
   if (recipe.archived_at !== null) return fail('invalid_state', 'base Recipe is archived');
   const versionId = base.version_id ? store.resolveVersionId(base.version_id) : recipe.active_version_id;
   if (!versionId) return fail('invalid_state', 'base Recipe has no available version');
-  const row = store.db.prepare('SELECT recipe_id,status FROM versions WHERE id=?').get(versionId) as
-    { recipe_id: string | null; status: string | null } | undefined;
+  const row = store.db.prepare("SELECT recipe_id,status,json_extract(data, '$.provenance.source') AS source FROM versions WHERE id=?")
+    .get(versionId) as { recipe_id: string | null; status: string | null; source: string | null } | undefined;
   if (!row) {
     const linked = store.db.prepare('SELECT 1 FROM idempotency WHERE scope=? AND key=?')
       .get(recipeIdentityScope, recipeId);
@@ -53,7 +53,7 @@ export function findLocalRecipeBase(store: Store, base: RecipeBase): LocalBase |
   if (row.recipe_id !== recipe.id) return fail('conflict', 'base Recipe version belongs to another Recipe');
   const imported = store.db.prepare('SELECT 1 FROM idempotency WHERE scope=? AND key=?')
     .get(bootstrapScope, versionId);
-  if (!base.version_id) return { recipe, versionId: imported ? versionId : undefined };
+  if (!base.version_id) return { recipe, versionId: imported || row.source === 'cloud' ? versionId : undefined };
   if (row.status !== 'available' && !imported) {
     const upload = store.db.prepare('SELECT 1 FROM idempotency WHERE scope=? AND key=?').get(uploadReceiptScope, versionId);
     const accepted = store.db.prepare(`
@@ -115,21 +115,23 @@ export function baseRecipePath(store: Store, recipe: Recipe, versionId: string) 
   return path;
 }
 
-function installFiles(store: Store, recipe: Recipe, bootstrap: Bootstrap) {
-  const target = versionDirectory(store, recipe, bootstrap.versionId);
+export function installRecipeVersionFiles(
+  store: Store, recipe: Recipe, versionId: string, archive: Uint8Array, files?: Map<string, Uint8Array>,
+) {
+  const target = versionDirectory(store, recipe, versionId);
   const parent = dirname(target);
   for (const path of [dirname(parent), parent, target]) {
     const stat = lstatSync(path, { throwIfNoEntry: false });
     if (stat && !stat.isDirectory()) return fail('conflict', 'local Recipe version directory is not usable');
   }
   if (lstatSync(target, { throwIfNoEntry: false })) {
-    assertRecipePackageMatches(target, bootstrap.archive);
+    assertRecipePackageMatches(target, archive);
     return;
   }
   mkdirSync(parent, { recursive: true, mode: 0o700 });
   const staging = mkdtempSync(join(parent, '.cloud-recipe-'));
   try {
-    stageRecipePackageFiles(staging, bootstrap.files);
+    stageRecipePackageFiles(staging, files ?? readRecipePackage(archive));
     renameSync(staging, target);
   } finally {
     rmSync(staging, { recursive: true, force: true });
@@ -150,10 +152,15 @@ export function installCloudRecipeBase(store: Store, bootstrap: Bootstrap): Loca
     { recipe_id: string | null } | undefined;
   const request = { recipe_id: recipeId, ...destination, sha256 };
   const imported = store.replay(bootstrapScope, versionId, request);
-  if (row && (row.recipe_id !== recipeId || !imported))
+  const uploaded = row && !imported && store.db.prepare(`
+    SELECT 1 FROM idempotency WHERE scope=? AND key=?
+      AND json_extract(request, '$.base_url')=? AND json_extract(request, '$.virtual_user_id') IS ?
+      AND json_extract(request, '$.zip_sha256')=? AND json_extract(result, '$.recipe_id')=?
+  `).get(uploadReceiptScope, versionId, destination.base_url, destination.virtual_user_id, sha256, recipeId);
+  if (row && (row.recipe_id !== recipeId || (!imported && !uploaded)))
     return fail('conflict', 'cloud Recipe version ID already belongs to a local version');
   const recipe = existing ?? store.insert<Recipe>('recipe', { id: recipeId, name: content.name });
-  installFiles(store, recipe, bootstrap);
+  installRecipeVersionFiles(store, recipe, versionId, bootstrap.archive, bootstrap.files);
   if (!row) {
     const { number } = store.db.prepare('SELECT COALESCE(MAX(number),0)+1 AS number FROM versions WHERE recipe_id=?')
       .get(recipeId) as { number: number };

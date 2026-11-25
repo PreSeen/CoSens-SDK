@@ -145,7 +145,7 @@ description: "按用户要求将订单数据导出为 CSV。"
 
 在本地模式下，传入要发布的 `task_id`。SDK 查找该任务通过验证的最终版本和冻结 ZIP，再上传。可先用 `task_get(task_id)` 读取 `recipe_zip_path` 判断产物是否就绪。
 
-传入正式的 `recipe_id` 时，SDK 将 ZIP 发布为该云端 Recipe 的新版本，回执返回同一个 `recipe_id` 和新签发的 `recipe_version_id`。省略时，SDK 沿用任务已关联的云端 Recipe，或在首次发布时创建 Recipe。任务已关联其他云端 Recipe，或指定 ID 已属于另一份本地 Recipe 时，SDK 返回冲突。
+传入正式的 `recipe_id` 时，SDK 将 ZIP 发布为该云端 Recipe 的新版本，回执返回同一个 `recipe_id` 和新签发的 `recipe_version_id`。若目标已存在于本地，SDK 复用该 Recipe、保存新版本并按 `task_id` 关联本次产物。省略时，SDK 沿用任务已关联的云端 Recipe，或在首次发布时创建 Recipe。任务已关联其他云端 Recipe 时，SDK 返回冲突。
 
 ```python
 receipt = client.recipes_upsert(task_id=task_id, recipe_id=cloud_recipe_id)
@@ -157,7 +157,7 @@ const receipt = await client.recipes_upsert({ task_id: taskId, recipe_id: cloudR
 
 本地 `recipes_upsert()` 从环境变量 `COSENS_RSI_BASE_URL` 读取上传地址，省略环境变量时使用默认 CoSens 地址。发起上传请求时，认证和账号信息取自初始化 `RSIClient` 时传入的 `config.headers`，其中可包含 `X-Virtual-User-Id`。SDK 生成 multipart 请求头，使用传入的 `idempotency_key` 或自动生成幂等键。
 
-上传成功后，SDK 按回执更新任务行的 `recipe_id` 和 `recipe_version_id`，并同步更新关联的 Execution 引用。`recipes.id` 始终是任务 ID。后续用 `execution_create()` 更新同一 Recipe 时可传正式 `recipe_id`。
+上传成功后，SDK 按回执更新任务行的 `recipe_id` 和 `recipe_version_id`。`recipes.id` 始终是任务 ID。未同步的本地任务发布到已存在的云端 Recipe 时，发布结果关联到本次任务，原 Execution 的生成和测试历史可继续追溯。后续用 `execution_create()` 更新同一 Recipe 时可传正式 `recipe_id`。
 
 网络中断后用同一个 `task_id` 重试。SDK 使用之前保存的 ZIP 和幂等键。为同一个 Recipe 上传另一版本时，先完成当前待确认的上传。若同一 Recipe 的 Execution 正在排队或运行，等该执行结束后再同步。
 

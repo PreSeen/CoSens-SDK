@@ -4,6 +4,7 @@ Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned
 
 ## Unreleased
 
+- A local Task can publish its approved ZIP as a new version of a cloud Recipe that is already cached on the device.
 - Local `execution_create()` can download a missing published Recipe before queuing an update and keep its formal cloud identity. Local Recipe references can pin a version with `recipe_version_id`.
 - Local RSI in Python and TypeScript adds `task_list()`, `task_get()`, and `task_restart()` for task cards, clarification history, and execution restarts. Task details expose a ZIP for the final qualified Recipe version.
 - Local SQLite schema v10 stores one row per Task in `recipes`, including its root Execution ID, Recipe and version IDs, and ZIP path. The migration preserves existing execution history, Recipe files and upload receipts.

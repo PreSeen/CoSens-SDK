@@ -699,11 +699,20 @@ test('local publication can bind an explicit cloud target and safely resume that
   t.after(() => { client.close(); store.close(); rmSync(data_dir, { recursive: true, force: true }); });
   const context_path = join(data_dir, 'context.md');
   writeFileSync(context_path, 'Task context.');
-  const approve = async (idempotency_key: string, recipe_reference?: { path: string; recipe_id: string }) => {
+  const resourceBytes = Buffer.from([0, 255, 42]);
+  const approve = async (
+    idempotency_key: string, recipe_reference?: { path: string; recipe_id: string }, reuseVersion?: string,
+  ) => {
     const execution = await client.execution_create({ evidence: { context_path, files: [] }, idempotency_key, recipe_reference });
     store.tx(() => {
       const recipe = store.get<Recipe>(execution.recipe_id!, 'recipe');
-      const version = store.append(recipe, { name: 'Approved', description: 'Fixture', instructions: 'Write output.' });
+      const version = reuseVersion ? store.version(recipe.id, reuseVersion)
+        : store.append(recipe, { name: 'Approved', description: 'Fixture', instructions: 'Write output.' });
+      if (!reuseVersion) {
+        const resources = join(data_dir, recipe.storage_path, version.id, 'resources');
+        mkdirSync(resources);
+        writeFileSync(join(resources, 'data.bin'), resourceBytes);
+      }
       store.publishRecipeVersion(recipe.id, version.id);
       store.save<Execution>({
         ...store.get<Execution>(execution.id, 'execution'), status: 'completed', recipe_version_id: version.id,
@@ -726,9 +735,6 @@ test('local publication can bind an explicit cloud target and safely resume that
   await withService(replies, async (base_url, seen) => {
     setTestEnv(t, 'COSENS_RSI_BASE_URL', base_url);
     const upload = { task_id: first.task_id };
-    await assert.rejects(client.recipes_upsert({ ...upload, recipe_id: other.recipe_id! }), /already used locally/);
-    assert.equal(seen.length, 0);
-
     await assert.rejects(client.recipes_upsert({ ...upload, recipe_id: target }), /retry the target/);
     assert.equal(seen[0].body.get('recipe_id'), target);
     const sha = createHash('sha256').update(readFileSync(first.recipe_zip_path!)).digest('hex');
@@ -767,6 +773,81 @@ test('local publication can bind an explicit cloud target and safely resume that
     replies[endpoint] = [200, nextReceipt];
     assert.deepEqual(await client.recipes_upsert({ task_id: next.task_id }), nextReceipt);
     assert.equal(seen[3].body.get('recipe_id'), target);
+
+    const original = await client.recipe_get(other.recipe_id!);
+    const sibling = await approve('sibling', {
+      recipe_id: original.id, path: join(data_dir, original.storage_path, other.recipe_version_id!, 'RECIPE.md'),
+    }, other.recipe_version_id!);
+    const draft = store.tx(() => store.append(store.get<Recipe>(target, 'recipe'), {
+      name: 'Draft', description: 'Fixture', instructions: 'Keep this draft.',
+    }));
+    const link = { task_id: other.task_id, recipe_id: target };
+    const linked = { recipe_id: target, recipe_version_id: 'version_cross_task' };
+    const differentTenant = new RSIClient({
+      data_dir,
+      config: { headers: { Authorization: 'Bearer fixture-access-token', 'X-Virtual-User-Id': 'different' } },
+    });
+    try {
+      await assert.rejects(differentTenant.recipes_upsert(link), /target Recipe was synchronized to a different/);
+    } finally {
+      differentTenant.close();
+    }
+    assert.equal(seen.length, 4);
+    replies[endpoint] = [503, { error: { code: 'unavailable', message: 'retry the association' } }];
+    await assert.rejects(client.recipes_upsert(link), /retry the association/);
+    await assert.rejects(client.recipes_upsert({ task_id: sibling.task_id, recipe_id: target }), /another upload is pending/);
+    const frozen = readFileSync(other.recipe_zip_path!);
+    const digest = createHash('sha256').update(frozen).digest('hex');
+    const scopedKey = createHash('sha256')
+      .update([other.recipe_id, other.recipe_version_id, digest, target, other.task_id].join('\0')).digest('hex');
+    const linkedKey = `local-recipe-upload-${scopedKey}`;
+    assert.equal(seen[4].headers['idempotency-key'], linkedKey);
+    replies[endpoint] = [200, linked];
+    assert.deepEqual(await Promise.all([
+      client.recipes_upsert({ task_id: other.task_id }), client.recipes_upsert(link),
+    ]), [linked, linked]);
+    assert.equal(seen[5].body.get('recipe_id'), target);
+    assert.deepEqual(Buffer.from(await seen[5].body.get('file').arrayBuffer()), frozen);
+    const targetRecipe = await client.recipe_get(target);
+    assert.equal(targetRecipe.active_version_id, linked.recipe_version_id);
+    assert.deepEqual(readFileSync(join(data_dir, targetRecipe.storage_path, linked.recipe_version_id, 'resources/data.bin')), resourceBytes);
+    assert.deepEqual(store.db.prepare('SELECT status FROM versions WHERE id=?').get(draft.id), { status: 'candidate' });
+    const originalExecution = await client.execution_get(other.execution_id);
+    assert.equal(originalExecution.recipe_id, other.recipe_id);
+    assert.equal(originalExecution.recipe_version_id, other.recipe_version_id);
+    assert.equal((await client.task_get(sibling.task_id)).recipe_id, sibling.recipe_id);
+    assert.deepEqual((await client.task_get(other.task_id)).artifact, { ...linked, zip_path: other.recipe_zip_path });
+    const linkedRequestCount = seen.length;
+    await assert.rejects(client.recipes_upsert({
+      task_id: sibling.task_id, recipe_id: target, idempotency_key: linkedKey,
+    }), /idempotency key is already used/);
+    assert.equal(seen.length, linkedRequestCount);
+
+    const siblingReceipt = { recipe_id: 'recipe_independent', recipe_version_id: 'version_independent' };
+    replies[endpoint] = [200, siblingReceipt];
+    assert.deepEqual(await client.recipes_upsert({ task_id: sibling.task_id }), siblingReceipt);
+    assert.equal((await client.task_get(sibling.task_id)).recipe_id, siblingReceipt.recipe_id);
+    assert.deepEqual((await client.task_get(other.task_id)).artifact, { ...linked, zip_path: other.recipe_zip_path });
+    const rekeyedOriginal = await client.recipe_get(siblingReceipt.recipe_id);
+    rmSync(other.recipe_zip_path!);
+    rmSync(join(data_dir, rekeyedOriginal.storage_path, siblingReceipt.recipe_version_id), { recursive: true });
+    const pruned = await client.task_get(other.task_id);
+    assert.equal(pruned.recipe_id, linked.recipe_id);
+    assert.equal(pruned.recipe_version_id, linked.recipe_version_id);
+    assert.equal(pruned.recipe_zip_path, null);
+    assert.deepEqual(store.db.prepare('SELECT recipe_id,recipe_version_id,recipe_zip_path FROM recipes WHERE id=?').get(other.task_id), {
+      ...linked, recipe_zip_path: null,
+    });
+    const offline = new RSIClient({ data_dir, config: null });
+    const totalRequests = seen.length;
+    try {
+      assert.deepEqual(await offline.recipes_upsert(link), linked);
+      await assert.rejects(offline.recipes_upsert({ ...link, recipe_id: siblingReceipt.recipe_id }), /different arguments/);
+      await assert.rejects(offline.recipes_upsert({ ...link, idempotency_key: 'different' }), /different arguments/);
+    } finally {
+      offline.close();
+    }
+    assert.equal(seen.length, totalRequests);
   });
 });
 

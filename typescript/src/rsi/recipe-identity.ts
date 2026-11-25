@@ -13,18 +13,21 @@ export const versionIdAlias = 'recipe_cloud_version_alias';
 export const recipeIdentityScope = 'recipe_cloud_identity';
 export const pendingUploadScope = 'recipe_cloud_upload_pending';
 export const uploadReceiptScope = 'recipe_cloud_upload_receipt';
+export const taskUploadReceiptScope = 'task_recipe_upload_receipt';
 
-export function assertCloudRecipeTargetAvailable(store: Store, targetId: string, localRecipeId?: string) {
+export function assertCloudRecipeTargetAvailable(
+  store: Store, targetId: string, localRecipeId?: string, allowExisting = false,
+) {
   if (localRecipeId !== undefined && targetId !== localRecipeId && (
     store.resolveRecipeId(targetId) !== targetId
-    || store.db.prepare('SELECT 1 FROM recipe_objects WHERE id=?').get(targetId)
+    || (!allowExisting && store.db.prepare('SELECT 1 FROM recipe_objects WHERE id=?').get(targetId))
   )) fail('conflict', 'cloud Recipe ID is already used locally');
 
   const pending = store.db.prepare(`
     SELECT 1 FROM idempotency
-    WHERE scope=? AND (? IS NULL OR key<>?) AND json_extract(request, '$.cloud_recipe_id')=?
+    WHERE scope=? AND (? IS NULL OR key<>?) AND (key=? OR json_extract(request, '$.cloud_recipe_id')=?)
     LIMIT 1
-  `).get(pendingUploadScope, localRecipeId ?? null, localRecipeId ?? null, targetId);
+  `).get(pendingUploadScope, localRecipeId ?? null, localRecipeId ?? null, targetId, targetId);
   if (pending) fail('conflict', 'the cloud Recipe has a pending local upload');
 }
 

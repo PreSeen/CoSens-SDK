@@ -11,7 +11,9 @@ from .recipe_identity import (
     BOOTSTRAP, IDENTITY, RECEIPT, journal_entry, recipe_id_for,
     require_unclaimed_upload_target, version_id_for,
 )
-from .recipe_package import ENTRYPOINT, assert_recipe_package_matches, read_recipe_package
+from .recipe_package import (
+    ENTRYPOINT, assert_recipe_package_matches, read_recipe_package, stage_recipe_package_files,
+)
 
 def _recipe_or_none(store, conn, recipe_id):
     try:
@@ -29,6 +31,22 @@ def _version_path(store, recipe, version_id):
     directory = store.root / storage_path / version_id
     if any(part.is_symlink() for part in (directory.parent.parent, directory.parent, directory)):
         raise Conflict("unexpected Recipe version directory")
+    return directory
+
+
+def install_recipe_version_files(store, recipe, version_id, archive, *, staged=None):
+    directory = _version_path(store, recipe, version_id)
+    if directory.exists():
+        assert_recipe_package_matches(directory, archive)
+    else:
+        directory.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if staged is not None:
+            staged.rename(directory)
+        else:
+            with TemporaryDirectory(dir=directory.parent) as temporary:
+                package = Path(temporary) / "version"
+                stage_recipe_package_files(package, read_recipe_package(archive))
+                package.rename(directory)
     return directory
 
 
@@ -107,17 +125,13 @@ def _install(store, recipe_id, version_id, archive, sha256, destination):
                 cached = journal_entry(conn, BOOTSTRAP, version_id) or journal_entry(conn, RECEIPT, version_id)
                 if existing["recipe_id"] != recipe_id or not cached or cached[0].get("zip_sha256") != sha256:
                     raise Conflict("cloud Recipe version conflicts with a local version")
+                install_recipe_version_files(store, recipe, version_id, archive, staged=staged)
                 return _pinned(store, conn, recipe, version_id)
             require_unclaimed_upload_target(conn, recipe_id)
             if recipe is None:
                 recipe = store.insert(conn, "recipe", {"id": recipe_id, "name": content["name"], "active_version_id": None})
                 store.remember(conn, IDENTITY, recipe_id, destination, {})
-            directory = _version_path(store, recipe, version_id)
-            directory.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            if directory.exists():
-                assert_recipe_package_matches(directory, archive)
-            else:
-                staged.rename(directory)
+            install_recipe_version_files(store, recipe, version_id, archive, staged=staged)
             store.append_version(
                 conn, recipe, content, recipe_markdown=markdown, version_id=version_id,
                 provenance={"source": "cloud", "package_sha256": sha256},
@@ -151,11 +165,14 @@ def resolve_base(store, base, cloud_factory):
             selected = requested or recipe["active_version_id"]
             if not selected:
                 raise InvalidState("base Recipe has no available version")
-            record = conn.execute("SELECT recipe_id FROM versions WHERE id=?", (selected,)).fetchone()
+            record = conn.execute(
+                "SELECT recipe_id,json_extract(data,'$.provenance.source') AS source FROM versions WHERE id=?",
+                (selected,),
+            ).fetchone()
             if record is not None:
                 if record["recipe_id"] != recipe_id:
                     raise Conflict("selected version belongs to a different local Recipe")
-                if requested or journal_entry(conn, BOOTSTRAP, selected):
+                if requested or record["source"] == "cloud" or journal_entry(conn, BOOTSTRAP, selected):
                     return _pinned(store, conn, recipe, selected)
                 # Unpinned earlier calls on native local Recipes use the caller's Markdown.
                 return None

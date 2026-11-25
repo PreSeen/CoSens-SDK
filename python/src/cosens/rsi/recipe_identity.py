@@ -15,6 +15,7 @@ RECIPE_ALIAS = "recipe_cloud_id_alias"
 VERSION_ALIAS = "recipe_cloud_version_alias"
 PENDING = "recipe_cloud_upload_pending"
 RECEIPT = "recipe_cloud_upload_receipt"
+TASK_RECEIPT = "task_recipe_upload_receipt"
 DESTINATION_FIELDS = ("base_url", "virtual_user_id")
 
 
@@ -43,12 +44,23 @@ def version_id_for(conn, version_id):
     return entry[1]["id"] if entry else version_id
 
 
+def task_upload_receipt(conn, task_id, recipe_id, version_id, execution_id):
+    saved = journal_entry(conn, TASK_RECEIPT, task_id)
+    if saved is not None and (
+        recipe_id_for(conn, saved[0]["local_recipe_id"]) != recipe_id
+        or version_id_for(conn, saved[0]["local_recipe_version_id"]) != version_id
+        or saved[0]["execution_id"] != execution_id
+    ):
+        raise Conflict("Task upload receipt has a different source Recipe version")
+    return saved
+
+
 def require_unclaimed_upload_target(conn, target, local_recipe_id=None):
     if target is not None and conn.execute(
         """SELECT 1 FROM idempotency
            WHERE scope=? AND (? IS NULL OR key<>?)
-             AND json_extract(request,'$.cloud_recipe_id')=? LIMIT 1""",
-        (PENDING, local_recipe_id, local_recipe_id, target),
+             AND (key=? OR json_extract(request,'$.cloud_recipe_id')=?) LIMIT 1""",
+        (PENDING, local_recipe_id, local_recipe_id, target, target),
     ).fetchone():
         raise Conflict("cloud Recipe target is reserved by another local Recipe upload")
 
@@ -210,8 +222,11 @@ def promote_recipe_identity(store, conn, recipe_id, version_id, receipt):
         )
         if recipe_objects == "recipe_objects":
             conn.execute(
-                "UPDATE recipes SET recipe_id=? WHERE recipe_id=?",
-                (new_recipe_id, recipe_id),
+                """UPDATE recipes SET recipe_id=? WHERE recipe_id=?
+                   AND NOT EXISTS (
+                       SELECT 1 FROM idempotency WHERE scope=? AND key=recipes.id
+                   )""",
+                (new_recipe_id, recipe_id, TASK_RECEIPT),
             )
         store.remember(conn, RECIPE_ALIAS, recipe_id, {}, {"id": new_recipe_id})
     if version_id != new_version_id:
@@ -234,6 +249,8 @@ def promote_recipe_identity(store, conn, recipe_id, version_id, receipt):
             if not is_approved(execution):
                 continue
             task_id = root_id(store, conn, execution)
+            if journal_entry(conn, TASK_RECEIPT, task_id):
+                continue
             if task_chain(store, conn, task_id)[-1]["id"] == execution["id"]:
                 conn.execute(
                     """INSERT INTO recipes(id, recipe_id, recipe_version_id) VALUES(?,?,?)
