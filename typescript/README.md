@@ -22,7 +22,7 @@ const run = await cloud.execution_create({
 
 All methods are async in both modes. `new RSIClient({ mode: 'cloud', ... })` takes `api_key`, `base_url` (default `https://rsi.cosens.ai/api`), `timeout` in seconds (default 60) and `virtualUserId`. Service errors are `RSIError` with the service's `code` and the HTTP `status`. For local mode, pass `data_dir` and your own model as below.
 
-To run local RSI, pass `model_id`, `api_key`, and `base_url` to the constructor. The model must support Chat Completions and tool calls. Use `config.headers` for local Recipe ZIP uploads. If you package a standalone Node with the host, set `RSI_NODE_EXECUTABLE` and include the SDK worker and the matching `better-sqlite3` native dependency.
+To run local RSI, pass `model_id`, `api_key`, and `base_url` to the constructor. The model must support Chat Completions and tool calls. Use `config.headers` to authorize cloud Recipe downloads and uploads from a local client. Local `execution_create()` can download a missing published Recipe before queuing an update, and `recipe_reference.recipe_version_id` can pin the baseline. If you package a standalone Node with the host, set `RSI_NODE_EXECUTABLE` and include the SDK worker and the matching `better-sqlite3` native dependency.
 
 ```ts
 import { RSIClient } from 'cosens-sdk/rsi';
@@ -56,6 +56,8 @@ The SDK submits the snapshots and queues the Execution in one call. The Worker r
 Pass just `data_dir` for read-only clients. After rotating the model key, create a Client with the same data directory and `config.credential_scope` and the new `api_key`. `recover()` resumes that account's unfinished work with the new Client settings. Use `recover({ recipe_id: recipeId })` to recover only executions for that SDK Recipe. Close each client with `close()` when done. The worker uses LangGraph for recovery and sends direct model API requests from its nodes.
 
 To restart a local task, call `task_restart(taskId, { idempotency_key: requestId, evidence })`. Omit `evidence` to run with the existing materials. The task keeps its card ID and starts a new Execution. Reuse the key when resending the same restart request.
+
+`await rsi.task_get(taskId)` returns `recipe_version_id` and `recipe_zip_path` once the final ZIP is ready. Publish the task with `rsi.recipes_upsert({ task_id: taskId })`. Pass `recipe_id` in the options to target an existing cloud Recipe. The upload uses the client's `config.headers` and the destination set by `COSENS_RSI_BASE_URL`, which defaults to the CoSens endpoint. A cloud client takes a ZIP path with `cloud.recipes_upsert(path)`.
 
 See the [complete TS and Python interface reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/local-rsi.md) and the [CoSens docs](https://cosens.ai/docs/). Run `npm run check` to build, typecheck and test the public package.
 

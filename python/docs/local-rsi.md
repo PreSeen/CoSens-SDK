@@ -1,13 +1,13 @@
 # CoSens RSI SDK 接口文档
 
-云端模式默认启用，本地模式使用 SQLite schema v9。云端和本地都支持 `recipe_insert()`，`recipe_get()` 另返回 Recipe 文件的 `storage_path`。TS 从 `cosens-sdk/rsi` 导入，Python 从 `cosens.rsi` 导入。
+云端模式默认启用，本地模式使用 SQLite schema v10。`recipe_get()` 返回 Recipe 文件的 `storage_path`。TS 从 `cosens-sdk/rsi` 导入，Python 从 `cosens.rsi` 导入。
 
 ```text
 Agent 启动 → recover()
 任务开始 → recipe_list() → Agent 选择可用版本 → recipe_get(recipe_id, version_id)
 交付确认 → execution_create（上下文和文件）
 查看任务卡片 → task_list() → task_get(task_id)
-测试通过且澄清完成 → SDK 激活本地版本并打包 ZIP → App 按需上传
+测试通过且澄清完成 → SDK 激活本地版本并打包 ZIP → App 按 task_id 调用 recipes_upsert
 ```
 
 ## 初始化
@@ -28,7 +28,7 @@ TS 也可以直接 `new CloudClient({ api_key, base_url })`，配置对象和两
 
 ### 本地模式
 
-TS 用 `new RSIClient({ data_dir, model_id, api_key, base_url, config })`。Python 用 `RSIClient(data_dir=..., model_id=..., api_key=..., base_url=..., config=...)`，可显式传 `mode="local"`。只读查询可只传 `data_dir`，也可同时传 `config: null`（TS）或 `config=None`（Python）。
+TS 用 `new RSIClient({ data_dir, model_id, api_key, base_url, config })`。Python 用 `RSIClient(data_dir=..., model_id=..., api_key=..., base_url=..., config=...)`，可显式传 `mode="local"`。只读查询可只传 `data_dir`，也可同时传 `config: null`（TS）或 `config=None`（Python）。只上传已有任务时，初始化可只传 `data_dir` 和包含 `headers` 的 `config`。
 
 | 参数 | 必填条件 | 类型、默认值和用途 |
 | --- | --- | --- |
@@ -36,8 +36,8 @@ TS 用 `new RSIClient({ data_dir, model_id, api_key, base_url, config })`。Pyth
 | `model_id` | 运行本地 Execution 时必填。 | 非空字符串，传入 Chat Completions 请求体的 `model` 字段。 |
 | `api_key` | 运行本地 Execution 时必填。 | 模型 API Key，SDK 将它作为 Bearer token 发送。 |
 | `base_url` | 运行本地 Execution 时必填。 | 支持工具调用的 OpenAI-compatible Chat Completions 基地址。 |
-| `config` | 选填。 | 本地运行和 Recipe 上传选项。 |
-| `config.headers` | 选填，省略等同 `{}`。 | 本地 Recipe ZIP 上传的 HTTP 请求头，键和值都是字符串。 |
+| `config` | 选填。 | 本地运行和 Recipe 云端读写选项。 |
+| `config.headers` | 选填，省略等同 `{}`。 | 本地 SDK 查找、下载和上传云端 Recipe 时使用的 HTTP 请求头，键和值都是字符串。 |
 | `config.credential_scope` | 选填。需要在 token 刷新后自动匹配同账号任务时传入。 | 宿主为已认证账号指定的稳定非空标识。同账号刷新 token 时沿用该值，共用 `data_dir` 的不同账号使用不同值。SQLite 保存标识的哈希。 |
 | `config.auto_start` | 选填，默认 `true`。 | 为 `true` 时入队后自动调度 Worker，为 `false` 时由宿主调用 `recover()`。 |
 | `config.max_tokens` | 选填。 | 正整数，限制单次模型调用的输出。省略时由模型服务决定。 |
@@ -54,11 +54,11 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 
 | 方法 | 必填参数 | 选填参数 | 返回与用途 |
 | --- | --- | --- | --- |
-| `execution_create` | `evidence`（对象）、`idempotency_key`（非空字符串） | `recipe_reference`（对象），提供时 `path` 必填，`recipe_id` 选填。 | 排队创建 Execution，立即返回执行的 `id` 和关联的 `recipe_id`。 |
+| `execution_create` | `evidence`（对象）、`idempotency_key`（非空字符串） | `recipe_reference`（对象），参数见下表。 | 排队创建 Execution，返回执行的 `id` 和关联的 `recipe_id`。 |
 | `execution_get` | `execution_id`（字符串） | 无 | 读取名称、阶段、进度、问题、测试结果和错误。 |
 | `execution_list` | 无 | `query`，提供时须含 `execution_ids: string[]`（Python 为 `list[str]`）。 | 返回 Execution 列表。 |
 | `task_list` | 无 | 无 | 本地模式。每个任务返回一条卡片摘要，包含当前执行的状态、进度和待答问题数量。 |
-| `task_get` | `task_id`（首次 Execution ID） | 无 | 本地模式。返回当前执行、历次澄清问答及就绪的最终产物。 |
+| `task_get` | `task_id`（首次 Execution ID） | 无 | 本地模式。返回任务 ID、Recipe 和版本 ID、最终 ZIP 路径、当前执行及历次澄清问答。 |
 | `task_restart` | `task_id`、`idempotency_key` | `evidence`（新材料）。 | 本地模式。创建后续 Execution，从分析开始，保留原执行的历史。 |
 | `execution_append_evidence` | `execution_id`（字符串）、`evidence`（对象） | 无顶层选填项。`evidence` 字段要求见下表。 | 给进行中的 Execution 追加证据并重新分析。 |
 | `execution_cancel` | `execution_id`（字符串） | 无 | 取消排队或进行中的 Execution。 |
@@ -66,8 +66,7 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 | `rubrics_list` | `offset`（非负整数）、`archived`（布尔值） | 无 | 分页列出评分标准及最新版本 ID。 |
 | `rubrics_get` | `rubrics_id`（字符串）、`version`（`"latest"` 或版本 ID） | 无 | 返回选中的评分标准版本。 |
 | `recipe_list` | 无 | `query`，提供时须含 `recipe_ids: string[]`（Python 为 `list[str]`）。 | 返回首次学习条目和现有 Recipe 的摘要。 |
-| `recipe_insert` | `path`（本地 Recipe 文件路径） | 无 | 验证文件，创建新 Recipe 和可用 v1，返回与 `recipe_get` 相同的 Recipe 对象。云端模式先在本地验证，再上传文件内容（`POST /recipes`）。 |
-| `recipes_upsert` | ZIP 路径或 `file://` URI。本地模式还需 `local_recipe_id`、`local_recipe_version_id`。 | 云端模式可传 `recipe_id`。两种模式都可传 `idempotency_key`。 | 上传 ZIP 并返回正式的 `recipe_id`、`recipe_version_id`。本地模式同步更新 SQLite 的 Recipe 和版本主键。 |
+| `recipes_upsert` | 本地模式传 `task_id`。云端模式传 ZIP 路径或 `file://` URI。 | `recipe_id`（指定已有云端 Recipe）和 `idempotency_key`。 | 上传 ZIP 并返回正式的 `recipe_id`、`recipe_version_id`。本地模式同步更新 SQLite 中的 ID。 |
 | `recipe_download` | `recipe_id`、`recipe_version_id`（TS 第二个位置参数对应版本 ID） | 无 | 云端模式读取指定版本的 ZIP，Python 返回 `bytes`，TS 返回 `Uint8Array`。 |
 | `recipe_get` | `recipe_id`（字符串） | `version`（`"active"`、`"latest"` 或版本 ID，默认 `"active"`） | 返回 Recipe 和 `selected_version`。 |
 | `recipe_test` | `execution_id`、`recipe_id`、`version_id`、`rubrics_version_id`（均为字符串） | 无 | 在活动 Execution 内安排指定版本测试。 |
@@ -85,8 +84,13 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 | `recipe_reference` | 选填，Python 可传 `None`。 | 对象，指定一份供首轮生成参考的 Recipe。 |
 | `recipe_reference.path` | 提供参考对象时必填。 | 参考 Recipe 的本地文件路径，支持直接使用已有版本的 `RECIPE.md`。 |
 | `recipe_reference.recipe_id` | 选填。 | 字符串。传入时关联已有 Recipe，新版本归到该 ID。省略或在 Python 中传 `None` 时，使用参考文件学习并新建 Recipe。 |
+| `recipe_reference.recipe_version_id` | 本地模式选填。使用时须同时提供 `recipe_id`。 | 指定更新的基准版本。 |
 
-`recipe_reference` 只在创建时提供。参考文件正文是首轮生成的基线，本地 Execution 的返回字段 `evidence` 会用 `role="recipe"` 标识该快照。要给已有本地 Recipe 生成新版本，应附上该 Recipe 的 `recipe_id`，该 Recipe 须有可用版本。普通历史材料使用 `role="reference"`。
+`recipe_reference` 在创建时提供。普通本地参考文件的正文用于首轮生成，本地 Execution 的 `evidence` 用 `role="recipe"` 标识对应的快照。普通历史材料使用 `role="reference"`。
+
+在新设备上更新云端 Recipe 时，传入正式 `recipe_id`。如果本地缺少基准版本，SDK 会从 CoSens 查询当前已发布且可用的版本，校验 ZIP 并保存包内全部文件，然后用包内的 `RECIPE.md` 创建任务。提供 `recipe_version_id` 时锁定该版本。若版本缺少本地记录并且云端已切到其他可用版本，SDK 返回版本冲突。下载使用 `COSENS_RSI_BASE_URL` 或默认的 CoSens 地址，并通过 `config.headers` 或 `COSENS_API_KEY` 认证。本地模型 Key 留在模型调用链路。
+
+SQLite 采用包的正式 Recipe ID 和版本 ID，并保存云端关联。缓存就绪后可以离线使用该版本。生成的新版本保留基准版本的资源，测试时可以使用这些资源。新产物仍通过 `recipes_upsert()` 将新版本写入同一个云端 Recipe。
 
 ```ts
 const run = await client.execution_create({
@@ -114,23 +118,9 @@ run = client.execution_create(
 
 本地完整文本上下文随 `context_path` 创建快照，无固定单文件或批次大小上限。Agent 通过 `read_evidence(locator, offset?, limit?, query?)` 读取，每页最多 8192 字符。按 `next_offset` 继续读取，或用 `query` 从指定位置查找下一处精确匹配。在较长的工具调用历史中，旧页的正文会从发给模型的请求中移除，原始快照和读取轨迹可供追查。普通附件以及云端上传仍适用各自的大小限制。
 
-### 导入外部 Recipe
+### Recipe 文件格式
 
-`recipe_insert(path)` 只接收一个本地文件路径。TS 传路径字符串，Python 接受字符串或 `Path`。文件须是 UTF-8，开头是由两行 `---` 包围的 YAML 映射，包含非空字符串 `name` 和 `description`。Markdown 正文可以为空。格式校验失败时本地库不会新增记录。
-
-每次成功导入都会创建新的 Recipe 和可用的 v1，返回与 `recipe_get()` 相同的 Recipe 对象：`id` 是 Recipe ID，`active_version_id` 和 `selected_version.id` 是新版本 ID。SDK 将原文件保存为对应版本目录下的 `RECIPE.md`，包括额外的 YAML 字段。`selected_version.provenance.source` 为 `external`。导入无需模型配置，`recipe_list()` 中的 `execution_ids` 为 `[]`。
-
-```ts
-const recipe = await client.recipe_insert('/local/order-export/SKILL.md');
-console.log(recipe.id, recipe.active_version_id);
-```
-
-```python
-recipe = client.recipe_insert('/local/order-export/SKILL.md')
-print(recipe['id'], recipe['active_version_id'])
-```
-
-导入和模型生成都要求 `name` 和 `description`。模型生成的 `instructions` 也必须是非空 Markdown。`selected_version.content` 使用这三个字段。示例文件如下。
+Recipe Markdown 使用 UTF-8，开头的 YAML 包含非空字符串 `name` 和 `description`，由两行 `---` 包围。模型生成的正文必须是非空 Markdown。`selected_version.content` 将正文放在 `instructions` 字段。示例文件如下。
 
 ```markdown
 ---
@@ -149,37 +139,29 @@ description: "按用户要求将订单数据导出为 CSV。"
 
 主动重新开始时，TS 调用 `task_restart(taskId, { idempotency_key, evidence })`，Python 调用 `task_restart(task_id, idempotency_key=..., evidence=...)`。可以省略新证据。SDK 创建下一条 Execution，继承材料和已提交的答案，从分析开始。重试同一次重启请求时沿用幂等键。最终产物已经确认的任务保留历史结果，后续更新 Recipe 通过 `execution_create()` 创建新任务。
 
-通过验证且无需澄清的最终版本打包成 ZIP 后，`task_get()` 的 `artifact` 返回 `zip_path`、`local_recipe_id` 和 `local_recipe_version_id`。候选版本仍可在执行状态和测试详情中查看。云端正式版本写入后，按原任务 ID 查询可读取正式 ID。历史任务只有上传回执且本机缺少原始 ZIP 时，仍返回正式 ID，可用云端 `recipe_download()` 获取该版本。
+`task_get()` 顶层返回 `task_id`、`recipe_id`、`recipe_version_id` 和 `recipe_zip_path`。任务关联 Recipe 后即可读到 `recipe_id`。最终版本通过验证、澄清完成并生成 ZIP 后，`recipe_version_id` 与绝对路径 `recipe_zip_path` 才有值，此前二者均为 `null`。产物就绪时，`artifact` 也包含同一对 ID 和 ZIP 路径。上传成功后用云端正式 ID。历史任务的本地 ZIP 已清理时，仍可通过回执读取正式 ID，路径为 `null`，可用云端 `recipe_download()` 获取该版本。
 
-### 从本地 Recipe 上传 ZIP
+### 发布 Recipe ZIP
 
-对本地客户端调用 `recipes_upsert()` 时，指定该 ZIP 对应的本地 Recipe 和版本。SDK 在发送前校验 ZIP 内的文件及其内容与指定版本一致。首次上传建立云端 Recipe，上传成功后本地沿用回执中的正式 ID。上传同一 Recipe 的下一版本时，SDK 自动将已同步的 Recipe ID 传给云端。
+在本地模式下，传入要发布的 `task_id`。SDK 查找该任务通过验证的最终版本和冻结 ZIP，再上传。可先用 `task_get(task_id)` 读取 `recipe_zip_path` 判断产物是否就绪。
+
+传入正式的 `recipe_id` 时，SDK 将 ZIP 发布为该云端 Recipe 的新版本，回执返回同一个 `recipe_id` 和新签发的 `recipe_version_id`。省略时，SDK 沿用任务已关联的云端 Recipe，或在首次发布时创建 Recipe。任务已关联其他云端 Recipe，或指定 ID 已属于另一份本地 Recipe 时，SDK 返回冲突。
 
 ```python
-artifact = client.task_get(task_id)["artifact"]
-if artifact:
-    receipt = client.recipes_upsert(
-        artifact["zip_path"],
-        local_recipe_id=artifact["local_recipe_id"],
-        local_recipe_version_id=artifact["local_recipe_version_id"],
-    )
+receipt = client.recipes_upsert(task_id=task_id, recipe_id=cloud_recipe_id)
 ```
 
 ```ts
-const { artifact } = await client.task_get(taskId);
-if (artifact) {
-  const receipt = await client.recipes_upsert(artifact.zip_path, {
-    local_recipe_id: artifact.local_recipe_id,
-    local_recipe_version_id: artifact.local_recipe_version_id,
-  });
-}
+const receipt = await client.recipes_upsert({ task_id: taskId, recipe_id: cloudRecipeId });
 ```
 
-本地 `recipes_upsert` 把非空的 `config.headers` 发给上传地址。上传地址依次取调用时的 `base_url`、`COSENS_RSI_BASE_URL`、默认 CoSens 地址。`config.headers` 为空时，上传使用调用时的 `api_key` 或环境变量 `COSENS_API_KEY`。SDK 生成 multipart 请求头和 `Idempotency-Key`。调用时显式指定的 Virtual User 优先于 `config.headers` 中的 `X-Virtual-User-Id`。
+本地 `recipes_upsert()` 从环境变量 `COSENS_RSI_BASE_URL` 读取上传地址，省略环境变量时使用默认 CoSens 地址。发起上传请求时，认证和账号信息取自初始化 `RSIClient` 时传入的 `config.headers`，其中可包含 `X-Virtual-User-Id`。SDK 生成 multipart 请求头，使用传入的 `idempotency_key` 或自动生成幂等键。
 
-上传成功后，SQLite 的 `recipes.id` 与回执的 `recipe_id` 一致，`versions.id` 与回执的 `recipe_version_id` 一致。关联的 Execution 使用正式 Recipe 和版本 ID，Execution 自身的 ID 保留。下一次调用可以直接使用回执中的正式 ID。
+上传成功后，SDK 按回执更新任务行的 `recipe_id` 和 `recipe_version_id`，并同步更新关联的 Execution 引用。`recipes.id` 始终是任务 ID。后续用 `execution_create()` 更新同一 Recipe 时可传正式 `recipe_id`。
 
-同一版本用同一 ZIP 重试时，临时 ID 和正式 ID 均可定位同一上传回执。为同一个 Recipe 上传另一版本时，先完成当前待确认的上传。若同一 Recipe 的 Execution 正在排队或运行，等该执行结束后再同步。
+网络中断后用同一个 `task_id` 重试。SDK 使用之前保存的 ZIP 和幂等键。为同一个 Recipe 上传另一版本时，先完成当前待确认的上传。若同一 Recipe 的 Execution 正在排队或运行，等该执行结束后再同步。
+
+在云端模式下，直接把 ZIP 路径传给 `recipes_upsert()`。传入已有的正式 `recipe_id` 时发布新版本，省略时创建 Recipe。
 
 ### Recipe 详情返回结构
 
@@ -221,13 +203,13 @@ recipe_file = (
 | `created_at` | 数字 | 创建时间，Unix 秒。已绑定 Recipe 时取 Recipe 记录，未绑定的历史条目取 Execution 记录。 |
 | `updated_at` | 数字 | 更新时间，Unix 秒，取同一条 Recipe 或 Execution 记录。 |
 
-命名规则：对象自身的 ID 叫 `id`，引用其他对象时用 `<对象>_id`。`recipe_get()` 和 `recipe_insert()` 返回 Recipe 对象，所以 ID 在 `id`；列表条目可能是还没有 Recipe 的首次学习，所以用 `recipe_id` 引用 Recipe。两处的可用版本都叫 `active_version_id`。
+`recipe_get()` 返回 Recipe 对象，其 ID 为 `id`。列表条目通过 `recipe_id` 引用 Recipe。两处的可用版本都叫 `active_version_id`。
 
 首次学习时，`execution_ids` 包含本次 Execution 的 ID。已有 Recipe 没有关联执行时返回 `[]`。未归档的 Execution 按创建时间从新到旧排序，创建时间相同时按 ID 倒序。
 
 `active_version_id` 表示 Recipe 当前可用的版本。例如学习 v2 时等待澄清，v1 仍可用，则此字段仍指向 v1。任务进度和澄清状态通过 `task_list()` 或 `task_get()` 读取。手动归档可用版本后，条目仍在列表，可用版本 ID 变为 `null`。恢复时可用 `recipe_get(recipe_id, "latest")`（Python 用 `version="latest"`）读取 `latest_qualified_version_id`，再调用 `recipe_version_set_archived`。
 
-在没有未决澄清时，上一个可用版本保留到编号更高的版本验证通过。切换和旧版归档在同一个事务完成。旧版可按 ID 读取，`selected_version.archived` 表示所查版本的归档状态。恢复仅支持最近发布的版本，包括通过 `recipe_insert()` 导入的 v1。手动归档只作用于指定版本，更新的版本通过验证后仍会自动可用。
+在没有未决澄清时，上一个可用版本保留到编号更高的版本验证通过。切换和旧版归档在同一个事务完成。旧版可按 ID 读取，`selected_version.archived` 表示所查版本的归档状态。恢复仅支持最近发布的版本。手动归档只作用于指定版本，更新的版本通过验证后仍会自动可用。
 
 `rubrics_list()` 固定每页 50 条。`offset` 从 0 开始，`archived=false` 查未归档对象，`true` 查已归档对象。
 
@@ -290,17 +272,17 @@ TS 用 `execution_list({ execution_ids: [id1, id2] })`，Python 用 `execution_l
 | 表 | 内容 |
 | --- | --- |
 | `executions` | **业务主表。** 记录状态、阶段、进度、续接关系及关联版本。`created_at` 用于排队，`owner`、`lease_until`、`fence` 用于 Worker 认领、续租和接管。澄清、评分和错误等明细存于 `details`。 |
-| `recipes` | **业务主表。** 保存 `id`、`name`、`created_at`、`updated_at`、`archived_at`、`storage_path`。已同步的 `id` 为云端正式 Recipe ID。`storage_path` 是相对于 `data_dir` 的固定目录。 |
-| `versions` | Recipe 和 Rubrics 的版本内容。通过 `recipe_id` 或 `rubrics_id` 归组。Recipe 版本的 `status` 为 `candidate`、`available` 或 `archived`。`rubrics_metadata` 保存评分标准名称、时间等元数据。已同步的版本 `id` 为云端正式版本 ID。 |
+| `recipes` | **每个任务一行。** `id` 是根 Execution 的 ID，也是任务主键。`recipe_id` 可由多个任务共享。任务最终通过验证后，写入 `recipe_version_id` 和相对 `data_dir` 的 `recipe_zip_path`。 |
+| `rubrics_versions` | 保存评分标准的各版本和元数据。 |
 | `evidence_snapshots` | 保存 Execution 的上下文与文件快照元数据。 |
 | `slots` | 协调同一数据目录内的 Worker 和模型调用并发。 |
-| `idempotency` | 保存幂等请求、上传回执和用于重试的临时 ID 别名。 |
+| `idempotency` | 保存幂等请求、上传回执、ID 别名，以及恢复候选版本和复用云端基准所需的 Recipe 数据。 |
 
 TS 和 Python 使用相同的表结构。查询时，`latest_version_id` 取版本号最大的一条，`active_version_id` 取唯一可用版本，`latest_qualified_version_id` 取可用及已归档版本中编号最大的一条。`recipe_list()` 行里的 `active_version_id` 与 `recipe_get()` 的同名字段取值相同。
 
 新版本验证通过并发布后，较早版本在同一事务中归档。手动归档当前可用版本后，可用版本 ID 为空。只允许恢复最近发布的版本。
 
-初始化将旧库升级到 SQLite schema v9。v8 已同步的记录从原有回执取得正式主键，未同步的记录沿用原 ID。v3 及更早的版本指针迁入版本状态，v4 的 `recipe_api_metadata` 在迁移中删除，v5 及更早的 Recipe 补齐 `storage_path`。v6 及更早的版本将 `title` 迁为 `name`、`applicability` 迁为 `description`，并在原路径按新格式导出 `RECIPE.md`。升级前先停止使用同一数据库的旧版 Worker。
+初始化将旧库升级到 SQLite schema v10。迁移按根 Execution 补齐任务行，保留旧 ID 别名、上传回执和原产物路径。v8 已同步的记录从回执恢复正式 ID。v6 及更早的版本在原路径导出新格式的 `RECIPE.md`。升级前先停止使用同一数据库的旧版 Worker。
 
 ## 运行管理
 

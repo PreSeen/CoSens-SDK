@@ -21,15 +21,21 @@ from .model_headers import bind_model_headers
 from .models import Conflict, InputChanged, InvalidState, LeaseLost, NotFound
 from .progress import stage_progress
 from .recipe_file import render_recipe_markdown
-from .recipe_identity import migrate_mapped_recipe_ids, recipe_id_for, version_id_for
+from .recipe_identity import (
+    migrate_mapped_recipe_ids,
+    recipe_id_for,
+    recipe_object_relation,
+    version_id_for,
+)
 from .store_schema import (
     LEGACY_RECIPES,
     MIGRATE_RECIPE_VERSIONS,
+    MIGRATE_TASK_RECIPES,
     RECIPE_PROJECTION,
     SCHEMA,
     STORAGE,
 )
-from .task import freeze_task_package, is_approved
+from .task import backfill_task_recipes, freeze_task_package, is_approved
 
 
 def uid(prefix):
@@ -94,16 +100,21 @@ class Store:
 
     def _initialize(self):
         with self.connect() as conn:
-            if conn.execute("PRAGMA user_version").fetchone()[0] == 9:
+            version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version == 10 or (version == 9 and self._is_cloud_database(conn)):
                 return
         with self.transaction() as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
+            if version == 10:
+                return
             if version == 9:
+                self._migrate_task_recipes(conn)
                 return
             if version in (7, 8):
                 if version == 8:
                     migrate_mapped_recipe_ids(self, conn)
                 conn.execute("PRAGMA user_version = 9")
+                self._migrate_task_recipes(conn)
                 return
             if version not in (0, 1, 2, 3, 4, 5, 6):
                 raise InvalidState("unsupported RSI SQLite schema version")
@@ -214,6 +225,28 @@ class Store:
                 if statement.strip():
                     conn.execute(statement)
             conn.execute("PRAGMA user_version = 9")
+            self._migrate_task_recipes(conn)
+
+    @staticmethod
+    def _is_cloud_database(conn):
+        return conn.execute(
+            """SELECT 1 FROM sqlite_master
+               WHERE type='table' AND name IN ('cloud_recipe_account', 'cloud_recipe_publications')"""
+        ).fetchone() is not None
+
+    def _migrate_task_recipes(self, conn):
+        if self._is_cloud_database(conn):
+            return
+        statement = ""
+        for line in MIGRATE_TASK_RECIPES.splitlines(keepends=True):
+            statement += line
+            if sqlite3.complete_statement(statement):
+                conn.execute(statement)
+                statement = ""
+        if statement.strip():
+            raise InvalidState("incomplete local Task Recipe migration")
+        backfill_task_recipes(self, conn)
+        conn.execute("PRAGMA user_version = 10")
 
     def _migrate_recipe_content(self, conn):
         rows = conn.execute("""
@@ -265,6 +298,8 @@ class Store:
     @staticmethod
     def _write_record(conn, kind, record, *, update):
         table, columns = STORAGE[kind]
+        if kind == "recipe":
+            table = recipe_object_relation(conn)
         details = dict(record)
         fields = [details.pop(column, None) for column in columns]
         if kind != "recipe":
@@ -324,7 +359,7 @@ class Store:
         base_id = execution.get("base_recipe_version_id")
         if recipe_id or base_id:
             row = conn.execute(
-                """SELECT name FROM recipes
+                f"""SELECT name FROM {recipe_object_relation(conn)}
                 WHERE id=COALESCE(?, (SELECT object_id FROM versions WHERE id=?))""",
                 (recipe_id, base_id),
             ).fetchone()
@@ -617,11 +652,14 @@ class Store:
 
     @staticmethod
     def set_recipe_version_status(conn, recipe, version_id, status):
-        result = conn.execute(
-            "UPDATE versions SET status=? WHERE recipe_id=? AND id=? AND status<>?",
-            (status, recipe["id"], version_id, status),
-        )
-        if result.rowcount:
+        existing = conn.execute(
+            "SELECT status FROM versions WHERE recipe_id=? AND id=?", (recipe["id"], version_id)
+        ).fetchone()
+        if existing is not None and existing["status"] != status:
+            conn.execute(
+                "UPDATE versions SET status=? WHERE recipe_id=? AND id=?",
+                (status, recipe["id"], version_id),
+            )
             Store.save(conn, recipe)
 
     def append_version(
@@ -633,6 +671,7 @@ class Store:
         operation_key=None,
         provenance=None,
         recipe_markdown=None,
+        version_id=None,
     ):
         if operation_key:
             row = conn.execute(
@@ -646,7 +685,7 @@ class Store:
             (obj["id"],),
         ).fetchone()[0]
         version = {
-            "id": uid("version"),
+            "id": version_id if version_id is not None else uid("version"),
             "object_id": obj["id"],
             "number": number,
             "content": content,
@@ -799,7 +838,7 @@ class Store:
                 AND (? IS NULL OR executions.id=?)
                 AND (? IS NULL OR (executions.status='queued' AND executions.fence=?
                     AND executions.archived_at IS NULL AND EXISTS (
-                        SELECT 1 FROM recipes WHERE id=executions.recipe_id AND archived_at IS NULL
+                        SELECT 1 FROM {recipe_object_relation(conn)} WHERE id=executions.recipe_id AND archived_at IS NULL
                     )))
                 AND (? IS NULL OR json_extract({EFFECTIVE_RUNTIME},'$.model.api_key_env')
                      IN (SELECT value FROM json_each(?)))
@@ -951,7 +990,7 @@ class Store:
                    AND (? IS NULL OR executions.id=?)
                    AND (? IS NULL OR (executions.status='queued' AND executions.fence=?
                        AND executions.archived_at IS NULL AND EXISTS (
-                          SELECT 1 FROM recipes WHERE id=executions.recipe_id AND archived_at IS NULL
+                          SELECT 1 FROM {recipe_object_relation(conn)} WHERE id=executions.recipe_id AND archived_at IS NULL
                        )))
                    AND (? IS NULL OR json_extract({EFFECTIVE_RUNTIME},'$.model.api_key_env')
                         IN (SELECT value FROM json_each(?)))

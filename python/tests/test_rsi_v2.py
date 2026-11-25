@@ -419,10 +419,15 @@ def test_version_availability_archive_and_restore(client, tmp_path):
         )
 
 
-def test_recipe_insert_requires_skill_metadata_and_creates_available_version(tmp_path):
+def test_seeded_recipe_requires_skill_metadata_and_creates_available_version(tmp_path):
     from cosens.rsi import RSIClient as PublicClient
+    from cosens.rsi.recipe_file import read_recipe_file
 
     host = PublicClient(data_dir=tmp_path)
+
+    def seed(source):
+        return host._queue.recipe_insert(*read_recipe_file(source))
+
     path = tmp_path / "SKILL.md"
     metadata = {
         "name": "order-export",
@@ -450,12 +455,12 @@ def test_recipe_insert_requires_skill_metadata_and_creates_available_version(tmp
     ):
         path.write_text(source, encoding="utf-8")
         with pytest.raises(ValueError, match=error):
-            host.recipe_insert(path)
+            seed(path)
     path.write_bytes(b"\x80")
     with pytest.raises(ValueError, match="readable UTF-8 Markdown file"):
-        host.recipe_insert(path)
+        seed(path)
     with pytest.raises(ValueError, match="readable UTF-8 Markdown file"):
-        host.recipe_insert(tmp_path)
+        seed(tmp_path)
     assert host.recipe_list() == []
 
     source = (
@@ -464,8 +469,8 @@ def test_recipe_insert_requires_skill_metadata_and_creates_available_version(tmp
         'metadata:\r\n  version: "1.0"\r\n---\r\n\r\n' + instructions
     )
     path.write_bytes(source.encode("utf-8"))
-    first = host.recipe_insert(path)
-    second = host.recipe_insert(str(path))
+    first = seed(path)
+    second = seed(str(path))
     assert first["id"] != second["id"]
     assert first["active_version_id"] != second["active_version_id"]
     assert host.recipe_get(first["id"], version=first["active_version_id"]) == first
@@ -486,7 +491,7 @@ def test_recipe_insert_requires_skill_metadata_and_creates_available_version(tmp
     path.write_text(
         "---\nname: minimal\ndescription: Metadata only\n---", encoding="utf-8"
     )
-    minimal = host.recipe_insert(path)
+    minimal = seed(path)
     assert minimal["selected_version"]["content"]["instructions"] == ""
 
 
@@ -608,6 +613,9 @@ def test_recipe_migration_preserves_archived_target_and_candidate(
     with host._queue.store.connect() as migrated:
         assert {
             row["name"] for row in migrated.execute("PRAGMA table_info(recipes)")
+        } == {"id", "recipe_id", "recipe_version_id", "recipe_zip_path"}
+        assert {
+            row["name"] for row in migrated.execute("PRAGMA table_info(recipe_objects)")
         } == {
             "id",
             "name",
@@ -623,7 +631,7 @@ def test_recipe_migration_preserves_archived_target_and_candidate(
             "available",
             "candidate",
         ]
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 10
         assert (
             migrated.execute(
                 "SELECT name FROM sqlite_schema WHERE name='recipe_api_metadata'"
@@ -1250,11 +1258,14 @@ def test_recipe_list_includes_learning_and_revision_status(client, tmp_path):
     assert client.recipe_list(q=source["name"]) == []
     assert client.recipe_list(active_only=True) == []
     with client.store.connect() as conn:
-        assert conn.execute("SELECT id FROM recipes").fetchall() == []
+        assert conn.execute("SELECT id FROM recipe_objects").fetchall() == []
+        assert tuple(conn.execute("SELECT * FROM recipes").fetchone()) == (learning["id"], None, None, None)
 
     client.run_pending(runtime=FileRuntime())
     [row] = client.recipe_list()
     assert (row["kind"], row["status"]) == ("recipe", "passed")
+    with client.store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM rubrics_versions").fetchone()[0] == 1
     assert row["active_version_number"] == 1
     assert row["execution_id"] == learning["id"]
     assert "runtime_config" not in row

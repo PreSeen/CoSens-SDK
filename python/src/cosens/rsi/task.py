@@ -2,19 +2,30 @@
 
 import hashlib
 import os
+import re
 import tempfile
 
 from .models import Conflict, NotFound
 from .recipe_identity import (
-    IDENTITY,
     RECEIPT,
     VERSION_ALIAS,
     journal_entry,
     recipe_id_for,
+    recipe_object_relation,
     version_id_for,
 )
 
 _PACKAGE_SCOPE = "task_final_package"
+
+
+def _frozen_package(conn, task_id):
+    entry = journal_entry(conn, _PACKAGE_SCOPE, task_id)
+    if entry:
+        return entry[0]
+    entry = journal_entry(conn, "task_recipe_package", task_id)
+    if entry:
+        return {**entry[0], **entry[1]}
+    return None
 
 
 def is_approved(execution):
@@ -123,7 +134,8 @@ def task_list(store):
     with store.connect() as conn:
         conn.execute("BEGIN")
         rows = conn.execute(
-            "SELECT * FROM executions WHERE archived_at IS NULL ORDER BY created_at DESC, id DESC"
+            """SELECT e.* FROM recipes r JOIN executions e ON e.id=r.id
+            WHERE e.archived_at IS NULL ORDER BY e.created_at DESC, e.id DESC"""
         ).fetchall()
         return [
             summary(store, conn, task_chain(store, conn, row["id"]))
@@ -132,7 +144,67 @@ def task_list(store):
         ]
 
 
-def freeze_task_package(store, conn, execution, *, receipt_sha256=None):
+def _save_task_recipe(store, conn, task_id, execution, path=None):
+    if recipe_object_relation(conn) != "recipe_objects":
+        return
+    recipe_id = recipe_id_for(conn, execution.get("recipe_id"))
+    version_id = version_id_for(conn, execution["recipe_version_id"]) if is_approved(execution) else None
+    conn.execute(
+        """INSERT INTO recipes(id,recipe_id,recipe_version_id,recipe_zip_path) VALUES(?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET recipe_id=excluded.recipe_id,
+          recipe_version_id=excluded.recipe_version_id, recipe_zip_path=excluded.recipe_zip_path""",
+        (task_id, recipe_id, version_id, path.relative_to(store.root).as_posix() if path else None),
+    )
+
+
+def write_task_recipe(store, conn, execution, path=None):
+    for child_id in continuation_ids(execution):
+        child = conn.execute("SELECT base_execution_id FROM executions WHERE id=?", (child_id,)).fetchone()
+        if child and child[0] == execution["id"]:
+            return
+    _save_task_recipe(store, conn, root_id(store, conn, execution), execution, path)
+
+
+def _read_task_zip(path):
+    from .recipe_package import MAX_ZIP_BYTES
+
+    if path.parent.is_symlink() or path.is_symlink() or not path.is_file():
+        return None
+    with path.open("rb") as stream:
+        content = stream.read(MAX_ZIP_BYTES + 1)
+    return content if len(content) <= MAX_ZIP_BYTES else None
+
+
+def backfill_task_recipes(store, conn):
+    for row in conn.execute("SELECT * FROM executions ORDER BY created_at,id"):
+        root = store._record(row)
+        task_id = root["id"]
+        if root_id(store, conn, root) != task_id:
+            continue
+        execution = task_chain(store, conn, task_id)[-1]
+        path = None
+        if is_approved(execution) and re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
+            version_id = version_id_for(conn, execution["recipe_version_id"])
+            journal = _frozen_package(conn, task_id)
+            candidate = store.root / "task-packages" / f"{task_id}.zip"
+            try:
+                if (
+                    journal and journal["execution_id"] == execution["id"]
+                    and version_id_for(conn, journal["version_id"]) == version_id
+                ):
+                    expected = journal["sha256"]
+                else:
+                    receipt = journal_entry(conn, RECEIPT, version_id)
+                    expected = receipt[0].get("zip_sha256") if receipt else None
+                cached = _read_task_zip(candidate) if expected else None
+                if cached and hashlib.sha256(cached).hexdigest() == expected:
+                    path = candidate
+            except OSError:
+                pass
+        _save_task_recipe(store, conn, task_id, execution, path)
+
+
+def freeze_task_package(store, conn, execution, *, expected_sha256=None):
     from .recipe_package import build_recipe_package
 
     task_id = root_id(store, conn, execution)
@@ -141,22 +213,25 @@ def freeze_task_package(store, conn, execution, *, receipt_sha256=None):
         raise Conflict("invalid Task Recipe ZIP storage path")
     recipe = store.get_in(conn, execution["recipe_id"], "recipe")
     version = store.version_in(conn, recipe["id"], execution["recipe_version_id"])
-    frozen = journal_entry(conn, _PACKAGE_SCOPE, task_id)
-    if frozen:
-        saved = frozen[0]
+    saved = _frozen_package(conn, task_id)
+    if saved:
         if (
             saved["execution_id"] != execution["id"]
             or version_id_for(conn, saved["version_id"]) != version["id"]
         ):
             raise Conflict("Task already has a different final Recipe version")
-        if not path.is_file():
+        cached = _read_task_zip(path)
+        if cached is None:
             raise NotFound("Task's final Recipe ZIP is missing")
-        if hashlib.sha256(path.read_bytes()).hexdigest() != saved["sha256"]:
+        if hashlib.sha256(cached).hexdigest() != saved["sha256"]:
             raise Conflict("Task's final Recipe ZIP contents changed")
-        return path if receipt_sha256 is None or receipt_sha256 == saved["sha256"] else None
+        if expected_sha256 is not None and expected_sha256 != saved["sha256"]:
+            return None
+        _save_task_recipe(store, conn, task_id, execution, path)
+        return path
     package = build_recipe_package(store.root / recipe["storage_path"] / version["id"])
     sha256 = hashlib.sha256(package).hexdigest()
-    if receipt_sha256 is not None and receipt_sha256 != sha256:
+    if expected_sha256 is not None and expected_sha256 != sha256:
         return None
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     temporary = None
@@ -175,6 +250,7 @@ def freeze_task_package(store, conn, execution, *, receipt_sha256=None):
         "version_id": version["id"],
         "sha256": sha256,
     }, {})
+    _save_task_recipe(store, conn, task_id, execution, path)
     return path
 
 
@@ -219,24 +295,31 @@ def detail(store, conn, chain):
         )
     recipe_id = recipe_id_for(conn, current.get("recipe_id"))
     version_id = version_id_for(conn, current.get("recipe_version_id"))
-    receipt = journal_entry(conn, RECEIPT, version_id) if is_approved(current) else None
+    approved = is_approved(current)
+    receipt = journal_entry(conn, RECEIPT, version_id) if approved else None
     artifact = None
-    if is_approved(current):
+    if approved:
         path = None
         if receipt is None:
             path = freeze_task_package(store, conn, current)
         elif receipt_sha256 := receipt[0].get("zip_sha256"):
             try:
-                path = freeze_task_package(store, conn, current, receipt_sha256=receipt_sha256)
+                path = freeze_task_package(store, conn, current, expected_sha256=receipt_sha256)
             except (Conflict, NotFound, OSError, ValueError):
                 # An already-published version can still be downloaded from the cloud.
                 pass
         if path is not None:
             artifact = {
                 "zip_path": str(path),
-                "local_recipe_id": recipe_id,
-                "local_recipe_version_id": version_id,
+                "recipe_id": recipe_id,
+                "recipe_version_id": version_id,
             }
+    if artifact is None:
+        _save_task_recipe(store, conn, chain[0]["id"], current)
+    final_version_id = version_id if artifact else None
+    if receipt:
+        recipe_id = receipt[1]["recipe_id"]
+        final_version_id = receipt[1]["recipe_version_id"]
     return {
         **summary(store, conn, chain),
         "execution_ids": [execution["id"] for execution in chain],
@@ -245,9 +328,7 @@ def detail(store, conn, chain):
         "result": current.get("result"),
         "error": current.get("error"),
         "artifact": artifact,
-        "recipe_id": (
-            receipt[1]["recipe_id"] if receipt else
-            recipe_id if recipe_id and journal_entry(conn, IDENTITY, recipe_id) else None
-        ),
-        "recipe_version_id": receipt[1]["recipe_version_id"] if receipt else None,
+        "recipe_id": recipe_id,
+        "recipe_version_id": final_version_id,
+        "recipe_zip_path": artifact["zip_path"] if artifact else None,
     }

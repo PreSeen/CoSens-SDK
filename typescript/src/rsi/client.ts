@@ -7,7 +7,14 @@ import { authorizedTestFiles, snapshot } from './materials.js';
 import { restartExecution } from './progress.js';
 import { Store, uid, now, encode, type RetryTarget } from './store.js';
 import { isHeaderBinding } from './model-headers.js';
-import { hasApprovedResult, readTaskChain } from './task.js';
+import {
+  baseRecipePath,
+  fetchCloudRecipeBase,
+  findLocalRecipeBase,
+  installCloudRecipeBase,
+  type RecipeBase,
+} from './recipe-bootstrap.js';
+import { hasApprovedResult, readTaskChain, writeTaskRecipe } from './task.js';
 import {
   readRecipeList,
   type RecipeListEntry,
@@ -42,7 +49,7 @@ type EvidenceExecutionCreate = {
   evidence: MaterialManifest;
   confirmation_ref: string;
   idempotency_key: string;
-  base: { kind: 'recipe'; id: string } | null;
+  base: RecipeBase | null;
 };
 
 export type RecoverResult = {
@@ -324,6 +331,7 @@ export class RSIClient {
       );
       if (prev) return this.execution_get(prev.id);
       const created = this.execution_insert(request);
+      writeTaskRecipe(this.store, created);
       this.store.remember('execution_create', idempotency_key, request, {
         id: created.id,
       });
@@ -364,13 +372,14 @@ export class RSIClient {
         (baseId
           ? this.store.version_by_id(baseId, 'recipe').object_id
           : this.store.createRecipe(execution.name).id);
-      this.store.save({ ...execution, recipe_id: recipeId });
+      writeTaskRecipe(this.store, this.store.save({ ...execution, recipe_id: recipeId }));
     }
     return this.execution_get(id);
   }
 
   async execution_create_with_evidence(
     request: EvidenceExecutionCreate,
+    cloudHeaders?: Headers,
   ): Promise<Execution> {
     const { evidence, confirmation_ref, idempotency_key, base } = request;
     const scope = 'execution_create';
@@ -378,56 +387,68 @@ export class RSIClient {
       this.store.replay<{ id: string }>(scope, idempotency_key, request);
     const previous = replay();
     if (!previous && this.auto_start) this.check_runtime();
-    const execution = previous
-      ? this.store.tx(() => this.bindRecipeOnReplay(previous.id))
-      : this.writeExecutionEvidence(evidence, this.config, (data) => {
-          const existing = replay();
-          if (existing)
-            return {
-              execution: this.bindRecipeOnReplay(existing.id),
-              attached: false,
-            };
-          const recipe = base
-            ? this.store.get<Recipe>(base.id, 'recipe')
-            : null;
-          if (
-            recipe &&
-            (recipe.archived_at !== null || !recipe.active_version_id)
-          )
-            fail('invalid_state', 'base Recipe has no available version');
-          const material = this.store.insert<Material>('material', data);
-          const learningPaths = new Set(
-            data.files
-              .filter((file) => file.role !== 'input')
-              .map((file) => file.path),
+    const bootstrap = !previous && base && !findLocalRecipeBase(this.store, base)
+      ? await fetchCloudRecipeBase(this.store, base, cloudHeaders)
+      : undefined;
+
+    let materialDirectory: string | undefined;
+    let execution: Execution;
+    try {
+      execution = this.store.tx(() => {
+        const existing = replay();
+        if (existing) return this.bindRecipeOnReplay(existing.id);
+        const selected = bootstrap
+          ? installCloudRecipeBase(this.store, bootstrap)
+          : base ? findLocalRecipeBase(this.store, base) : undefined;
+        if (base && !selected) return fail('not_found', 'base Recipe version is no longer available');
+        const selectedEvidence = selected?.versionId ? {
+          ...evidence,
+          files: [
+            ...(evidence.files ?? []).filter(({ role }) => role !== 'recipe'),
+            { path: baseRecipePath(this.store, selected.recipe, selected.versionId), role: 'recipe' as const },
+          ],
+        } : evidence;
+        const data = snapshot(this.data_dir, selectedEvidence, this.config);
+        materialDirectory = join(this.data_dir, 'materials', data.id);
+        const learningPaths = new Set(
+          data.files
+            .filter((file) => file.role !== 'input')
+            .map((file) => file.path),
+        );
+        const inputs = data.files.filter((file) => file.role === 'input');
+        if (inputs.some((file) => learningPaths.has(file.path)))
+          fail(
+            'invalid_argument',
+            'current case inputs cannot also have a learning-only role',
           );
-          const inputs = data.files.filter((file) => file.role === 'input');
-          if (inputs.some((file) => learningPaths.has(file.path)))
-            fail(
-              'invalid_argument',
-              'current case inputs cannot also have a learning-only role',
-            );
-          const created = this.execution_insert({
-            material_ids: [material.id],
-            recipe_id: recipe?.id ?? this.store.createRecipe().id,
-            name: recipe?.name,
-            policy: {
-              artifact_confirmed: true,
-              confirmation_ref,
-              test_task: {
-                instruction:
-                  'Repeat the current task using the Recipe and the supplied current inputs. Produce the expected deliverables from scratch.',
-                replay_current_case: true,
-                input_locators: inputs.map((file) => file.locator),
-                checks: [],
-              },
+        const material = this.store.insert<Material>('material', data);
+        const created = this.execution_insert({
+          material_ids: [material.id],
+          recipe_id: selected?.recipe.id ?? this.store.createRecipe().id,
+          base_recipe_version_id: selected?.versionId,
+          name: selected?.recipe.name,
+          policy: {
+            artifact_confirmed: true,
+            confirmation_ref,
+            test_task: {
+              instruction:
+                'Repeat the current task using the Recipe and the supplied current inputs. Produce the expected deliverables from scratch.',
+              replay_current_case: true,
+              input_locators: inputs.map((file) => file.locator),
+              checks: [],
             },
-          });
-          this.store.remember(scope, idempotency_key, request, {
-            id: created.id,
-          });
-          return { execution: created, attached: true };
+          },
         });
+        writeTaskRecipe(this.store, created);
+        this.store.remember(scope, idempotency_key, request, {
+          id: created.id,
+        });
+        return created;
+      });
+    } catch (error) {
+      if (materialDirectory) rmSync(materialDirectory, { recursive: true, force: true });
+      throw error;
+    }
     if (this.auto_start) await this.recover();
     return execution;
   }
@@ -637,8 +658,8 @@ export class RSIClient {
 
     const version = execution.recipe_version_id ?? execution.base_recipe_version_id ?? null;
     const linkedRecipe = this.store.db.prepare(`
-      SELECT 1 FROM recipes WHERE id=? AND archived_at IS NULL AND (? IS NULL OR EXISTS (
-        SELECT 1 FROM versions WHERE recipe_id=recipes.id AND id=?
+      SELECT 1 FROM recipe_objects WHERE id=? AND archived_at IS NULL AND (? IS NULL OR EXISTS (
+        SELECT 1 FROM versions WHERE recipe_id=recipe_objects.id AND id=?
       ))
     `).get(execution.recipe_id, version, version);
     if (!linkedRecipe) return inherited;
@@ -937,13 +958,13 @@ export class RSIClient {
           const time = now();
           this.store.db
             .prepare(
-              `UPDATE recipes SET archived_at=?, updated_at=?
+              `UPDATE recipe_objects SET archived_at=?, updated_at=?
                WHERE id=? AND archived_at IS NULL
                  AND NOT EXISTS (
-                   SELECT 1 FROM versions WHERE recipe_id=recipes.id
+                   SELECT 1 FROM versions WHERE recipe_id=recipe_objects.id
                  )
                  AND NOT EXISTS (
-                   SELECT 1 FROM executions WHERE recipe_id=recipes.id AND id<>?
+                   SELECT 1 FROM executions WHERE recipe_id=recipe_objects.id AND id<>?
                  )`,
             )
             .run(time, time, obj.recipe_id, obj.id);
@@ -951,7 +972,7 @@ export class RSIClient {
         }
         obj.test_request = request;
         restartExecution(obj);
-        this.store.save(obj);
+        writeTaskRecipe(this.store, this.store.save(obj));
       }
       return { execution_id, status: 'queued' as const, ...request };
     });

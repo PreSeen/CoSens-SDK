@@ -23,7 +23,7 @@ def read_recipe_file(path: str | Path):
         markdown = file.read_bytes().decode("utf-8")
     except (OSError, ValueError, TypeError):
         raise ValueError(
-            "recipe_insert requires a readable UTF-8 Markdown file"
+            "Recipe requires a readable UTF-8 Markdown file"
         ) from None
 
     header = _FRONTMATTER.match(markdown)

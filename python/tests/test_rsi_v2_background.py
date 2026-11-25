@@ -862,7 +862,9 @@ def test_recover_retry_key_resumes_timed_out_checkpoint_once(
     skill.write_text(
         "---\nname: answer-writer\ndescription: Write an answer\n---\n\nWrite the answer 42.\n"
     )
-    recipe = initial.recipe_insert(skill)
+    from cosens.rsi.recipe_file import read_recipe_file
+
+    recipe = initial._queue.recipe_insert(*read_recipe_file(skill))
     context = tmp_path / "context.md"
     context.write_text("Write the answer 42 into answer.txt")
     evidence = {"context_path": str(context), "files": []}

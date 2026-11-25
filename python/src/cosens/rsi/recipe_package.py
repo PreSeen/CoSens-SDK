@@ -9,7 +9,7 @@ import stat
 import unicodedata
 import zlib
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from zipfile import ZIP_DEFLATED, ZIP_STORED, BadZipFile, ZipFile, ZipInfo
 
 from .recipe_file import read_recipe_file
@@ -133,6 +133,31 @@ def read_recipe_package(data: bytes) -> dict[str, bytes]:
     return files
 
 
+def _read_regular_file(path: Path, info: os.stat_result, total: int = 0) -> bytes:
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("Recipe version files must be regular files")
+    _check_size(info.st_size, total + info.st_size)
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0),
+    )
+    with os.fdopen(descriptor, "rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if not stat.S_ISREG(opened.st_mode) or (
+            info.st_dev, info.st_ino
+        ) != (opened.st_dev, opened.st_ino):
+            raise ValueError("Recipe version file changed while packaging")
+        _check_size(opened.st_size, total + opened.st_size)
+        content = stream.read(opened.st_size + 1)
+        if (
+            len(content) != opened.st_size
+            or os.fstat(stream.fileno()).st_mtime_ns != opened.st_mtime_ns
+        ):
+            raise ValueError("Recipe version file changed while packaging")
+    return content
+
+
 def _read_directory(directory: Path) -> dict[str, bytes]:
     if not stat.S_ISDIR(directory.lstat().st_mode):
         raise ValueError("Recipe version path must be a regular directory")
@@ -150,35 +175,77 @@ def _read_directory(directory: Path) -> dict[str, bytes]:
             if is_directory:
                 remaining.append(path)
                 continue
-            if not stat.S_ISREG(info.st_mode):
-                raise ValueError("Recipe version files must be regular files")
             if len(files) + 2 > MAX_ENTRIES:
                 raise ValueError(f"Recipe ZIP exceeds {MAX_ENTRIES} entries")
-            _check_size(info.st_size, total + info.st_size)
-            descriptor = os.open(
-                path,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0),
-            )
-            with os.fdopen(descriptor, "rb") as stream:
-                opened = os.fstat(stream.fileno())
-                if not stat.S_ISREG(opened.st_mode) or (
-                    info.st_dev, info.st_ino
-                ) != (opened.st_dev, opened.st_ino):
-                    raise ValueError("Recipe version file changed while packaging")
-                _check_size(opened.st_size, total + opened.st_size)
-                content = stream.read(opened.st_size + 1)
-                if (
-                    len(content) != opened.st_size
-                    or os.fstat(stream.fileno()).st_mtime_ns != opened.st_mtime_ns
-                ):
-                    raise ValueError("Recipe version file changed while packaging")
+            content = _read_regular_file(path, info, total)
             total += len(content)
             files[relative] = content
     paths.check_conflicts()
     if ENTRYPOINT not in files:
         raise ValueError(f"Recipe version requires {ENTRYPOINT} at its root")
     return files
+
+
+def read_recipe_version_resources(directory: Path) -> dict[str, bytes]:
+    files = _read_directory(directory)
+    del files[ENTRYPOINT]
+    return files
+
+
+def describe_recipe_resources(files: dict[str, bytes]) -> list[dict]:
+    remaining = 32 * 1024
+    resources = []
+    for path, data in sorted(files.items()):
+        info = {"path": path, "size": len(data)}
+        if len(data) <= min(8 * 1024, remaining) and b"\0" not in data:
+            try:
+                info["text"] = data.decode("utf-8")
+                remaining -= len(data)
+            except UnicodeDecodeError:
+                pass
+        resources.append(info)
+    return resources
+
+
+def stage_recipe_package_files(directory: Path, files: dict[str, bytes]) -> None:
+    if not files:
+        return
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not stat.S_ISDIR(directory.lstat().st_mode):
+        raise ValueError("Recipe package destination must be a regular directory")
+    paths = _PackagePaths()
+    for name in files:
+        paths.add(name, False)
+    paths.check_conflicts()
+    for name, data in files.items():
+        target = directory / name
+        parent = directory
+        for part in name.split("/")[:-1]:
+            parent = parent / part
+            parent.mkdir(mode=0o700, exist_ok=True)
+            if not stat.S_ISDIR(parent.lstat().st_mode):
+                raise ValueError("Recipe package destination cannot contain a symlink")
+        try:
+            info = target.lstat()
+        except FileNotFoundError:
+            temporary = None
+            try:
+                with NamedTemporaryFile(dir=directory.parent, delete=False) as stream:
+                    temporary = Path(stream.name)
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                temporary.chmod(0o400)
+                try:
+                    os.link(temporary, target)
+                except FileExistsError:
+                    pass
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+            info = target.lstat()
+        if _read_regular_file(target, info) != data:
+            raise ValueError("Recipe package destination already has different contents")
 
 
 def build_recipe_package(directory: Path) -> bytes:

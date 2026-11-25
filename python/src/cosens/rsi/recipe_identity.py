@@ -10,11 +10,20 @@ from .models import Conflict, InvalidState
 from .recipe_file import render_recipe_markdown
 
 IDENTITY = "recipe_cloud_identity"
+BOOTSTRAP = "recipe_cloud_bootstrap"
 RECIPE_ALIAS = "recipe_cloud_id_alias"
 VERSION_ALIAS = "recipe_cloud_version_alias"
 PENDING = "recipe_cloud_upload_pending"
 RECEIPT = "recipe_cloud_upload_receipt"
 DESTINATION_FIELDS = ("base_url", "virtual_user_id")
+
+
+def recipe_object_relation(conn):
+    """Recipe engine metadata lives in a view in local schema 10."""
+    current = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='view' AND name='recipe_objects'"
+    ).fetchone()
+    return "recipe_objects" if current else "recipes"
 
 
 def journal_entry(conn, scope, key):
@@ -32,6 +41,16 @@ def recipe_id_for(conn, recipe_id):
 def version_id_for(conn, version_id):
     entry = journal_entry(conn, VERSION_ALIAS, version_id) if version_id else None
     return entry[1]["id"] if entry else version_id
+
+
+def require_unclaimed_upload_target(conn, target, local_recipe_id=None):
+    if target is not None and conn.execute(
+        """SELECT 1 FROM idempotency
+           WHERE scope=? AND (? IS NULL OR key<>?)
+             AND json_extract(request,'$.cloud_recipe_id')=? LIMIT 1""",
+        (PENDING, local_recipe_id, local_recipe_id, target),
+    ).fetchone():
+        raise Conflict("cloud Recipe target is reserved by another local Recipe upload")
 
 
 _EXECUTION_REFERENCES = """recipe_id=? OR recipe_version_id=? OR base_recipe_version_id=?
@@ -162,8 +181,9 @@ def promote_recipe_identity(store, conn, recipe_id, version_id, receipt):
     version = store.version_in(conn, recipe_id, version_id)
     recipe_id, version_id = recipe["id"], version["id"]
     new_recipe_id, new_version_id = receipt["recipe_id"], receipt["recipe_version_id"]
+    recipe_objects = recipe_object_relation(conn)
     for table, scope, old, new in (
-        ("recipes", RECIPE_ALIAS, recipe_id, new_recipe_id),
+        (recipe_objects, RECIPE_ALIAS, recipe_id, new_recipe_id),
         ("versions", VERSION_ALIAS, version_id, new_version_id),
     ):
         if old != new and (
@@ -183,11 +203,16 @@ def promote_recipe_identity(store, conn, recipe_id, version_id, receipt):
     )
     conn.execute("PRAGMA defer_foreign_keys=ON")
     if recipe_id != new_recipe_id:
-        conn.execute("UPDATE recipes SET id=? WHERE id=?", (new_recipe_id, recipe_id))
+        conn.execute(f"UPDATE {recipe_objects} SET id=? WHERE id=?", (new_recipe_id, recipe_id))
         conn.execute(
             "UPDATE versions SET recipe_id=?,data=json_set(data,'$.object_id',?) WHERE recipe_id=?",
             (new_recipe_id, new_recipe_id, recipe_id),
         )
+        if recipe_objects == "recipe_objects":
+            conn.execute(
+                "UPDATE recipes SET recipe_id=? WHERE recipe_id=?",
+                (new_recipe_id, recipe_id),
+            )
         store.remember(conn, RECIPE_ALIAS, recipe_id, {}, {"id": new_recipe_id})
     if version_id != new_version_id:
         conn.execute(
@@ -197,6 +222,25 @@ def promote_recipe_identity(store, conn, recipe_id, version_id, receipt):
         store.remember(conn, VERSION_ALIAS, version_id, {}, {"id": new_version_id})
     if (recipe_id, version_id) != (new_recipe_id, new_version_id):
         _update_executions(conn, recipe_id, version_id, new_recipe_id, new_version_id)
+    if recipe_objects == "recipe_objects":
+        from .task import is_approved, root_id, task_chain
+
+        rows = conn.execute(
+            "SELECT * FROM executions WHERE recipe_id=? AND recipe_version_id=? AND status='completed'",
+            (new_recipe_id, new_version_id),
+        ).fetchall()
+        for row in rows:
+            execution = store._record(row)
+            if not is_approved(execution):
+                continue
+            task_id = root_id(store, conn, execution)
+            if task_chain(store, conn, task_id)[-1]["id"] == execution["id"]:
+                conn.execute(
+                    """INSERT INTO recipes(id, recipe_id, recipe_version_id) VALUES(?,?,?)
+                       ON CONFLICT(id) DO UPDATE SET recipe_id=excluded.recipe_id,
+                           recipe_version_id=excluded.recipe_version_id""",
+                    (task_id, new_recipe_id, new_version_id),
+                )
 
 
 def migrate_mapped_recipe_ids(store, conn):

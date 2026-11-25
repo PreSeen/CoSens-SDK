@@ -18,7 +18,6 @@ import httpx
 
 from .chat_completions import USER_AGENT
 from .models import Conflict, InvalidState, NotFound, RecipeReference, RSIError
-from .recipe_file import read_recipe_file
 
 DEFAULT_BASE_URL = "https://rsi.cosens.ai/api"
 # The CoSens gateway accepts request bodies up to 10 MiB.
@@ -44,6 +43,9 @@ def _upload(path, extra=None):
 
 
 def _evidence(evidence, recipe_reference=None):
+    reference = RecipeReference.model_validate(recipe_reference) if recipe_reference is not None else None
+    if reference is not None and reference.recipe_version_id is not None:
+        raise ValueError("recipe_reference.recipe_version_id requires local mode")
     if not isinstance(evidence, dict) or not evidence.get("context_path"):
         raise ValueError("evidence needs context_path and files")
     files = []
@@ -53,8 +55,7 @@ def _evidence(evidence, recipe_reference=None):
         if item["role"] == "recipe":
             raise ValueError("supply the Recipe using execution_create.recipe_reference")
         files.append(_upload(item["path"], {"role": item["role"]}))
-    if recipe_reference is not None:
-        reference = RecipeReference.model_validate(recipe_reference)
+    if reference is not None:
         extra = {"role": "recipe"}
         if reference.recipe_id is not None:
             extra["recipe_id"] = reference.recipe_id
@@ -95,6 +96,25 @@ def _validate_recipe_upload(recipe_id, idempotency_key):
         raise ValueError("idempotency_key must be a nonempty HTTP header value")
 
 
+def _validate_virtual_user_id(value):
+    if value is not None and (not isinstance(value, str) or not value or any(
+        char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value
+    )):
+        raise ValueError("virtual_user_id must be a nonempty header value")
+
+
+def _recipe_destination(url, virtual_user_id):
+    if url.scheme not in {"http", "https"} or not url.host or url.userinfo or url.query or url.fragment:
+        raise ValueError("local Recipe upload requires a cloud base_url without credentials, query or fragment")
+    return {"base_url": str(url).rstrip("/"), "virtual_user_id": virtual_user_id}
+
+
+def _local_upload_destination(shared_headers):
+    url = httpx.URL((os.environ.get("COSENS_RSI_BASE_URL") or DEFAULT_BASE_URL).rstrip("/"))
+    virtual_user_id = httpx.Headers(shared_headers, encoding="iso-8859-1").get("X-Virtual-User-Id")
+    return _recipe_destination(url, virtual_user_id)
+
+
 class CloudRSIClient:
     """Cloud mode of RSIClient, backed by the CoSens service."""
 
@@ -111,8 +131,7 @@ class CloudRSIClient:
         for name in ("Content-Type", "Content-Length", "Transfer-Encoding", "Idempotency-Key"):
             headers.pop(name, None)
         headers.setdefault("User-Agent", USER_AGENT)
-        if virtual_user_id is not None and (not isinstance(virtual_user_id, str) or not virtual_user_id or any(c.isspace() or ord(c) < 32 or ord(c) == 127 for c in virtual_user_id)):
-            raise ValueError("virtual_user_id must be a nonempty header value")
+        _validate_virtual_user_id(virtual_user_id)
         if virtual_user_id is not None:
             headers["X-Virtual-User-Id"] = virtual_user_id
         self._http = httpx.Client(
@@ -229,11 +248,6 @@ class CloudRSIClient:
         rows = self._request("GET", "/recipes", params=params)
         return [{key: value for key, value in row.items() if key != "status"} for row in rows]
 
-    def recipe_insert(self, path: str | Path):
-        # Validate locally first, so a malformed file fails the same way in both modes.
-        _, markdown = read_recipe_file(path)
-        return self._request("POST", "/recipes", json={"markdown": markdown})
-
     def recipes_upsert(
         self, path: str | Path, *, recipe_id: str | None = None, idempotency_key: str | None = None
     ) -> dict[str, str]:
@@ -244,13 +258,7 @@ class CloudRSIClient:
         )
 
     def _recipe_upload_destination(self):
-        url = self._http.base_url
-        if url.scheme not in {"http", "https"} or not url.host or url.userinfo or url.query or url.fragment:
-            raise ValueError("local Recipe upload requires a cloud base_url without credentials, query or fragment")
-        return {
-            "base_url": str(url).rstrip("/"),
-            "virtual_user_id": self._http.headers.get("X-Virtual-User-Id"),
-        }
+        return _recipe_destination(self._http.base_url, self._http.headers.get("X-Virtual-User-Id"))
 
     def _recipes_upsert_bytes(self, filename, zip_bytes, *, recipe_id, idempotency_key):
         _validate_recipe_upload(recipe_id, idempotency_key)

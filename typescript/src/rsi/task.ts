@@ -2,10 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { MAX_RECIPE_ZIP_BYTES, type RecipeUpsertResult } from './cloud.js';
 import { fail, RSIError, type Execution, type ExecutionAnswer, type Question, type Recipe } from './models.js';
-import { recipeIdentityScope, uploadReceiptScope } from './recipe-identity.js';
+import { uploadReceiptScope } from './recipe-identity.js';
 import { buildRecipePackage, readRecipePackage } from './recipe-package.js';
 import type { Store } from './store.js';
 
@@ -36,8 +36,8 @@ export type TaskClarification = TaskQuestion & {
 
 export type TaskArtifact = {
   zip_path: string;
-  local_recipe_id: string;
-  local_recipe_version_id: string;
+  recipe_id: string;
+  recipe_version_id: string;
 };
 
 export type Task = TaskSummary & {
@@ -49,6 +49,7 @@ export type Task = TaskSummary & {
   artifact: TaskArtifact | null;
   recipe_id: string | null;
   recipe_version_id: string | null;
+  recipe_zip_path: string | null;
 };
 
 function continuationIds(execution: Execution) {
@@ -128,7 +129,8 @@ function summarizeTask(store: Store, root: Execution, current: Execution): TaskS
 
 export function readTasks(store: Store): TaskSummary[] {
   const { roots, next } = executionLinks(store);
-  return roots.reverse().filter((root) => root.archived_at == null)
+  const tasks = new Set(store.db.prepare('SELECT id FROM recipes').pluck().all());
+  return roots.reverse().filter((root) => tasks.has(root.id) && root.archived_at == null)
     .map((root) => summarizeTask(store, root, chain(root, next).at(-1)!));
 }
 
@@ -139,13 +141,29 @@ export function readTaskSummary(store: Store, taskId: string, executionId: strin
   return summarizeTask(store, executions[0], execution);
 }
 
-export function hasApprovedResult(execution: Execution): boolean {
+export function hasApprovedResult(execution: Execution): execution is Execution & {
+  recipe_id: string;
+  recipe_version_id: string;
+} {
   return execution.status === 'completed' && execution.result?.test_status === 'passed'
     && execution.result.published === true && execution.result.provisional === false
     && execution.recipe_id != null && execution.recipe_version_id != null;
 }
 
 export const taskRecipePackageScope = 'task_recipe_package';
+type TaskPackage = { sha256: string; version_id: string };
+
+function frozenTaskPackage(store: Store, taskId: string, executionId: string): TaskPackage | undefined {
+  const stored = store.replay<TaskPackage>(taskRecipePackageScope, taskId, { execution_id: executionId });
+  if (stored) return stored;
+  const legacy = store.db.prepare('SELECT request FROM idempotency WHERE scope=? AND key=?')
+    .get('task_final_package', taskId) as { request: string } | undefined;
+  if (!legacy) return;
+  const record = JSON.parse(legacy.request) as TaskPackage & { execution_id: string };
+  if (record.execution_id !== executionId)
+    return fail('conflict', 'Task already has a different final Recipe version');
+  return record;
+}
 
 type UploadedVersion = { zipSha256: string; result: RecipeUpsertResult };
 
@@ -186,7 +204,7 @@ function readFrozenPackage(path: string): Buffer | null {
   }
 }
 
-function taskArtifact(store: Store, taskId: string, execution: Execution, upload?: UploadedVersion): TaskArtifact | null {
+export function taskArtifact(store: Store, taskId: string, execution: Execution, expectedSha256?: string): TaskArtifact | null {
   if (!hasApprovedResult(execution) || !execution.recipe_id || !execution.recipe_version_id) return null;
   const recipe = store.get<Recipe>(execution.recipe_id, 'recipe');
   const version = store.version(recipe.id, execution.recipe_version_id);
@@ -197,14 +215,14 @@ function taskArtifact(store: Store, taskId: string, execution: Execution, upload
   if (packagesStat && !packagesStat.isDirectory()) return fail('invalid_state', 'invalid Task package directory');
   const zip_path = join(packages, `${taskId}.zip`);
   const request = { execution_id: execution.id };
-  const saved = store.replay<{ sha256: string; version_id: string }>(taskRecipePackageScope, taskId, request);
-  const cached = saved || upload ? readFrozenPackage(zip_path) : null;
-  const frozen = cached && (saved || digest(cached) === upload?.zipSha256) ? cached : null;
+  const saved = frozenTaskPackage(store, taskId, execution.id);
+  const cached = saved || expectedSha256 ? readFrozenPackage(zip_path) : null;
+  const frozen = cached && (saved || digest(cached) === expectedSha256) ? cached : null;
   const bytes = frozen ?? buildRecipePackage(directory);
   const sha256 = digest(bytes);
   if (saved && (saved.sha256 !== sha256 || store.resolveVersionId(saved.version_id) !== version.id))
     return fail('invalid_state', 'the frozen Task Recipe ZIP has changed');
-  if (upload && upload.zipSha256 !== sha256) return null;
+  if (expectedSha256 && expectedSha256 !== sha256) return null;
   if (!saved && frozen) readRecipePackage(bytes);
   if (!frozen) {
     mkdirSync(packages, { recursive: true, mode: 0o700 });
@@ -217,12 +235,14 @@ function taskArtifact(store: Store, taskId: string, execution: Execution, upload
     }
   }
   if (!saved) store.remember(taskRecipePackageScope, taskId, request, { sha256, version_id: version.id });
-  return { zip_path, local_recipe_id: recipe.id, local_recipe_version_id: version.id };
+  saveTaskRecipe(store, taskId, execution, zip_path);
+  return { zip_path, recipe_id: recipe.id, recipe_version_id: version.id };
 }
 
 function availableArtifact(store: Store, taskId: string, execution: Execution, upload?: UploadedVersion) {
+  if (upload && !upload.zipSha256) return null;
   try {
-    return taskArtifact(store, taskId, execution, upload);
+    return taskArtifact(store, taskId, execution, upload?.zipSha256);
   } catch (error) {
     // Older uploads may have no readable local copy of the exact published archive.
     if (!upload) throw error;
@@ -230,9 +250,8 @@ function availableArtifact(store: Store, taskId: string, execution: Execution, u
   }
 }
 
-export function freezeTaskArtifact(store: Store, execution: Execution) {
-  if (!hasApprovedResult(execution)) return;
-  let root = execution;
+function taskRoot(store: Store, execution: Execution): Execution {
+  let root: Execution = execution;
   const seen = new Set([root.id]);
   while (root.base_execution_id) {
     let parent: Execution;
@@ -247,7 +266,54 @@ export function freezeTaskArtifact(store: Store, execution: Execution) {
     seen.add(parent.id);
     root = parent;
   }
-  availableArtifact(store, root.id, execution, uploadedVersion(store, execution));
+  return root;
+}
+
+function saveTaskRecipe(store: Store, taskId: string, execution: Execution, zipPath?: string) {
+  const recipeId = execution.recipe_id === null ? null : store.resolveRecipeId(execution.recipe_id);
+  const versionId = hasApprovedResult(execution) ? store.resolveVersionId(execution.recipe_version_id) : null;
+  const storedPath = zipPath ? relative(store.root, zipPath).split(sep).join('/') : null;
+  store.db.prepare(`
+    INSERT INTO recipes(id,recipe_id,recipe_version_id,recipe_zip_path) VALUES(?,?,?,?)
+    ON CONFLICT(id) DO UPDATE SET recipe_id=excluded.recipe_id,
+      recipe_version_id=excluded.recipe_version_id, recipe_zip_path=excluded.recipe_zip_path
+  `).run(taskId, recipeId, versionId, storedPath);
+}
+
+export function writeTaskRecipe(store: Store, execution: Execution, artifact?: TaskArtifact) {
+  for (const id of continuationIds(execution)) {
+    if (id && store.listExecutions([id], true).some((child) => child.base_execution_id === execution.id)) return;
+  }
+  saveTaskRecipe(store, taskRoot(store, execution).id, execution, artifact?.zip_path);
+}
+
+export function backfillTaskRecipes(store: Store) {
+  const { roots, next } = executionLinks(store);
+  for (const root of roots) {
+    const execution = chain(root, next).at(-1)!;
+    let path: string | undefined;
+    if (hasApprovedResult(execution) && /^[A-Za-z0-9_-]+$/u.test(root.id)) {
+      const candidate = join(store.root, 'task-packages', `${root.id}.zip`);
+      try {
+        const journal = frozenTaskPackage(store, root.id, execution.id);
+        const versionId = store.resolveVersionId(execution.recipe_version_id);
+        const expected = journal && store.resolveVersionId(journal.version_id) === versionId
+          ? journal.sha256 : uploadedVersion(store, execution)?.zipSha256;
+        const cached = expected && readFrozenPackage(candidate);
+        if (cached && digest(cached) === expected) path = candidate;
+      } catch (error) {
+        if (!(error instanceof RSIError) && !(error instanceof Error && 'code' in error)) throw error;
+      }
+    }
+    saveTaskRecipe(store, root.id, execution, path);
+  }
+}
+
+export function freezeTaskArtifact(store: Store, execution: Execution) {
+  if (!hasApprovedResult(execution)) return;
+  const root = taskRoot(store, execution);
+  const artifact = availableArtifact(store, root.id, execution, uploadedVersion(store, execution));
+  if (!artifact) saveTaskRecipe(store, root.id, execution);
 }
 
 function presentAnswer(recorded: ExecutionAnswer) {
@@ -286,10 +352,9 @@ export function readTask(store: Store, taskId: string): Task {
     }
     const upload = uploadedVersion(store, current);
     const artifact = availableArtifact(store, taskId, current, upload);
+    if (!artifact) saveTaskRecipe(store, taskId, current);
     const formal = upload?.result;
-    const knownId = current.recipe_id && store.resolveRecipeId(current.recipe_id);
-    const linked = knownId && store.db.prepare('SELECT 1 FROM idempotency WHERE scope=? AND key=?')
-      .get(recipeIdentityScope, knownId);
+    const knownId = current.recipe_id ? store.resolveRecipeId(current.recipe_id) : null;
     return {
       ...summarizeTask(store, executions[0], current),
       execution_ids: executions.map(({ id }) => id),
@@ -298,8 +363,9 @@ export function readTask(store: Store, taskId: string): Task {
       result: current.result,
       error: current.error,
       artifact,
-      recipe_id: formal?.recipe_id ?? (linked ? knownId : null),
-      recipe_version_id: formal?.recipe_version_id ?? null,
+      recipe_id: formal?.recipe_id ?? artifact?.recipe_id ?? knownId,
+      recipe_version_id: formal?.recipe_version_id ?? artifact?.recipe_version_id ?? null,
+      recipe_zip_path: artifact?.zip_path ?? null,
     };
   });
 }

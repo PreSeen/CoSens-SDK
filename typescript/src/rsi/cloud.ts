@@ -4,7 +4,6 @@ import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { selectedVirtualUser, type VirtualUserSelection } from '../virtual-user.js';
 import { USER_AGENT } from './chat-completions.js';
-import { readRecipeFile } from './recipe-file.js';
 import {
   RecipeReferenceSchema,
   RSIError,
@@ -25,6 +24,18 @@ export type CloudOptions = {
 } & VirtualUserSelection;
 export type RecipeUpsertOptions = { recipe_id?: string; idempotency_key?: string };
 export type RecipeUpsertResult = { recipe_id: string; recipe_version_id: string };
+
+export function recipeCloudDestination(options: CloudOptions, sharedHeaders?: Headers) {
+  const base = new URL(options.base_url ?? process.env.COSENS_RSI_BASE_URL ?? DEFAULT_CLOUD_BASE_URL);
+  if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash)
+    throw new TypeError('base_url must be an HTTP(S) address without embedded credentials, query or fragment');
+  return {
+    base_url: base.href.replace(/\/+$/, ''),
+    virtual_user_id: selectedVirtualUser(options) ?? sharedHeaders?.get('X-Virtual-User-Id') ?? null,
+  };
+}
+
+export type RecipeCloudDestination = ReturnType<typeof recipeCloudDestination>;
 
 type EvidenceInput = {
   context_path: string;
@@ -62,6 +73,9 @@ async function evidenceBody(
 ) {
   if (!evidence?.context_path || !Array.isArray(evidence.files))
     throw new TypeError('evidence needs context_path and files');
+  const reference = recipeReference === undefined ? undefined : RecipeReferenceSchema.parse(recipeReference);
+  if (reference?.recipe_version_id !== undefined)
+    throw new TypeError('recipe_reference.recipe_version_id requires local mode');
   const files = [];
   for (const file of evidence.files) {
     if (!file?.path || !file.role)
@@ -72,8 +86,8 @@ async function evidenceBody(
       );
     files.push(await upload(file.path, { role: file.role }));
   }
-  if (recipeReference !== undefined) {
-    const { path, recipe_id } = RecipeReferenceSchema.parse(recipeReference);
+  if (reference) {
+    const { path, recipe_id } = reference;
     files.push(await upload(path, { role: 'recipe', recipe_id }));
   }
   return { context: await upload(evidence.context_path), files };
@@ -101,7 +115,10 @@ export async function openRecipeZip(path: string | URL) {
   return { file: zip, filename: basename(localPath) };
 }
 
-export function validateRecipeUpsertOptions({ recipe_id, idempotency_key }: RecipeUpsertOptions) {
+export function validateRecipeUpsertOptions(options: RecipeUpsertOptions) {
+  if (Object.keys(options).some((key) => key !== 'recipe_id' && key !== 'idempotency_key'))
+    throw new TypeError('cloud Recipe upload accepts only recipe_id and idempotency_key options');
+  const { recipe_id, idempotency_key } = options;
   if (
     recipe_id !== undefined
     && (typeof recipe_id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(recipe_id))
@@ -116,6 +133,17 @@ export function validateRecipeUpsertOptions({ recipe_id, idempotency_key }: Reci
   ) {
     throw new TypeError('idempotency_key must be a nonempty HTTP header value');
   }
+}
+
+export function uploadRecipeZip(
+  cloud: CloudClient,
+  { file, filename }: { file: Blob; filename: string },
+  { recipe_id, idempotency_key }: RecipeUpsertOptions,
+): Promise<RecipeUpsertResult> {
+  const multipart = new FormData();
+  multipart.set('file', file, filename);
+  if (recipe_id !== undefined) multipart.set('recipe_id', recipe_id);
+  return cloud.request('POST', '/recipes_upsert', { multipart, idempotency_key });
 }
 
 /** Cloud mode uploads the supplied evidence and optional Recipe reference to CoSens. */
@@ -274,28 +302,12 @@ export class CloudClient {
     return rows.map(({ status: _status, ...row }) => row);
   }
 
-  async recipe_insert(path: string): Promise<Recipe> {
-    // Validate locally first, so a malformed file fails the same way in both modes.
-    const { markdown } = await readRecipeFile(path);
-    return this.request('POST', '/recipes', { body: { markdown } });
-  }
-
   async recipes_upsert(
     path: string | URL,
     options: RecipeUpsertOptions = {},
   ): Promise<RecipeUpsertResult> {
     validateRecipeUpsertOptions(options);
-    return this.uploadRecipeZip(await openRecipeZip(path), options);
-  }
-
-  async uploadRecipeZip(
-    { file, filename }: { file: Blob; filename: string },
-    { recipe_id, idempotency_key }: RecipeUpsertOptions,
-  ): Promise<RecipeUpsertResult> {
-    const multipart = new FormData();
-    multipart.set('file', file, filename);
-    if (recipe_id !== undefined) multipart.set('recipe_id', recipe_id);
-    return this.request('POST', '/recipes_upsert', { multipart, idempotency_key });
+    return uploadRecipeZip(this, await openRecipeZip(path), options);
   }
 
   recipe_get(id: string, version = 'active'): Promise<Recipe> {

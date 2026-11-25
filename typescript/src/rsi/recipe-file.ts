@@ -25,7 +25,10 @@ export async function readRecipeFile(path: string) {
       'recipe_insert requires a readable UTF-8 Markdown file',
     );
   }
+  return parseRecipeMarkdown(markdown);
+}
 
+export function parseRecipeMarkdown(markdown: string) {
   const header =
     /^\uFEFF?---[ \t]*\r?\n((?:[^\n]*\n)*?)---[ \t]*(?:\r?\n|$)/u.exec(markdown);
   if (!header) {

@@ -1,14 +1,13 @@
 import { z } from 'zod';
 import { RSIClient as QueueClient, type RecoverResult } from './client.js';
-import { CloudClient, type CloudOptions, type RecipeUpsertOptions } from './cloud.js';
+import { CloudClient, type CloudOptions, type RecipeUpsertOptions, type RecipeUpsertResult } from './cloud.js';
 import {
   fail,
   RecipeReferenceSchema,
   type EvidenceFile,
   type Execution as StoredExecution,
 } from './models.js';
-import { readRecipeFile } from './recipe-file.js';
-import { uploadLocalRecipe, type LocalRecipeUpsertOptions } from './local-recipe-upload.js';
+import { uploadLocalTaskRecipe, type LocalRecipeUpsertOptions } from './local-recipe-upload.js';
 export type { LocalRecipeUpsertOptions } from './local-recipe-upload.js';
 import { bindModelHeaders, credentialScopeId } from './model-headers.js';
 import { readTask, readTaskSummary, readTasks } from './task.js';
@@ -36,7 +35,10 @@ const localExecutionOptions = z.strictObject({
   base_url: connectionValue,
   config: config.nullish(),
 });
-const localReadOptions = z.strictObject({ data_dir: text, config: z.null().optional() });
+const localReadOptions = z.strictObject({
+  data_dir: text,
+  config: z.strictObject({ headers: requestHeaders }).nullish(),
+});
 const versionArchive = z.strictObject({
   version_id: text,
   archived: z.boolean(),
@@ -154,7 +156,7 @@ export class RSIClient {
       return;
     }
     this.mode = 'local';
-    const hasModel = 'model_id' in options || 'api_key' in options || 'base_url' in options || options.config != null;
+    const hasModel = 'model_id' in options || 'api_key' in options || 'base_url' in options;
     const local = hasModel ? localExecutionOptions.parse(options) : localReadOptions.parse(options);
     const { data_dir, config: settings } = local;
     try {
@@ -162,9 +164,10 @@ export class RSIClient {
     } catch {
       fail('invalid_argument', 'Invalid Recipe upload headers');
     }
-    const scope = settings?.credential_scope === undefined
+    const modelSettings = 'model_id' in local ? local.config : undefined;
+    const scope = modelSettings?.credential_scope === undefined
       ? undefined
-      : credentialScopeId(settings.credential_scope);
+      : credentialScopeId(modelSettings.credential_scope);
     const binding = 'model_id' in local
       ? bindModelHeaders(local.base_url, local.model_id, { Authorization: `Bearer ${local.api_key}` }, scope)
       : undefined;
@@ -173,23 +176,23 @@ export class RSIClient {
       ...('model_id' in local && binding
         ? {
             config: {
-              ...(settings?.test_python_image === undefined
+              ...(modelSettings?.test_python_image === undefined
                 ? {}
-                : { test_python_image: settings.test_python_image }),
+                : { test_python_image: modelSettings.test_python_image }),
               model: {
                 model: local.model_id,
                 base_url: local.base_url,
                 api_key_env: binding.name,
                 ...(scope === undefined ? {} : { credential_scope: scope }),
-                ...(settings?.max_tokens === undefined
+                ...(modelSettings?.max_tokens === undefined
                   ? {}
-                  : { max_tokens: settings.max_tokens }),
-                ...(settings?.timeout === undefined
+                  : { max_tokens: modelSettings.max_tokens }),
+                ...(modelSettings?.timeout === undefined
                   ? {}
-                  : { timeout: settings.timeout }),
+                  : { timeout: modelSettings.timeout }),
               },
             },
-            auto_start: settings?.auto_start,
+            auto_start: modelSettings?.auto_start,
             model_header_binding: binding,
           }
         : {}),
@@ -266,8 +269,8 @@ export class RSIClient {
       },
       idempotency_key,
       confirmation_ref: idempotency_key,
-      base: recipeId ? { kind: 'recipe', id: recipeId } : null,
-    });
+      base: recipeId ? { kind: 'recipe', id: recipeId, version_id: recipe_reference?.recipe_version_id } : null,
+    }, this.#uploadHeaders);
     return {
       ...this.#presentExecution(execution),
       recipe_id: execution.recipe_id!,
@@ -362,21 +365,17 @@ export class RSIClient {
     }));
   }
 
-  async recipe_insert(path: string) {
-    if (this.#cloud) return this.#cloud.recipe_insert(path);
-    const { content, markdown } = await readRecipeFile(path);
-    return this.#queue.recipe_insert(content, markdown);
-  }
-
-  async recipes_upsert(path: string | URL, options?: RecipeUpsertOptions | LocalRecipeUpsertOptions) {
+  recipes_upsert(options: LocalRecipeUpsertOptions): Promise<RecipeUpsertResult>;
+  recipes_upsert(path: string | URL, options?: RecipeUpsertOptions): Promise<RecipeUpsertResult>;
+  async recipes_upsert(request: string | URL | LocalRecipeUpsertOptions, options?: RecipeUpsertOptions) {
     if (this.#cloud) {
-      if (options && 'local_recipe_id' in options)
-        return fail('invalid_argument', 'local Recipe IDs require a local RSIClient');
-      return this.#cloud.recipes_upsert(path, options);
+      if (typeof request !== 'string' && !(request instanceof URL))
+        return fail('invalid_argument', 'cloud Recipe upload requires a ZIP path');
+      return this.#cloud.recipes_upsert(request, options);
     }
-    if (!options || !('local_recipe_id' in options))
-      return fail('invalid_argument', 'local Recipe upload requires local_recipe_id and local_recipe_version_id');
-    return uploadLocalRecipe(this.#queue.store, path, options, this.#uploadHeaders);
+    if (!request || typeof request !== 'object' || request instanceof URL || options !== undefined)
+      return fail('invalid_argument', 'local Recipe upload requires { task_id }');
+    return uploadLocalTaskRecipe(this.#queue.store, request, this.#uploadHeaders);
   }
 
   async recipe_get(id: string, version = 'active') {

@@ -15,6 +15,11 @@ from .models import (
     RecipeContent,
 )
 from .portability import LearningLiterals, recipe_rule_text, rubric_rule_text
+from .recipe_package import (
+    describe_recipe_resources,
+    read_recipe_version_resources,
+    stage_recipe_package_files,
+)
 from .store import uid
 
 
@@ -36,8 +41,22 @@ class Engine:
         self.client, self.store, self.runtime = client, client.store, runtime
         self.owner, self.fence, self.execution_id = owner, fence, execution_id
 
+    def _recipe_version_directory(self, version):
+        recipe = self.store.get(version["object_id"], "recipe")
+        return self.store.root / recipe["storage_path"] / version["id"]
+
+    def _recipe_resources(self, version):
+        try:
+            return read_recipe_version_resources(self._recipe_version_directory(version))
+        except FileNotFoundError:
+            if version["provenance"].get("source") == "cloud":
+                raise
+            # Some old Markdown-only versions have no on-disk version directory.
+            return {}
+
     def prepare_test_workspace(self, recipe, workspace, state):
-        """Allow the cloud engine to stage immutable Recipe package files."""
+        """Stage immutable Recipe package resources for local tests."""
+        stage_recipe_package_files(workspace, self._recipe_resources(recipe))
 
     def guard(self, revision=None):
         with self.store.transaction() as conn:
@@ -256,9 +275,12 @@ class Engine:
                 "version_id": request["version_id"],
                 "round": round_number,
             }
+        base_resources = self._recipe_resources(base) if base and not self.package_recipes else {}
         key = f"recipe:{self.execution_id}:{state['input_revision']}:{round_number}"
         version = self.store.version_by_operation(key)
         if version:
+            if base_resources:
+                stage_recipe_package_files(self._recipe_version_directory(version), base_resources)
             return {
                 "recipe_id": version["object_id"],
                 "version_id": version["id"],
@@ -270,6 +292,8 @@ class Engine:
             context["base_recipe"] = base["content"]
         elif recipe_file:
             context["base_recipe"] = read_snapshot(recipe_file)["text"]
+        if base_resources:
+            context["base_recipe_resources"] = describe_recipe_resources(base_resources)
         literals = self.learning_literals(
             execution, base["provenance"].get("execution_id") if base else None
         )
@@ -313,6 +337,8 @@ class Engine:
             base_id=base_id,
             operation_key=key,
         )
+        if base_resources:
+            stage_recipe_package_files(self._recipe_version_directory(version), base_resources)
         return {
             "recipe_id": version["object_id"],
             "version_id": version["id"],

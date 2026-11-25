@@ -3,10 +3,12 @@ import { bindModelHeaders } from './model-headers.js';
 import {
   legacyRecipes,
   migrateRecipeVersions,
+  migrateTaskRecipes,
   recipeProjection,
   schema,
   storage,
 } from './store-schema.js';
+import { backfillTaskRecipes } from './task.js';
 import { migrateMappedRecipes, recipeIdAlias, versionIdAlias } from './recipe-identity.js';
 import { formatRecipeMarkdown } from './recipe-file.js';
 import Database from 'better-sqlite3';
@@ -39,7 +41,7 @@ export type RetryTarget = { id: string; fence: number };
 const queuedConfig = `COALESCE(json_extract(details, '$.recovery_config'), json_extract(details, '$.runtime_config'))`;
 const retryEligible = `executions.status='queued' AND executions.fence=?
   AND executions.archived_at IS NULL AND EXISTS (
-    SELECT 1 FROM recipes WHERE id=executions.recipe_id AND archived_at IS NULL
+    SELECT 1 FROM recipe_objects WHERE id=executions.recipe_id AND archived_at IS NULL
   )`;
 /** Stable JSON for idempotency comparison, including nested object key order. */
 export function encode(value: unknown): string {
@@ -118,13 +120,13 @@ export class Store {
     chmodSync(path, 0o600);
   }
   private initialize() {
-    if (this.db.pragma('user_version', { simple: true }) === 9) return;
+    if (this.db.pragma('user_version', { simple: true }) === 10) return;
     this.tx(() => {
       const version = this.db.pragma('user_version', { simple: true });
-      if (version === 9) return;
-      if (version === 7 || version === 8) {
+      if (version === 10) return;
+      if (version === 7 || version === 8 || version === 9) {
         if (version === 8) migrateMappedRecipes(this);
-        this.db.pragma('user_version = 9');
+        this.migrateTaskRecipes();
         return;
       }
       if (
@@ -251,8 +253,14 @@ export class Store {
       }
       this.migrateRecipeContent();
       this.db.exec(recipeProjection);
-      this.db.pragma('user_version = 9');
+      this.migrateTaskRecipes();
     });
+  }
+
+  private migrateTaskRecipes() {
+    this.db.exec(migrateTaskRecipes);
+    backfillTaskRecipes(this);
+    this.db.pragma('user_version = 10');
   }
 
   private migrateRecipeContent() {
@@ -369,7 +377,7 @@ export class Store {
     if (!recipeId && !baseId) return execution.name;
     const recipe = this.db
       .prepare(
-        `SELECT name FROM recipes
+        `SELECT name FROM recipe_objects
        WHERE id=COALESCE(?, (SELECT object_id FROM versions WHERE id=?))`,
       )
       .get(recipeId, baseId) as { name: string | null } | undefined;
@@ -512,12 +520,17 @@ export class Store {
     versionId: string,
     status: 'available' | 'archived',
   ) {
-    const result = this.db
+    const version = this.resolveVersionId(versionId);
+    const current = this.db
+      .prepare('SELECT status FROM versions WHERE recipe_id=? AND id=?')
+      .get(recipe.id, version) as { status: string } | undefined;
+    if (!current || current.status === status) return;
+    this.db
       .prepare(
-        'UPDATE versions SET status=? WHERE recipe_id=? AND id=? AND status<>?',
+        'UPDATE versions SET status=? WHERE recipe_id=? AND id=?',
       )
-      .run(status, recipe.id, this.resolveVersionId(versionId), status);
-    if (result.changes) this.save(recipe);
+      .run(status, recipe.id, version);
+    this.save(recipe);
   }
   version_by_id<C = unknown>(id: string, kind: Kind): Version<C> {
     const row = this.db

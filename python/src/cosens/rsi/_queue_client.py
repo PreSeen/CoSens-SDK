@@ -21,7 +21,7 @@ from .models import (
     NotFound,
 )
 from .progress import restart_execution
-from .recipe_identity import journal_entry, recipe_id_for, version_id_for
+from .recipe_identity import journal_entry, recipe_id_for, recipe_object_relation, version_id_for
 from .recipe_list import read_recipe_list
 from .store import Store, uid
 
@@ -274,16 +274,16 @@ class RSIClient:
         idempotency_key=None,
     ):
         policy = ExecutionPolicy.model_validate(policy).model_dump()
-        task = policy["test_task"]
-        if task is not None:
+        test_task = policy["test_task"]
+        if test_task is not None:
             # Preserve idempotency hashes for older requests that lack these fields.
             for field in (
                 "input_locators",
                 "shared_reference_locators",
                 "replay_current_case",
             ):
-                if task[field] is None:
-                    del task[field]
+                if test_task[field] is None:
+                    del test_task[field]
         material_ids = list(dict.fromkeys(material_ids))
         if not material_ids:
             raise ValueError("at least one Material is required")
@@ -303,6 +303,7 @@ class RSIClient:
                 obj = self.store.get_in(conn, previous["id"], "execution")
             else:
                 obj = self._execution_insert(conn, request)
+                task.write_task_recipe(self.store, conn, obj)
                 self.store.remember(
                     conn,
                     "execution_create",
@@ -343,13 +344,14 @@ class RSIClient:
                     "id"
                 ]
             execution = self.store.save(conn, {**execution, "recipe_id": recipe_id})
+            task.write_task_recipe(self.store, conn, execution)
         return {
             **execution,
             "name": self.store.execution_recipe_name(conn, execution) or "首次学习",
         }
 
     def execution_create_with_evidence(
-        self, *, evidence, confirmation_ref, idempotency_key, base
+        self, *, evidence, confirmation_ref, idempotency_key, base, resolve_base=None
     ):
         request = {
             "evidence": evidence,
@@ -359,6 +361,7 @@ class RSIClient:
         scope = "execution_create"
         with self.store.connect() as conn:
             previous = self.store.replay(conn, scope, idempotency_key, request)
+        pinned = None
 
         def create(conn, data):
             existing = self.store.replay(conn, scope, idempotency_key, request)
@@ -370,9 +373,10 @@ class RSIClient:
                 else None
             )
             if recipe and (
-                recipe["archived_at"] is not None or not recipe["active_version_id"]
+                recipe["archived_at"] is not None or (not pinned and not recipe["active_version_id"])
             ):
                 raise InvalidState("base Recipe has no available version")
+            pinned_id = self.store.version_in(conn, recipe["id"], pinned["version_id"])["id"] if pinned else None
             material = self.store.insert(conn, "material", data)
             learning_paths = {
                 file["path"] for file in data["files"] if file["role"] != "input"
@@ -404,10 +408,12 @@ class RSIClient:
                     if recipe
                     else self.store.create_recipe(conn)["id"],
                     "name": recipe["name"] if recipe else None,
-                    "publication_base_version_id": recipe["active_version_id"] if recipe else None,
+                    "base_recipe_version_id": pinned_id,
+                    "publication_base_version_id": pinned_id or (recipe["active_version_id"] if recipe else None),
                     "policy": policy,
                 },
             )
+            task.write_task_recipe(self.store, conn, execution)
             self.store.remember(
                 conn, scope, idempotency_key, request, {"id": execution["id"]}
             )
@@ -419,7 +425,18 @@ class RSIClient:
         else:
             if self.auto_start:
                 self._check_runtime()
-            execution = self._write_execution_evidence(evidence, self.config, create)
+            if base is not None and resolve_base is not None:
+                pinned = resolve_base(base)
+            snapshot_evidence = evidence
+            if pinned:
+                snapshot_evidence = {
+                    **evidence,
+                    "files": [
+                        {**file, "path": pinned["path"]} if file["role"] == "recipe" else file
+                        for file in evidence["files"]
+                    ],
+                }
+            execution = self._write_execution_evidence(snapshot_evidence, self.config, create)
         if self.auto_start:
             self.recover()
         return execution
@@ -539,6 +556,7 @@ class RSIClient:
                 config=config,
             )
             self.store.save(conn, {**current, "continuation_execution_id": successor["id"]})
+            task.write_task_recipe(self.store, conn, successor)
             self.store.remember(conn, scope, idempotency_key, request, {"execution_id": successor["id"]})
             return task.summary(self.store, conn, [root, successor]), data is not None
 
@@ -634,8 +652,8 @@ class RSIClient:
         ):
             return config
         valid_recipe = conn.execute(
-            """SELECT 1 FROM recipes WHERE id=? AND archived_at IS NULL AND (? IS NULL OR EXISTS (
-                   SELECT 1 FROM versions WHERE recipe_id=recipes.id AND id=?
+            f"""SELECT 1 FROM {recipe_object_relation(conn)} r WHERE id=? AND archived_at IS NULL AND (? IS NULL OR EXISTS (
+                   SELECT 1 FROM versions WHERE recipe_id=r.id AND id=?
                ))""",
             (recipe_id, base_version_id, base_version_id),
         ).fetchone()
@@ -806,7 +824,7 @@ class RSIClient:
                     inherited["name"] = name
                 if active and parent.get("test_request"):
                     inherited["test_request"] = parent["test_request"]
-                child_id = self._execution_insert(
+                child = self._execution_insert(
                     conn,
                     inherited,
                     config=self._clarification_model_config(
@@ -817,13 +835,16 @@ class RSIClient:
                     )
                     if is_header_binding(parent_config.model.api_key_env)
                     else self._supplied_config or parent_config,
-                )["id"]
+                )
+                child_id = child["id"]
                 answers = {
                     **answers,
                     key: {**answer, "continuation_execution_id": child_id},
                 }
                 obj = {**parent, "continuation_execution_id": child_id}
             self.store.save(conn, {**obj, "answers": answers})
+            if child_id:
+                task.write_task_recipe(self.store, conn, child)
             result = {
                 "execution_id": execution_id,
                 "continuation_execution_id": child_id,
@@ -1001,14 +1022,15 @@ class RSIClient:
             if obj.get("test_request") != request:
                 if obj["recipe_id"] and obj["recipe_id"] != recipe_id:
                     timestamp = time.time()
+                    recipe_objects = recipe_object_relation(conn)
                     conn.execute(
-                        """UPDATE recipes SET archived_at=?, updated_at=?
+                        f"""UPDATE {recipe_objects} SET archived_at=?, updated_at=?
                            WHERE id=? AND archived_at IS NULL
                              AND NOT EXISTS (
-                               SELECT 1 FROM versions WHERE recipe_id=recipes.id
+                               SELECT 1 FROM versions WHERE recipe_id={recipe_objects}.id
                              )
                              AND NOT EXISTS (
-                               SELECT 1 FROM executions WHERE recipe_id=recipes.id AND id<>?
+                               SELECT 1 FROM executions WHERE recipe_id={recipe_objects}.id AND id<>?
                              )""",
                         (timestamp, timestamp, obj["recipe_id"], execution_id),
                     )
@@ -1016,6 +1038,7 @@ class RSIClient:
                 obj["test_request"] = request
                 restart_execution(obj)
                 self.store.save(conn, obj)
+                task.write_task_recipe(self.store, conn, obj)
             result = {"execution_id": execution_id, "status": "queued", **request}
         if self.auto_start:
             self.recover()

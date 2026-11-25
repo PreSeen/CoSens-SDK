@@ -1,6 +1,6 @@
 """Host-facing API for local RSI."""
 
-from pathlib import Path
+import os
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -19,8 +19,7 @@ from .model_headers import (
     credential_scope_id,
     normalize_request_headers,
 )
-from .models import Contract, PythonImage, RecipeReference
-from .recipe_file import read_recipe_file
+from .models import Contract, InvalidState, NotFound, PythonImage, RecipeReference
 
 Text = Annotated[str, StringConstraints(min_length=1)]
 NonBlankText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -113,9 +112,11 @@ class RSIClient:
         api_key=None, base_url=None, virtual_user_id=None,
     ):
         settings = LocalOptions.model_validate(config if config is not None else {})
+        endpoint_requested = any(value is not None for value in (model_id, api_key, base_url))
+        worker_settings = config is not None and settings.model_fields_set != {"headers"}
         endpoint = (
             ModelEndpoint(model_id=model_id, api_key=api_key, base_url=base_url)
-            if any(value is not None for value in (config, model_id, api_key, base_url))
+            if endpoint_requested or worker_settings
             else None
         )
         scope = credential_scope_id(settings.credential_scope)
@@ -188,18 +189,33 @@ class RSIClient:
     def execution_create(self, *, evidence, idempotency_key, recipe_reference=None):
         submission_id = _TEXT.validate_python(idempotency_key)
         submission = ExecutionEvidence.model_validate(evidence).model_dump()
-        recipe_id = None
+        base = None
         if recipe_reference is not None:
             reference = RecipeReference.model_validate(recipe_reference)
             submission["files"].append({"path": reference.path, "role": "recipe"})
-            recipe_id = reference.recipe_id
+            if reference.recipe_id is not None:
+                base = {"kind": "recipe", "id": reference.recipe_id}
+                if reference.recipe_version_id is not None:
+                    base["version_id"] = reference.recipe_version_id
         execution = self._queue.execution_create_with_evidence(
             evidence=submission,
             confirmation_ref=submission_id,
             idempotency_key=submission_id,
-            base={"kind": "recipe", "id": recipe_id} if recipe_id else None,
+            base=base,
+            resolve_base=self._resolve_recipe_base,
         )
         return self._present_execution(execution)
+
+    def _resolve_recipe_base(self, base):
+        from .cloud import CloudRSIClient
+        from .recipe_bootstrap import resolve_base
+
+        def cloud_client():
+            if not self._upload_headers and not os.environ.get("COSENS_API_KEY"):
+                raise NotFound("recipe not found locally; configure CoSens credentials to fetch it")
+            return CloudRSIClient(_shared_headers=self._upload_headers)
+
+        return resolve_base(self._queue.store, base, cloud_client)
 
     def execution_get(self, execution_id):
         return self._present_execution(self._queue.execution_get(execution_id))
@@ -282,44 +298,32 @@ class RSIClient:
             for row in self._queue.recipe_list_all(recipe_ids=recipe_ids)
         ]
 
-    def recipe_insert(self, path: str | Path):
-        content, markdown = read_recipe_file(path)
-        return self._queue.recipe_insert(content, markdown)
-
     def recipes_upsert(
         self,
-        path: str | Path,
+        task_id: str,
         *,
-        local_recipe_id: str,
-        local_recipe_version_id: str,
+        recipe_id: str | None = None,
         idempotency_key: str | None = None,
-        api_key: str | None = None,
-        base_url: str | None = None,
-        virtual_user_id: str | None = None,
     ) -> dict[str, str]:
-        """Upload an existing local Recipe version and adopt the IDs from the cloud receipt."""
-        from .cloud import CloudRSIClient, _read_recipe_zip
-        from .recipe_sync import upload_recipe
+        """Publish the approved Recipe ZIP for a local Task."""
+        from .cloud import CloudRSIClient, _local_upload_destination
+        from .recipe_sync import upload_task
 
-        filename, zip_bytes = _read_recipe_zip(path)
-        client = CloudRSIClient(
-            api_key=api_key,
-            base_url=base_url,
-            virtual_user_id=virtual_user_id,
-            _shared_headers=self._upload_headers,
-        )
-        try:
-            return upload_recipe(
-                self._queue.store,
-                client,
-                filename,
-                zip_bytes,
-                _TEXT.validate_python(local_recipe_id),
-                _TEXT.validate_python(local_recipe_version_id),
-                idempotency_key,
+        task_id = _TEXT.validate_python(task_id)
+        destination = _local_upload_destination(self._upload_headers)
+
+        def cloud_client():
+            if not self._upload_headers:
+                raise InvalidState("configure CoSens request headers in local RSIClient config.headers to upload a Recipe")
+            return CloudRSIClient(
+                base_url=destination["base_url"],
+                _shared_headers=self._upload_headers,
             )
-        finally:
-            client.close()
+
+        return upload_task(
+            self._queue.store, task_id, idempotency_key, destination, cloud_client,
+            target_recipe_id=recipe_id,
+        )
 
     def recipe_get(self, recipe_id, *, version="active"):
         version = _TEXT.validate_python(version)

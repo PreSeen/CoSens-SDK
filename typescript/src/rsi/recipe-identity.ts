@@ -14,6 +14,20 @@ export const recipeIdentityScope = 'recipe_cloud_identity';
 export const pendingUploadScope = 'recipe_cloud_upload_pending';
 export const uploadReceiptScope = 'recipe_cloud_upload_receipt';
 
+export function assertCloudRecipeTargetAvailable(store: Store, targetId: string, localRecipeId?: string) {
+  if (localRecipeId !== undefined && targetId !== localRecipeId && (
+    store.resolveRecipeId(targetId) !== targetId
+    || store.db.prepare('SELECT 1 FROM recipe_objects WHERE id=?').get(targetId)
+  )) fail('conflict', 'cloud Recipe ID is already used locally');
+
+  const pending = store.db.prepare(`
+    SELECT 1 FROM idempotency
+    WHERE scope=? AND (? IS NULL OR key<>?) AND json_extract(request, '$.cloud_recipe_id')=?
+    LIMIT 1
+  `).get(pendingUploadScope, localRecipeId ?? null, localRecipeId ?? null, targetId);
+  if (pending) fail('conflict', 'the cloud Recipe has a pending local upload');
+}
+
 const recipeExecutions = `
   recipe_id = @recipeId OR json_extract(details, '$.test_request.recipe_id') = @recipeId
   OR json_extract(details, '$.result.recipe_id') = @recipeId
@@ -93,11 +107,13 @@ export function adoptRecipeIdentity(
   recipe: Recipe,
   versionId: string,
   receipt: RecipeUpsertResult,
+  legacy = false,
 ) {
   const recipeId = recipe.id;
+  const objects = legacy ? 'recipes' : 'recipe_objects';
   const { recipe_id: formalRecipeId, recipe_version_id: formalVersionId } = receipt;
   if ((recipeId !== formalRecipeId && (
-    store.db.prepare('SELECT 1 FROM recipes WHERE id=?').get(formalRecipeId)
+    store.db.prepare(`SELECT 1 FROM ${objects} WHERE id=?`).get(formalRecipeId)
     || store.resolveRecipeId(formalRecipeId) !== formalRecipeId
   )) || (versionId !== formalVersionId && (
     store.db.prepare('SELECT 1 FROM versions WHERE id=?').get(formalVersionId)
@@ -130,11 +146,12 @@ export function adoptRecipeIdentity(
   // Existing version rows still reference the Recipe ID until both writes finish.
   store.db.pragma('defer_foreign_keys = ON');
   if (recipeId !== formalRecipeId) {
-    store.db.prepare('UPDATE recipes SET id=? WHERE id=?').run(formalRecipeId, recipeId);
+    store.db.prepare(`UPDATE ${objects} SET id=? WHERE id=?`).run(formalRecipeId, recipeId);
     store.db.prepare(`
       UPDATE versions SET recipe_id=?, data=json_set(data, '$.object_id', ?) WHERE recipe_id=?
     `).run(formalRecipeId, formalRecipeId, recipeId);
     store.db.prepare('UPDATE executions SET recipe_id=? WHERE recipe_id=?').run(formalRecipeId, recipeId);
+    if (!legacy) store.db.prepare('UPDATE recipes SET recipe_id=? WHERE recipe_id=?').run(formalRecipeId, recipeId);
     store.remember(recipeIdAlias, recipeId, {}, { id: formalRecipeId });
   }
   if (versionId !== formalVersionId) {
@@ -145,6 +162,10 @@ export function adoptRecipeIdentity(
       .run(formalVersionId, versionId);
     store.db.prepare('UPDATE executions SET base_recipe_version_id=? WHERE base_recipe_version_id=?')
       .run(formalVersionId, versionId);
+    if (!legacy) {
+      store.db.prepare('UPDATE recipes SET recipe_version_id=? WHERE recipe_id=? AND recipe_version_id=?')
+        .run(formalVersionId, formalRecipeId, versionId);
+    }
     store.remember(versionIdAlias, versionId, {}, { id: formalVersionId });
   }
 }
@@ -167,7 +188,7 @@ export function migrateMappedRecipes(store: Store) {
     if (!entry) return fail('invalid_state', 'mapped Recipe version lost its upload receipt');
     const { base_url, virtual_user_id } = JSON.parse(entry.request);
     const destination = { base_url, virtual_user_id };
-    adoptRecipeIdentity(store, recipe, local_version_id, receipt);
+    adoptRecipeIdentity(store, recipe, local_version_id, receipt, true);
     if (!store.replay(recipeIdentityScope, receipt.recipe_id, destination))
       store.remember(recipeIdentityScope, receipt.recipe_id, destination, {});
     const move = store.db.prepare('UPDATE idempotency SET key=? WHERE scope=? AND key=?');

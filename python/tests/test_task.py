@@ -20,6 +20,10 @@ def test_task_tracks_explicit_successors_and_keeps_restart_evidence(tmp_path):
         row = store.get_in(conn, task_id, "execution")
         store.save(conn, {**row, "questions": [question]})
     pending = client.task_get(task_id)
+    assert pending["task_id"] == task_id
+    assert pending["recipe_id"] == root["recipe_id"]
+    assert pending["recipe_version_id"] is None
+    assert pending["recipe_zip_path"] is None
     assert pending["pending_question_count"] == 1
     assert pending["pending_questions"][0]["execution_id"] == task_id
     assert pending["clarification_history"][0]["answer"] is None
@@ -70,6 +74,9 @@ def test_task_tracks_explicit_successors_and_keeps_restart_evidence(tmp_path):
     assert detail["clarification_history"][1]["answer"] is None
     assert detail["pending_questions"] == []
     assert detail["artifact"] is None
+    assert detail["recipe_id"] == root["recipe_id"]
+    assert detail["recipe_version_id"] is None
+    assert detail["recipe_zip_path"] is None
 
 
 def test_appending_evidence_rejects_stale_clarification(tmp_path):

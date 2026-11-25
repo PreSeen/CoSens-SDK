@@ -1,18 +1,21 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { strToU8, zipSync } from 'fflate';
 import { createServer, type IncomingHttpHeaders } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import test from 'node:test';
+import { isAbsolute, join } from 'node:path';
+import test, { type TestContext } from 'node:test';
 import { pathToFileURL } from 'node:url';
-import { RSIClient, RSIError } from '../src/rsi/index.js';
+import { CloudClient, RSIClient, RSIError } from '../src/rsi/index.js';
+import { uploadLocalRecipe } from '../src/rsi/local-recipe-upload.js';
 import { Store } from '../src/rsi/store.js';
 import { buildRecipePackage } from '../src/rsi/recipe-package.js';
 import type { Execution, Recipe } from '../src/rsi/models.js';
+import { seedRecipe } from './recipe-fixtures.js';
 
 type Seen = {
   method: string;
@@ -20,6 +23,15 @@ type Seen = {
   headers: IncomingHttpHeaders;
   body: any;
 };
+
+function setTestEnv(t: TestContext, key: string, value: string) {
+  const prior = process.env[key];
+  t.after(() => {
+    if (prior === undefined) delete process.env[key];
+    else process.env[key] = prior;
+  });
+  process.env[key] = value;
+}
 
 async function withService(
   replies: Record<string, [number, unknown]>,
@@ -75,6 +87,12 @@ test('new RSIClient() is cloud; data_dir selects local', () => {
     const local = new RSIClient({ data_dir: dir, config: null });
     assert.equal(local.mode, 'local');
     local.close();
+    const uploadOnly = new RSIClient({ data_dir: dir, config: { headers: { 'X-Test-Auth': 'fixture' } } });
+    assert.equal(uploadOnly.mode, 'local');
+    uploadOnly.close();
+    assert.throws(() => new RSIClient({
+      data_dir: dir, config: { headers: {}, auto_start: false },
+    } as never), /auto_start/);
     delete process.env.COSENS_API_KEY;
     assert.throws(() => new RSIClient(), /COSENS_API_KEY/);
     const connection = { model_id: 'fixture', api_key: 'fixture-key', base_url: 'http://localhost:9/v1' };
@@ -210,26 +228,18 @@ test('virtual_user_id is rejected before any request; only virtualUserId sets th
   assert.throws(() => new RSIClient({ data_dir: '/tmp/nope', config: null, virtual_user_id: 'vu_a' } as never));
 });
 
-test('cloud recipe_insert uploads the validated Markdown', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'rsi-cloud-recipe-'));
-  const markdown =
-    '---\nname: Weekly report\ndescription: Sales by region\n---\nGroup sales by region.\n';
-  writeFileSync(join(dir, 'RECIPE.md'), markdown);
-  writeFileSync(join(dir, 'bad.md'), 'Group sales by region.');
-  const reply = { id: 'recipe_1', active_version_id: 'version_1' };
-  await withService({ 'POST /api/recipes': [200, reply] }, async (base_url, seen) => {
+test('cloud clients expose ZIP upsert without Markdown insert or local Task upload', async () => {
+  await withService({}, async (base_url, seen) => {
     const client = new RSIClient({ mode: 'cloud', api_key: 'k', base_url });
-    assert.deepEqual(await client.recipe_insert(join(dir, 'RECIPE.md')), reply);
-    assert.deepEqual(
-      seen.map(({ method, url, body }) => [method, url, body]),
-      [['POST', '/api/recipes', { markdown }]],
-    );
-    await assert.rejects(
-      client.recipe_insert(join(dir, 'bad.md')),
-      (error: unknown) =>
-        error instanceof RSIError && error.code === 'invalid_argument',
-    );
-    assert.equal(seen.length, 1);
+    const cloud = new CloudClient({ api_key: 'k', base_url });
+    assert.equal('recipe_insert' in client, false);
+    assert.equal('recipe_insert' in cloud, false);
+    await assert.rejects(client.recipes_upsert({ task_id: 'execution_local' }), /requires a ZIP path/);
+    for (const options of [{ task_id: 'execution_local' }, { local_recipe_id: 'recipe_local' }]) {
+      await assert.rejects(client.recipes_upsert('unused.zip', options as never), /accepts only recipe_id/);
+      await assert.rejects(cloud.recipes_upsert('unused.zip', options as never), /accepts only recipe_id/);
+    }
+    assert.equal(seen.length, 0);
   });
 });
 
@@ -308,31 +318,186 @@ test('cloud recipe_download returns ZIP bytes for the requested version', async 
   });
 });
 
+test('local execution bootstraps a verified cloud Recipe and later publishes into it', async (t) => {
+  const data_dir = mkdtempSync(join(tmpdir(), 'rsi-cloud-base-'));
+  const local = new RSIClient({
+    data_dir, model_id: 'fixture', base_url: 'http://localhost:9/v1', api_key: 'fixture-model-key',
+    config: {
+      auto_start: false,
+      headers: { Authorization: 'Bearer fixture-cosens-token', 'X-Virtual-User-Id': 'vu_fixture' },
+    },
+  });
+  const store = new Store(data_dir);
+  const originalBase = process.env.COSENS_RSI_BASE_URL;
+  t.after(() => {
+    if (originalBase === undefined) delete process.env.COSENS_RSI_BASE_URL;
+    else process.env.COSENS_RSI_BASE_URL = originalBase;
+    local.close();
+    store.close();
+    rmSync(data_dir, { recursive: true, force: true });
+  });
+  const recipeId = 'recipe_official';
+  const versionId = 'version_official';
+  const context_path = join(data_dir, 'context.md');
+  const callerPath = join(data_dir, 'caller-RECIPE.md');
+  writeFileSync(context_path, 'Update the existing Recipe');
+  writeFileSync(callerPath, '---\nname: Caller\ndescription: Caller input\n---\nDifferent local file.\n');
+  const markdown = '---\nname: Published\ndescription: Published Recipe\n---\nOriginal cloud instructions.\n';
+  const archive = zipSync({
+    'RECIPE.md': strToU8(markdown),
+    'resources/helper.bin': new Uint8Array([0, 1, 2, 255]),
+    'manifest.json': strToU8(JSON.stringify({ entrypoint: 'RECIPE.md', files: ['RECIPE.md', 'resources/helper.bin'] })),
+  });
+  const digest = createHash('sha256').update(archive).digest('hex');
+  const metadata = {
+    id: recipeId, archived_at: null, active_version_id: versionId,
+    selected_version: { id: versionId, object_id: recipeId, publication_state: 'published', package_sha256: digest },
+  };
+  const get = `GET /api/recipes/${recipeId}`;
+  const download = `GET /api/recipes/${recipeId}/versions/${versionId}/download`;
+  const receipt = { recipe_id: recipeId, recipe_version_id: 'version_next' };
+  const replies: Record<string, [number, unknown]> = {
+    [get]: [200, { ...metadata, selected_version: { ...metadata.selected_version, package_sha256: '0'.repeat(64) } }],
+    [download]: [200, archive],
+    'POST /api/recipes_upsert': [200, receipt],
+  };
+  const request = {
+    evidence: { context_path, files: [] },
+    idempotency_key: 'rewrite-cloud-recipe',
+    recipe_reference: { path: callerPath, recipe_id: recipeId, recipe_version_id: versionId },
+  };
 
-test('local ZIP upload adopts cloud Recipe and version IDs and keeps Execution linkage', async (t) => {
+  await withService(replies, async (base_url, seen) => {
+    process.env.COSENS_RSI_BASE_URL = base_url;
+    await assert.rejects(local.execution_create(request), /SHA-256/);
+    assert.deepEqual(await local.execution_list(), []);
+    assert.deepEqual(await local.recipe_list(), []);
+    replies[get] = [200, metadata];
+    await assert.rejects(local.execution_create({
+      ...request, recipe_reference: { ...request.recipe_reference, recipe_version_id: 'version_old' },
+    }), /no longer active/);
+    assert.deepEqual(await local.execution_list(), []);
+    const cloud = new RSIClient({ mode: 'cloud', api_key: 'fixture', base_url });
+    await assert.rejects(cloud.execution_create(request), /requires local mode/);
+
+    const [first, duplicate] = await Promise.all([local.execution_create(request), local.execution_create(request)]);
+    assert.equal(duplicate.id, first.id);
+    assert.deepEqual(await local.execution_list().then((rows) => rows.map(({ id }) => id)), [first.id]);
+    const localVersion = await local.recipe_get(recipeId, versionId);
+    assert.equal(localVersion.id, recipeId);
+    assert.equal(localVersion.active_version_id, versionId);
+    assert.equal(localVersion.selected_version?.id, versionId);
+    const installed = join(data_dir, localVersion.storage_path, versionId);
+    assert.equal(readFileSync(join(installed, 'RECIPE.md'), 'utf8'), markdown);
+    assert.deepEqual(readFileSync(join(installed, 'resources/helper.bin')), Buffer.from([0, 1, 2, 255]));
+    const enteredRecipe = first.evidence.find(({ role }) => role === 'recipe');
+    assert.equal(enteredRecipe?.path, realpathSync(join(installed, 'RECIPE.md')));
+    assert.equal(store.get<Execution>(first.id, 'execution').base_recipe_version_id, versionId);
+    for (const request of seen) {
+      assert.equal(request.headers.authorization, 'Bearer fixture-cosens-token');
+      assert.equal(request.headers['x-virtual-user-id'], 'vu_fixture');
+    }
+    assert.ok(seen.some(({ method, url }) => method === 'GET' && url.includes(`?version=${versionId}`)));
+
+    const count = seen.length;
+    const originalZip = join(data_dir, 'original.zip');
+    writeFileSync(originalZip, archive);
+    await assert.rejects(uploadLocalRecipe(store, originalZip, {
+      base_url, local_recipe_id: recipeId, local_recipe_version_id: versionId,
+    }), /already published in the cloud/);
+    process.env.COSENS_RSI_BASE_URL = 'http://127.0.0.1:1/api';
+    assert.equal((await local.execution_create(request)).id, first.id);
+    const offline = await local.execution_create({
+      ...request, idempotency_key: 'offline-cloud-recipe', recipe_reference: { path: callerPath, recipe_id: recipeId },
+    });
+    assert.notEqual(offline.id, first.id);
+    assert.equal(store.get<Execution>(offline.id, 'execution').base_recipe_version_id, versionId);
+    assert.equal(seen.length, count);
+    await local.execution_cancel(offline.id);
+
+    store.tx(() => {
+      const version = store.append(store.get<Recipe>(recipeId, 'recipe'), {
+        name: 'Published', description: 'Updated Recipe', instructions: 'Revised instructions.',
+      }, undefined, { execution_id: first.id });
+      store.publishRecipeVersion(recipeId, version.id);
+      store.save<Execution>({
+        ...store.get<Execution>(first.id, 'execution'), status: 'completed', recipe_version_id: version.id,
+        result: { test_status: 'passed', published: true, provisional: false },
+      });
+    });
+    const task = await local.task_get(first.id);
+    assert.ok(task.artifact);
+    const { recipe_id, recipe_version_id } = task;
+    assert.equal(recipe_id, recipeId);
+    assert.ok(recipe_version_id);
+    assert.equal(recipe_version_id, task.artifact.recipe_version_id);
+    assert.equal(task.recipe_zip_path, task.artifact.zip_path);
+    process.env.COSENS_RSI_BASE_URL = base_url;
+    assert.deepEqual(await local.recipes_upsert({ task_id: task.task_id }), receipt);
+    assert.equal(seen.at(-1)?.body.get('recipe_id'), recipeId);
+    assert.equal((await local.task_get(first.id)).recipe_version_id, receipt.recipe_version_id);
+
+    const draft = store.tx(() => store.append(store.get<Recipe>(recipeId, 'recipe'), {
+      name: 'Local draft', description: 'Unpublished draft', instructions: 'Keep local changes.',
+    }));
+    process.env.COSENS_RSI_BASE_URL = base_url;
+    const otherVersion = 'version_other_device';
+    replies[get] = [200, {
+      ...metadata, active_version_id: otherVersion,
+      selected_version: { ...metadata.selected_version, id: otherVersion },
+    }];
+    replies[`GET /api/recipes/${recipeId}/versions/${otherVersion}/download`] = [200, archive];
+    const otherRequest = {
+      ...request, idempotency_key: 'cloud-version-from-other-device',
+      recipe_reference: { ...request.recipe_reference, recipe_version_id: otherVersion },
+    };
+    store.remember('recipe_cloud_upload_pending', recipeId, { cloud_recipe_id: recipeId }, {});
+    await assert.rejects(local.execution_create(otherRequest), /pending local upload/);
+    store.db.prepare("DELETE FROM idempotency WHERE scope='recipe_cloud_upload_pending' AND key=?").run(recipeId);
+    const otherDevice = await local.execution_create(otherRequest);
+    assert.equal(store.get<Execution>(otherDevice.id, 'execution').base_recipe_version_id, otherVersion);
+    assert.equal((await local.recipe_get(recipeId)).active_version_id, receipt.recipe_version_id);
+    assert.equal((await local.recipe_get(recipeId, draft.id)).selected_version?.content.name, 'Local draft');
+    const native = await seedRecipe(data_dir, callerPath);
+    const beforeMissing = seen.length;
+    await assert.rejects(local.execution_create({
+      ...request, idempotency_key: 'missing-native-version',
+      recipe_reference: { path: callerPath, recipe_id: native.id, recipe_version_id: 'version_missing' },
+    }), /local base Recipe version not found/);
+    assert.equal(seen.length, beforeMissing);
+  });
+});
+
+
+test('local upsert selects the exact Task ZIP and replays even when its ZIP is pruned', async (t) => {
   const data_dir = mkdtempSync(join(tmpdir(), 'rsi-local-zip-'));
   t.after(() => rmSync(data_dir, { recursive: true, force: true }));
   const path = join(data_dir, 'RECIPE.md');
   const zip = join(data_dir, 'recipe.zip');
   const firstMarkdown = '---\nname: Report\ndescription: Generate the report\n---\nDraft one\n';
   writeFileSync(path, firstMarkdown);
-  const local = new RSIClient({
+  const headers = {
+    Authorization: 'Bearer fixture-access-token',
+    'X-Auth-Type': 'access_token',
+    'X-Virtual-User-Id': 'vu_fixture',
+    'Content-Type': 'application/json',
+    'Content-Length': '0',
+    'Idempotency-Key': 'model-key',
+  };
+  const localOptions = {
     data_dir,
     model_id: 'fixture', base_url: 'http://localhost:9/v1', api_key: 'fixture-model-key',
-    config: {
-      auto_start: false,
-      headers: {
-        Authorization: 'Bearer fixture-access-token',
-        'X-Auth-Type': 'access_token',
-        'X-Virtual-User-Id': 'vu_fixture',
-        'Content-Type': 'application/json',
-        'Content-Length': '0',
-        'Idempotency-Key': 'model-key',
-      },
-    },
+    config: { auto_start: false, headers },
+  };
+  const local = new RSIClient(localOptions);
+  const otherTenant = new RSIClient({
+    ...localOptions, config: { ...localOptions.config, headers: { ...headers, 'X-Virtual-User-Id': 'vu_other' } },
   });
-  t.after(() => local.close());
-  const recipe = await local.recipe_insert(path);
+  const uploadStore = new Store(data_dir);
+  const uploadVersion = (path: string, options: Parameters<typeof uploadLocalRecipe>[2]) =>
+    uploadLocalRecipe(uploadStore, path, options, new Headers(headers));
+  t.after(() => { local.close(); otherTenant.close(); uploadStore.close(); });
+  const recipe = await seedRecipe(data_dir, path);
   const firstLocalVersion = recipe.active_version_id!;
   const firstDirectory = join(data_dir, recipe.storage_path, firstLocalVersion);
   writeFileSync(join(firstDirectory, 'helper.py'), 'print(42)\n');
@@ -348,8 +513,23 @@ test('local ZIP upload adopts cloud Recipe and version IDs and keeps Execution l
   const second = { recipe_id: 'recipe_cloud', recipe_version_id: 'version_cloud_2' };
   const replies: Record<string, [number, unknown]> = { 'POST /api/recipes_upsert': [200, first] };
   await withService(replies, async (base_url, seen) => {
+    setTestEnv(t, 'COSENS_RSI_BASE_URL', base_url);
+    setTestEnv(t, 'COSENS_API_KEY', 'fixture-ambient-key');
     const initial = { base_url, local_recipe_id: recipe.id, local_recipe_version_id: firstLocalVersion };
-    await assert.rejects(local.recipes_upsert(zip, initial), /finish the pending Recipe execution/);
+    const selectedUpload = { task_id: execution.id };
+    const priorPair = { recipe_id: recipe.id, recipe_version_id: firstLocalVersion };
+    await assert.rejects(local.recipes_upsert(zip), /requires \{ task_id \}/);
+    await assert.rejects(local.recipes_upsert(zip, initial as never), /requires \{ task_id \}/);
+    await assert.rejects(local.recipes_upsert(priorPair as never), /Unrecognized key/);
+    await assert.rejects(local.recipes_upsert({ ...selectedUpload, ...priorPair } as never), /Unrecognized key/);
+    await assert.rejects(local.recipes_upsert({ ...selectedUpload, local_recipe_id: recipe.id } as never), /Unrecognized key/);
+    for (const removedOptions of [
+      { base_url }, { api_key: 'old-key' }, { virtualUserId: 'vu_override' },
+    ]) {
+      await assert.rejects(local.recipes_upsert({ ...selectedUpload, ...removedOptions } as never), /Unrecognized key/);
+    }
+    await assert.rejects(local.recipes_upsert(selectedUpload), /has no approved Recipe version/);
+    await assert.rejects(uploadVersion(zip, initial), /finish the pending Recipe execution/);
     assert.equal(seen.length, 0);
     const setup = new Database(join(data_dir, 'rsi-ts.sqlite3'));
     try {
@@ -365,25 +545,53 @@ test('local ZIP upload adopts cloud Recipe and version IDs and keeps Execution l
     } finally {
       setup.close();
     }
+    const secondLocalVersion = uploadStore.tx(() => {
+      const version = uploadStore.append(uploadStore.get<Recipe>(recipe.id, 'recipe'), {
+        name: 'Report', description: 'Generate the report', instructions: 'Draft two',
+      });
+      uploadStore.publishRecipeVersion(recipe.id, version.id);
+      return version.id;
+    });
+    assert.equal((await local.recipe_get(recipe.id)).active_version_id, secondLocalVersion);
     const packages = join(data_dir, 'task-packages');
     mkdirSync(packages);
     writeFileSync(join(packages, `${execution.id}.zip`), 'orphan from interrupted commit');
     const task = await local.task_get(execution.id);
-    assert.equal(task.recipe_id, null);
-    assert.equal(task.recipe_version_id, null);
+    assert.equal(task.recipe_id, recipe.id);
+    assert.equal(task.recipe_version_id, firstLocalVersion);
     assert.ok(task.artifact);
+    assert.equal(task.artifact.recipe_id, recipe.id);
+    assert.equal(task.artifact.recipe_version_id, firstLocalVersion);
+    assert.equal(task.recipe_zip_path, task.artifact.zip_path);
+    assert.ok(isAbsolute(task.artifact.zip_path));
     assert.deepEqual(readFileSync(task.artifact.zip_path), readFileSync(zip));
     const original = readFileSync(zip);
     const repacked = Buffer.concat([original, Buffer.from('x')]);
     repacked.writeUInt16LE(1, original.length - 2);
     const repackedZip = join(data_dir, 'repacked.zip');
     writeFileSync(repackedZip, repacked);
-    await assert.rejects(local.recipes_upsert(repackedZip, initial), /frozen Task Recipe ZIP/);
+    await assert.rejects(uploadVersion(repackedZip, initial), /frozen Task Recipe ZIP/);
     assert.equal(seen.length, 0);
-    assert.deepEqual(await local.recipes_upsert(pathToFileURL(task.artifact.zip_path), initial), first);
-    assert.deepEqual(await local.recipes_upsert(zip, { ...initial, virtualUserId: 'vu_fixture' }), first);
-    await assert.rejects(local.recipes_upsert(zip, { ...initial, virtualUserId: 'vu_other' }), /different arguments/);
+    replies['POST /api/recipes_upsert'] = [503, { error: { code: 'unavailable', message: 'retry Task upload' } }];
+    await assert.rejects(local.recipes_upsert(selectedUpload), /retry Task upload/);
+    await assert.rejects(otherTenant.recipes_upsert(selectedUpload), /another upload is pending/);
+    assert.equal(seen.length, 1);
+    const pendingKey = seen[0].headers['idempotency-key'];
+    seen.length = 0;
+    rmSync(task.artifact.zip_path);
+    replies['POST /api/recipes_upsert'] = [200, first];
+    const uploadOnly = new RSIClient({ data_dir, config: { headers } });
+    try {
+      assert.deepEqual(await uploadOnly.recipes_upsert(selectedUpload), first);
+    } finally {
+      uploadOnly.close();
+    }
+    assert.equal(seen[0].headers['idempotency-key'], pendingKey);
+    assert.deepEqual(await local.recipes_upsert(selectedUpload), first);
+    assert.deepEqual(await local.recipes_upsert({ ...selectedUpload, recipe_id: first.recipe_id }), first);
+    await assert.rejects(otherTenant.recipes_upsert(selectedUpload), /different arguments/);
     assert.equal(seen[0].body.get('recipe_id'), null);
+    assert.deepEqual(Buffer.from(await seen[0].body.get('file').arrayBuffer()), readFileSync(zip));
     assert.equal(seen[0].headers.authorization, 'Bearer fixture-access-token');
     assert.equal(seen[0].headers['x-auth-type'], 'access_token');
     assert.equal(seen[0].headers['x-virtual-user-id'], 'vu_fixture');
@@ -399,9 +607,10 @@ test('local ZIP upload adopts cloud Recipe and version IDs and keeps Execution l
     assert.equal(resumed.recipe_id, first.recipe_id);
     assert.equal(resumed.recipe_version_id, first.recipe_version_id);
     const syncedTask = await local.task_get(execution.id);
-    assert.equal(syncedTask.artifact?.zip_path, task.artifact.zip_path);
+    assert.deepEqual(syncedTask.artifact, { zip_path: task.artifact.zip_path, ...first });
     assert.equal(syncedTask.recipe_id, first.recipe_id);
     assert.equal(syncedTask.recipe_version_id, first.recipe_version_id);
+    assert.equal(syncedTask.recipe_zip_path, task.artifact.zip_path);
     assert.deepEqual(resumed.test_results, [{
       id: 'test-persisted', recipe_id: first.recipe_id, version_id: first.recipe_version_id,
     }]);
@@ -412,28 +621,15 @@ test('local ZIP upload adopts cloud Recipe and version IDs and keeps Execution l
       started: 0, recipe_id: first.recipe_id, execution_id: execution.id,
     });
 
-    const store = new Store(data_dir);
-    let secondLocalVersion: string;
-    try {
-      secondLocalVersion = store.tx(() => {
-        const version = store.append(store.get<Recipe>(recipe.id, 'recipe'), {
-          name: 'Report', description: 'Generate the report', instructions: 'Draft two',
-        });
-        store.publishRecipeVersion(recipe.id, version.id);
-        return version.id;
-      });
-    } finally {
-      store.close();
-    }
     const nextZip = join(data_dir, 'recipe-v2.zip');
     writeFileSync(nextZip, buildRecipePackage(join(data_dir, recipe.storage_path, secondLocalVersion)));
     replies['POST /api/recipes_upsert'] = [200, second];
-    assert.deepEqual(await local.recipes_upsert(nextZip, {
+    assert.deepEqual(await uploadVersion(nextZip, {
       ...initial, local_recipe_version_id: secondLocalVersion,
     }), second);
     assert.equal(seen[1].body.get('recipe_id'), first.recipe_id);
-    assert.deepEqual(await local.recipes_upsert(zip, initial), first);
-    assert.deepEqual(await local.recipes_upsert(zip, {
+    assert.deepEqual(await uploadVersion(zip, initial), first);
+    assert.deepEqual(await uploadVersion(zip, {
       ...initial, local_recipe_id: first.recipe_id, local_recipe_version_id: first.recipe_version_id,
     }), first);
     assert.equal(seen.length, 2);
@@ -452,7 +648,9 @@ test('local ZIP upload adopts cloud Recipe and version IDs and keeps Execution l
     }
     const db = new Database(join(data_dir, 'rsi-ts.sqlite3'), { readonly: true });
     try {
-      assert.deepEqual(db.prepare('SELECT id FROM recipes').all(), [{ id: first.recipe_id }]);
+      assert.deepEqual(db.prepare('SELECT id,recipe_id,recipe_version_id FROM recipes').all(), [{
+        id: execution.id, recipe_id: first.recipe_id, recipe_version_id: first.recipe_version_id,
+      }]);
       assert.deepEqual(db.prepare('SELECT id FROM versions WHERE recipe_id=? ORDER BY number').all(first.recipe_id), [
         { id: first.recipe_version_id }, { id: second.recipe_version_id },
       ]);
@@ -461,17 +659,114 @@ test('local ZIP upload adopts cloud Recipe and version IDs and keeps Execution l
       });
       assert.deepEqual(db.pragma('foreign_key_check'), []);
       assert.equal(db.prepare('SELECT 1 FROM idempotency WHERE scope=?').get('recipe_cloud_upload_pending'), undefined);
-      assert.ok(!JSON.stringify(db.prepare('SELECT request,result FROM idempotency').all()).includes(initial.api_key));
+      assert.doesNotMatch(JSON.stringify(db.prepare('SELECT request,result FROM idempotency').all()), /fixture-access-token/);
     } finally {
       db.close();
     }
-    const alias = await local.recipe_insert(path);
+    rmSync(task.artifact.zip_path);
+    rmSync(join(data_dir, synced.storage_path, first.recipe_version_id), { recursive: true });
+    const prunedTask = await local.task_get(execution.id);
+    assert.equal(prunedTask.recipe_id, first.recipe_id);
+    assert.equal(prunedTask.recipe_version_id, first.recipe_version_id);
+    assert.equal(prunedTask.recipe_zip_path, null);
+    assert.equal(prunedTask.artifact, null);
+    assert.deepEqual(await local.recipes_upsert(selectedUpload), first);
+    await assert.rejects(local.recipes_upsert({ ...first, base_url } as never), /Unrecognized key/);
+    await assert.rejects(local.recipes_upsert({ ...selectedUpload, idempotency_key: 'changed-key' }), /different arguments/);
+    process.env.COSENS_RSI_BASE_URL = base_url + '/other';
+    await assert.rejects(local.recipes_upsert(selectedUpload), /different arguments/);
+    process.env.COSENS_RSI_BASE_URL = base_url;
+    assert.equal(seen.length, 2);
+    const alias = await seedRecipe(data_dir, path);
+    await assert.rejects(uploadVersion(zip, { ...initial, local_recipe_id: alias.id }), /version does not belong/);
+    assert.equal(seen.length, 2);
     const aliasZip = join(data_dir, 'alias.zip');
     writeFileSync(aliasZip, buildRecipePackage(join(data_dir, alias.storage_path, alias.active_version_id!)));
-    await assert.rejects(local.recipes_upsert(aliasZip, {
+    await assert.rejects(uploadVersion(aliasZip, {
       ...initial, local_recipe_id: alias.id, local_recipe_version_id: alias.active_version_id!,
     }), /already used locally/);
     assert.equal((await local.recipe_get(alias.id)).id, alias.id);
+  });
+});
+
+test('local publication can bind an explicit cloud target and safely resume that reservation', async (t) => {
+  const data_dir = mkdtempSync(join(tmpdir(), 'rsi-explicit-target-'));
+  const client = new RSIClient({
+    data_dir, model_id: 'fixture', base_url: 'http://localhost:9/v1', api_key: 'fixture-model-key',
+    config: { auto_start: false, headers: { Authorization: 'Bearer fixture-access-token' } },
+  });
+  const store = new Store(data_dir);
+  t.after(() => { client.close(); store.close(); rmSync(data_dir, { recursive: true, force: true }); });
+  const context_path = join(data_dir, 'context.md');
+  writeFileSync(context_path, 'Task context.');
+  const approve = async (idempotency_key: string, recipe_reference?: { path: string; recipe_id: string }) => {
+    const execution = await client.execution_create({ evidence: { context_path, files: [] }, idempotency_key, recipe_reference });
+    store.tx(() => {
+      const recipe = store.get<Recipe>(execution.recipe_id!, 'recipe');
+      const version = store.append(recipe, { name: 'Approved', description: 'Fixture', instructions: 'Write output.' });
+      store.publishRecipeVersion(recipe.id, version.id);
+      store.save<Execution>({
+        ...store.get<Execution>(execution.id, 'execution'), status: 'completed', recipe_version_id: version.id,
+        result: { test_status: 'passed', published: true, provisional: false },
+      });
+    });
+    const task = await client.task_get(execution.id);
+    assert.ok(task.recipe_id && task.recipe_version_id && task.recipe_zip_path);
+    return task;
+  };
+
+  const first = await approve('first');
+  const other = await approve('other');
+  const target = 'recipe_shared_cloud';
+  const receipt = { recipe_id: target, recipe_version_id: 'version_bound_cloud' };
+  const endpoint = 'POST /api/recipes_upsert';
+  const replies: Record<string, [number, unknown]> = {
+    [endpoint]: [503, { error: { code: 'unavailable', message: 'retry the target' } }],
+  };
+  await withService(replies, async (base_url, seen) => {
+    setTestEnv(t, 'COSENS_RSI_BASE_URL', base_url);
+    const upload = { task_id: first.task_id };
+    await assert.rejects(client.recipes_upsert({ ...upload, recipe_id: other.recipe_id! }), /already used locally/);
+    assert.equal(seen.length, 0);
+
+    await assert.rejects(client.recipes_upsert({ ...upload, recipe_id: target }), /retry the target/);
+    assert.equal(seen[0].body.get('recipe_id'), target);
+    const sha = createHash('sha256').update(readFileSync(first.recipe_zip_path!)).digest('hex');
+    const key = createHash('sha256').update([first.recipe_id, first.recipe_version_id, sha, target].join('\0')).digest('hex');
+    assert.equal(seen[0].headers['idempotency-key'], `local-recipe-upload-${key}`);
+    await assert.rejects(client.recipes_upsert({ task_id: other.task_id, recipe_id: target }), /pending local upload/);
+    await assert.rejects(client.recipes_upsert({ ...upload, recipe_id: 'recipe_different' }), /another upload is pending/);
+    assert.equal(seen.length, 1);
+
+    replies[endpoint] = [200, { ...receipt, recipe_id: 'recipe_wrong_receipt' }];
+    await assert.rejects(client.recipes_upsert(upload), /mismatched or invalid IDs/);
+    assert.equal(seen[1].body.get('recipe_id'), target);
+    assert.equal(seen[1].headers['idempotency-key'], seen[0].headers['idempotency-key']);
+    replies[endpoint] = [200, receipt];
+    assert.deepEqual(await client.recipes_upsert(upload), receipt);
+    assert.equal(seen[2].body.get('recipe_id'), target);
+    assert.equal(seen[2].headers['idempotency-key'], seen[0].headers['idempotency-key']);
+    const synced = await client.task_get(first.task_id);
+    assert.equal(synced.task_id, first.task_id);
+    assert.equal(synced.recipe_id, target);
+    assert.equal(synced.recipe_version_id, receipt.recipe_version_id);
+    assert.equal(synced.recipe_zip_path, first.recipe_zip_path);
+    assert.deepEqual(await client.recipes_upsert({ ...upload, recipe_id: target }), receipt);
+    await assert.rejects(client.recipes_upsert({ ...upload, recipe_id: 'recipe_different' }), /different arguments/);
+    await assert.rejects(client.recipes_upsert({ task_id: other.task_id, recipe_id: first.recipe_id! }), /already used locally/);
+    assert.equal(seen.length, 3);
+
+    const recipe = await client.recipe_get(target);
+    const path = join(data_dir, recipe.storage_path, receipt.recipe_version_id, 'RECIPE.md');
+    const next = await approve('next', { path, recipe_id: target });
+    await assert.rejects(client.recipes_upsert({
+      task_id: next.task_id, recipe_id: 'recipe_different',
+    }), /already linked to a different cloud Recipe/);
+    assert.equal(seen.length, 3);
+    const nextReceipt = { recipe_id: target, recipe_version_id: 'version_next_cloud' };
+    replies[endpoint] = [200, nextReceipt];
+    assert.deepEqual(await client.recipes_upsert({ task_id: next.task_id }), nextReceipt);
+    assert.equal(seen[3].body.get('recipe_id'), target);
   });
 });
 
@@ -485,8 +780,9 @@ test('failed local ZIP upload retains a retry only for the same bytes and destin
   const markdown = '---\nname: Report\ndescription: Generate the report\n---\nMake a report.\n';
   writeFileSync(path, markdown);
   const local = new RSIClient({ data_dir, config: null });
-  t.after(() => local.close());
-  const recipe = await local.recipe_insert(path);
+  const store = new Store(data_dir);
+  t.after(() => { local.close(); store.close(); });
+  const recipe = await seedRecipe(data_dir, path);
   writeFileSync(zip, buildRecipePackage(join(data_dir, recipe.storage_path, recipe.active_version_id!)));
   const archive = (content: string) => zipSync({
     'RECIPE.md': strToU8(content),
@@ -499,24 +795,24 @@ test('failed local ZIP upload retains a retry only for the same bytes and destin
   };
   await withService(replies, async (base_url, seen) => {
     const options = { base_url, api_key: 'k', local_recipe_id: recipe.id, local_recipe_version_id: recipe.active_version_id! };
-    await assert.rejects(local.recipes_upsert(mismatch, options), /match/i);
+    await assert.rejects(uploadLocalRecipe(store, mismatch, options), /match/i);
     assert.equal(seen.length, 0);
-    await assert.rejects(local.recipes_upsert(alternate, options), /ZIP invalid/);
+    await assert.rejects(uploadLocalRecipe(store, alternate, options), /ZIP invalid/);
     replies['POST /api/recipes_upsert'] = [503, { error: { code: 'unavailable', message: 'try again' } }];
-    await assert.rejects(local.recipes_upsert(zip, options), /try again/);
+    await assert.rejects(uploadLocalRecipe(store, zip, options), /try again/);
     assert.equal((await local.recipe_get(recipe.id)).id, recipe.id);
-    await assert.rejects(local.recipes_upsert(alternate, options), /another upload is pending/);
-    await assert.rejects(local.recipes_upsert(zip, { ...options, virtualUserId: 'vu_other' }), /another upload is pending/);
-    await assert.rejects(local.recipes_upsert(zip, { ...options, base_url: base_url + '/other' }), /another upload is pending/);
-    await assert.rejects(local.recipes_upsert(zip, { ...options, local_recipe_version_id: 'version_missing' }), /version does not belong/);
+    await assert.rejects(uploadLocalRecipe(store, alternate, options), /another upload is pending/);
+    await assert.rejects(uploadLocalRecipe(store, zip, { ...options, virtualUserId: 'vu_other' }), /another upload is pending/);
+    await assert.rejects(uploadLocalRecipe(store, zip, { ...options, base_url: base_url + '/other' }), /another upload is pending/);
+    await assert.rejects(uploadLocalRecipe(store, zip, { ...options, local_recipe_version_id: 'version_missing' }), /version does not belong/);
     assert.equal(seen.length, 2);
     const receipt = { recipe_id: 'recipe_cloud', recipe_version_id: 'version_cloud' };
     replies['POST /api/recipes_upsert'] = [200, receipt];
-    assert.deepEqual(await local.recipes_upsert(zip, { ...options, api_key: 'rotated-key' }), receipt);
+    assert.deepEqual(await uploadLocalRecipe(store, zip, { ...options, api_key: 'rotated-key' }), receipt);
     assert.equal(seen[2].headers['idempotency-key'], seen[1].headers['idempotency-key']);
     assert.equal(seen[2].headers.authorization, 'Bearer rotated-key');
     assert.equal((await local.recipe_get(recipe.id)).active_version_id, receipt.recipe_version_id);
-    await assert.rejects(local.recipes_upsert(zip, { ...options, virtualUserId: 'vu_other' }), /different arguments/);
+    await assert.rejects(uploadLocalRecipe(store, zip, { ...options, virtualUserId: 'vu_other' }), /different arguments/);
   });
 });
 
@@ -549,9 +845,14 @@ test('local upload rejects candidates and a legacy approved version retains its 
   });
   const zip = join(data_dir, 'candidate.zip');
   writeFileSync(zip, buildRecipePackage(join(data_dir, recipe.storage_path, version.id)));
-  assert.equal((await local.task_get(run.id)).artifact, null);
+  const provisional = await local.task_get(run.id);
+  assert.equal(provisional.recipe_id, recipe.id);
+  assert.equal(provisional.recipe_version_id, null);
+  assert.equal(provisional.recipe_zip_path, null);
+  assert.equal(provisional.artifact, null);
   await withService({}, async (base_url, seen) => {
-    await assert.rejects(local.recipes_upsert(zip, {
+    await assert.rejects(local.recipes_upsert({ task_id: run.id }), /has no approved Recipe version/);
+    await assert.rejects(uploadLocalRecipe(store, zip, {
       base_url, api_key: 'k', local_recipe_id: recipe.id, local_recipe_version_id: version.id,
     }), /must be approved/);
     assert.equal(seen.length, 0);
@@ -568,13 +869,23 @@ test('local upload rejects candidates and a legacy approved version retains its 
   legacy.writeUInt16LE(1, original.length - 2);
   writeFileSync(zip, legacy);
   const receipt = { recipe_id: 'recipe_cloud', recipe_version_id: 'version_cloud' };
-  await withService({ 'POST /api/recipes_upsert': [200, receipt] }, async (base_url) => {
-    await local.recipes_upsert(zip, {
+  await withService({ 'POST /api/recipes_upsert': [200, receipt] }, async (base_url, seen) => {
+    setTestEnv(t, 'COSENS_RSI_BASE_URL', base_url);
+    setTestEnv(t, 'COSENS_API_KEY', 'fixture-ambient-key');
+    await assert.rejects(local.recipes_upsert({ task_id: run.id }), /config.headers/);
+    assert.equal(seen.length, 0);
+    assert.equal(store.db.prepare('SELECT 1 FROM idempotency WHERE scope=?')
+      .get('recipe_cloud_upload_pending'), undefined);
+    await uploadLocalRecipe(store, zip, {
       base_url, api_key: 'k', local_recipe_id: recipe.id, local_recipe_version_id: version.id,
     });
+    delete process.env.COSENS_API_KEY;
+    assert.deepEqual(await local.recipes_upsert({ task_id: run.id }), receipt);
+    assert.equal(seen.length, 1);
   });
   const synced = await local.task_get(run.id);
   assert.equal(synced.recipe_id, receipt.recipe_id);
   assert.equal(synced.recipe_version_id, receipt.recipe_version_id);
+  assert.equal(synced.recipe_zip_path, null);
   assert.equal(synced.artifact, null);
 });

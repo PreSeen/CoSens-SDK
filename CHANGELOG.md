@@ -4,13 +4,16 @@ Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned
 
 ## Unreleased
 
+- Local `execution_create()` can download a missing published Recipe before queuing an update and keep its formal cloud identity. Local Recipe references can pin a version with `recipe_version_id`.
 - Local RSI in Python and TypeScript adds `task_list()`, `task_get()`, and `task_restart()` for task cards, clarification history, and execution restarts. Task details expose a ZIP for the final qualified Recipe version.
+- Local SQLite schema v10 stores one row per Task in `recipes`, including its root Execution ID, Recipe and version IDs, and ZIP path. The migration preserves existing execution history, Recipe files and upload receipts.
+- Local `task_get()` returns the current `recipe_id`, final `recipe_version_id`, and `recipe_zip_path` at the top level. The version and path are null until the final artifact is ready.
 
 ### Breaking
 
 - `recipe_list()` no longer returns `status`. Use `task_list()` or `task_get()` for local task status and `active_version_id` to find the available Recipe version.
-- Local `recipes_upsert()` verifies that the ZIP contains the files of the specified local Recipe version.
-- Local `RSIClient` now requires `model_id`, `api_key`, and `base_url` as constructor arguments when configured to run an Execution. Move the model ID and URL out of `config` and supply the model key as `api_key`. The SDK sends the key as a Bearer token to the OpenAI-compatible model endpoint. `config.headers` is used only for local Recipe ZIP uploads.
+- The Python and TypeScript SDKs remove `recipe_insert()`. Local `recipes_upsert()` takes a `task_id` and finds the task's final ZIP. An optional `recipe_id` publishes a new version of that cloud Recipe. The upload uses `config.headers` and the endpoint from `COSENS_RSI_BASE_URL` or the default CoSens endpoint. Both modes accept `idempotency_key`; cloud clients pass a ZIP path.
+- Local `RSIClient` now requires `model_id`, `api_key`, and `base_url` as constructor arguments when configured to run an Execution. Move the model ID and URL out of `config` and supply the model key as `api_key`. The SDK sends the key as a Bearer token to the OpenAI-compatible model endpoint. `config.headers` carries CoSens authentication for local Recipe downloads and uploads.
 
 ## TypeScript 0.10.1
 

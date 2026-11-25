@@ -87,6 +87,10 @@ export type MaterialManifest = z.input<typeof ManifestSchema>;
 export const RecipeReferenceSchema = z.strictObject({
   path: text,
   recipe_id: text.optional(),
+  recipe_version_id: text.optional(),
+}).refine(({ recipe_id, recipe_version_id }) => !recipe_version_id || !!recipe_id, {
+  message: 'recipe_version_id requires recipe_id',
+  path: ['recipe_version_id'],
 });
 export type RecipeReference = z.input<typeof RecipeReferenceSchema>;
 export const EvidenceSchema = z

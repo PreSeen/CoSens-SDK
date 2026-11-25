@@ -17,6 +17,12 @@ import {
 import { LearningLiterals, rubricRuleText } from './portability.js';
 import { uid } from './store.js';
 import { stageProgress } from './progress.js';
+import {
+  assertStagedRecipePackageFiles,
+  describeRecipeResources,
+  readRecipeVersionResources,
+  stageRecipePackageFiles,
+} from './recipe-package.js';
 import { freezeTaskArtifact } from './task.js';
 import type { PythonRun } from './test-python.js';
 import {
@@ -35,6 +41,7 @@ import {
   type Runtime,
   type TestResult,
   type Recipe,
+  type Version,
 } from './models.js';
 
 interface Candidate {
@@ -289,6 +296,21 @@ export class Engine {
     });
   }
 
+  private recipeVersionDirectory(version: Version<RecipeContent>): string {
+    const recipe = this.store.get<Recipe>(version.object_id, 'recipe');
+    return join(this.store.root, recipe.storage_path, version.id);
+  }
+
+  private recipeResources(version: Version<RecipeContent>): Map<string, Uint8Array> {
+    try {
+      return readRecipeVersionResources(this.recipeVersionDirectory(version));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || version.provenance.source === 'cloud') throw error;
+      // Some old Markdown-only versions did not have an on-disk version directory.
+      return new Map();
+    }
+  }
+
   private async generate(state: State): Promise<{ candidate: Candidate }> {
     const round = (state.candidate?.round ?? 0) + 1;
     const execution = this.inStage(state.revision, 'generate', round);
@@ -303,8 +325,15 @@ export class Engine {
       };
     }
     const key = `recipe:${this.id}:${state.revision}:${round}`;
+    const baseId =
+      state.candidate?.version_id ?? execution.base_recipe_version_id;
+    const base = baseId
+      ? this.store.version_by_id<RecipeContent>(baseId, 'recipe')
+      : undefined;
+    const resources = base ? this.recipeResources(base) : new Map<string, Uint8Array>();
     const cached = this.store.operation<RecipeContent>(key);
     if (cached) {
+      if (resources.size) stageRecipePackageFiles(this.recipeVersionDirectory(cached), resources);
       return {
         candidate: {
           recipe_id: cached.object_id,
@@ -313,11 +342,6 @@ export class Engine {
         },
       };
     }
-    const baseId =
-      state.candidate?.version_id ?? execution.base_recipe_version_id;
-    const base = baseId
-      ? this.store.version_by_id<RecipeContent>(baseId, 'recipe')
-      : undefined;
     const files = this.evidence(execution);
     const recipeFile = files.find((file) => file.role === 'recipe');
     const literals = this.learningLiterals(
@@ -332,6 +356,7 @@ export class Engine {
       base_recipe:
         base?.content ??
         (recipeFile ? read_snapshot(recipeFile).text : undefined),
+      ...(resources.size ? { base_recipe_resources: describeRecipeResources(resources) } : {}),
     };
     let content: RecipeContent;
     for (let attempt = 0; ; attempt++) {
@@ -373,6 +398,7 @@ export class Engine {
           input_revision: state.revision,
         },
       );
+      if (resources.size) stageRecipePackageFiles(this.recipeVersionDirectory(version), resources);
       this.store.save({
         ...current,
         name,
@@ -468,7 +494,17 @@ export class Engine {
     const inputs = this.evidence(execution, true);
     const attempt = join(this.directory(state.revision), uid('test-attempt'));
     const workspace = join(attempt, 'outputs');
+    const scripts = join(attempt, 'scripts');
     mkdirSync(workspace, { recursive: true, mode: 0o700 });
+    const resources = this.recipeResources(recipe);
+    const workspaceFiles = new Map<string, Uint8Array>();
+    const scriptFiles = new Map<string, Uint8Array>();
+    for (const [name, bytes] of resources) {
+      if (name.startsWith('scripts/')) scriptFiles.set(name.slice('scripts/'.length), bytes);
+      else workspaceFiles.set(name, bytes);
+    }
+    stageRecipePackageFiles(workspace, workspaceFiles);
+    stageRecipePackageFiles(scripts, scriptFiles);
     const trace = join(attempt, 'executor-trace.json');
     atomic_json(join(attempt, 'test-input.json'), {
       test_task: task,
@@ -479,6 +515,10 @@ export class Engine {
       {
         recipe: recipe.content,
         test_task: { instruction: task.instruction },
+        ...(resources.size ? {
+          package_files: [...resources.keys()].sort(),
+          package_usage: 'Use staged package files at their exact paths. Keep them unchanged.',
+        } : {}),
         ...(rubrics.requires_python ? { requires_python: true } : {}),
       },
       inputs,
@@ -487,9 +527,12 @@ export class Engine {
     );
     atomic_json(join(attempt, 'executor-result.json'), summary ?? null);
     this.guard(state.revision);
+    assertStagedRecipePackageFiles(workspace, workspaceFiles);
+    assertStagedRecipePackageFiles(scripts, scriptFiles);
     result.workspace = workspace;
     result.trace_path = trace;
     result.artifacts = workspace_files(workspace)
+      .filter((path) => !workspaceFiles.has(relative(workspace, path).split(sep).join('/')))
       .sort()
       .map((path) =>
         this.file(

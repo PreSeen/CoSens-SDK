@@ -6,6 +6,7 @@ import test from 'node:test';
 import { RSIClient } from '../src/rsi/index.js';
 import type { Execution, Question } from '../src/rsi/models.js';
 import { Store } from '../src/rsi/store.js';
+import { seedRecipe } from './recipe-fixtures.js';
 
 const question = (id: string, revision: number): Question => ({
   id,
@@ -35,12 +36,17 @@ test('Task restart follows legacy clarification and preserves the prior attempts
   writeFileSync(path, '---\nname: Sample\ndescription: Test Recipe\n---\nMake the report.\n');
   writeFileSync(originalInput, 'col\noriginal\n');
   writeFileSync(newInput, 'col\nexample\n');
-  const recipe = await client.recipe_insert(path);
+  const recipe = await seedRecipe(data_dir, path);
   const recipe_reference = { path, recipe_id: recipe.id };
   const first = await client.execution_create({
     evidence: { context_path, files: [{ path: originalInput, role: 'input' }] },
     idempotency_key: 'initial', recipe_reference,
   });
+  const initial = await client.task_get(first.id);
+  assert.equal(initial.task_id, first.id);
+  assert.equal(initial.recipe_id, recipe.id);
+  assert.equal(initial.recipe_version_id, null);
+  assert.equal(initial.recipe_zip_path, null);
   const second = await client.execution_create({
     evidence: { context_path, files: [] }, idempotency_key: 'separate-update', recipe_reference,
   });
@@ -55,6 +61,10 @@ test('Task restart follows legacy clarification and preserves the prior attempts
   assert.equal((await client.task_get(second.id)).pending_question_count, 0);
   const firstQuestion = question('first', 1);
   store.save({ ...store.get<Execution>(first.id, 'execution'), status: 'running', questions: [firstQuestion] });
+  const running = await client.task_get(first.id);
+  assert.equal(running.recipe_id, recipe.id);
+  assert.equal(running.recipe_version_id, null);
+  assert.equal(running.recipe_zip_path, null);
   const reply = await client.execution_clarification_answer(first.id, {
     question_id: firstQuestion.id, question_revision: firstQuestion.revision, answer: ['a'],
   });

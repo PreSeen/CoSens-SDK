@@ -1,5 +1,6 @@
-import { constants, closeSync, fstatSync, lstatSync, openSync, readSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { constants, closeSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readSync, readdirSync, rmSync, writeFileSync, type Stats } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { crc32, inflateRawSync } from 'node:zlib';
 import { Zip, ZipDeflate } from 'fflate';
 import { isMap, parseDocument } from 'yaml';
@@ -217,6 +218,32 @@ export function readRecipePackage(bytes: Uint8Array): Map<string, Uint8Array> {
   return files;
 }
 
+function readRegularFile(path: string, info: Stats, total = 0): Buffer {
+  if (!info.isFile()) invalid('Recipe version files must be regular files');
+  checkSize(info.size, total + info.size);
+  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const opened = fstatSync(descriptor);
+    if (!opened.isFile() || info.dev !== opened.dev || info.ino !== opened.ino) {
+      invalid('Recipe version file changed while packaging');
+    }
+    checkSize(opened.size, total + opened.size);
+    const content = Buffer.alloc(opened.size + 1);
+    let length = 0;
+    while (length < content.length) {
+      const read = readSync(descriptor, content, length, content.length - length, null);
+      if (!read) break;
+      length += read;
+    }
+    if (length !== opened.size || fstatSync(descriptor).mtimeMs !== opened.mtimeMs) {
+      invalid('Recipe version file changed while packaging');
+    }
+    return content.subarray(0, length);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
 function readDirectory(directory: string): Map<string, Uint8Array> {
   if (!lstatSync(directory).isDirectory()) invalid('Recipe version path must be a regular directory');
   const paths = new PackagePaths();
@@ -236,36 +263,88 @@ function readDirectory(directory: string): Map<string, Uint8Array> {
         pending.push(name);
         continue;
       }
-      if (!info.isFile()) invalid('Recipe version files must be regular files');
       if (files.size + 2 > MAX_ENTRIES) invalid('Recipe ZIP exceeds 256 entries');
-      checkSize(info.size, total + info.size);
-      const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-      try {
-        const opened = fstatSync(descriptor);
-        if (!opened.isFile() || info.dev !== opened.dev || info.ino !== opened.ino) {
-          invalid('Recipe version file changed while packaging');
-        }
-        checkSize(opened.size, total + opened.size);
-        const content = Buffer.alloc(opened.size + 1);
-        let length = 0;
-        while (length < content.length) {
-          const read = readSync(descriptor, content, length, content.length - length, null);
-          if (!read) break;
-          length += read;
-        }
-        if (length !== opened.size || fstatSync(descriptor).mtimeMs !== opened.mtimeMs) {
-          invalid('Recipe version file changed while packaging');
-        }
-        total += length;
-        files.set(name, content.subarray(0, length));
-      } finally {
-        closeSync(descriptor);
-      }
+      const content = readRegularFile(path, info, total);
+      total += content.length;
+      files.set(name, content);
     }
   }
   paths.checkConflicts();
   if (!files.has(ENTRYPOINT)) invalid('Recipe version requires RECIPE.md at its root');
   return files;
+}
+
+export function readRecipeVersionResources(directory: string): Map<string, Uint8Array> {
+  const files = readDirectory(directory);
+  files.delete(ENTRYPOINT);
+  return files;
+}
+
+type ResourceDescription = { path: string; size: number; text?: string };
+
+export function describeRecipeResources(files: Map<string, Uint8Array>): ResourceDescription[] {
+  let remaining = 32 * 1024;
+  return [...files].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([path, bytes]) => {
+      const entry: ResourceDescription = { path, size: bytes.length };
+      if (bytes.length <= Math.min(8 * 1024, remaining) && !bytes.includes(0)) {
+        try {
+          entry.text = utf8.decode(bytes);
+          remaining -= bytes.length;
+        } catch {
+          // Binary resources remain available to the executor by path.
+        }
+      }
+      return entry;
+    });
+}
+
+function packageTarget(directory: string, name: string, create: boolean): string {
+  if (!lstatSync(directory).isDirectory()) invalid('Recipe package destination must be a regular directory');
+  const components = name.split('/');
+  let target = directory;
+  for (const component of components.slice(0, -1)) {
+    target = join(target, component);
+    if (create && !lstatSync(target, { throwIfNoEntry: false }))
+      mkdirSync(target, { recursive: true, mode: 0o700 });
+    if (!lstatSync(target).isDirectory()) invalid('Recipe package destination cannot contain a symlink');
+  }
+  return join(target, components.at(-1)!);
+}
+
+export function stageRecipePackageFiles(directory: string, files: Map<string, Uint8Array>): void {
+  if (!files.size) return;
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const paths = new PackagePaths();
+  for (const name of files.keys()) paths.add(name, false);
+  paths.checkConflicts();
+  for (const [name, bytes] of files) {
+    const target = packageTarget(directory, name, true);
+    if (!lstatSync(target, { throwIfNoEntry: false })) {
+      const temporary = join(dirname(directory), '.recipe-package-' + randomUUID() + '.tmp');
+      try {
+        writeFileSync(temporary, bytes, { flag: 'wx', mode: 0o400, flush: true });
+        try {
+          linkSync(temporary, target);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        }
+      } finally {
+        rmSync(temporary, { force: true });
+      }
+    }
+    if (Buffer.compare(readRegularFile(target, lstatSync(target)), bytes) !== 0)
+      invalid('Recipe package destination already has different contents');
+  }
+}
+
+export function assertStagedRecipePackageFiles(directory: string, files: Map<string, Uint8Array>): void {
+  for (const [name, bytes] of files) {
+    const target = packageTarget(directory, name, false);
+    const info = lstatSync(target, { throwIfNoEntry: false });
+    if (!info || Buffer.compare(readRegularFile(target, info), bytes) !== 0)
+      invalid('Test changed a staged Recipe package file');
+  }
 }
 
 export function buildRecipePackage(directory: string): Uint8Array {

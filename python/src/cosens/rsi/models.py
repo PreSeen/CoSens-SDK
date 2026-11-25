@@ -97,6 +97,13 @@ class FileRef(Contract):
 class RecipeReference(Contract):
     path: str = Field(min_length=1)
     recipe_id: Annotated[str, Field(min_length=1)] | None = None
+    recipe_version_id: Annotated[str, Field(min_length=1)] | None = None
+
+    @model_validator(mode="after")
+    def version_requires_recipe(self):
+        if self.recipe_version_id is not None and self.recipe_id is None:
+            raise ValueError("recipe_version_id requires recipe_id")
+        return self
 
 
 class MaterialManifest(Contract):

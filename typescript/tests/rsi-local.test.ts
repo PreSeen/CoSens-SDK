@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import {
   mkdirSync,
@@ -20,6 +21,8 @@ import { RSIClient as PublicRSIClient } from '../src/rsi/index.js';
 import { RecipeSchema, type Runtime } from '../src/rsi/models.js';
 import { Engine } from '../src/rsi/engine.js';
 import { ChatRuntime } from '../src/rsi/runtime.js';
+import { buildRecipePackage } from '../src/rsi/recipe-package.js';
+import { seedLegacyRecipe, seedRecipe } from './recipe-fixtures.js';
 import {
   legacyRecipes,
   recipeProjection,
@@ -155,12 +158,10 @@ for (const version of [3, 4, 5, 6]) {
               .map((column) => (column as { name: string }).name)
               .sort(),
             [
-              'archived_at',
-              'created_at',
               'id',
-              'name',
-              'storage_path',
-              'updated_at',
+              'recipe_id',
+              'recipe_version_id',
+              'recipe_zip_path',
             ],
           );
           assert.deepEqual(
@@ -170,7 +171,8 @@ for (const version of [3, 4, 5, 6]) {
               .all(),
             ['available', 'candidate'],
           );
-          assert.equal(migrated.pragma('user_version', { simple: true }), 9);
+          assert.equal(migrated.pragma('user_version', { simple: true }), 10);
+          assert.equal(migrated.prepare("SELECT type FROM sqlite_schema WHERE name='versions'").pluck().get(), 'view');
           assert.equal(
             migrated
               .prepare(
@@ -192,10 +194,11 @@ for (const version of [3, 4, 5, 6]) {
   });
 }
 
-test('recipe_insert requires Skill metadata and creates a fresh available Recipe', async () => {
+test('legacy local Recipe import retains validated Skill metadata', async () => {
   const data_dir = mkdtempSync(join(tmpdir(), 'cosens-rsi-import-'));
   const client = new PublicRSIClient({ data_dir, config: null });
   try {
+    assert.equal('recipe_insert' in client, false);
     const path = join(data_dir, 'SKILL.md');
     const metadata = {
       name: 'order-export',
@@ -220,11 +223,11 @@ test('recipe_insert requires Skill metadata and creates a fresh available Recipe
       ['---\nname: order-export\ndescription: 42\n---', /name and description/],
     ] as const) {
       writeFileSync(path, source);
-      await assert.rejects(client.recipe_insert(path), error);
+      await assert.rejects(seedRecipe(data_dir, path), error);
     }
     writeFileSync(path, Buffer.from([0x80]));
-    await assert.rejects(client.recipe_insert(path), /readable UTF-8 Markdown file/);
-    await assert.rejects(client.recipe_insert(data_dir), /readable UTF-8 Markdown file/);
+    await assert.rejects(seedRecipe(data_dir, path), /readable UTF-8 Markdown file/);
+    await assert.rejects(seedRecipe(data_dir, data_dir), /readable UTF-8 Markdown file/);
     assert.deepEqual(await client.recipe_list(), []);
 
     const source = [
@@ -239,8 +242,8 @@ test('recipe_insert requires Skill metadata and creates a fresh available Recipe
       '',
     ].join('\r\n') + '\r\n' + instructions;
     writeFileSync(path, source);
-    const first = await client.recipe_insert(path);
-    const second = await client.recipe_insert(path);
+    const first = await seedRecipe(data_dir, path);
+    const second = await seedRecipe(data_dir, path);
     assert.notEqual(first.id, second.id);
     assert.notEqual(first.active_version_id, second.active_version_id);
     assert.deepEqual(await client.recipe_get(first.id, first.active_version_id!), first);
@@ -262,7 +265,7 @@ test('recipe_insert requires Skill metadata and creates a fresh available Recipe
     assert.equal(file, source);
 
     writeFileSync(path, '---\nname: minimal\ndescription: Metadata only\n---');
-    const minimal = await client.recipe_insert(path);
+    const minimal = await seedRecipe(data_dir, path);
     assert.equal(minimal.selected_version?.content.instructions, '');
   } finally {
     client.close();
@@ -273,23 +276,17 @@ test('recipe_insert requires Skill metadata and creates a fresh available Recipe
 test('schema v7 upgrades while preserving IDs for an unsynchronized Recipe', async (t) => {
   const data_dir = mkdtempSync(join(tmpdir(), 'cosens-rsi-migrate-v7-'));
   t.after(() => rmSync(data_dir, { recursive: true, force: true }));
-  const draft = join(data_dir, 'RECIPE.md');
   const markdown = '---\nname: Report\ndescription: Read a report\n---\nExisting body\n';
-  writeFileSync(draft, markdown);
-  const client = new PublicRSIClient({ data_dir, config: null });
-  const recipe = await client.recipe_insert(draft);
-  client.close();
-  const db = new Database(join(data_dir, 'rsi-ts.sqlite3'));
-  db.pragma('user_version=7');
-  db.close();
+  const recipe = seedLegacyRecipe(data_dir, markdown, 7);
   const migrated = new PublicRSIClient({ data_dir, config: null });
   t.after(() => migrated.close());
   assert.deepEqual(await migrated.recipe_get(recipe.id), recipe);
   assert.equal(readFileSync(join(data_dir, recipe.storage_path, recipe.active_version_id!, 'RECIPE.md'), 'utf8'), markdown);
   const proof = new Database(join(data_dir, 'rsi-ts.sqlite3'), { readonly: true });
   try {
-    assert.equal(proof.pragma('user_version', { simple: true }), 9);
-    assert.equal(proof.prepare('SELECT id FROM recipes').pluck().get(), recipe.id);
+    assert.equal(proof.pragma('user_version', { simple: true }), 10);
+    assert.equal(proof.prepare('SELECT id FROM recipe_objects').pluck().get(), recipe.id);
+    assert.equal(proof.prepare('SELECT COUNT(*) FROM recipes').pluck().get(), 0);
   } finally {
     proof.close();
   }
@@ -298,12 +295,8 @@ test('schema v7 upgrades while preserving IDs for an unsynchronized Recipe', asy
 test('schema v8 adopts previously synchronized Recipe and version IDs', async (t) => {
   const data_dir = mkdtempSync(join(tmpdir(), 'cosens-rsi-migrate-v8-'));
   t.after(() => rmSync(data_dir, { recursive: true, force: true }));
-  const draft = join(data_dir, 'RECIPE.md');
   const markdown = '---\nname: Report\ndescription: Read a report\n---\nExisting body\n';
-  writeFileSync(draft, markdown);
-  const client = new PublicRSIClient({ data_dir, config: null });
-  const recipe = await client.recipe_insert(draft);
-  client.close();
+  const recipe = seedLegacyRecipe(data_dir, markdown, 8);
   const localVersion = recipe.active_version_id!;
   const receipt = { recipe_id: 'recipe_synced', recipe_version_id: 'version_synced' };
   const plan = {
@@ -336,13 +329,89 @@ test('schema v8 adopts previously synchronized Recipe and version IDs', async (t
   assert.equal(readFileSync(join(data_dir, canonical.storage_path, receipt.recipe_version_id, 'RECIPE.md'), 'utf8'), markdown);
   const proof = new Database(join(data_dir, 'rsi-ts.sqlite3'), { readonly: true });
   try {
-    assert.equal(proof.pragma('user_version', { simple: true }), 9);
-    assert.deepEqual(proof.prepare('SELECT id FROM recipes').pluck().all(), [receipt.recipe_id]);
+    assert.equal(proof.pragma('user_version', { simple: true }), 10);
+    assert.deepEqual(proof.prepare('SELECT id FROM recipe_objects').pluck().all(), [receipt.recipe_id]);
+    assert.equal(proof.prepare('SELECT COUNT(*) FROM recipes').pluck().get(), 0);
     assert.deepEqual(proof.prepare('SELECT id FROM versions').pluck().all(), [receipt.recipe_version_id]);
     assert.equal(proof.prepare('SELECT key FROM idempotency WHERE scope=?').pluck().get('recipe_cloud_upload_receipt'), receipt.recipe_version_id);
     assert.deepEqual(proof.pragma('foreign_key_check'), []);
   } finally {
     proof.close();
+  }
+});
+
+test('schema v9 backfills one Recipe row per root Task with its approved continuation ZIP', async (t) => {
+  const data_dir = mkdtempSync(join(tmpdir(), 'cosens-rsi-migrate-v9-'));
+  t.after(() => rmSync(data_dir, { recursive: true, force: true }));
+  const recipe = seedLegacyRecipe(data_dir,
+    '---\nname: Report\ndescription: Read a report\n---\nExisting body\n', 9);
+  const rootId = 'execution_v9_root';
+  const continuationId = 'execution_v9_continuation';
+  const independentId = 'execution_v9_independent';
+  const versionId = recipe.active_version_id!;
+  const packages = join(data_dir, 'task-packages');
+  const zipPath = join(packages, `${rootId}.zip`);
+  const zip = buildRecipePackage(join(data_dir, recipe.storage_path, versionId));
+  mkdirSync(packages);
+  writeFileSync(zipPath, zip);
+  const db = new Database(join(data_dir, 'rsi-ts.sqlite3'));
+  try {
+    const insert = db.prepare(`
+      INSERT INTO executions(
+        id,created_at,updated_at,revision,base_execution_id,recipe_id,recipe_version_id,
+        status,stage,progress_percent,input_revision,details
+      ) VALUES (?,?,?,1,?,?,?, ?,?,?,?,?)
+    `);
+    const acceptedAnswer = {
+      question: 'Which format?', question_revision: 1, selected_option_ids: ['csv'],
+      selected_options: [{ id: 'csv', label: 'CSV' }], text: null,
+    };
+    insert.run(rootId, 1, 2, null, recipe.id, null, 'cancelled', 'cancelled', 20, 1, JSON.stringify({
+      questions: [], answers: { 'format:1': { ...acceptedAnswer, continuation_execution_id: continuationId } },
+      result: null, error: null,
+    }));
+    insert.run(continuationId, 2, 4, rootId, recipe.id, versionId, 'completed', 'done', 100, 2, JSON.stringify({
+      questions: [], answers: { 'format:1': acceptedAnswer },
+      result: { test_status: 'passed', published: true, provisional: false }, error: null,
+    }));
+    insert.run(independentId, 3, 3, rootId, recipe.id, null, 'queued', 'queued', 0, 1, JSON.stringify({
+      questions: [], answers: {}, result: null, error: null,
+    }));
+    db.prepare('INSERT INTO idempotency VALUES (?,?,?,?)').run(
+      'task_recipe_package', rootId, JSON.stringify({ execution_id: continuationId }),
+      JSON.stringify({ version_id: versionId, sha256: createHash('sha256').update(zip).digest('hex') }),
+    );
+  } finally {
+    db.close();
+  }
+  const host = new PublicRSIClient({
+    data_dir, model_id: 'fixture', base_url: 'http://127.0.0.1:1/v1', api_key: 'fixture',
+    config: { auto_start: false },
+  });
+  t.after(() => host.close());
+  const audit = new Database(join(data_dir, 'rsi-ts.sqlite3'), { readonly: true });
+  try {
+    assert.deepEqual(audit.prepare('SELECT * FROM recipes ORDER BY id').all(), [
+      { id: independentId, recipe_id: recipe.id, recipe_version_id: null, recipe_zip_path: null },
+      { id: rootId, recipe_id: recipe.id, recipe_version_id: versionId, recipe_zip_path: `task-packages/${rootId}.zip` },
+    ]);
+    assert.deepEqual(audit.pragma('foreign_key_check'), []);
+    const tasks = await host.task_list();
+    assert.deepEqual(tasks.map(({ task_id, execution_id }) => [task_id, execution_id]), [
+      [independentId, independentId], [rootId, continuationId],
+    ]);
+    const task = await host.task_get(rootId);
+    assert.deepEqual(task.execution_ids, [rootId, continuationId]);
+    assert.deepEqual(task.artifact, { zip_path: zipPath, recipe_id: recipe.id, recipe_version_id: versionId });
+
+    const context_path = join(data_dir, 'new-context.md');
+    writeFileSync(context_path, 'New Task');
+    const created = await host.execution_create({ evidence: { context_path, files: [] }, idempotency_key: 'new-task' });
+    assert.deepEqual(audit.prepare('SELECT * FROM recipes WHERE id=?').get(created.id), {
+      id: created.id, recipe_id: created.recipe_id, recipe_version_id: null, recipe_zip_path: null,
+    });
+  } finally {
+    audit.close();
   }
 });
 
@@ -848,8 +917,9 @@ test('independent Node hooks enqueue work that persists and passes a file test a
       const host = new PublicRSIClient({ data_dir, config: null });
       try {
         const task = await host.task_get(run.id);
-        assert.equal(task.artifact?.zip_path, taskPackage);
-        assert.equal(task.artifact?.local_recipe_version_id, run.recipe_version_id);
+        assert.deepEqual(task.artifact, {
+          zip_path: taskPackage, recipe_id: run.recipe_id, recipe_version_id: run.recipe_version_id,
+        });
         await assert.rejects(host.task_restart(run.id, { idempotency_key: 'already-approved' }), /approved Task/);
         const available = (await host.recipe_list())
           .find((row) => row.recipe_id === run.recipe_id);
