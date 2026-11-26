@@ -19,7 +19,8 @@ import httpx
 from .chat_completions import USER_AGENT
 from .models import Conflict, InvalidState, NotFound, RecipeReference, RSIError
 
-DEFAULT_BASE_URL = "https://rsi.cosens.ai/api"
+_CLOUD_API_VERSION = "/v1"
+DEFAULT_BASE_URL = "https://friday-rsi-cn.stardust-ai.com/api" + _CLOUD_API_VERSION
 # The CoSens gateway accepts request bodies up to 10 MiB.
 MAX_REQUEST_BYTES = 10 * 1024 * 1024
 MAX_RECIPE_ZIP_BYTES = 8 * 1024 * 1024
@@ -103,16 +104,34 @@ def _validate_virtual_user_id(value):
         raise ValueError("virtual_user_id must be a nonempty header value")
 
 
+def _cloud_base_url(base_url=None):
+    url = httpx.URL(base_url or os.environ.get("COSENS_RSI_BASE_URL") or DEFAULT_BASE_URL)
+    value = str(url)
+    if url.scheme not in {"http", "https"} or not url.host or url.userinfo or "?" in value or "#" in value:
+        raise ValueError("base_url must be an HTTP(S) address without embedded credentials, query or fragment")
+    base = value.rstrip("/")
+    return base if url.raw_path.rstrip(b"/").endswith(_CLOUD_API_VERSION.encode()) else base + _CLOUD_API_VERSION
+
+
 def _recipe_destination(url, virtual_user_id):
-    if url.scheme not in {"http", "https"} or not url.host or url.userinfo or url.query or url.fragment:
-        raise ValueError("local Recipe upload requires a cloud base_url without credentials, query or fragment")
-    return {"base_url": str(url).rstrip("/"), "virtual_user_id": virtual_user_id}
+    return {"base_url": _cloud_base_url(url), "virtual_user_id": virtual_user_id}
+
+
+def _recipe_base_aliases(base_url):
+    # Older journals recorded the configured prefix before the API version was added.
+    return base_url, base_url[:-len(_CLOUD_API_VERSION)]
+
+
+def _matches_recipe_destination(recorded, current):
+    return (
+        recorded.get("base_url") in _recipe_base_aliases(current["base_url"])
+        and recorded.get("virtual_user_id") == current["virtual_user_id"]
+    )
 
 
 def _local_upload_destination(shared_headers):
-    url = httpx.URL((os.environ.get("COSENS_RSI_BASE_URL") or DEFAULT_BASE_URL).rstrip("/"))
     virtual_user_id = httpx.Headers(shared_headers, encoding="iso-8859-1").get("X-Virtual-User-Id")
-    return _recipe_destination(url, virtual_user_id)
+    return _recipe_destination(None, virtual_user_id)
 
 
 class CloudRSIClient:
@@ -135,7 +154,7 @@ class CloudRSIClient:
         if virtual_user_id is not None:
             headers["X-Virtual-User-Id"] = virtual_user_id
         self._http = httpx.Client(
-            base_url=(base_url or os.environ.get("COSENS_RSI_BASE_URL") or DEFAULT_BASE_URL).rstrip("/"),
+            base_url=_cloud_base_url(base_url),
             headers=headers,
             timeout=timeout,
             transport=transport,

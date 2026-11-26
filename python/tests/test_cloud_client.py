@@ -36,6 +36,33 @@ def test_default_is_cloud_and_data_dir_selects_local(tmp_path, monkeypatch):
         RSIClient()
 
 
+def test_cloud_api_versions_default_environment_and_explicit_prefixes_once(monkeypatch):
+    urls = []
+
+    def handle(request):
+        urls.append(str(request.url))
+        return httpx.Response(200, json={})
+
+    def client(base_url=None):
+        return CloudRSIClient(api_key="k", base_url=base_url, transport=httpx.MockTransport(handle))
+
+    monkeypatch.delenv("COSENS_RSI_BASE_URL", raising=False)
+    client().execution_get("run")
+    monkeypatch.setenv("COSENS_RSI_BASE_URL", "https://stage.example/api/")
+    client().execution_get("run")
+    client("https://direct.example/").execution_get("run")
+    client("https://stage.example/mounted/").execution_get("run")
+    client("https://stage.example/mounted/v1/").recipe_download("recipe_1", recipe_version_id="version_1")
+    for marker in ("?", "#"):
+        with pytest.raises(ValueError, match="base_url"):
+            client(f"https://stage.example/api{marker}")
+    assert urls == [
+        "https://friday-rsi-cn.stardust-ai.com/api/v1/executions/run", "https://stage.example/api/v1/executions/run",
+        "https://direct.example/v1/executions/run", "https://stage.example/mounted/v1/executions/run",
+        "https://stage.example/mounted/v1/recipes/recipe_1/versions/version_1/download",
+    ]
+
+
 def test_create_uploads_only_the_named_files(tmp_path):
     (tmp_path / "context.txt").write_text("[user] weekly report")
     (tmp_path / "sales.csv").write_text("region,amount\n")
@@ -56,7 +83,7 @@ def test_create_uploads_only_the_named_files(tmp_path):
         recipe_reference={"path": str(tmp_path / "RECIPE.md"), "recipe_id": "recipe_1"},
     )
     request = seen[0]
-    assert (request["method"], request["path"]) == ("POST", "/api/executions")
+    assert (request["method"], request["path"]) == ("POST", "/api/v1/executions")
     assert request["headers"]["authorization"] == "Bearer k"
     assert request["headers"]["user-agent"].startswith("cosens-sdk-python/")
     body = request["body"]
@@ -78,7 +105,7 @@ def test_create_uploads_only_the_named_files(tmp_path):
 
 def test_reads_and_queries_map_to_routes():
     transport, seen = recording({
-        ("GET", "/api/recipes"): (200, [{"recipe_id": "r1", "status": "active"}]),
+        ("GET", "/api/v1/recipes"): (200, [{"recipe_id": "r1", "status": "active"}]),
     })
     client = CloudRSIClient(api_key="k", base_url="https://rsi.example/api", transport=transport)
     client.execution_get("e/1")
@@ -90,14 +117,14 @@ def test_reads_and_queries_map_to_routes():
     client.execution_clarification_answer("e1", question_id="q", question_revision=1, answer=["opt"])
     client.recipe_test(execution_id="e1", recipe_id="r1", version_id="v1", rubrics_version_id="b1")
     assert [(s["method"], s["path"]) for s in seen] == [
-        ("GET", "/api/executions/e%2F1"),
-        ("GET", "/api/executions"),
-        ("GET", "/api/recipes"),
-        ("GET", "/api/recipes/r1"),
-        ("GET", "/api/rubrics"),
-        ("PUT", "/api/recipes/r1/versions/v1/archived"),
-        ("POST", "/api/executions/e1/clarifications"),
-        ("POST", "/api/executions/e1/recipe-tests"),
+        ("GET", "/api/v1/executions/e%2F1"),
+        ("GET", "/api/v1/executions"),
+        ("GET", "/api/v1/recipes"),
+        ("GET", "/api/v1/recipes/r1"),
+        ("GET", "/api/v1/rubrics"),
+        ("PUT", "/api/v1/recipes/r1/versions/v1/archived"),
+        ("POST", "/api/v1/executions/e1/clarifications"),
+        ("POST", "/api/v1/executions/e1/recipe-tests"),
     ]
     assert seen[1]["params"] == {"execution_ids": "a,b"}
     assert seen[3]["params"] == {"version": "active"}
@@ -113,9 +140,9 @@ def test_reads_and_queries_map_to_routes():
 def test_service_errors_keep_their_codes():
     transport, _ = recording(
         {
-            ("GET", "/api/executions/missing"): (404, {"error": {"code": "not_found", "message": "not found"}}),
-            ("POST", "/api/executions/e1/cancel"): (409, {"error": {"code": "conflict", "message": "done"}}),
-            ("GET", "/api/recipes/bad"): (422, {"error": {"code": "invalid_request", "message": "bad version"}}),
+            ("GET", "/api/v1/executions/missing"): (404, {"error": {"code": "not_found", "message": "not found"}}),
+            ("POST", "/api/v1/executions/e1/cancel"): (409, {"error": {"code": "conflict", "message": "done"}}),
+            ("GET", "/api/v1/recipes/bad"): (422, {"error": {"code": "invalid_request", "message": "bad version"}}),
         }
     )
     client = CloudRSIClient(api_key="k", base_url="https://rsi.example/api", transport=transport)
@@ -169,7 +196,7 @@ def test_recipes_upsert_uploads_zip_from_path_and_file_uri(tmp_path):
 
     def handle(request):
         assert request.method == "POST"
-        assert request.url.path == "/api/recipes_upsert"
+        assert request.url.path == "/api/v1/recipes_upsert"
         assert request.headers["authorization"] == "Bearer k"
         content_type = request.headers["content-type"]
         assert content_type.startswith("multipart/form-data; boundary=")
@@ -210,7 +237,7 @@ def test_recipe_download_reads_exact_zip_bytes_and_keeps_service_errors():
 
     def handle(request):
         assert request.method == "GET"
-        assert request.url.path.startswith("/api/recipes/recipe_1/versions/")
+        assert request.url.path.startswith("/api/v1/recipes/recipe_1/versions/")
         if request.url.path.endswith("/version_1/download"):
             return httpx.Response(200, content=zip_bytes, headers={"Content-Type": "application/zip"})
         return httpx.Response(404, json={"error": {"code": "not_found", "message": "missing version"}})

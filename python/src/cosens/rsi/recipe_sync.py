@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 
-from .cloud import _read_recipe_zip, _validate_recipe_upload
+from .cloud import _matches_recipe_destination, _read_recipe_zip, _recipe_base_aliases, _validate_recipe_upload
 from .models import Conflict, InvalidState, NotFound, RSIError
 from .recipe_bootstrap import install_recipe_version_files
 from .recipe_file import read_recipe_file
@@ -35,7 +35,7 @@ def _same_request(conn, plan, recipe_id, version_id, zip_sha256, key, destinatio
         and version_id_for(conn, plan["local_recipe_version_id"]) == version_id
         and plan["zip_sha256"] == zip_sha256
         and (key is None or plan["idempotency_key"] == key)
-        and all(plan.get(field) == value for field, value in destination.items())
+        and _matches_recipe_destination(plan, destination)
     )
 
 
@@ -84,7 +84,7 @@ def _occupied_target(store, conn, target, destination, *, task_id):
         return None
     if task_id is None:
         raise Conflict("cloud Recipe target is already linked to another local Recipe or alias")
-    if identity and identity[0] != destination:
+    if identity and not _matches_recipe_destination(identity[0], destination):
         raise Conflict("cloud Recipe target is linked to a different cloud destination")
     if recipe["archived_at"] is not None:
         raise InvalidState("archived Recipe cannot be a cloud upload target")
@@ -121,7 +121,7 @@ def _plan_upload(
                 raise Conflict("local cloud Recipe target changed during upload")
         return plan
     identity = journal_entry(conn, IDENTITY, recipe_id)
-    if identity and identity[0] != destination:
+    if identity and not _matches_recipe_destination(identity[0], destination):
         raise Conflict(
             "local Recipe is already linked to a different cloud destination"
         )
@@ -137,9 +137,10 @@ def _plan_upload(
         if conn.execute(
             """SELECT 1 FROM idempotency WHERE scope IN (?,?,?)
                AND json_extract(request,'$.idempotency_key')=?
-               AND json_extract(request,'$.base_url') IS ?
+               AND json_extract(request,'$.base_url') IN (?,?)
                AND json_extract(request,'$.virtual_user_id') IS ? LIMIT 1""",
-            (PENDING, TASK_RECEIPT, RECEIPT, key, destination["base_url"], destination["virtual_user_id"]),
+            (PENDING, TASK_RECEIPT, RECEIPT, key,
+             *_recipe_base_aliases(destination["base_url"]), destination["virtual_user_id"]),
         ).fetchone():
             raise Conflict("idempotency key is already used by another Recipe upload")
     if key is None:

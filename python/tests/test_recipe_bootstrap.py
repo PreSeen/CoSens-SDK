@@ -57,7 +57,7 @@ def _cloud(monkeypatch, archive, *, selected=VERSION, active=VERSION, published=
         assert request.url.host == "rsi.example"
         calls.append((request.method, request.url.path, request.url.params.get("version")))
         if request.method == "POST":
-            assert request.url.path == "/api/recipes_upsert"
+            assert request.url.path == "/api/v1/recipes_upsert"
             message = BytesParser(policy=policy.default).parsebytes(
                 f"Content-Type: {request.headers['Content-Type']}\r\n\r\n".encode() + request.content
             )
@@ -67,7 +67,7 @@ def _cloud(monkeypatch, archive, *, selected=VERSION, active=VERSION, published=
             }
             assert fields["recipe_id"] == RECIPE.encode()
             return httpx.Response(200, json={"recipe_id": RECIPE, "recipe_version_id": NEXT_VERSION})
-        if request.url.path == f"/api/recipes/{RECIPE}":
+        if request.url.path == f"/api/v1/recipes/{RECIPE}":
             if metadata_barrier is not None:
                 metadata_barrier.wait(timeout=5)
             return httpx.Response(200, json={
@@ -76,9 +76,10 @@ def _cloud(monkeypatch, archive, *, selected=VERSION, active=VERSION, published=
                 "selected_version": {
                     "id": selected, "object_id": RECIPE, "publication_state": published,
                     "package_sha256": sha256 or hashlib.sha256(archive).hexdigest(),
+                    "download_path": f"/v1/recipes/{RECIPE}/versions/{selected}/download",
                 },
             })
-        assert request.url.path == f"/api/recipes/{RECIPE}/versions/{selected}/download"
+        assert request.url.path == f"/api/v1/recipes/{RECIPE}/versions/{selected}/download"
         return httpx.Response(200, content=archive)
 
     transport = httpx.MockTransport(send)
@@ -146,7 +147,7 @@ def test_bootstrap_pinned_selection_requires_current_published_version(tmp_path,
     request["recipe_reference"]["recipe_version_id"] = VERSION
     with pytest.raises(Conflict, match="no longer active"):
         client.execution_create(**request)
-    assert calls == [("GET", f"/api/recipes/{RECIPE}", VERSION)]
+    assert calls == [("GET", f"/api/v1/recipes/{RECIPE}", VERSION)]
     assert client.task_list() == []
     assert client.recipe_list() == []
 

@@ -3,7 +3,9 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import {
   CloudClient,
+  matchesRecipeCloudDestination,
   openRecipeZip,
+  recipeCloudBaseAliases,
   recipeCloudDestination,
   uploadRecipeZip,
   validateRecipeUpsertOptions,
@@ -79,15 +81,11 @@ function journal<Request, Result = Record<string, never>>(store: Store, scope: s
   return { request: JSON.parse(row.request) as Request, result: JSON.parse(row.result) as Result };
 }
 
-function sameDestination(left: Destination, right: Destination) {
-  return left.base_url === right.base_url && left.virtual_user_id === right.virtual_user_id;
-}
-
 function sameUploadSelection(store: Store, recorded: UploadPlan, request: Omit<UploadRequest, 'zip_sha256'>) {
   return store.resolveRecipeId(recorded.local_recipe_id) === store.resolveRecipeId(request.local_recipe_id)
     && store.resolveVersionId(recorded.local_recipe_version_id) === store.resolveVersionId(request.local_recipe_version_id)
     && (request.idempotency_key === undefined || recorded.idempotency_key === request.idempotency_key)
-    && sameDestination(recorded, request);
+    && matchesRecipeCloudDestination(recorded, request);
 }
 
 function sameUpload(store: Store, recorded: UploadPlan, request: UploadRequest) {
@@ -109,7 +107,7 @@ function resolveUploadTarget(
   store: Store, recipeId: string, destination: Destination, requested?: string, pending?: UploadPlan, task?: TaskSelection,
 ) {
   const identity = journal<Destination>(store, recipeIdentityScope, recipeId);
-  if (identity && !sameDestination(identity.request, destination))
+  if (identity && !matchesRecipeCloudDestination(identity.request, destination))
     return fail('conflict', 'local Recipe was synchronized to a different cloud endpoint or Virtual User');
   if (identity && requested !== undefined && requested !== recipeId)
     return fail('conflict', 'local Recipe is already linked to a different cloud Recipe');
@@ -123,7 +121,7 @@ function resolveUploadTarget(
   if (id !== null) assertCloudRecipeTargetAvailable(store, id, recipeId, Boolean(existing));
   if (existing) {
     const linked = journal<Destination>(store, recipeIdentityScope, existing.id);
-    if (linked && !sameDestination(linked.request, destination))
+    if (linked && !matchesRecipeCloudDestination(linked.request, destination))
       return fail('conflict', 'target Recipe was synchronized to a different cloud endpoint or Virtual User');
     if (existing.archived_at !== null) return fail('invalid_state', 'target Recipe is archived');
     assertRecipeIdle(store, existing.id);
@@ -135,11 +133,11 @@ function assertAvailableTaskUploadKey(store: Store, taskId: string, request: Upl
   if (request.idempotency_key === undefined) return;
   const used = store.db.prepare(`
     SELECT 1 FROM idempotency WHERE scope IN (?,?,?)
-      AND json_extract(request, '$.base_url')=? AND json_extract(request, '$.virtual_user_id') IS ?
+      AND json_extract(request, '$.base_url') IN (?,?) AND json_extract(request, '$.virtual_user_id') IS ?
       AND json_extract(request, '$.idempotency_key')=? AND json_extract(request, '$.task_id') IS NOT ?
     LIMIT 1
   `).get(pendingUploadScope, taskUploadReceiptScope, uploadReceiptScope,
-    request.base_url, request.virtual_user_id, request.idempotency_key, taskId);
+    ...recipeCloudBaseAliases(request.base_url), request.virtual_user_id, request.idempotency_key, taskId);
   if (used) fail('conflict', 'idempotency key is already used by another Recipe upload');
 }
 

@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { lstatSync, mkdirSync, mkdtempSync, renameSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
-import { CloudClient, recipeCloudDestination, type RecipeCloudDestination } from './cloud.js';
+import {
+  CloudClient, recipeCloudBaseAliases, recipeCloudDestination, type RecipeCloudDestination,
+} from './cloud.js';
 import { fail, type Recipe, type RecipeContent, type Version } from './models.js';
 import { parseRecipeMarkdown } from './recipe-file.js';
 import { assertCloudRecipeTargetAvailable, recipeIdentityScope, uploadReceiptScope } from './recipe-identity.js';
@@ -34,6 +36,17 @@ type Bootstrap = {
   files: Map<string, Uint8Array>;
   content: RecipeContent;
 };
+
+function replayDestination(store: Store, scope: string, key: string, request: RecipeCloudDestination) {
+  const row = store.db.prepare('SELECT request FROM idempotency WHERE scope=? AND key=?')
+    .get(scope, key) as { request: string } | undefined;
+  if (!row) return false;
+  const recorded: RecipeCloudDestination = JSON.parse(row.request);
+  if (!recipeCloudBaseAliases(request.base_url).includes(recorded.base_url)
+      || encode({ ...recorded, base_url: request.base_url }) !== encode(request))
+    return fail('conflict', 'idempotency key reused with different arguments');
+  return true;
+}
 
 export function findLocalRecipeBase(store: Store, base: RecipeBase): LocalBase | undefined {
   const recipeId = store.resolveRecipeId(base.id);
@@ -73,7 +86,7 @@ export async function fetchCloudRecipeBase(store: Store, base: RecipeBase, heade
   const recipeId = identifier.parse(store.resolveRecipeId(base.id));
   const requested = base.version_id ? identifier.parse(store.resolveVersionId(base.version_id)) : undefined;
   const destination = recipeCloudDestination({}, headers);
-  store.replay(recipeIdentityScope, recipeId, destination);
+  replayDestination(store, recipeIdentityScope, recipeId, destination);
   const cloud = new CloudClient({ base_url: destination.base_url }, headers);
   const response = cloudRecipe.safeParse(await cloud.recipe_get(recipeId, requested ?? 'active'));
   if (!response.success || response.data.id !== recipeId)
@@ -144,19 +157,19 @@ export function installCloudRecipeBase(store: Store, bootstrap: Bootstrap): Loca
   assertCloudRecipeTargetAvailable(store, recipeId);
   if (store.resolveRecipeId(recipeId) !== recipeId || store.resolveVersionId(versionId) !== versionId)
     return fail('conflict', 'cloud Recipe or version ID is already used as a local alias');
-  const identity = store.replay(recipeIdentityScope, recipeId, destination);
+  const identity = replayDestination(store, recipeIdentityScope, recipeId, destination);
   const existing = store.db.prepare('SELECT * FROM recipe_records WHERE id=?').get(recipeId) as Recipe | undefined;
   if (existing && (!identity || existing.archived_at !== null))
     return fail('conflict', 'existing local Recipe cannot be linked to this cloud Recipe');
   const row = store.db.prepare('SELECT recipe_id FROM versions WHERE id=?').get(versionId) as
     { recipe_id: string | null } | undefined;
   const request = { recipe_id: recipeId, ...destination, sha256 };
-  const imported = store.replay(bootstrapScope, versionId, request);
+  const imported = replayDestination(store, bootstrapScope, versionId, request);
   const uploaded = row && !imported && store.db.prepare(`
     SELECT 1 FROM idempotency WHERE scope=? AND key=?
-      AND json_extract(request, '$.base_url')=? AND json_extract(request, '$.virtual_user_id') IS ?
+      AND json_extract(request, '$.base_url') IN (?,?) AND json_extract(request, '$.virtual_user_id') IS ?
       AND json_extract(request, '$.zip_sha256')=? AND json_extract(result, '$.recipe_id')=?
-  `).get(uploadReceiptScope, versionId, destination.base_url, destination.virtual_user_id, sha256, recipeId);
+  `).get(uploadReceiptScope, versionId, ...recipeCloudBaseAliases(destination.base_url), destination.virtual_user_id, sha256, recipeId);
   if (row && (row.recipe_id !== recipeId || (!imported && !uploaded)))
     return fail('conflict', 'cloud Recipe version ID already belongs to a local version');
   const recipe = existing ?? store.insert<Recipe>('recipe', { id: recipeId, name: content.name });

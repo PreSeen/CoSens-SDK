@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from .cloud import _matches_recipe_destination
 from .models import Conflict, InvalidState, NotFound, RSIError
 from .recipe_file import read_recipe_file
 from .recipe_identity import (
@@ -116,7 +117,7 @@ def _install(store, recipe_id, version_id, archive, sha256, destination):
                 raise Conflict("cloud Recipe or version is already linked to a different local ID")
             recipe = _recipe_or_none(store, conn, recipe_id)
             identity = journal_entry(conn, IDENTITY, recipe_id)
-            if recipe is not None and (not identity or identity[0] != destination):
+            if recipe is not None and (not identity or not _matches_recipe_destination(identity[0], destination)):
                 raise Conflict("local Recipe is already linked to a different identity")
             if recipe is not None and recipe["archived_at"] is not None:
                 raise InvalidState("archived recipe cannot be used")

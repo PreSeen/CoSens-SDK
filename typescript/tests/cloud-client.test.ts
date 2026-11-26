@@ -106,6 +106,35 @@ test('new RSIClient() is cloud; data_dir selects local', () => {
   }
 });
 
+test('cloud RSI versions the default, environment and explicit base prefixes once', async (t) => {
+  const originalBase = process.env.COSENS_RSI_BASE_URL;
+  t.after(() => {
+    if (originalBase === undefined) delete process.env.COSENS_RSI_BASE_URL;
+    else process.env.COSENS_RSI_BASE_URL = originalBase;
+  });
+  const seen: string[] = [];
+  t.mock.method(globalThis, 'fetch', async (url: URL) => {
+    seen.push(url.href);
+    return Response.json({});
+  });
+  delete process.env.COSENS_RSI_BASE_URL;
+  await new CloudClient({ api_key: 'fixture' }).execution_get('run');
+  process.env.COSENS_RSI_BASE_URL = 'https://stage.example/api/';
+  await new CloudClient({ api_key: 'fixture' }).execution_get('run');
+  await new CloudClient({ api_key: 'fixture', base_url: 'https://direct.example/' }).execution_get('run');
+  await new CloudClient({ api_key: 'fixture', base_url: 'https://stage.example/mounted/' }).execution_get('run');
+  await new CloudClient({ api_key: 'fixture', base_url: 'https://stage.example/mounted/v1/' })
+    .request('GET', '/v1/recipes/recipe_1/versions/version_1/download');
+  for (const marker of ['?', '#']) {
+    assert.throws(() => new CloudClient({ api_key: 'fixture', base_url: `https://stage.example/api${marker}` }), /base_url/);
+  }
+  assert.deepEqual(seen, [
+    'https://friday-rsi-cn.stardust-ai.com/api/v1/executions/run', 'https://stage.example/api/v1/executions/run',
+    'https://direct.example/v1/executions/run', 'https://stage.example/mounted/v1/executions/run',
+    'https://stage.example/mounted/v1/recipes/recipe_1/versions/version_1/download',
+  ]);
+});
+
 test('cloud create uploads only the named files', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rsi-cloud-'));
   writeFileSync(join(dir, 'context.txt'), '[user] weekly report');
@@ -128,7 +157,7 @@ test('cloud create uploads only the named files', async () => {
     });
     const [request] = seen;
     assert.equal(request.method, 'POST');
-    assert.equal(request.url, '/api/executions');
+    assert.equal(request.url, '/api/v1/executions');
     assert.equal(request.headers.authorization, 'Bearer k');
     assert.match(String(request.headers['user-agent']), /^cosens-sdk-typescript\//);
     assert.deepEqual(request.body.context, {
@@ -156,7 +185,7 @@ test('cloud create uploads only the named files', async () => {
 test('cloud reads map to routes and errors keep their codes', async () => {
   await withService(
     {
-      'GET /api/executions/missing': [
+      'GET /api/v1/executions/missing': [
         404,
         { error: { code: 'not_found', message: 'not found' } },
       ],
@@ -172,9 +201,9 @@ test('cloud reads map to routes and errors keep their codes', async () => {
       assert.deepEqual(
         seen.map((s) => `${s.method} ${s.url}`),
         [
-          'GET /api/executions?execution_ids=a%2Cb',
-          'GET /api/recipes/r1?version=active',
-          'PUT /api/recipes/r1/versions/v1/archived',
+          'GET /api/v1/executions?execution_ids=a%2Cb',
+          'GET /api/v1/recipes/r1?version=active',
+          'PUT /api/v1/recipes/r1/versions/v1/archived',
         ],
       );
       assert.deepEqual(await client.recover(), { started: 0 });
@@ -275,7 +304,7 @@ test('cloud recipes_upsert uploads ZIP bytes from a local path and file URI', as
   const zip = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0xfe]);
   writeFileSync(path, zip);
   const reply = { recipe_id: 'recipe_1', recipe_version_id: 'version_1' };
-  await withService({ 'POST /api/recipes_upsert': [200, reply] }, async (base_url, seen) => {
+  await withService({ 'POST /api/v1/recipes_upsert': [200, reply] }, async (base_url, seen) => {
     const client = new RSIClient({ mode: 'cloud', api_key: 'k', base_url });
     assert.deepEqual(await client.recipes_upsert(path), reply);
     assert.deepEqual(await client.recipes_upsert(pathToFileURL(path).href, {
@@ -285,7 +314,7 @@ test('cloud recipes_upsert uploads ZIP bytes from a local path and file URI', as
     assert.equal(seen.length, 2);
     for (const request of seen) {
       assert.equal(request.method, 'POST');
-      assert.equal(request.url, '/api/recipes_upsert');
+      assert.equal(request.url, '/api/v1/recipes_upsert');
       assert.equal(request.headers.authorization, 'Bearer k');
       assert.match(String(request.headers['content-type']), /^multipart\/form-data; boundary=/);
       const file = request.body.get('file') as File;
@@ -303,8 +332,8 @@ test('cloud recipes_upsert uploads ZIP bytes from a local path and file URI', as
 test('cloud recipe_download returns ZIP bytes for the requested version', async () => {
   const zip = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0xfe]);
   await withService({
-    'GET /api/recipes/recipe_1/versions/version_1/download': [200, zip],
-    'GET /api/recipes/recipe_1/versions/version_other/download': [
+    'GET /api/v1/recipes/recipe_1/versions/version_1/download': [200, zip],
+    'GET /api/v1/recipes/recipe_1/versions/version_other/download': [
       404, { error: { code: 'not_found', message: 'missing version' } },
     ],
   }, async (base_url, seen) => {
@@ -314,7 +343,7 @@ test('cloud recipe_download returns ZIP bytes for the requested version', async 
       client.recipe_download('recipe_1', 'version_other'),
       (error: unknown) => error instanceof RSIError && error.code === 'not_found',
     );
-    assert.equal(seen[0].url, '/api/recipes/recipe_1/versions/version_1/download');
+    assert.equal(seen[0].url, '/api/v1/recipes/recipe_1/versions/version_1/download');
   });
 });
 
@@ -351,15 +380,18 @@ test('local execution bootstraps a verified cloud Recipe and later publishes int
   const digest = createHash('sha256').update(archive).digest('hex');
   const metadata = {
     id: recipeId, archived_at: null, active_version_id: versionId,
-    selected_version: { id: versionId, object_id: recipeId, publication_state: 'published', package_sha256: digest },
+    selected_version: {
+      id: versionId, object_id: recipeId, publication_state: 'published', package_sha256: digest,
+      download_path: `/v1/recipes/${recipeId}/versions/${versionId}/download`,
+    },
   };
-  const get = `GET /api/recipes/${recipeId}`;
-  const download = `GET /api/recipes/${recipeId}/versions/${versionId}/download`;
+  const get = `GET /api/v1/recipes/${recipeId}`;
+  const download = `GET /api/v1/recipes/${recipeId}/versions/${versionId}/download`;
   const receipt = { recipe_id: recipeId, recipe_version_id: 'version_next' };
   const replies: Record<string, [number, unknown]> = {
     [get]: [200, { ...metadata, selected_version: { ...metadata.selected_version, package_sha256: '0'.repeat(64) } }],
     [download]: [200, archive],
-    'POST /api/recipes_upsert': [200, receipt],
+    'POST /api/v1/recipes_upsert': [200, receipt],
   };
   const request = {
     evidence: { context_path, files: [] },
@@ -446,7 +478,7 @@ test('local execution bootstraps a verified cloud Recipe and later publishes int
       ...metadata, active_version_id: otherVersion,
       selected_version: { ...metadata.selected_version, id: otherVersion },
     }];
-    replies[`GET /api/recipes/${recipeId}/versions/${otherVersion}/download`] = [200, archive];
+    replies[`GET /api/v1/recipes/${recipeId}/versions/${otherVersion}/download`] = [200, archive];
     const otherRequest = {
       ...request, idempotency_key: 'cloud-version-from-other-device',
       recipe_reference: { ...request.recipe_reference, recipe_version_id: otherVersion },
@@ -511,7 +543,7 @@ test('local upsert selects the exact Task ZIP and replays even when its ZIP is p
   });
   const first = { recipe_id: 'recipe_cloud', recipe_version_id: 'version_cloud_1' };
   const second = { recipe_id: 'recipe_cloud', recipe_version_id: 'version_cloud_2' };
-  const replies: Record<string, [number, unknown]> = { 'POST /api/recipes_upsert': [200, first] };
+  const replies: Record<string, [number, unknown]> = { 'POST /api/v1/recipes_upsert': [200, first] };
   await withService(replies, async (base_url, seen) => {
     setTestEnv(t, 'COSENS_RSI_BASE_URL', base_url);
     setTestEnv(t, 'COSENS_API_KEY', 'fixture-ambient-key');
@@ -572,14 +604,16 @@ test('local upsert selects the exact Task ZIP and replays even when its ZIP is p
     writeFileSync(repackedZip, repacked);
     await assert.rejects(uploadVersion(repackedZip, initial), /frozen Task Recipe ZIP/);
     assert.equal(seen.length, 0);
-    replies['POST /api/recipes_upsert'] = [503, { error: { code: 'unavailable', message: 'retry Task upload' } }];
+    replies['POST /api/v1/recipes_upsert'] = [503, { error: { code: 'unavailable', message: 'retry Task upload' } }];
     await assert.rejects(local.recipes_upsert(selectedUpload), /retry Task upload/);
     await assert.rejects(otherTenant.recipes_upsert(selectedUpload), /another upload is pending/);
     assert.equal(seen.length, 1);
     const pendingKey = seen[0].headers['idempotency-key'];
+    uploadStore.db.prepare("UPDATE idempotency SET request=json_set(request, '$.base_url', ?) WHERE scope=?")
+      .run(base_url, 'recipe_cloud_upload_pending');
     seen.length = 0;
     rmSync(task.artifact.zip_path);
-    replies['POST /api/recipes_upsert'] = [200, first];
+    replies['POST /api/v1/recipes_upsert'] = [200, first];
     const uploadOnly = new RSIClient({ data_dir, config: { headers } });
     try {
       assert.deepEqual(await uploadOnly.recipes_upsert(selectedUpload), first);
@@ -622,8 +656,10 @@ test('local upsert selects the exact Task ZIP and replays even when its ZIP is p
     });
 
     const nextZip = join(data_dir, 'recipe-v2.zip');
+    uploadStore.db.prepare("UPDATE idempotency SET request=json_set(request, '$.base_url', ?) WHERE scope IN (?,?)")
+      .run(base_url, 'recipe_cloud_upload_receipt', 'recipe_cloud_identity');
     writeFileSync(nextZip, buildRecipePackage(join(data_dir, recipe.storage_path, secondLocalVersion)));
-    replies['POST /api/recipes_upsert'] = [200, second];
+    replies['POST /api/v1/recipes_upsert'] = [200, second];
     assert.deepEqual(await uploadVersion(nextZip, {
       ...initial, local_recipe_version_id: secondLocalVersion,
     }), second);
@@ -728,7 +764,7 @@ test('local publication can bind an explicit cloud target and safely resume that
   const other = await approve('other');
   const target = 'recipe_shared_cloud';
   const receipt = { recipe_id: target, recipe_version_id: 'version_bound_cloud' };
-  const endpoint = 'POST /api/recipes_upsert';
+  const endpoint = 'POST /api/v1/recipes_upsert';
   const replies: Record<string, [number, unknown]> = {
     [endpoint]: [503, { error: { code: 'unavailable', message: 'retry the target' } }],
   };
@@ -872,14 +908,14 @@ test('failed local ZIP upload retains a retry only for the same bytes and destin
   writeFileSync(alternate, archive(markdown));
   writeFileSync(mismatch, archive(markdown + 'Wrong version.\n'));
   const replies: Record<string, [number, unknown]> = {
-    'POST /api/recipes_upsert': [422, { error: { code: 'invalid_request', message: 'ZIP invalid' } }],
+    'POST /api/v1/recipes_upsert': [422, { error: { code: 'invalid_request', message: 'ZIP invalid' } }],
   };
   await withService(replies, async (base_url, seen) => {
     const options = { base_url, api_key: 'k', local_recipe_id: recipe.id, local_recipe_version_id: recipe.active_version_id! };
     await assert.rejects(uploadLocalRecipe(store, mismatch, options), /match/i);
     assert.equal(seen.length, 0);
     await assert.rejects(uploadLocalRecipe(store, alternate, options), /ZIP invalid/);
-    replies['POST /api/recipes_upsert'] = [503, { error: { code: 'unavailable', message: 'try again' } }];
+    replies['POST /api/v1/recipes_upsert'] = [503, { error: { code: 'unavailable', message: 'try again' } }];
     await assert.rejects(uploadLocalRecipe(store, zip, options), /try again/);
     assert.equal((await local.recipe_get(recipe.id)).id, recipe.id);
     await assert.rejects(uploadLocalRecipe(store, alternate, options), /another upload is pending/);
@@ -888,7 +924,7 @@ test('failed local ZIP upload retains a retry only for the same bytes and destin
     await assert.rejects(uploadLocalRecipe(store, zip, { ...options, local_recipe_version_id: 'version_missing' }), /version does not belong/);
     assert.equal(seen.length, 2);
     const receipt = { recipe_id: 'recipe_cloud', recipe_version_id: 'version_cloud' };
-    replies['POST /api/recipes_upsert'] = [200, receipt];
+    replies['POST /api/v1/recipes_upsert'] = [200, receipt];
     assert.deepEqual(await uploadLocalRecipe(store, zip, { ...options, api_key: 'rotated-key' }), receipt);
     assert.equal(seen[2].headers['idempotency-key'], seen[1].headers['idempotency-key']);
     assert.equal(seen[2].headers.authorization, 'Bearer rotated-key');
@@ -950,7 +986,7 @@ test('local upload rejects candidates and a legacy approved version retains its 
   legacy.writeUInt16LE(1, original.length - 2);
   writeFileSync(zip, legacy);
   const receipt = { recipe_id: 'recipe_cloud', recipe_version_id: 'version_cloud' };
-  await withService({ 'POST /api/recipes_upsert': [200, receipt] }, async (base_url, seen) => {
+  await withService({ 'POST /api/v1/recipes_upsert': [200, receipt] }, async (base_url, seen) => {
     setTestEnv(t, 'COSENS_RSI_BASE_URL', base_url);
     setTestEnv(t, 'COSENS_API_KEY', 'fixture-ambient-key');
     await assert.rejects(local.recipes_upsert({ task_id: run.id }), /config.headers/);

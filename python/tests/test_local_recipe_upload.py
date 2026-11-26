@@ -76,7 +76,7 @@ def _transport(monkeypatch, handler, *, authorization="Bearer fixture-key"):
     calls = []
 
     def receive(request):
-        assert request.method == "POST" and request.url.path == "/api/recipes_upsert"
+        assert request.method == "POST" and request.url.path == "/api/v1/recipes_upsert"
         assert request.headers["Authorization"] == authorization
         message = BytesParser(policy=policy.default).parsebytes(
             f"Content-Type: {request.headers['Content-Type']}\r\n\r\n".encode()
@@ -238,6 +238,12 @@ def test_local_upload_promotes_primary_keys_and_replays_old_version(
         "execution_ids"
     ] == [execution_id]
 
+    with client._queue.store.transaction() as conn:
+        conn.execute(
+            """UPDATE idempotency SET request=json_set(request,'$.base_url',?)
+               WHERE scope IN ('recipe_cloud_identity','recipe_cloud_upload_receipt')""",
+            (RSI_URL,),
+        )
     next_id, markdown = _local_new_version(client, via_alias)
     second_zip = _zip(tmp_path / "second.zip", markdown)
     assert _upload(client, V1["recipe_id"], next_id, second_zip) == V2
@@ -311,6 +317,11 @@ def test_upload_recovers_ambiguous_failure_with_staged_idempotency_key(
     with pytest.raises(RSIError, match="could not be reached"):
         _upload(client, recipe_id, version_id, package)
     assert client.recipe_get(recipe_id)["id"] == recipe_id
+    with client._queue.store.transaction() as conn:
+        conn.execute(
+            "UPDATE idempotency SET request=json_set(request,'$.base_url',?) WHERE scope='recipe_cloud_upload_pending'",
+            (RSI_URL,),
+        )
     reopened = RSIClient(data_dir=tmp_path)
     with pytest.raises(Conflict, match="same version, ZIP and idempotency key"):
         _upload(reopened, recipe_id, next_id, later)

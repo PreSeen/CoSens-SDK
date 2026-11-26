@@ -11,7 +11,8 @@ import {
   type RecipeReference,
 } from './models.js';
 
-export const DEFAULT_CLOUD_BASE_URL = 'https://rsi.cosens.ai/api';
+const CLOUD_API_VERSION = '/v1';
+export const DEFAULT_CLOUD_BASE_URL = `https://friday-rsi-cn.stardust-ai.com/api${CLOUD_API_VERSION}`;
 /** The CoSens gateway accepts request bodies up to 10 MiB. */
 export const MAX_CLOUD_REQUEST_BYTES = 10 * 1024 * 1024;
 export const MAX_RECIPE_ZIP_BYTES = 8 * 1024 * 1024;
@@ -25,17 +26,33 @@ export type CloudOptions = {
 export type RecipeUpsertOptions = { recipe_id?: string; idempotency_key?: string };
 export type RecipeUpsertResult = { recipe_id: string; recipe_version_id: string };
 
-export function recipeCloudDestination(options: CloudOptions, sharedHeaders?: Headers) {
+function cloudBase(options: CloudOptions) {
   const base = new URL(options.base_url ?? process.env.COSENS_RSI_BASE_URL ?? DEFAULT_CLOUD_BASE_URL);
-  if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash)
+  if (!['http:', 'https:'].includes(base.protocol) || base.href !== base.origin + base.pathname)
     throw new TypeError('base_url must be an HTTP(S) address without embedded credentials, query or fragment');
+  const prefix = base.pathname.replace(/\/+$/, '');
+  base.pathname = prefix.endsWith(CLOUD_API_VERSION) ? prefix : prefix + CLOUD_API_VERSION;
+  return base.href;
+}
+
+export function recipeCloudDestination(options: CloudOptions, sharedHeaders?: Headers) {
   return {
-    base_url: base.href.replace(/\/+$/, ''),
+    base_url: cloudBase(options),
     virtual_user_id: selectedVirtualUser(options) ?? sharedHeaders?.get('X-Virtual-User-Id') ?? null,
   };
 }
 
 export type RecipeCloudDestination = ReturnType<typeof recipeCloudDestination>;
+
+// Older journals recorded the configured prefix before the API version was added.
+export function recipeCloudBaseAliases(baseUrl: string): readonly [string, string] {
+  return [baseUrl, baseUrl.slice(0, -CLOUD_API_VERSION.length)];
+}
+
+export function matchesRecipeCloudDestination(recorded: RecipeCloudDestination, current: RecipeCloudDestination) {
+  return recipeCloudBaseAliases(current.base_url).includes(recorded.base_url)
+    && recorded.virtual_user_id === current.virtual_user_id;
+}
 
 type EvidenceInput = {
   context_path: string;
@@ -170,11 +187,7 @@ export class CloudClient {
     if (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0)
       throw new TypeError('timeout must be a positive number of seconds');
     this.#timeoutMs = timeout * 1000;
-    this.#base = (
-      options.base_url ??
-      process.env.COSENS_RSI_BASE_URL ??
-      DEFAULT_CLOUD_BASE_URL
-    ).replace(/\/+$/, '');
+    this.#base = cloudBase(options);
   }
 
   async request(
@@ -195,7 +208,10 @@ export class CloudClient {
       throw new TypeError(
         'upload exceeds the 10 MiB cloud request limit; send fewer or smaller files, or use local mode',
       );
-    const url = new URL(this.#base + path);
+    // Backend metadata can contain paths relative to its own /v1 mount.
+    const route = path === CLOUD_API_VERSION || path.startsWith(`${CLOUD_API_VERSION}/`)
+      ? path.slice(CLOUD_API_VERSION.length) : path;
+    const url = new URL(this.#base + route);
     for (const [key, value] of Object.entries(params ?? {}))
       url.searchParams.set(key, value);
     const headers = new Headers(this.#headers);

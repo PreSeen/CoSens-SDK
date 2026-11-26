@@ -2,7 +2,7 @@
 
 Install with `pip install --upgrade cosens-sdk`.
 
-Cloud mode is the default. Set `COSENS_API_KEY`; CoSens learns with its own models and you need no model of your own.
+Cloud mode is the default and uses `COSENS_API_KEY` for access to CoSens models. The default RSI API is `https://friday-rsi-cn.stardust-ai.com/api/v1`. Use `base_url` or `COSENS_RSI_BASE_URL` to specify a different API prefix. The SDK appends `/v1` when needed.
 
 ```python
 from cosens.rsi import RSIClient
