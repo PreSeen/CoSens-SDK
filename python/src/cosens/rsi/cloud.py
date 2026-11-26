@@ -10,6 +10,8 @@ from __future__ import annotations
 import base64
 import os
 import re
+from contextlib import closing
+from json import JSONDecodeError
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 from urllib.request import url2pathname
@@ -166,7 +168,7 @@ class CloudRSIClient:
     def close(self):
         self._http.close()
 
-    def _request(self, method, path, *, json=None, params=None, files=None, data=None, headers=None, binary=False):
+    def _request(self, method, path, *, json=None, params=None, files=None, data=None, headers=None):
         content = None
         headers = dict(headers or {})
         if json is not None:
@@ -193,7 +195,7 @@ class CloudRSIClient:
             error.code = "service_unavailable"
             raise error from None
         if response.is_success:
-            return response.content if binary else response.json()
+            return response.json()
         try:
             detail = response.json().get("error") or {}
         except ValueError:
@@ -292,13 +294,49 @@ class CloudRSIClient:
     def recipe_get(self, recipe_id, *, version="active"):
         return self._request("GET", f"/recipes/{_segment(recipe_id)}", params={"version": version})
 
-    def recipe_download(self, recipe_id: str, *, recipe_version_id: str) -> bytes:
-        """Download the ZIP bytes for an exact Recipe version."""
-        return self._request(
-            "GET",
-            f"/recipes/{_segment(recipe_id)}/versions/{_segment(recipe_version_id)}/download",
-            binary=True,
-        )
+    def recipe_download(self, recipe_id: str, *, recipe_version_id: str) -> str:
+        """Get the signed Recipe ZIP URL for an exact version."""
+        path = f"/recipes/{_segment(recipe_id)}/versions/{_segment(recipe_version_id)}/download-url"
+        try:
+            receipt = self._request("POST", path)
+        except (JSONDecodeError, UnicodeDecodeError):
+            receipt = None
+        signed = receipt.get("url") if isinstance(receipt, dict) else None
+        url = None
+        if isinstance(signed, str) and not re.search(
+            r"[\s\x00-\x1f\x7f\\#]|^https?://[^/?#]*@", signed, re.IGNORECASE
+        ):
+            try:
+                url = httpx.URL(signed)
+            except (ValueError, httpx.InvalidURL):
+                pass
+        if (
+            url is None or url.scheme not in {"http", "https"} or not url.host
+            or (url.port is not None and not 0 < url.port <= 65535)
+        ):
+            raise RSIError("CoSens RSI returned an invalid Recipe download URL")
+        return signed
+
+    def _download_recipe_zip(self, signed_url: str) -> bytes:
+        # A raw Request uses the client transport and timeout without merging credentials or cookies.
+        request = httpx.Request("GET", signed_url)
+        try:
+            with closing(self._http.send(request, stream=True, auth=None, follow_redirects=False)) as response:
+                if response.status_code != 200:
+                    error = RSIError(f"Recipe ZIP download returned HTTP {response.status_code}")
+                    error.code = f"http_{response.status_code}"
+                    error.status = response.status_code
+                    raise error
+                data = bytearray()
+                for chunk in response.iter_bytes(chunk_size=64 * 1024):
+                    if len(data) + len(chunk) > MAX_RECIPE_ZIP_BYTES:
+                        raise RSIError("Recipe ZIP download exceeds 8 MiB")
+                    data.extend(chunk)
+                return bytes(data)
+        except httpx.HTTPError:
+            error = RSIError("Recipe ZIP could not be downloaded")
+            error.code = "service_unavailable"
+            raise error from None
 
     def recipe_test(self, *, execution_id, recipe_id, version_id, rubrics_version_id):
         return self._request(

@@ -66,7 +66,7 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 | `rubrics_get` | `rubrics_id`（字符串）、`version`（`"latest"` 或版本 ID） | 无 | 返回选中的评分标准版本。 |
 | `recipe_list` | 无 | `query`，提供时须含 `recipe_ids: string[]`（Python 为 `list[str]`）。 | 返回首次学习条目和现有 Recipe 的摘要。 |
 | `recipes_upsert` | 本地模式传 `task_id`。云端模式传 ZIP 路径或 `file://` URI。 | `recipe_id`（指定已有云端 Recipe）和 `idempotency_key`。 | 上传 ZIP 并返回正式的 `recipe_id`、`recipe_version_id`。本地模式同步更新 SQLite 中的 ID。 |
-| `recipe_download` | `recipe_id`、`recipe_version_id`（TS 第二个位置参数对应版本 ID） | 无 | 云端模式读取指定版本的 ZIP，Python 返回 `bytes`，TS 返回 `Uint8Array`。 |
+| `recipe_download` | `recipe_id`、`recipe_version_id`（TS 第二个位置参数对应版本 ID） | 无 | 云端模式返回指定版本 ZIP 的短期签名 URL，客户端可使用该链接直接下载。 |
 | `recipe_get` | `recipe_id`（字符串） | `version`（`"active"`、`"latest"` 或版本 ID，默认 `"active"`） | 返回 Recipe 和 `selected_version`。 |
 | `recipe_test` | `execution_id`、`recipe_id`、`version_id`、`rubrics_version_id`（均为字符串） | 无 | 在活动 Execution 内安排指定版本测试。 |
 | `recipe_version_set_archived` | `recipe_id`、`version_id`（字符串）、`archived`（布尔值） | 无 | `true` 归档版本，`false` 恢复最近发布的版本。返回两个 ID 和归档状态。 |
@@ -138,7 +138,7 @@ description: "按用户要求将订单数据导出为 CSV。"
 
 主动重新开始时，TS 调用 `task_restart(taskId, { idempotency_key, evidence })`，Python 调用 `task_restart(task_id, idempotency_key=..., evidence=...)`。可以省略新证据。SDK 创建下一条 Execution，继承材料和已提交的答案，从分析开始。重试同一次重启请求时沿用幂等键。最终产物已经确认的任务保留历史结果，后续更新 Recipe 通过 `execution_create()` 创建新任务。
 
-`task_get()` 顶层返回 `task_id`、`recipe_id`、`recipe_version_id` 和 `recipe_zip_path`。任务关联 Recipe 后即可读到 `recipe_id`。最终版本通过验证、澄清完成并生成 ZIP 后，`recipe_version_id` 与绝对路径 `recipe_zip_path` 才有值，此前二者均为 `null`。产物就绪时，`artifact` 也包含同一对 ID 和 ZIP 路径。上传成功后用云端正式 ID。历史任务的本地 ZIP 已清理时，仍可通过回执读取正式 ID，路径为 `null`，可用云端 `recipe_download()` 获取该版本。
+`task_get()` 顶层返回 `task_id`、`recipe_id`、`recipe_version_id` 和 `recipe_zip_path`。任务关联 Recipe 后即可读到 `recipe_id`。最终版本通过验证、澄清完成并生成 ZIP 后，`recipe_version_id` 与绝对路径 `recipe_zip_path` 才有值，此前二者均为 `null`。产物就绪时，`artifact` 也包含同一对 ID 和 ZIP 路径。上传成功后用云端正式 ID。历史任务的本地 ZIP 已清理时，仍可通过回执读取正式 ID，路径为 `null`，可用云端 `recipe_download()` 获取该版本的签名下载 URL。
 
 ### 发布 Recipe ZIP
 

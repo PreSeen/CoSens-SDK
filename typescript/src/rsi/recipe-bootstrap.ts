@@ -3,9 +3,10 @@ import { lstatSync, mkdirSync, mkdtempSync, renameSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import {
-  CloudClient, recipeCloudBaseAliases, recipeCloudDestination, type RecipeCloudDestination,
+  CloudClient, DEFAULT_CLOUD_TIMEOUT_SECONDS, MAX_RECIPE_ZIP_BYTES,
+  recipeCloudBaseAliases, recipeCloudDestination, type RecipeCloudDestination,
 } from './cloud.js';
-import { fail, type Recipe, type RecipeContent, type Version } from './models.js';
+import { fail, RSIError, type Recipe, type RecipeContent, type Version } from './models.js';
 import { parseRecipeMarkdown } from './recipe-file.js';
 import { assertCloudRecipeTargetAvailable, recipeIdentityScope, uploadReceiptScope } from './recipe-identity.js';
 import { assertRecipePackageMatches, readRecipePackage, stageRecipePackageFiles } from './recipe-package.js';
@@ -80,6 +81,36 @@ export function findLocalRecipeBase(store: Store, base: RecipeBase): LocalBase |
   return { recipe, versionId };
 }
 
+async function fetchRecipeZip(url: string): Promise<Uint8Array> {
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      credentials: 'omit',
+      redirect: 'error',
+      signal: AbortSignal.timeout(DEFAULT_CLOUD_TIMEOUT_SECONDS * 1000),
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new RSIError(`http_${response.status}`, `Recipe download returned HTTP ${response.status}`, response.status);
+    }
+    if (!response.body) return fail('invalid_response', 'downloaded Recipe ZIP is empty');
+
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for await (const chunk of response.body) {
+      size += chunk.byteLength;
+      if (size > MAX_RECIPE_ZIP_BYTES)
+        return fail('invalid_response', 'downloaded Recipe ZIP exceeds 8 MiB');
+      chunks.push(chunk);
+    }
+    if (size === 0) return fail('invalid_response', 'downloaded Recipe ZIP is empty');
+    return Buffer.concat(chunks, size);
+  } catch (error) {
+    if (error instanceof RSIError) throw error;
+    return fail('service_unavailable', 'Recipe ZIP could not be downloaded');
+  }
+}
+
 export async function fetchCloudRecipeBase(store: Store, base: RecipeBase, headers?: Headers): Promise<Bootstrap> {
   if ((!headers || headers.keys().next().done) && !process.env.COSENS_API_KEY)
     return fail('not_found', 'recipe not found in local SQLite; configure CoSens credentials to fetch it');
@@ -101,7 +132,8 @@ export async function fetchCloudRecipeBase(store: Store, base: RecipeBase, heade
     return fail('invalid_response', 'CoSens returned inconsistent cloud Recipe version IDs');
   if (selected.publication_state !== 'published' || !selected.package_sha256 || !/^[a-f0-9]{64}$/u.test(selected.package_sha256))
     return fail('invalid_state', 'cloud Recipe version has no verified published ZIP');
-  const archive = await cloud.recipe_download(recipeId, selected.id);
+  const downloadUrl = await cloud.recipe_download(recipeId, selected.id);
+  const archive = await fetchRecipeZip(downloadUrl);
   const sha256 = createHash('sha256').update(archive).digest('hex');
   if (sha256 !== selected.package_sha256)
     return fail('invalid_response', 'cloud Recipe ZIP does not match its published SHA-256');
