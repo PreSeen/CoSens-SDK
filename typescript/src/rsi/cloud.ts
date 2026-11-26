@@ -313,16 +313,8 @@ export class CloudClient {
     });
   }
 
-  rubrics_list(query: { offset: number; archived: boolean }) {
-    return this.request('GET', '/rubrics', {
-      params: { offset: String(query.offset), archived: String(query.archived) },
-    });
-  }
-
-  rubrics_get(id: string, version: string) {
-    return this.request('GET', `/rubrics/${segment(id)}`, {
-      params: { version },
-    });
+  rubrics_get(recipeId: string, recipeVersionId: string) {
+    return this.request('GET', `/recipes/${segment(recipeId)}/versions/${segment(recipeVersionId)}/rubrics`);
   }
 
   async recipe_list(query?: { recipe_ids: string[] }) {

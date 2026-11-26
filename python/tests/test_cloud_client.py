@@ -106,15 +106,18 @@ def test_create_uploads_only_the_named_files(tmp_path):
 
 
 def test_reads_and_queries_map_to_routes():
+    rubric = {"id": "rubrics_1", "selected_version": {"id": "b1", "object_id": "rubrics_1"}}
     transport, seen = recording({
         ("GET", "/api/v1/recipes"): (200, [{"recipe_id": "r1", "status": "active"}]),
+        ("GET", "/api/v1/recipes/r1/versions/v1/rubrics"): (200, rubric),
     })
     client = CloudRSIClient(api_key="k", base_url="https://rsi.example/api", transport=transport)
     client.execution_get("e/1")
     client.execution_list(query={"execution_ids": ["a", "b"]})
     assert client.recipe_list() == [{"recipe_id": "r1"}]
     client.recipe_get("r1", version="active")
-    client.rubrics_list(offset=50, archived=True)
+    assert client.rubrics_get("r1", recipe_version_id="v1") == rubric
+    assert not hasattr(client, "rubrics_list")
     client.recipe_version_set_archived("r1", version_id="v1", archived=True)
     client.execution_clarification_answer("e1", question_id="q", question_revision=1, answer=["opt"])
     client.recipe_test(execution_id="e1", recipe_id="r1", version_id="v1", rubrics_version_id="b1")
@@ -123,14 +126,14 @@ def test_reads_and_queries_map_to_routes():
         ("GET", "/api/v1/executions"),
         ("GET", "/api/v1/recipes"),
         ("GET", "/api/v1/recipes/r1"),
-        ("GET", "/api/v1/rubrics"),
+        ("GET", "/api/v1/recipes/r1/versions/v1/rubrics"),
         ("PUT", "/api/v1/recipes/r1/versions/v1/archived"),
         ("POST", "/api/v1/executions/e1/clarifications"),
         ("POST", "/api/v1/executions/e1/recipe-tests"),
     ]
     assert seen[1]["params"] == {"execution_ids": "a,b"}
     assert seen[3]["params"] == {"version": "active"}
-    assert seen[4]["params"] == {"offset": "50", "archived": "true"}
+    assert seen[4]["params"] == {}
     assert client.execution_list(query={"execution_ids": []}) == []
     assert client.recover() == {"started": 0}
     assert client.recover(recipe_id="r1") == {"started": 0}

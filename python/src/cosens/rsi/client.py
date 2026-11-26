@@ -24,7 +24,6 @@ from .models import Contract, InvalidState, NotFound, RecipeReference
 Text = Annotated[str, StringConstraints(min_length=1)]
 NonBlankText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Positive = Annotated[StrictInt, Field(gt=0)]
-Offset = Annotated[StrictInt, Field(ge=0)]
 
 
 class ModelEndpoint(Contract):
@@ -53,11 +52,6 @@ class File(Contract):
 class ExecutionEvidence(Contract):
     context_path: Text
     files: list[File] = Field(max_length=1000)
-
-
-class Page(Contract):
-    offset: Offset
-    archived: StrictBool
 
 
 class ExecutionListQuery(Contract):
@@ -267,15 +261,10 @@ class RSIClient:
             text=value if isinstance(value, str) else None,
         )
 
-    def rubrics_list(self, *, offset, archived):
-        return self._queue.rubrics_list(
-            **Page(offset=offset, archived=archived).model_dump()
-        )
-
-    def rubrics_get(self, rubrics_id, *, version):
-        version = _TEXT.validate_python(version)
-        return self._queue.rubrics_get(
-            rubrics_id, version_id=None if version == "latest" else version
+    def rubrics_get(self, recipe_id: str, *, recipe_version_id: str):
+        """Get the Rubrics used to generate the specified Recipe version."""
+        return self._queue.rubrics_for_recipe(
+            _TEXT.validate_python(recipe_id), _TEXT.validate_python(recipe_version_id)
         )
 
     def recipe_list(self, *, query=None):

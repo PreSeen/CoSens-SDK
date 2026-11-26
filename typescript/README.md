@@ -76,6 +76,8 @@ To restart a local task, call `task_restart(taskId, { idempotency_key: requestId
 
 `await cloud.recipe_download(recipeId, recipeVersionId)` returns the temporary signed download URL as a string. Fetch that URL to retrieve the ZIP.
 
+Use `await rsi.rubrics_get(recipeId, recipeVersionId)` in local or cloud mode to read the Rubrics used by a specific Recipe version. The response includes `id` and `selected_version`. An imported Recipe version without associated Rubrics returns `not_found`.
+
 See the [complete TS and Python interface reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/local-rsi.md) and the [CoSens docs](https://cosens.ai/docs/). Run `npm run check` to build, typecheck and test the public package.
 
 ### Virtual User selection

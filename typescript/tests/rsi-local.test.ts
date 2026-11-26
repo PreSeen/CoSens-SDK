@@ -1748,6 +1748,10 @@ test('an expired worker lease resumes the graph without regenerating the candida
       config: { auto_start: false },
     });
     try {
+      const generatedVersion = (await host.recipe_get(after.recipe_id!, after.recipe_version_id!)).selected_version;
+      assert.equal(generatedVersion?.provenance.rubrics_version_id, after.rubrics_version_id);
+      const rubrics = await host.rubrics_get(after.recipe_id!, after.recipe_version_id!);
+      assert.equal(rubrics.selected_version?.id, after.rubrics_version_id);
       const recipePath = join(directory, 'prior-recipe.md');
       const recipeText = 'Write the response as a plain text file.';
       writeFileSync(recipePath, recipeText);
@@ -1892,6 +1896,68 @@ test('an expired worker lease resumes the graph without regenerating the candida
   } finally {
     client.close();
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('rubrics_get resolves historical Recipe revisions and rejects unassociated versions', async (t) => {
+  const data_dir = mkdtempSync(join(tmpdir(), 'cosens-rsi-recipe-rubrics-'));
+  const queue = new RSIClient({ data_dir, config: { model: { model: 'fixture' } }, auto_start: false });
+  const client = new PublicRSIClient({ data_dir, config: null });
+  t.after(() => {
+    client.close();
+    queue.close();
+    rmSync(data_dir, { recursive: true, force: true });
+  });
+  const context_path = join(data_dir, 'context.md');
+  writeFileSync(context_path, 'Prepare an output file');
+  const material = queue.material_create({ manifest: { context_path } });
+  const execution = await queue.execution_create({
+    material_ids: [material.id], policy: { artifact_confirmed: true, confirmation_ref: 'fixture' },
+  });
+  const { store } = queue;
+  const recipe = store.createRecipe('Output');
+  const imported = store.createRecipe('Imported');
+  const content = { name: 'Output', description: 'Fixture', instructions: 'Prepare an output file.' };
+  const rubric = store.insert('rubrics', { name: 'Output checks', description: '', latest_version_id: null });
+  const original = store.append(rubric, { criteria: [{ id: 'original' }] });
+  const second = store.append(rubric, { criteria: [{ id: 'second' }] }, `rubrics:${execution.id}:2`);
+  const current = store.append(rubric, { criteria: [{ id: 'current' }] });
+  const originalVersion = store.append(recipe, content, undefined, { execution_id: execution.id, input_revision: 1 });
+  const secondVersion = store.append(recipe, content, undefined, { execution_id: execution.id, input_revision: 2 });
+  const currentVersion = store.append(recipe, content, undefined, { execution_id: execution.id, input_revision: 3 });
+  const unknownVersion = store.append(recipe, content, undefined, { execution_id: execution.id, input_revision: 4 });
+  const ambiguousVersion = store.append(recipe, content, undefined, { execution_id: execution.id, input_revision: 3 });
+  const importedVersion = store.append(imported, content, undefined, { source: 'cloud' });
+  const originalTest = {
+    id: 'test_fixture', execution_id: execution.id, recipe_id: recipe.id, version_id: originalVersion.id,
+    input_revision: 1, round: 1, rubrics_version_id: original.id, status: 'passed' as const,
+    score: 1, scores: [], checks: [], artifacts: [],
+  };
+  store.save({
+    ...execution, recipe_id: recipe.id, recipe_version_id: currentVersion.id,
+    input_revision: 3, analyzed_input_revision: 3, rubrics_version_id: current.id,
+    test_results: [
+      { ...originalTest, id: 'test_later', input_revision: 3, rubrics_version_id: current.id },
+      originalTest,
+      { ...originalTest, id: 'test_conflicting', version_id: secondVersion.id, input_revision: 2 },
+      { ...originalTest, id: 'test_ambiguous_1', version_id: ambiguousVersion.id, input_revision: 3 },
+      { ...originalTest, id: 'test_ambiguous_2', version_id: ambiguousVersion.id, input_revision: 3, rubrics_version_id: current.id },
+    ],
+  });
+
+  for (const [recipeVersion, rubricVersion] of [
+    [originalVersion, original], [secondVersion, second], [currentVersion, current],
+  ]) {
+    const result = await client.rubrics_get(recipe.id, recipeVersion.id);
+    assert.equal(result.id, rubric.id);
+    assert.equal(result.selected_version?.id, rubricVersion.id);
+    assert.deepEqual(result.selected_version?.content, rubricVersion.content);
+  }
+  for (const [recipeId, versionId] of [
+    [recipe.id, unknownVersion.id], [recipe.id, ambiguousVersion.id],
+    [imported.id, importedVersion.id], [imported.id, originalVersion.id],
+  ]) {
+    await assert.rejects(client.rubrics_get(recipeId, versionId), { code: 'not_found' });
   }
 });
 
