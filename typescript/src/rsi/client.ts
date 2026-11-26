@@ -22,6 +22,7 @@ import {
 } from './recipe-list.js';
 import {
   LocalConfigSchema,
+  parseStoredLocalConfig,
   PolicySchema,
   type RubricsSchema,
   TERMINAL,
@@ -298,7 +299,7 @@ export class RSIClient {
       ...request,
       base_execution_id: request.base_execution_id ?? null,
       rubrics_version_id: null,
-      runtime_config: config,
+      runtime_config: parseStoredLocalConfig(config),
       policy: PolicySchema.parse(request.policy),
       status: 'queued',
       stage: 'queued',
@@ -854,7 +855,7 @@ export class RSIClient {
       if (!selected || selected.execution.archived_at != null)
         return fail('invalid_state', 'no eligible execution for this Recipe');
       const { execution, target } = selected;
-      const stored = execution.recovery_config ?? execution.runtime_config;
+      const stored = parseStoredLocalConfig(execution.recovery_config ?? execution.runtime_config);
       const original = stored.model;
       if (
         original.credential_scope !== current.credential_scope ||
@@ -1045,7 +1046,7 @@ export class RSIClient {
     const credentials = this.credentialNames();
     const pending = this.store.pending_execution(credentials, recipeId);
     if (!pending) return { started: 0 };
-    const config = LocalConfigSchema.parse(JSON.parse(pending.config));
+    const config = parseStoredLocalConfig(JSON.parse(pending.config));
     const workers =
       this.model_header_binding || recipeId !== undefined
         ? Math.min(
@@ -1093,7 +1094,7 @@ export class RSIClient {
     if (!pending) return { processed: 0 };
     const client = new RSIClient({
       data_dir: this.data_dir,
-      config: LocalConfigSchema.parse(JSON.parse(pending.config)),
+      config: parseStoredLocalConfig(JSON.parse(pending.config)),
       auto_start: false,
     });
     try {

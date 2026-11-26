@@ -42,7 +42,6 @@ TS 用 `new RSIClient({ data_dir, model_id, api_key, base_url, config })`。Pyth
 | `config.auto_start` | 选填，默认 `true`。 | 为 `true` 时入队后自动调度 Worker，为 `false` 时由宿主调用 `recover()`。 |
 | `config.max_tokens` | 选填。 | 正整数，限制单次模型调用的输出。省略时由模型服务决定。 |
 | `config.timeout` | 选填。 | 秒数，默认 120，有效范围为大于 0 且不超过 3600。 |
-| `config.test_python_image` | 选填。 | 本机已安装且由宿主信任的 Docker Python 镜像，例如 `python:3.12-slim`。设置后本地 Worker 可以在隔离容器中运行测试脚本。需要的依赖由镜像预装。 |
 
 SDK 向 `<base_url>/chat/completions` 发送模型请求，使用 `Authorization: Bearer <api_key>`、`Content-Type: application/json` 和 SDK 的 `User-Agent`。模型 Key 只在 Client 和 Worker 进程使用，SQLite 只保存匹配标识。
 
@@ -251,13 +250,13 @@ TS 用 `execution_list({ execution_ids: [id1, id2] })`，Python 用 `execution_l
 - Worker 自动提炼并锁定 Recipe 名称、生成 Rubrics、保存候选及测试结果。自动学习最多两轮。
 - 如果宿主显式调用 `recipe_test` 改测另一个 Recipe，Execution 会切换到指定的测试目标。原先为这一条执行预建、尚无任何版本的 Recipe 会归档。
 
-### 测试中运行 Python
+### 回放中运行脚本
 
-本地 Client 配置了 `test_python_image` 时，回放可选用 `run_python({ path, args })`。测试模型可用 `write_output` 将脚本写到 `scripts/`。`path` 是脚本相对路径，`args` 是参数数组，省略时为 `[]`。Docker 使用本机已有镜像。脚本在 `/workspace/outputs` 中运行，从 `/workspace/inputs` 读取本轮获准测试的只读文件。工具将真实退出码、标准输出和标准错误写入测试轨迹。测试产物由隔离工作区收集，待运行脚本与产物分开。
+两版 SDK 的本地回放默认提供 `run_python` 和 `run_typescript`，由 LangGraph 按任务选用。工具优先复用当前 Worker 的解释器或 PATH 中兼容的解释器。缺失时，SDK 下载并校验固定版本的 CPython 或 Node.js，安装到 `data_dir/runtimes` 供后续回放复用。
 
-容器禁用网络并限制运行时间和资源。使用未声明 `VOLUME` 的可信镜像，由镜像预装任务所需的依赖，例如读取 Excel 所需的库。模型请求头、宿主的其他路径和学习材料不会挂载到容器。
+测试模型可用 `write_output` 将脚本写到 `scripts/`，再以 `{ path, args }` 调用对应工具。`path` 是脚本相对路径，`args` 是参数数组，省略时为 `[]`。脚本在本次回放的临时工作目录运行，通过证据目录中的 `input_path` 读取输入副本。脚本以 RSI 进程的账号运行，文件和网络访问受该账号权限约束。工具记录实际退出码、标准输出和标准错误，成功执行后收集通过检查的产物。
 
-评审依据 Rubric 的具体要求和实际产物评分。配置缺失、镜像或 Docker 不可用、可选的 Python 调用失败时，回放可以采用符合要求的其他方法，工具结果仍保留在测试轨迹中。任务明确要求运行某个脚本、方法或检查时，评审需要观察到成功执行和相应结果才能通过该项。
+评审依据 Rubric 的具体要求、测试轨迹和实际产物评分。可选工具不可用或调用失败时，回放可以改用其他符合要求的方法。任务明确要求实际执行时，评审根据执行证据和产生的结果判断该项是否通过。
 
 ### 更新和澄清参数
 

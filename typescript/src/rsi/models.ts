@@ -46,7 +46,6 @@ export const ModelConfigSchema = z.strictObject({
 });
 export const LocalConfigSchema = z.strictObject({
   model: ModelConfigSchema,
-  test_python_image: z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,254}$/u).optional(),
   max_executions: z.number().int().min(1).max(32).default(2),
   max_model_requests: z.number().int().min(1).max(32).default(2),
   lease_seconds: z.number().min(3).max(3600).default(30),
@@ -64,6 +63,15 @@ export const LocalConfigSchema = z.strictObject({
 });
 export type LocalConfig = z.output<typeof LocalConfigSchema>;
 export type LocalConfigInput = z.input<typeof LocalConfigSchema>;
+export function parseStoredLocalConfig(value: unknown): LocalConfig {
+  if (value && typeof value === 'object' &&
+    ('test_script_mode' in value || 'test_python_image' in value)) {
+    const { test_script_mode: _mode, test_python_image: _image, ...current } =
+      value as Record<string, unknown>;
+    return LocalConfigSchema.parse(current);
+  }
+  return LocalConfigSchema.parse(value);
+}
 export const ManifestSchema = z.strictObject({
   context_path: text,
   files: z

@@ -19,7 +19,7 @@ from .model_headers import (
     credential_scope_id,
     normalize_request_headers,
 )
-from .models import Contract, InvalidState, NotFound, PythonImage, RecipeReference
+from .models import Contract, InvalidState, NotFound, RecipeReference
 
 Text = Annotated[str, StringConstraints(min_length=1)]
 NonBlankText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -43,7 +43,6 @@ class LocalOptions(Contract):
     auto_start: StrictBool = True
     max_tokens: Positive | None = None
     timeout: Annotated[float, Field(gt=0, le=3600)] | None = None
-    test_python_image: PythonImage | None = None
 
 
 class File(Contract):
@@ -143,7 +142,6 @@ class RSIClient:
                         include={"max_tokens", "timeout"}, exclude_none=True
                     ),
                 },
-                **settings.model_dump(include={"test_python_image"}, exclude_none=True),
             }
             if endpoint and binding
             else None,

@@ -1679,8 +1679,6 @@ def test_package_recipe_resource_schema_is_opt_in():
 
 
 def test_python_restore_rejects_overwritten_package_files(tmp_path):
-    import base64
-
     from cosens.rsi.models import LocalConfig
     from cosens.rsi.python_runner import _restore_output
 
@@ -1689,10 +1687,15 @@ def test_python_restore_rejects_overwritten_package_files(tmp_path):
     template.parent.mkdir(parents=True)
     template.write_text("42", encoding="utf-8")
 
+    staged_output = tmp_path / "staged"
+    overwritten = staged_output / "templates" / "answer.txt"
+    overwritten.parent.mkdir(parents=True)
+    overwritten.write_text("0", encoding="utf-8")
+
     with pytest.raises(ValueError, match="changed a Recipe package file"):
         _restore_output(
             workspace,
-            {"templates/answer.txt": base64.b64encode(b"0").decode()},
+            staged_output,
             LocalConfig.model_validate(settings()),
             protected_files={"templates/answer.txt"},
         )

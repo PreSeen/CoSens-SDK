@@ -71,12 +71,6 @@ class ModelConfig(Contract):
         return self
 
 
-PythonImage = Annotated[
-    str,
-    StringConstraints(strip_whitespace=True, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,254}$"),
-]
-
-
 class LocalConfig(Contract):
     model: ModelConfig
     max_executions: int = Field(default=2, ge=1, le=32)
@@ -85,7 +79,16 @@ class LocalConfig(Contract):
     max_file_bytes: int = Field(default=4 * 1024 * 1024, ge=1)
     max_bundle_bytes: int = Field(default=32 * 1024 * 1024, ge=1)
     recursion_limit: int = Field(default=40, ge=4, le=500)
-    test_python_image: PythonImage | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_legacy_runner_settings(cls, value):
+        if isinstance(value, dict):
+            return {
+                key: item for key, item in value.items()
+                if key not in {"test_python_image", "test_script_mode"}
+            }
+        return value
 
 
 class FileRef(Contract):

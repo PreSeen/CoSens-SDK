@@ -1,53 +1,45 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { RSIClient } from 'cosens-sdk/rsi';
 import { RSIClient as QueueClient } from '../src/rsi/client.js';
-import { parseStoredRubrics, RubricsSchema } from '../src/rsi/models.js';
+import { LocalConfigSchema, parseStoredLocalConfig, parseStoredRubrics, RubricsSchema } from '../src/rsi/models.js';
+import { runHostScript } from '../src/rsi/test-host.js';
 
-const image = process.env.RSI_TEST_PYTHON_IMAGE ?? 'python:3.12-slim';
-const dockerAvailable = spawnSync('docker', ['image', 'inspect', image], {
-  timeout: 5_000,
-  stdio: 'ignore',
-}).status === 0;
-
-const script = `
-import csv
-import os
-import socket
-import sys
-from pathlib import Path
-
-input_file = Path(sys.argv[1])
-with input_file.open() as source:
-    rows = list(csv.DictReader(source))
-totals = {row["channel"]: int(row["sales"]) for row in rows}
-with Path("report.csv").open("w", newline="") as report:
-    writer = csv.writer(report)
-    writer.writerow(["channel", "sales"])
-    writer.writerows(sorted(totals.items()))
-    writer.writerow(["total", sum(totals.values())])
-assert len(rows) == len(totals)
-assert list(Path("/workspace/inputs").rglob("*.csv")) == [input_file]
-assert {name for _, name in socket.if_nameindex()} == {"lo"}
-assert os.getuid() == 65534
-for path in (input_file, Path("/proc/1/fd/1")):
-    try:
-        path.open("a").close()
-    except OSError:
-        pass
-    else:
-        raise RuntimeError(f"Write allowed: {path}")
-print("Input count, data isolation, network and filesystem checks passed")
-`;
+const hostPythonAvailable = ['python3', 'python', 'python3.14', 'python3.13', 'python3.12', 'python3.11', 'python3.10'].some((command) =>
+  spawnSync(command, ['-c', 'import sys; sys.exit(not (sys.version_info >= (3, 10)))'], {
+    timeout: 5_000,
+    stdio: 'ignore',
+  }).status === 0,
+);
 
 const report = 'channel,sales\nonline,28\nstore,14\ntotal,42\n';
+const hostPythonScript = `
+import csv, os, sys
+from pathlib import Path
+
+assert not any(name.startswith("RSI_") for name in os.environ)
+with Path(sys.argv[1]).open() as source:
+    rows = list(csv.DictReader(source))
+    total = sum(int(row["sales"]) for row in rows)
+Path("report.csv").write_bytes(Path(sys.argv[1]).read_bytes() + f"total,{total}\\n".encode())
+print("Host Python computed the total")
+`;
+const hostTypeScript = `
+import { readFileSync, writeFileSync } from 'node:fs';
+if (Object.keys(process.env).some((key) => key.startsWith('RSI_'))) throw new Error('Unexpected runner environment');
+const input: string = readFileSync(process.argv[2], 'utf8');
+const values: number[] = input.trim().split('\\n').slice(1).map((row) => Number(row.split(',')[1]));
+writeFileSync('report.csv', input + 'total,' + values.reduce((a, b) => a + b, 0) + '\\n');
+console.log('Host TypeScript computed the total');
+`;
 
 test('stored Rubrics ignore the former Python flag without changing their criteria', () => {
   const criteria = [{
@@ -62,20 +54,67 @@ test('stored Rubrics ignore the former Python flag without changing their criter
   assert.deepEqual(parseStoredRubrics(legacy), { criteria, pass_threshold: 0.9 });
 });
 
-for (const mode of [
-  'run', 'nonzero', 'fallback', 'available-unused', 'unconfigured', 'text',
-] as const) {
-  test(`local recipe test Python runner: ${mode}`, {
-    skip: (mode === 'run' || mode === 'nonzero') && !dockerAvailable,
+test('only stored replay configuration accepts the retired script settings', () => {
+  const clean = LocalConfigSchema.parse({ model: { model: 'fixture' } });
+  const legacy = { ...clean, test_script_mode: 'host', test_python_image: 'old-image' };
+  assert.equal(LocalConfigSchema.safeParse(legacy).success, false);
+  assert.deepEqual(parseStoredLocalConfig(legacy), clean);
+  assert.throws(() => parseStoredLocalConfig({ ...legacy, unknown_option: true }));
+});
+
+test('host replay stops the process group when its lease is lost', {
+  skip: process.platform === 'win32',
+  timeout: 10_000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'cosens-rsi-host-lease-'));
+  const scripts = join(root, 'scripts');
+  const workspace = join(root, 'outputs');
+  const heartbeat = join(root, 'heartbeat');
+  const pidFile = join(root, 'child-pid');
+  try {
+    mkdirSync(scripts);
+    mkdirSync(workspace);
+    const childProgram = `
+const fs = require('node:fs');
+fs.writeFileSync(process.argv[1], String(process.pid));
+setInterval(() => fs.appendFileSync(process.argv[2], '.'), 20);
+`;
+    writeFileSync(join(scripts, 'lease.ts'), `
+import { spawn } from 'node:child_process';
+spawn(process.execPath, ['-e', ${JSON.stringify(childProgram)}, ...process.argv.slice(2)], { stdio: 'inherit' });
+setInterval(() => {}, 10_000);
+`);
+    const checkAlive = () => {
+      if (existsSync(heartbeat)) throw new Error('test lease lost');
+    };
+    await assert.rejects(runHostScript(
+      'typescript', 'scripts/lease.ts', [pidFile, heartbeat], scripts, workspace,
+      [], root, LocalConfigSchema.parse({ model: { model: 'fixture' } }), checkAlive,
+    ), /test lease lost/);
+    const lastWrite = readFileSync(heartbeat, 'utf8');
+    await sleep(100);
+    assert.equal(readFileSync(heartbeat, 'utf8'), lastWrite);
+  } finally {
+    if (existsSync(pidFile)) {
+      const pid = Number(readFileSync(pidFile, 'utf8'));
+      try { process.kill(pid, 'SIGKILL'); } catch { /* Already stopped. */ }
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const mode of ['python', 'typescript', 'nonzero', 'text', 'unverified', 'legacy-configuration'] as const) {
+  test(`default host recipe replay: ${mode}`, {
+    skip: mode === 'python' && !hostPythonAvailable,
   }, async () => {
-    const root = mkdtempSync(join(tmpdir(), 'cosens-rsi-python-test-'));
+    const root = mkdtempSync(join(tmpdir(), 'cosens-rsi-host-test-'));
     const data_dir = join(root, 'rsi');
     const contextPath = join(root, 'context.md');
     const current = join(root, 'current.csv');
     const history = join(root, 'prior.csv');
-    const needsRealExecution = mode === 'run' || mode === 'nonzero' || mode === 'unconfigured';
-    const pythonConfigured = mode !== 'text' && mode !== 'unconfigured';
-    const attemptsPython = mode === 'run' || mode === 'nonzero' || mode === 'fallback';
+    const needsRealExecution = mode === 'unverified';
+    const usesTypeScript = mode === 'typescript' || mode === 'nonzero' || mode === 'legacy-configuration';
+    const attemptsScript = mode === 'python' || usesTypeScript;
     const criterionDescription = needsRealExecution
       ? 'Run Python to calculate and verify the total'
       : 'Calculate and verify the total';
@@ -116,11 +155,12 @@ for (const mode of [
           }];
         } else if (tools.has('Assessment')) {
           assessments++;
-          if (mode === 'unconfigured' && outputs.length === 0) {
+          if (mode === 'unverified' && outputs.length === 0) {
             call = ['read_evidence', { locator: 'trace/executor.json' }];
-          } else if (mode === 'unconfigured') {
+          } else if (mode === 'unverified') {
             const trace = JSON.parse(JSON.parse(outputs[0].content!).text);
             assert.equal(trace.python_runs, undefined);
+            assert.equal(trace.typescript_runs, undefined);
             call = ['Assessment', {
               verifiable: false,
               scores: [{
@@ -131,15 +171,8 @@ for (const mode of [
             }];
           } else if (outputs.length === 0) {
             call = ['read_evidence', { locator: 'test/report.csv' }];
-          } else if (mode === 'run' && outputs.length === 1) {
-            assert.match(outputs[0].content!, /online,28\\r\\nstore,14\\r\\ntotal,42/);
-            call = ['read_evidence', { locator: 'trace/executor.json' }];
           } else {
-            if (mode === 'run') {
-              assert.match(outputs[1].content!, /Input count, data isolation, network and filesystem checks passed/);
-            } else {
-              assert.equal(JSON.parse(outputs[0].content!).text, report);
-            }
+            assert.equal(JSON.parse(outputs[0].content!).text, report);
             call = ['Assessment', {
               verifiable: true,
               scores: [{ criterion_id: 'verified-total', score: 1, evidence: 'Verified report.csv' }],
@@ -147,24 +180,31 @@ for (const mode of [
             }];
           }
         } else {
-          assert.equal(tools.has('run_python'), pythonConfigured);
+          assert.equal(tools.has('run_python'), true);
+          assert.equal(tools.has('run_typescript'), true);
           assert.deepEqual(context.criteria, [
             { id: 'verified-total', description: criterionDescription, required: true },
           ]);
           assert.deepEqual(catalog.map((entry: { role: string }) => entry.role), ['input']);
-          if (!attemptsPython) {
-            assert.equal(typeof catalog[0].sandbox_path, pythonConfigured ? 'string' : 'undefined');
+          assert.match(catalog[0].input_path, /^\.\.\/inputs\/material_[^/]+\/1\/current\.csv$/);
+          if (attemptsScript) {
+            const path = usesTypeScript ? 'scripts/stats.ts' : 'scripts/stats.py';
             if (outputs.length === 0) {
-              call = ['write_output', { path: 'report.csv', content: report }];
+              const content = usesTypeScript ? hostTypeScript : hostPythonScript;
+              call = ['write_output', {
+                path,
+                content: mode === 'nonzero' ? content + '\nprocess.exit(4);\n' : content,
+              }];
+            } else if (outputs.length === 1) {
+              call = [usesTypeScript ? 'run_typescript' : 'run_python', {
+                path, args: [catalog[0].input_path],
+              }];
+            } else {
+              const receipt = JSON.parse(outputs[1].content!);
+              assert.equal(receipt.status, 'completed');
+              assert.equal(receipt.exit_code, mode === 'nonzero' ? 4 : 0);
             }
           } else if (outputs.length === 0) {
-            const code = mode === 'nonzero' ? script + '\nraise SystemExit(4)\n' : script;
-            call = ['write_output', { path: 'scripts/stats.py', content: code }];
-          } else if (outputs.length === 1) {
-            assert.match(catalog[0].sandbox_path, /^\/workspace\/inputs\/material_[^/]+\/1\/current\.csv$/);
-            call = ['run_python', { path: 'scripts/stats.py', args: [catalog[0].sandbox_path] }];
-          } else if (mode === 'fallback' && outputs.length === 2) {
-            assert.equal(JSON.parse(outputs[1].content!).status, 'unavailable');
             call = ['write_output', { path: 'report.csv', content: report }];
           }
         }
@@ -192,12 +232,7 @@ for (const mode of [
       model_id: 'python-runner-fixture',
       base_url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`,
       api_key: 'fixture',
-      config: {
-        auto_start: true,
-        ...(pythonConfigured ? {
-          test_python_image: mode === 'fallback' ? 'cosens-rsi-test:missing-' + process.pid : image,
-        } : {}),
-      },
+      ...(mode === 'legacy-configuration' ? { config: { auto_start: false } } : {}),
     });
     const reader = new QueueClient({ data_dir, auto_start: false });
     try {
@@ -208,22 +243,40 @@ for (const mode of [
         ] },
         idempotency_key: mode,
       });
+      if (mode === 'legacy-configuration') {
+        const queued = reader.execution_get(started.id);
+        const runtime_config = {
+          ...queued.runtime_config,
+          test_script_mode: 'host',
+          test_python_image: 'retired-image',
+        };
+        reader.store.save({ ...queued, runtime_config });
+        const binding = runtime_config.model.api_key_env;
+        const previous = process.env[binding];
+        process.env[binding] = JSON.stringify({ authorization: 'Bearer fixture' });
+        try {
+          assert.deepEqual(await reader.run_pending(), { processed: 1 });
+        } finally {
+          if (previous === undefined) delete process.env[binding];
+          else process.env[binding] = previous;
+        }
+      }
       const complete = await reader.wait(started.id, { timeout: 35, poll_interval: 0.05 });
       assert.equal(complete.status, 'completed', JSON.stringify(complete.error));
       const attempt = complete.test_results.at(-1)!;
       const trace = JSON.parse(readFileSync(attempt.trace_path!, 'utf8'));
       assert.doesNotMatch(JSON.stringify(trace), /prior\.csv|historic,5000/);
-      if (mode === 'unconfigured' || mode === 'nonzero') {
+      if (mode === 'unverified' || mode === 'nonzero') {
         assert.equal(complete.result?.published, false);
         assert.equal(attempt.status, 'unverifiable');
-        if (mode === 'unconfigured') {
+        if (mode === 'unverified') {
           assert.equal(assessments, 2);
           assert.match(attempt.reason!, /script execution could not be verified/);
           assert.equal(trace.python_runs, undefined);
         } else {
           assert.equal(assessments, 0);
           assert.deepEqual(attempt.artifacts, []);
-          assert.equal(trace.python_runs[0].exit_code, 4);
+          assert.equal(trace.typescript_runs[0].exit_code, 4);
         }
       } else {
         assert.equal(complete.result?.test_status, 'passed', attempt.reason);
@@ -232,21 +285,16 @@ for (const mode of [
         const recipe = await client.recipe_get(attempt.recipe_id);
         assert.equal(recipe.active_version_id, attempt.version_id);
         assert.deepEqual(attempt.artifacts.map((artifact) => artifact.locator), ['test/report.csv']);
-        if (mode === 'run') {
-          assert.equal(assessments, 3);
-          assert.equal(readFileSync(attempt.artifacts[0].path, 'utf8'), report.replaceAll('\n', '\r\n'));
-          assert.equal(trace.python_runs.length, 1);
-          assert.equal(trace.python_runs[0].exit_code, 0);
-          assert.match(trace.python_runs[0].stdout, /checks passed/);
+        assert.equal(assessments, 2);
+        assert.equal(readFileSync(attempt.artifacts[0].path, 'utf8'), report);
+        if (attemptsScript) {
+          const receipts = usesTypeScript ? trace.typescript_runs : trace.python_runs;
+          assert.equal(receipts.length, 1);
+          assert.equal(receipts[0].exit_code, 0);
+          assert.match(receipts[0].stdout, /Host (TypeScript|Python) computed the total/);
         } else {
-          assert.equal(assessments, 2);
-          assert.equal(readFileSync(attempt.artifacts[0].path, 'utf8'), report);
-          if (mode === 'fallback') {
-            assert.equal(trace.python_runs[0].status, 'unavailable');
-            assert.equal(trace.python_runs[0].exit_code, null);
-          } else {
-            assert.equal(trace.python_runs, undefined);
-          }
+          assert.equal(trace.python_runs, undefined);
+          assert.equal(trace.typescript_runs, undefined);
         }
       }
     } finally {

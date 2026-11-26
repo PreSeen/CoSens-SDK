@@ -1,10 +1,15 @@
-"""Exercise the Recipe test loop and the real opt-in Python sandbox."""
+"""Exercise Recipe replay with its default native script tools."""
 
+import hashlib
+import io
 import json
+import shutil
+import tarfile
 import threading
 from contextlib import contextmanager, nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -12,9 +17,10 @@ from pydantic import ValidationError
 pytest.importorskip("langgraph.checkpoint.sqlite")
 
 from cosens.rsi import RSIClient
+from cosens.rsi import host_runtime
 from cosens.rsi.chat_completions import Assistant
 from cosens.rsi.models import RubricsContent, parse_stored_rubrics
-from cosens.rsi.python_runner import _installed_image
+from cosens.rsi.python_runner import run_host_script
 
 
 def tool_reply(name, args):
@@ -88,29 +94,38 @@ def test_stored_rubrics_ignore_obsolete_python_flag():
 @pytest.mark.parametrize(
     ("mode", "test_status"),
     [
-        ("docker", "passed"),
         ("nonzero", "passed"),
         ("unavailable", "passed"),
         ("rejected", "passed"),
-        ("unconfigured", "passed"),
         ("skipped", "failed"),
         ("text", "passed"),
         ("incidental", "passed"),
+        ("host-python", "passed"),
+        ("host-typescript", "passed"),
+        ("legacy-host-python", "passed"),
     ],
 )
-def test_recipe_replay_with_optional_python(tmp_path, monkeypatch, mode, test_status):
-    image = "python:3.12-slim"
-    python_configured = mode not in {"unconfigured", "incidental"}
-    execution_required = mode in {"docker", "skipped"}
+def test_recipe_replay_with_native_tools(tmp_path, monkeypatch, mode, test_status):
+    host_mode = mode in {"host-python", "host-typescript", "legacy-host-python"}
+    execution_required = mode in {"host-python", "skipped"}
     criterion_description = (
         "Run the Python check and verify the calculated quantities in the resulting CSV"
         if execution_required
         else "Verify the calculated quantities in the output CSV"
     )
-    if mode in {"docker", "nonzero"} and _installed_image(image) is None:
-        pytest.skip("Docker and the locally installed Python test image are required")
+    if mode == "host-typescript":
+        bun = shutil.which("bun")
+        node = shutil.which("node")
+        if not (bun and host_runtime._version(bun)) and not (
+            node and host_runtime._node_command(node)
+        ):
+            pytest.skip("A host Bun or compatible Node.js executable is required")
+    monkeypatch.setenv("SYNTHETIC_WORKER_SECRET", "not-for-script")
     if mode == "unavailable":
-        monkeypatch.setattr("cosens.rsi.python_runner._installed_image", lambda _image: None)
+        def unavailable(*_args):
+            raise host_runtime.HostRuntimeUnavailable("Test interpreter unavailable")
+
+        monkeypatch.setattr("cosens.rsi.python_runner.host_command", unavailable)
     python_quote = "Run Python to compute and verify the CSV deliverable."
     outcome_requirement = (
         "Compute the totals, deliver a CSV summary and a Markdown report, "
@@ -134,35 +149,32 @@ def test_recipe_replay_with_optional_python(tmp_path, monkeypatch, mode, test_st
     historical = tmp_path / "archived-data.csv"
     historical.write_text("HISTORICAL_RECORD\n77723\n")
     expected = "quantity,doubled\n6,12\n"
-    script = r"""
-import csv
+    host_scripts = {
+        "host-python": (
+            "run_python", "scripts/host.py",
+            r"""
 import os
 import sys
 from pathlib import Path
 
-source = Path(sys.argv[1])
-assert os.getuid() == 65534
-assert list(Path('/workspace/inputs').rglob('*.csv')) == [source]
-try:
-    source.open('a')
-except OSError:
-    pass
-else:
-    raise AssertionError('input was writable')
-try:
-    Path('/proc/1/fd/1').open()
-except PermissionError:
-    pass
-else:
-    raise AssertionError('runner receipt was accessible')
-with source.open() as input_file:
-    quantity = int(next(csv.DictReader(input_file))['quantity'])
-with Path('verified.csv').open('w', newline='') as output_file:
-    writer = csv.writer(output_file, lineterminator='\n')
-    writer.writerow(['quantity', 'doubled'])
-    writer.writerow([quantity, quantity * int(sys.argv[2])])
-print('Read-only input and calculated quantity verified')
-"""
+assert 'SYNTHETIC_WORKER_SECRET' not in os.environ
+value = int(Path(sys.argv[1]).read_text().splitlines()[1])
+Path('verified.csv').write_text(f'quantity,doubled\n{value},{value * 2}\n')
+print('Calculated on host')
+""",
+        ),
+        "host-typescript": (
+            "run_typescript", "scripts/host.ts",
+            r"""
+import { readFileSync, writeFileSync } from 'node:fs';
+
+if (process.env.SYNTHETIC_WORKER_SECRET) throw new Error('Host credential was passed');
+const value: number = Number(readFileSync(process.argv[2], 'utf8').split('\n')[1]);
+writeFileSync('verified.csv', `quantity,doubled\n${value},${value * 2}\n`);
+console.log('Calculated on host');
+""",
+        ),
+    }
     assessed = []
 
     def completion(_config, _headers, messages, definitions):
@@ -206,17 +218,19 @@ print('Read-only input and calculated quantity verified')
             })
         if "Assessment" in tools:
             assert "run_python" not in tools
+            assert "run_typescript" not in tools
             assert "requires_python" not in payload["context"]["rubrics"]
             if not responses:
                 return tool_reply("read_evidence", {"locator": "test/verified.csv"})
             assert responses[0]["text"] == expected
-            if execution_required or mode in {"unavailable", "rejected", "nonzero"}:
+            if host_mode or execution_required or mode in {"unavailable", "rejected", "nonzero"}:
                 if len(responses) == 1:
                     return tool_reply("read_evidence", {"locator": "test/executor-trace.json"})
                 trace = json.loads(responses[1]["text"])
-                if mode == "docker":
-                    assert trace["python_runs"][0]["exit_code"] == 0
-                    assert "calculated quantity verified" in trace["python_runs"][0]["stdout"]
+                if host_mode:
+                    key = "typescript_runs" if mode == "host-typescript" else "python_runs"
+                    assert trace[key][0]["exit_code"] == 0
+                    assert "Calculated on host" in trace[key][0]["stdout"]
                 elif mode == "skipped":
                     assert "python_runs" not in trace
                 elif mode == "nonzero":
@@ -243,7 +257,7 @@ print('Read-only input and calculated quantity verified')
                     else "Verified the calculated output"
                 ),
             })
-        assert ("run_python" in tools) is python_configured
+        assert {"run_python", "run_typescript"} <= tools
         assert "requires_python" not in payload["context"]
         assert payload["context"]["criteria"] == [{
             "id": "verified_csv",
@@ -251,26 +265,33 @@ print('Read-only input and calculated quantity verified')
             "required": True,
         }]
         assert len(catalog) == 1 and catalog[0]["role"] == "input"
-        if not python_configured:
-            assert "sandbox_path" not in catalog[0]
+        assert "sandbox_path" not in catalog[0]
+        assert catalog[0]["input_path"].startswith("../inputs/")
+        if host_mode:
+            language_mode = "host-typescript" if mode == "host-typescript" else "host-python"
+            tool, script_path, source = host_scripts[language_mode]
             if not responses:
-                return tool_reply("write_output", {"path": "verified.csv", "content": expected})
+                return tool_reply("write_output", {"path": script_path, "content": source})
             if len(responses) == 1:
-                return tool_reply("run_python", {"path": "scripts/unneeded.py"})
-            assert responses[-1] == "Unknown or unauthorized tool."
-            return Assistant(role="assistant", content="The CSV is ready for verification.")
-        assert catalog[0]["sandbox_path"].endswith("/current.csv")
+                return tool_reply(tool, {
+                    "path": script_path,
+                    "args": [catalog[0]["input_path"]],
+                })
+            assert responses[1]["exit_code"] == 0, responses[1]
+            return Assistant(role="assistant", content="The verification finished.")
         if not responses:
-            if mode in {"skipped", "text"}:
+            if mode in {"skipped", "text", "incidental"}:
                 return tool_reply("write_output", {"path": "verified.csv", "content": expected})
             if mode == "rejected":
                 return tool_reply("run_python", {"path": "scripts/missing.py"})
-            source = "raise SystemExit(17)" if mode == "nonzero" else script
-            return tool_reply("write_output", {"path": "scripts/verify.py", "content": source})
-        if len(responses) == 1 and mode in {"docker", "unavailable", "nonzero"}:
+            return tool_reply("write_output", {
+                "path": "scripts/verify.py",
+                "content": "raise SystemExit(17)",
+            })
+        if len(responses) == 1 and mode in {"unavailable", "nonzero"}:
             return tool_reply("run_python", {
                 "path": "scripts/verify.py",
-                "args": [catalog[0]["sandbox_path"], "2"],
+                "args": [catalog[0]["input_path"]],
             })
         if (mode == "rejected" and len(responses) == 1) or (
             mode in {"unavailable", "nonzero"} and len(responses) == 2
@@ -278,7 +299,7 @@ print('Read-only input and calculated quantity verified')
             return tool_reply("write_output", {"path": "verified.csv", "content": expected})
         return Assistant(role="assistant", content="The verification finished.")
 
-    detached = mode == "docker"
+    detached = mode == "host-python"
     if not detached:
         monkeypatch.setattr("cosens.rsi.runtime.request_completion", completion)
     with gateway(completion) if detached else nullcontext("http://127.0.0.1:1/v1") as url:
@@ -287,10 +308,7 @@ print('Read-only input and calculated quantity verified')
             model_id="fixture",
             base_url=url,
             api_key="synthetic-fixture",
-            config={
-                "auto_start": detached,
-                **({"test_python_image": image} if python_configured else {}),
-            },
+            config={"auto_start": False} if not detached else None,
         )
         accepted = client.execution_create(
             evidence={
@@ -302,6 +320,14 @@ print('Read-only input and calculated quantity verified')
             },
             idempotency_key="python-test",
         )
+        if mode == "legacy-host-python":
+            store = client._queue.store
+            with store.transaction() as conn:
+                queued = store.get_in(conn, accepted["id"], "execution")
+                queued["runtime_config"].update(
+                    test_script_mode="host", test_python_image="python:3.12-slim"
+                )
+                store.save(conn, queued)
         if detached:
             client._queue.wait(accepted["id"], timeout=30)
         else:
@@ -322,5 +348,74 @@ print('Read-only input and calculated quantity verified')
         assert tested["score"] == 1
         assert Path(tested["artifacts"][0]["path"]).read_text() == expected
         assert client.recipe_get(execution["recipe_id"])["active_version_id"] == tested["version_id"]
-    if mode in {"unconfigured", "incidental", "text", "skipped"}:
+    if mode in {"incidental", "text", "skipped"}:
         assert "python_runs" not in trace
+
+
+def test_public_config_rejects_obsolete_script_settings(tmp_path):
+    with pytest.raises(ValidationError) as error:
+        RSIClient(
+            data_dir=tmp_path,
+            config={"test_script_mode": "host", "test_python_image": "python:3.12-slim"},
+        )
+    assert {issue["loc"] for issue in error.value.errors()} == {
+        ("test_script_mode",),
+        ("test_python_image",),
+    }
+
+
+def test_host_script_failure_does_not_publish_staged_outputs(tmp_path):
+    workspace = tmp_path / "output"
+    scripts = workspace / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "failed.py").write_text(
+        "from pathlib import Path\n"
+        "Path('bad.txt').write_text('failed')\n"
+        "raise SystemExit(17)\n"
+    )
+    result = run_host_script(
+        "scripts/failed.py", [], workspace, [],
+        SimpleNamespace(max_file_bytes=4096, max_bundle_bytes=8192),
+        lambda: None,
+        language="python", data_dir=tmp_path,
+    )
+    assert result["exit_code"] == 17
+    assert not (workspace / "bad.txt").exists()
+
+
+def test_host_node_is_provisioned_once_from_verified_archive(tmp_path, monkeypatch):
+    release = host_runtime._NODE_RELEASE
+    name = f"node-{release}-linux-x64"
+    payload = b"synthetic Node.js executable"
+    archive_contents = io.BytesIO()
+    with tarfile.open(fileobj=archive_contents, mode="w:gz") as archive:
+        entry = tarfile.TarInfo(f"{name}/bin/node")
+        entry.size = len(payload)
+        archive.addfile(entry, io.BytesIO(payload))
+    data = archive_contents.getvalue()
+    urls = []
+
+    def download(url, *, timeout):
+        urls.append(url)
+        return io.BytesIO(data)
+
+    monkeypatch.setattr(host_runtime.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(host_runtime.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(host_runtime.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(host_runtime, "urlopen", download)
+    monkeypatch.setattr(host_runtime, "_version", lambda _path: release)
+    monkeypatch.setitem(
+        host_runtime._NODE_ASSETS, ("Linux", "x64"),
+        ("linux-x64", hashlib.sha256(data).hexdigest()),
+    )
+    command = host_runtime.host_command("typescript", tmp_path, lambda: None)
+    assert Path(command[0]).read_bytes() == payload
+    assert host_runtime.host_command("typescript", tmp_path, lambda: None) == command
+    assert urls == [f"https://nodejs.org/dist/{release}/{name}.tar.gz"]
+    monkeypatch.setitem(
+        host_runtime._NODE_ASSETS, ("Linux", "x64"), ("linux-x64", "0" * 64)
+    )
+    with pytest.raises(host_runtime.HostRuntimeUnavailable, match="Could not provision"):
+        host_runtime.host_command("typescript", tmp_path / "bad-checksum", lambda: None)
+    assert not list((tmp_path / "bad-checksum").rglob("node.tar.gz"))
+    assert not (tmp_path / "bad-checksum/runtimes/node" / release / "linux-x64/node").exists()

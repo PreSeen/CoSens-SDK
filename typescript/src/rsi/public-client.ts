@@ -25,7 +25,6 @@ const config = z.strictObject({
   auto_start: z.boolean().optional(),
   max_tokens: z.number().int().positive().optional(),
   timeout: z.number().positive().max(3600).optional(),
-  test_python_image: text.optional(),
 });
 const connectionValue = z.string().trim().min(1);
 const localExecutionOptions = z.strictObject({
@@ -176,9 +175,6 @@ export class RSIClient {
       ...('model_id' in local && binding
         ? {
             config: {
-              ...(modelSettings?.test_python_image === undefined
-                ? {}
-                : { test_python_image: modelSettings.test_python_image }),
               model: {
                 model: local.model_id,
                 base_url: local.base_url,

@@ -29,7 +29,7 @@ from .models import (
     NamedAnalysis,
     RecipeContent,
 )
-from .python_runner import run_python, sandbox_path
+from .python_runner import host_input_path, run_host_script
 
 
 class Runtime(Protocol):
@@ -103,7 +103,7 @@ class WriteOutputArgs(ReadOutputArgs):
     content: StrictStr
 
 
-class RunPythonArgs(Contract):
+class RunScriptArgs(Contract):
     path: Annotated[StrictStr, Field(min_length=1, max_length=4096)]
     args: list[Annotated[StrictStr, Field(max_length=4096)]] = Field(
         default_factory=list, max_length=64
@@ -148,8 +148,10 @@ class ChatRuntime:
         headers = model_headers(settings.api_key_env)
         by_locator = {f["locator"]: f for f in files}
         reads = []
-        python_runs = []
-        python_enabled = workspace is not None and bool(self.client.config.test_python_image)
+        script_runs = {
+            "run_python": ("python_runs", []),
+            "run_typescript": ("typescript_runs", []),
+        }
         last_file = None
         long_page_messages = {}
 
@@ -201,7 +203,7 @@ class ChatRuntime:
                 return candidate
 
             def write_output(path: str, content: str) -> str:
-                """Write a UTF-8 test deliverable within the isolated workspace; no host files or shell."""
+                """Write a UTF-8 deliverable inside the Recipe replay workspace."""
                 self.check_alive()
                 target = output_path(path)
                 if target.relative_to(root).as_posix() in package_files:
@@ -240,26 +242,32 @@ class ChatRuntime:
                     ),
                 ]
             )
-            if python_enabled:
-
-                def execute_python(path, args):
-                    """Execute a staged scripts/*.py with optional arguments in the isolated test sandbox and return its receipt."""
-                    self.check_alive()
-                    return run_python(
-                        path,
-                        args,
-                        root,
-                        files,
-                        self.client.config,
-                        self.check_alive,
-                        protected_files=package_files,
-                    )
-
-                tools.append(
-                    Tool(
-                        "run_python", execute_python.__doc__, RunPythonArgs, execute_python
-                    )
+            def execute_host(language, path, args):
+                self.check_alive()
+                return run_host_script(
+                    path,
+                    args,
+                    root,
+                    files,
+                    self.client.config,
+                    self.check_alive,
+                    language=language,
+                    data_dir=self.client.data_dir,
+                    protected_files=package_files,
                 )
+
+            def execute_python(path, args):
+                """Execute a staged scripts/*.py on the host and return its execution receipt."""
+                return execute_host("python", path, args)
+
+            def execute_typescript(path, args):
+                """Execute a staged TypeScript script on the host and return its execution receipt."""
+                return execute_host("typescript", path, args)
+
+            tools.extend([
+                Tool("run_python", execute_python.__doc__, RunScriptArgs, execute_python),
+                Tool("run_typescript", execute_typescript.__doc__, RunScriptArgs, execute_typescript),
+            ])
 
         catalog = [
             {
@@ -270,7 +278,7 @@ class ChatRuntime:
                 "material_id": f["locator"].split("/")[0]
                 if f["locator"].startswith("material_")
                 else None,
-                **({"sandbox_path": sandbox_path(f)} if python_enabled else {}),
+                **({"input_path": host_input_path(f)} if workspace is not None else {}),
             }
             for f in files
         ]
@@ -385,7 +393,7 @@ class ChatRuntime:
                                         output = (
                                             "Tool could not complete the operation."
                                         )
-                            if tool is not None and call.function.name == "run_python":
+                            if tool is not None and call.function.name in script_runs:
                                 if isinstance(output, str):
                                     output = {
                                         "status": "rejected", "exit_code": None,
@@ -393,7 +401,7 @@ class ChatRuntime:
                                     }
                                 script = args.get("path") if isinstance(args, dict) else None
                                 script_args = args.get("args") if isinstance(args, dict) else None
-                                python_runs.append({
+                                script_runs[call.function.name][1].append({
                                     "path": script if isinstance(script, str) else None,
                                     "args": script_args if isinstance(script_args, list) else [],
                                     **output,
@@ -418,7 +426,7 @@ class ChatRuntime:
                         return {
                             "summary": reply.content or "",
                             "reads": reads,
-                            **({"python_runs": python_runs} if python_runs else {}),
+                            **{label: runs for label, runs in script_runs.values() if runs},
                         }
                     else:
                         correct()
@@ -437,7 +445,7 @@ class ChatRuntime:
                         "model": settings.model,
                         "system_prompt": prompt,
                         "reads": reads,
-                        **({"python_runs": python_runs} if python_runs else {}),
+                        **{label: runs for label, runs in script_runs.values() if runs},
                         "structured_output_attempts": min(corrections + 1, 3),
                         "messages": [
                             {
@@ -525,14 +533,6 @@ class ChatRuntime:
                 "Use staged package_files at their exact paths through read_output. "
                 "Keep package files unchanged. "
             )
-        python_instruction = ""
-        if self.client.config.test_python_image:
-            python_instruction = (
-                "You may use run_python when it helps satisfy the task. Run a staged script unchanged, "
-                "or use write_output at a new scripts/ path for a task-specific script. "
-                "Use catalog sandbox_path values for authorized inputs and write deliverables to the current output directory. "
-                "If the tool fails or is unavailable, use another permitted method if it satisfies the criteria. "
-            )
         return self._call(
             stage="recipe test executor",
             context=context,
@@ -542,9 +542,15 @@ class ChatRuntime:
             instruction=(
                 "Actually perform test_task using recipe.instructions. Read task inputs with read_evidence; "
                 "produce the resulting deliverable files in the test workspace with the available tools. "
-                f"{file_instruction}{python_instruction}"
+                f"{file_instruction}"
+                "Use run_python or run_typescript when it helps satisfy the task. "
+                "Run staged scripts unchanged or write a task-specific script under scripts/. "
+                "For TypeScript, use erasable type syntax so the script can run with Bun or Node.js. "
+                "Pass catalog input_path values as arguments relative to the script's working directory. "
+                "Write deliverables inside that working directory. Use only the authorized inputs and report actual results. "
+                "If a tool fails or is unavailable, use another permitted method if it satisfies the criteria. "
                 "Follow the supplied Rubric criteria. For every required check, execute it and report its observed result. "
-                "If these tools cannot perform the task, explain the missing capability. Claim completion only when the required work was executed successfully. No shell or network tools exist."
+                "If these tools cannot perform the task, explain the missing capability. Claim completion only when the required work was executed successfully. No direct shell or network tools are available."
             ),
         )
 

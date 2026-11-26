@@ -5,7 +5,7 @@ import { RSIClient } from './client.js';
 import { Engine } from './engine.js';
 import { ChatRuntime } from './runtime.js';
 import {
-  LocalConfigSchema,
+  parseStoredLocalConfig,
   RSIError,
   type Execution,
   type Runtime,
@@ -79,7 +79,7 @@ export async function drain(
       try {
         executionClient = new RSIClient({
           data_dir: client.data_dir,
-          config: store.get<Execution>(id, 'execution').runtime_config,
+          config: parseStoredLocalConfig(store.get<Execution>(id, 'execution').runtime_config),
           auto_start: false,
         });
         leaseSeconds = executionClient.config.lease_seconds;
@@ -234,8 +234,8 @@ if (
       const pending = reader.store.pending_execution(undefined, recipeId);
       const requested = executionId ? reader.execution_get(executionId) : undefined;
       const config = requested
-        ? requested.recovery_config ?? requested.runtime_config
-        : pending && LocalConfigSchema.parse(JSON.parse(pending.config));
+        ? parseStoredLocalConfig(requested.recovery_config ?? requested.runtime_config)
+        : pending && parseStoredLocalConfig(JSON.parse(pending.config));
       if (config) {
         const client = new RSIClient({ data_dir, config, auto_start: false });
         try {
