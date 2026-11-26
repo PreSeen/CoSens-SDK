@@ -20,7 +20,7 @@ from .chat_completions import USER_AGENT
 from .models import Conflict, InvalidState, NotFound, RecipeReference, RSIError
 
 _CLOUD_API_VERSION = "/v1"
-DEFAULT_BASE_URL = "https://friday-rsi-cn.stardust-ai.com/api" + _CLOUD_API_VERSION
+DEFAULT_BASE_URL = "https://friday-memeory-dev.rosettalab.top" + _CLOUD_API_VERSION
 # The CoSens gateway accepts request bodies up to 10 MiB.
 MAX_REQUEST_BYTES = 10 * 1024 * 1024
 MAX_RECIPE_ZIP_BYTES = 8 * 1024 * 1024

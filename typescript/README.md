@@ -20,7 +20,7 @@ const run = await cloud.execution_create({
 });
 ```
 
-All methods are async in both modes. `new RSIClient({ mode: 'cloud', ... })` takes `api_key`, `base_url`, `timeout` in seconds (default 60) and `virtualUserId`. Cloud RSI uses `COSENS_RSI_BASE_URL` or defaults to `https://friday-rsi-cn.stardust-ai.com/api/v1`. The SDK appends `/v1` to a configured API prefix when needed. Service errors are `RSIError` with the service's `code` and the HTTP `status`. For local mode, pass `data_dir` and your own model as below.
+All methods are async in both modes. `new RSIClient({ mode: 'cloud', ... })` takes `api_key`, `base_url`, `timeout` in seconds (default 60) and `virtualUserId`. Cloud RSI uses `COSENS_RSI_BASE_URL` or defaults to `https://friday-memeory-dev.rosettalab.top/v1` on `dev`. The SDK appends `/v1` to a configured API prefix when needed. Service errors are `RSIError` with the service's `code` and the HTTP `status`. For local mode, pass `data_dir` and your own model as below.
 
 To run local RSI, pass `model_id`, `api_key`, and `base_url` to the constructor. The model must support Chat Completions and tool calls. Use `config.headers` to authorize cloud Recipe downloads and uploads from a local client. Local `execution_create()` can download a missing published Recipe before queuing an update, and `recipe_reference.recipe_version_id` can pin the baseline. If you package a standalone Node with the host, set `RSI_NODE_EXECUTABLE` and include the SDK worker and the matching `better-sqlite3` native dependency.
 

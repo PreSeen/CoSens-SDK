@@ -4,8 +4,7 @@ Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned
 
 ## Unreleased
 
-- On `dev`, the default Memory API for Python and TypeScript is `https://friday-memeory-dev.rosettalab.top/api/memory`.
-- Python and TypeScript cloud RSI requests, including local Recipe sync, use `/v1` under the configured gateway prefix. The default is `https://friday-rsi-cn.stardust-ai.com/api/v1`. To resume Recipe uploads that used the overseas gateway, set `COSENS_RSI_BASE_URL` to `https://rsi.cosens.ai/api/v1`.
+- Python and TypeScript cloud RSI requests, including local Recipe sync, use `/v1` under the configured gateway prefix. On `dev`, the default is `https://friday-memeory-dev.rosettalab.top/v1`. To resume Recipe uploads from another gateway, set `COSENS_RSI_BASE_URL` to the original API prefix, such as `https://rsi.cosens.ai/api/v1`.
 - A local Task can publish its approved ZIP as a new version of a cloud Recipe that is already cached on the device.
 - Local `execution_create()` can download a missing published Recipe before queuing an update and keep its formal cloud identity. Local Recipe references can pin a version with `recipe_version_id`.
 - Local RSI in Python and TypeScript adds `task_list()`, `task_get()`, and `task_restart()` for task cards, clarification history, and execution restarts. Task details expose a ZIP for the final qualified Recipe version.

@@ -1,6 +1,6 @@
 import { rejectVirtualUser, selectedVirtualUser, type VirtualUserSelection } from './virtual-user.js';
 
-const SERVICE_URL = 'https://friday-memeory-dev.rosettalab.top/api/memory';
+const SERVICE_URL = 'https://rsi.cosens.ai/api/memory';
 
 export interface MemoryEndpointOptions { baseUrl?: string; apiKey?: string }
 

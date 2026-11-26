@@ -20,7 +20,7 @@ TS 可用 `new RSIClient()` 或 `new RSIClient({ mode: "cloud", api_key, base_ur
 | --- | --- | --- |
 | `mode` | TS 传云端配置对象时必填。Python 选填。 | 取值 `"cloud"`。无参构造默认选择云端。 |
 | `api _key` | 选填。有可用凭证才能发起调用。 | 非空字符串，省略时读取 `COSENS_API_KEY`。 |
-| `base_url` | 选填。 | 字符串，省略时依次使用 `COSENS_RSI_BASE_URL` 和 `https://friday-rsi-cn.stardust-ai.com/api/v1`。SDK 会为尚未带 `/v1` 的 API 前缀补上该后缀。 |
+| `base_url` | 选填。 | 字符串，省略时依次使用 `COSENS_RSI_BASE_URL` 和 `dev` 分支的默认地址 `https://friday-memeory-dev.rosettalab.top/v1`。SDK 会为尚未带 `/v1` 的 API 前缀补上该后缀。 |
 
 TS 也可以直接 `new CloudClient({ api_key, base_url })`，配置对象和两个字段均可省略。该类提供 `request(method, path, options?)`，其中 HTTP 方法 `method` 和相对 API 路径 `path` 必填，`options.body` 和 `options.params` 选填。TS 云端请求超时为 60 秒。Python 直接构造 `CloudRSIClient(api_key=..., base_url=..., timeout=..., transport=...)` 时，四项均选填，`timeout` 默认 60 秒，`transport` 默认 `None`，可传自定义 HTTPX transport。这两个参数属于 `CloudRSIClient`。
 
@@ -154,7 +154,7 @@ receipt = client.recipes_upsert(task_id=task_id, recipe_id=cloud_recipe_id)
 const receipt = await client.recipes_upsert({ task_id: taskId, recipe_id: cloudRecipeId });
 ```
 
-本地 `recipes_upsert()` 从环境变量 `COSENS_RSI_BASE_URL` 读取上传地址，省略环境变量时使用 `https://friday-rsi-cn.stardust-ai.com/api/v1`。SDK 会为尚未带 `/v1` 的 API 前缀补上该后缀。发起上传请求时，认证和账号信息取自初始化 `RSIClient` 时传入的 `config.headers`，其中可包含 `X-Virtual-User-Id`。SDK 生成 multipart 请求头，使用传入的 `idempotency_key` 或自动生成幂等键。
+本地 `recipes_upsert()` 从环境变量 `COSENS_RSI_BASE_URL` 读取上传地址，省略环境变量时使用 `dev` 分支的默认地址 `https://friday-memeory-dev.rosettalab.top/v1`。SDK 会为尚未带 `/v1` 的 API 前缀补上该后缀。发起上传请求时，认证和账号信息取自初始化 `RSIClient` 时传入的 `config.headers`，其中可包含 `X-Virtual-User-Id`。SDK 生成 multipart 请求头，使用传入的 `idempotency_key` 或自动生成幂等键。
 
 上传成功后，SDK 按回执更新任务行的 `recipe_id` 和 `recipe_version_id`。`recipes.id` 始终是任务 ID。未同步的本地任务发布到已存在的云端 Recipe 时，发布结果关联到本次任务，原 Execution 的生成和测试历史可继续追溯。后续用 `execution_create()` 更新同一 Recipe 时可传正式 `recipe_id`。
 
@@ -316,7 +316,7 @@ execution = client.execution_get(retry["execution_id"])
 
 ## Memory 服务接口
 
-宿主 Agent 直接调用 Memory 原子函数。`dev` 分支默认通过开发网关的 `https://friday-memeory-dev.rosettalab.top/api/memory` 发送请求。认证使用环境变量 `COSENS_API_KEY`，请求头为 `Authorization: Bearer <COSENS_API_KEY>` 和 `X-Auth-Type: api_key`。
+宿主 Agent 直接调用 Memory 原子函数。调用时读取环境变量 `COSENS_API_KEY`，通过 US 算法网关 `https://rsi.cosens.ai/api` 发送请求，认证头为 `Authorization: Bearer <COSENS_API_KEY>` 和 `X-Auth-Type: api_key`。
 
 | TS 方法 | Python 方法 | 必填参数（TS / Python） | 选填参数和默认值（TS / Python） | 服务接口 |
 | --- | --- | --- | --- | --- |

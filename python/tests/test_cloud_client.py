@@ -57,7 +57,7 @@ def test_cloud_api_versions_default_environment_and_explicit_prefixes_once(monke
         with pytest.raises(ValueError, match="base_url"):
             client(f"https://stage.example/api{marker}")
     assert urls == [
-        "https://friday-rsi-cn.stardust-ai.com/api/v1/executions/run", "https://stage.example/api/v1/executions/run",
+        "https://friday-memeory-dev.rosettalab.top/v1/executions/run", "https://stage.example/api/v1/executions/run",
         "https://direct.example/v1/executions/run", "https://stage.example/mounted/v1/executions/run",
         "https://stage.example/mounted/v1/recipes/recipe_1/versions/version_1/download",
     ]

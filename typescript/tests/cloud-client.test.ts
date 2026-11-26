@@ -129,7 +129,7 @@ test('cloud RSI versions the default, environment and explicit base prefixes onc
     assert.throws(() => new CloudClient({ api_key: 'fixture', base_url: `https://stage.example/api${marker}` }), /base_url/);
   }
   assert.deepEqual(seen, [
-    'https://friday-rsi-cn.stardust-ai.com/api/v1/executions/run', 'https://stage.example/api/v1/executions/run',
+    'https://friday-memeory-dev.rosettalab.top/v1/executions/run', 'https://stage.example/api/v1/executions/run',
     'https://direct.example/v1/executions/run', 'https://stage.example/mounted/v1/executions/run',
     'https://stage.example/mounted/v1/recipes/recipe_1/versions/version_1/download',
   ]);

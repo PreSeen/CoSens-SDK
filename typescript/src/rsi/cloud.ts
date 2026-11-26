@@ -12,7 +12,7 @@ import {
 } from './models.js';
 
 const CLOUD_API_VERSION = '/v1';
-export const DEFAULT_CLOUD_BASE_URL = `https://friday-rsi-cn.stardust-ai.com/api${CLOUD_API_VERSION}`;
+export const DEFAULT_CLOUD_BASE_URL = `https://friday-memeory-dev.rosettalab.top${CLOUD_API_VERSION}`;
 /** The CoSens gateway accepts request bodies up to 10 MiB. */
 export const MAX_CLOUD_REQUEST_BYTES = 10 * 1024 * 1024;
 export const MAX_RECIPE_ZIP_BYTES = 8 * 1024 * 1024;
