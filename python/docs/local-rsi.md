@@ -316,7 +316,7 @@ execution = client.execution_get(retry["execution_id"])
 
 ## Memory 服务接口
 
-宿主 Agent 直接调用 Memory 原子函数。调用时读取环境变量 `COSENS_API_KEY`，通过 US 算法网关 `https://rsi.cosens.ai/api` 发送请求，认证头为 `Authorization: Bearer <COSENS_API_KEY>` 和 `X-Auth-Type: api_key`。
+宿主 Agent 直接调用 Memory 原子函数。`dev` 分支默认通过开发网关的 `https://friday-memeory-dev.rosettalab.top/api/memory` 发送请求。认证使用环境变量 `COSENS_API_KEY`，请求头为 `Authorization: Bearer <COSENS_API_KEY>` 和 `X-Auth-Type: api_key`。
 
 | TS 方法 | Python 方法 | 必填参数（TS / Python） | 选填参数和默认值（TS / Python） | 服务接口 |
 | --- | --- | --- | --- | --- |

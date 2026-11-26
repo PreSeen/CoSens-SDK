@@ -5,7 +5,7 @@ from urllib.parse import quote, urlencode, urlsplit, unquote
 
 import httpx
 
-_SERVICE_URL = "https://rsi.cosens.ai/api/memory"
+_SERVICE_URL = "https://friday-memeory-dev.rosettalab.top/api/memory"
 
 
 class MemoryError(RuntimeError):

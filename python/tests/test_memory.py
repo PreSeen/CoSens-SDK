@@ -21,7 +21,7 @@ def test_memory_atoms_1026_contract(monkeypatch):
     prefix = "/api/memory"
 
     def mock(request):
-        assert request.url.host == "rsi.cosens.ai"
+        assert request.url.host == "friday-memeory-dev.rosettalab.top"
         assert request.headers["authorization"] == "Bearer fixture-key"
         assert request.headers["x-auth-type"] == "api_key"
         requests.append(
@@ -79,7 +79,7 @@ def test_memory_atoms_1026_contract(monkeypatch):
 
 def test_memory_errors_redact_key_and_reject_redirects(monkeypatch):
     def mock(request):
-        assert request.url.host == "rsi.cosens.ai"
+        assert request.url.host == "friday-memeory-dev.rosettalab.top"
         if request.url.path.endswith("/recall"):
             return httpx.Response(302, headers={"location": "https://example.test/"})
         return httpx.Response(
@@ -160,7 +160,7 @@ def test_explicit_service_and_key_are_per_call_and_fail_closed(monkeypatch):
     asyncio.run(run())
     assert set(requests) == {
         ('https://regional.example/memory/recall','Bearer region-key','api_key','vu_a'),
-        ('https://rsi.cosens.ai/api/memory/items?limit=200','Bearer ambient-key',None,None),
+        ('https://friday-memeory-dev.rosettalab.top/api/memory/items?limit=200','Bearer ambient-key',None,None),
         ('https://stage.example/api/memory/ingest','Bearer stage-key','api_key',None),
         ('https://regional.example/memory/jobs/j','Bearer region-key','api_key',None),
         ('https://regional.example/memory/experiences/e?revision=2','Bearer region-key','api_key',None),

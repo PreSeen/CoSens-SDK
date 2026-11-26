@@ -28,7 +28,7 @@ test('Memory atoms send the six 10-26 requests', async (t) => {
     assert.equal(headers.get('X-Auth-Type'), 'api_key');
     assert.equal(init?.redirect, 'manual');
     const parsed = new URL(String(url));
-    assert.equal(parsed.origin, 'https://rsi.cosens.ai');
+    assert.equal(parsed.origin, 'https://friday-memeory-dev.rosettalab.top');
     requests.push([
       init!.method!,
       parsed.pathname + parsed.search,
@@ -172,7 +172,7 @@ test('explicit Memory service and key are per call and fail closed', async (t) =
   ]);
   assert.deepEqual(seen, [
     ['https://regional.example/memory/recall', 'Bearer region-key', 'api_key', 'vu_a'],
-    ['https://rsi.cosens.ai/api/memory/items?limit=200', 'Bearer fixture-key', null, null],
+    ['https://friday-memeory-dev.rosettalab.top/api/memory/items?limit=200', 'Bearer fixture-key', null, null],
     ['https://stage.example/api/memory/ingest', 'Bearer stage-key', 'api_key', null],
     ['https://regional.example/memory/jobs/j', 'Bearer region-key', 'api_key', null],
     ['https://regional.example/memory/experiences/e?revision=2', 'Bearer region-key', 'api_key', null],
