@@ -7,6 +7,7 @@ import {
   openRecipeZip,
   recipeCloudBaseAliases,
   recipeCloudDestination,
+  serializeUploadRubrics,
   uploadRecipeZip,
   validateRecipeUpsertOptions,
   type RecipeCloudDestination,
@@ -14,6 +15,7 @@ import {
 } from './cloud.js';
 import { fail, RSIError, type Recipe, type RecipeContent, type Version } from './models.js';
 import { installRecipeVersionFiles } from './recipe-bootstrap.js';
+import { approvedRubricsVersionId } from './recipe-rubrics.js';
 import {
   adoptRecipeIdentity,
   assertCloudRecipeTargetAvailable,
@@ -37,6 +39,7 @@ const destinationOptions = {
 const localOptionsSchema = z.strictObject({
   task_id: nonempty,
   recipe_id: nonempty.optional(),
+  expected_latest_version_id: nonempty.optional(),
   idempotency_key: nonempty.optional(),
 });
 export type LocalRecipeUpsertOptions = z.input<typeof localOptionsSchema>;
@@ -44,6 +47,7 @@ const versionOptionsSchema = z.strictObject({
   local_recipe_id: nonempty,
   local_recipe_version_id: nonempty,
   recipe_id: nonempty.optional(),
+  expected_latest_version_id: nonempty.optional(),
   ...destinationOptions,
 });
 const identifier = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
@@ -59,9 +63,15 @@ type UploadRequest = Destination & {
   local_recipe_version_id: string;
   zip_sha256: string;
   idempotency_key: string | undefined;
+  expected_latest_version_id?: string;
 };
 type TaskSelection = { task_id: string; execution_id: string };
-type UploadPlan = UploadRequest & Partial<TaskSelection> & { cloud_recipe_id: string | null; idempotency_key: string };
+type UploadPlan = UploadRequest & Partial<TaskSelection> & {
+  cloud_recipe_id: string | null;
+  idempotency_key: string;
+  rubrics_version_id?: string;
+  rubrics?: string;
+};
 type Receipt = { receipt: RecipeUpsertResult };
 type PreparedUpload = Receipt | {
   plan: UploadPlan;
@@ -85,6 +95,8 @@ function sameUploadSelection(store: Store, recorded: UploadPlan, request: Omit<U
   return store.resolveRecipeId(recorded.local_recipe_id) === store.resolveRecipeId(request.local_recipe_id)
     && store.resolveVersionId(recorded.local_recipe_version_id) === store.resolveVersionId(request.local_recipe_version_id)
     && (request.idempotency_key === undefined || recorded.idempotency_key === request.idempotency_key)
+    && (request.expected_latest_version_id === undefined
+      || recorded.expected_latest_version_id === request.expected_latest_version_id)
     && matchesRecipeCloudDestination(recorded, request);
 }
 
@@ -150,9 +162,10 @@ function persistTaskAssociation(
     return fail('conflict', 'cloud Recipe version ID is already used locally');
   const { number } = store.db.prepare('SELECT COALESCE(MAX(number),0)+1 AS number FROM versions WHERE recipe_id=?')
     .get(target.id) as { number: number };
+  const rubrics_version_id = plan.rubrics_version_id ?? approvedRubricsVersionId(store, source, plan.execution_id);
   const version: Version<RecipeContent> = {
     id, object_id: target.id, number, content: source.content, created_at: now(),
-    provenance: { source: 'cloud', package_sha256: plan.zip_sha256 },
+    provenance: { source: 'cloud', package_sha256: plan.zip_sha256, rubrics_version_id },
   };
   installRecipeVersionFiles(store, target, id, bytes);
   // A published target head replaces the previous available version. Draft candidates stay independent.
@@ -185,8 +198,8 @@ export async function uploadLocalTaskRecipe(
   options: LocalRecipeUpsertOptions,
   uploadHeaders?: Headers,
 ): Promise<RecipeUpsertResult> {
-  const { task_id, recipe_id, idempotency_key } = localOptionsSchema.parse(options);
-  validateRecipeUpsertOptions({ recipe_id, idempotency_key });
+  const { task_id, recipe_id, expected_latest_version_id, idempotency_key } = localOptionsSchema.parse(options);
+  validateRecipeUpsertOptions({ recipe_id, expected_latest_version_id, idempotency_key });
   const destination = recipeCloudDestination({}, uploadHeaders);
   const prepared = store.tx<PreparedLocalUpload>(() => {
     const execution = readTaskChain(store, task_id).at(-1)!;
@@ -197,7 +210,7 @@ export async function uploadLocalTaskRecipe(
       local_recipe_version_id: store.resolveVersionId(execution.recipe_version_id),
     };
     const task = { task_id, execution_id: execution.id };
-    const selection = { ...ids, ...destination, idempotency_key };
+    const selection = { ...ids, ...destination, expected_latest_version_id, idempotency_key };
     const saved = publishedUpload(store, ids.local_recipe_version_id, task);
     if (saved) {
       if (!sameUploadSelection(store, saved.request, selection)
@@ -219,7 +232,7 @@ export async function uploadLocalTaskRecipe(
   });
   if ('receipt' in prepared) return prepared.receipt;
   return uploadLocalRecipe(store, prepared.path, {
-    ...prepared.ids, recipe_id, idempotency_key, base_url: destination.base_url,
+    ...prepared.ids, recipe_id, expected_latest_version_id, idempotency_key, base_url: destination.base_url,
   }, uploadHeaders, prepared.task);
 }
 
@@ -230,20 +243,21 @@ export async function uploadLocalRecipe(
   uploadHeaders?: Headers,
   task?: TaskSelection,
 ): Promise<RecipeUpsertResult> {
-  const { local_recipe_id, local_recipe_version_id, recipe_id, idempotency_key, ...cloudOptions } = versionOptionsSchema.parse(options);
-  validateRecipeUpsertOptions({ recipe_id, idempotency_key });
+  const { local_recipe_id, local_recipe_version_id, recipe_id, expected_latest_version_id, idempotency_key, ...cloudOptions }
+    = versionOptionsSchema.parse(options);
+  validateRecipeUpsertOptions({ recipe_id, expected_latest_version_id, idempotency_key });
   const destination = recipeCloudDestination(cloudOptions, uploadHeaders);
   const { file, filename } = await openRecipeZip(path);
   // Send the same immutable bytes used to derive the idempotency key.
   const bytes = await file.arrayBuffer();
   const zip_sha256 = createHash('sha256').update(new Uint8Array(bytes)).digest('hex');
   const request: UploadRequest = {
-    local_recipe_id, local_recipe_version_id, zip_sha256, idempotency_key, ...destination,
+    local_recipe_id, local_recipe_version_id, zip_sha256, expected_latest_version_id, idempotency_key, ...destination,
   };
 
   const prepared = store.tx<PreparedUpload>(() => {
     const recipe = store.get<Recipe>(local_recipe_id, 'recipe');
-    const version = store.version(recipe.id, local_recipe_version_id);
+    const version = store.version<RecipeContent>(recipe.id, local_recipe_version_id);
     const synced = publishedUpload(store, version.id, task);
     if (synced) {
       if (!sameUpload(store, synced.request, request)
@@ -286,6 +300,7 @@ export async function uploadLocalRecipe(
     const keyParts = [recipe.id, version.id, zip_sha256];
     if (target.id !== null) keyParts.push(target.id);
     if (linkedTaskId !== undefined) keyParts.push(linkedTaskId);
+    const rubrics_version_id = !pending && task ? approvedRubricsVersionId(store, version, task.execution_id) : undefined;
     const plan: UploadPlan = pending?.request ?? {
       ...request,
       ...target.link?.task,
@@ -294,6 +309,8 @@ export async function uploadLocalRecipe(
       idempotency_key: idempotency_key ?? `local-recipe-upload-${createHash('sha256')
         .update(keyParts.join('\0')).digest('hex')}`,
       cloud_recipe_id: target.id,
+      rubrics_version_id,
+      rubrics: rubrics_version_id ? serializeUploadRubrics(store.version_by_id(rubrics_version_id, 'rubrics').content) : undefined,
     };
     if (!pending) store.remember(pendingUploadScope, recipe.id, plan, {});
     return { plan, cloud, pendingKey: recipe.id };
@@ -306,7 +323,10 @@ export async function uploadLocalRecipe(
     response = await uploadRecipeZip(
       cloud,
       { file: new Blob([bytes], { type: 'application/zip' }), filename },
-      { recipe_id: plan.cloud_recipe_id ?? undefined, idempotency_key: plan.idempotency_key },
+      {
+        recipe_id: plan.cloud_recipe_id ?? undefined, idempotency_key: plan.idempotency_key,
+        expected_latest_version_id: plan.expected_latest_version_id, rubrics: plan.rubrics,
+      },
     );
   } catch (error) {
     const terminal = uploadFailedPermanently(error);
@@ -347,6 +367,9 @@ export async function uploadLocalRecipe(
     } else {
       assertCloudRecipeTargetAvailable(store, receipt.recipe_id, recipe.id);
       adoptRecipeIdentity(store, recipe, versionId, receipt);
+      if (plan.rubrics_version_id)
+        store.db.prepare("UPDATE versions SET data=json_set(data, '$.provenance.rubrics_version_id', ?) WHERE id=?")
+          .run(plan.rubrics_version_id, receipt.recipe_version_id);
       store.remember(uploadReceiptScope, receipt.recipe_version_id, plan, receipt);
     }
     const previouslyLinked = journal<Destination>(store, recipeIdentityScope, receipt.recipe_id);

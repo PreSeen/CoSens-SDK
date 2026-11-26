@@ -9,8 +9,10 @@ import {
   RSIError,
   TASK_INPUT_FILENAME,
   TaskInputTextSchema,
+  parseStoredRubrics,
   type Recipe,
   type RecipeReference,
+  type RubricsContent,
 } from './models.js';
 
 const CLOUD_API_VERSION = '/v1';
@@ -26,7 +28,13 @@ export type CloudOptions = {
   /** Request timeout in seconds (default 60). */
   timeout?: number;
 } & VirtualUserSelection;
-export type RecipeUpsertOptions = { recipe_id?: string; idempotency_key?: string };
+export type RecipeUpsertOptions = {
+  recipe_id?: string;
+  expected_latest_version_id?: string;
+  idempotency_key?: string;
+  rubrics?: RubricsContent;
+};
+type RecipeUploadFields = Omit<RecipeUpsertOptions, 'rubrics'> & { rubrics?: string };
 export type RecipeUpsertResult = { recipe_id: string; recipe_version_id: string };
 
 function cloudBase(options: CloudOptions) {
@@ -135,15 +143,30 @@ export async function openRecipeZip(path: string | URL) {
   return { file: zip, filename: basename(localPath) };
 }
 
-export function validateRecipeUpsertOptions(options: RecipeUpsertOptions) {
-  if (Object.keys(options).some((key) => key !== 'recipe_id' && key !== 'idempotency_key'))
-    throw new TypeError('cloud Recipe upload accepts only recipe_id and idempotency_key options');
-  const { recipe_id, idempotency_key } = options;
+export function serializeUploadRubrics(content: unknown): string {
+  const parsed = parseStoredRubrics(content);
+  return JSON.stringify({
+    ...parsed,
+    criteria: parsed.criteria.map(({ evidence: _evidence, ...criterion }) => criterion),
+  });
+}
+
+export function validateRecipeUpsertOptions(options: RecipeUpsertOptions): RecipeUploadFields {
+  const allowed = ['recipe_id', 'expected_latest_version_id', 'idempotency_key', 'rubrics'];
+  if (Object.keys(options).some((key) => !allowed.includes(key)))
+    throw new TypeError('cloud Recipe upload accepts only recipe_id, expected_latest_version_id, idempotency_key and rubrics options');
+  const { recipe_id, expected_latest_version_id, idempotency_key, rubrics } = options;
+  const identifier = /^[A-Za-z0-9_-]{1,64}$/;
   if (
     recipe_id !== undefined
-    && (typeof recipe_id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(recipe_id))
+    && (typeof recipe_id !== 'string' || !identifier.test(recipe_id))
   ) {
     throw new TypeError('recipe_id must contain 1–64 letters, digits, underscores or hyphens');
+  }
+  if (expected_latest_version_id !== undefined) {
+    if (recipe_id === undefined) throw new TypeError('expected_latest_version_id requires recipe_id');
+    if (typeof expected_latest_version_id !== 'string' || !identifier.test(expected_latest_version_id))
+      throw new TypeError('expected_latest_version_id must contain 1–64 letters, digits, underscores or hyphens');
   }
   if (
     idempotency_key !== undefined
@@ -153,16 +176,19 @@ export function validateRecipeUpsertOptions(options: RecipeUpsertOptions) {
   ) {
     throw new TypeError('idempotency_key must be a nonempty HTTP header value');
   }
+  return { ...options, rubrics: rubrics === undefined ? undefined : serializeUploadRubrics(rubrics) };
 }
 
 export function uploadRecipeZip(
   cloud: CloudClient,
   { file, filename }: { file: Blob; filename: string },
-  { recipe_id, idempotency_key }: RecipeUpsertOptions,
+  { recipe_id, expected_latest_version_id, idempotency_key, rubrics }: RecipeUploadFields,
 ): Promise<RecipeUpsertResult> {
   const multipart = new FormData();
   multipart.set('file', file, filename);
   if (recipe_id !== undefined) multipart.set('recipe_id', recipe_id);
+  if (expected_latest_version_id !== undefined) multipart.set('expected_latest_version_id', expected_latest_version_id);
+  if (rubrics !== undefined) multipart.set('rubrics', rubrics);
   return cloud.request('POST', '/recipes_upsert', { multipart, idempotency_key });
 }
 
@@ -329,8 +355,8 @@ export class CloudClient {
     path: string | URL,
     options: RecipeUpsertOptions = {},
   ): Promise<RecipeUpsertResult> {
-    validateRecipeUpsertOptions(options);
-    return uploadRecipeZip(this, await openRecipeZip(path), options);
+    const upload = validateRecipeUpsertOptions(options);
+    return uploadRecipeZip(this, await openRecipeZip(path), upload);
   }
 
   recipe_get(id: string, version = 'active'): Promise<Recipe> {

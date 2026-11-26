@@ -4,6 +4,7 @@ Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned
 
 ## Unreleased
 
+- Python and TypeScript preserve the Rubrics associated with a published Task version and send its criteria with the ZIP. Recipe updates can supply `expected_latest_version_id` for an atomic cloud version check.
 - TypeScript `execution_create()` accepts `evidence.input_text` as a replay input for tasks whose request comes from chat.
 - Python and TypeScript cloud RSI requests, including local Recipe sync, use `/v1` under the configured gateway prefix. On `dev`, the default is `https://friday-memeory-dev.rosettalab.top/v1`. To resume Recipe uploads from another gateway, set `COSENS_RSI_BASE_URL` to the original API prefix, such as `https://rsi.cosens.ai/api/v1`.
 - A local Task can publish its approved ZIP as a new version of a cloud Recipe that is already cached on the device.

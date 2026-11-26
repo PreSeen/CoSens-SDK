@@ -7,6 +7,7 @@ import { authorizedTestFiles, digest, snapshot } from './materials.js';
 import { restartExecution } from './progress.js';
 import { Store, uid, now, encode, type RetryTarget } from './store.js';
 import { isHeaderBinding } from './model-headers.js';
+import { recipeRubricsVersionId } from './recipe-rubrics.js';
 import {
   baseRecipePath,
   fetchCloudRecipeBase,
@@ -244,24 +245,7 @@ export class RSIClient {
   recipe_version_rubrics_get(recipeId: string, recipeVersionId: string): Versioned<ResolvedRubrics> {
     const recipe = this.store.get<Recipe>(recipeId, 'recipe');
     const version = this.store.version<RecipeContent>(recipe.id, recipeVersionId);
-    const { rubrics_version_id, execution_id, input_revision } = version.provenance ?? {};
-    let rubricId = typeof rubrics_version_id === 'string' ? rubrics_version_id : undefined;
-    if (!rubricId && typeof execution_id === 'string' && typeof input_revision === 'number') {
-      rubricId = this.store.operation(`rubrics:${execution_id}:${input_revision}`)?.id;
-      if (!rubricId) {
-        const [origin] = this.store.listExecutions([execution_id]);
-        const matches = origin?.test_results?.filter((result) =>
-          result.execution_id === execution_id
-          && result.input_revision === input_revision
-          && this.store.resolveRecipeId(result.recipe_id) === recipe.id
-          && this.store.resolveVersionId(result.version_id) === version.id);
-        const testRubrics = new Set(matches?.map(({ rubrics_version_id }) => rubrics_version_id));
-        if (testRubrics.size === 1) rubricId = testRubrics.values().next().value;
-        if (testRubrics.size === 0 && origin?.input_revision === input_revision
-            && (origin.analyzed_input_revision ?? input_revision) === input_revision)
-          rubricId = origin.rubrics_version_id ?? undefined;
-      }
-    }
+    const rubricId = recipeRubricsVersionId(this.store, version);
     if (!rubricId) return fail('not_found', 'no Rubrics associated with this Recipe version');
     const rubric = this.store.version_by_id<ResolvedRubrics>(rubricId, 'rubrics');
     return this.rubrics_get(rubric.object_id, { version_id: rubric.id });

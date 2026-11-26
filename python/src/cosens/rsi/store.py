@@ -22,6 +22,7 @@ from .models import Conflict, InputChanged, InvalidState, LeaseLost, NotFound
 from .progress import stage_progress
 from .recipe_file import render_recipe_markdown
 from .recipe_identity import (
+    TASK_RECEIPT,
     migrate_mapped_recipe_ids,
     recipe_id_for,
     recipe_object_relation,
@@ -655,6 +656,81 @@ class Store:
                 (status, recipe["id"], version_id),
             )
             Store.save(conn, recipe)
+
+    def _approved_recipe_rubrics_id(self, conn, version, execution_id):
+        if execution_id:
+            try:
+                execution = self.get_in(conn, execution_id, "execution")
+            except NotFound:
+                execution = None
+            if (
+                execution and is_approved(execution)
+                and recipe_id_for(conn, execution["recipe_id"]) == version["object_id"]
+                and version_id_for(conn, execution["recipe_version_id"]) == version["id"]
+                and execution.get("rubrics_version_id")
+            ):
+                return execution["rubrics_version_id"]
+        provenance = version.get("provenance") or {}
+        return provenance.get("rubrics_version_id") or self._legacy_recipe_rubrics(conn, version, provenance)
+
+    def recipe_rubrics_version(self, conn, version, *, execution_id=None):
+        rubric_id = self._approved_recipe_rubrics_id(conn, version, execution_id)
+        provenance = version.get("provenance") or {}
+        if rubric_id is None and provenance.get("source") == "cloud":
+            # Older Task receipts linked the formal version without copying its Rubrics.
+            origins = conn.execute(
+                """SELECT json_extract(request, '$.local_recipe_id') AS recipe_id,
+                          json_extract(request, '$.local_recipe_version_id') AS version_id,
+                          json_extract(request, '$.execution_id') AS execution_id
+                   FROM idempotency WHERE scope=?
+                       AND json_extract(result, '$.recipe_id')=?
+                       AND json_extract(result, '$.recipe_version_id')=?
+                       AND json_extract(request, '$.cloud_recipe_id')=? LIMIT 2""",
+                (TASK_RECEIPT, version["object_id"], version["id"], version["object_id"]),
+            ).fetchall()
+            if len(origins) == 1 and all(origins[0]):
+                source = origins[0]
+                try:
+                    origin = self.version_in(conn, source["recipe_id"], source["version_id"])
+                except NotFound:
+                    return None
+                if origin["id"] != version["id"]:
+                    rubric_id = self._approved_recipe_rubrics_id(conn, origin, source["execution_id"])
+        row = conn.execute(
+            "SELECT data FROM versions WHERE id=? AND rubrics_id IS NOT NULL", (rubric_id,)
+        ).fetchone()
+        return json.loads(row["data"]) if row else None
+
+    def _legacy_recipe_rubrics(self, conn, version, provenance):
+        execution_id, revision = provenance.get("execution_id"), provenance.get("input_revision")
+        if not isinstance(execution_id, str) or not execution_id or type(revision) is not int:
+            return None
+        row = conn.execute(
+            "SELECT id FROM versions WHERE operation_key=? AND rubrics_id IS NOT NULL",
+            (f"rubrics:{execution_id}:{revision}",),
+        ).fetchone()
+        if row is not None:
+            return row["id"]
+        try:
+            execution = self.get_in(conn, execution_id, "execution")
+        except NotFound:
+            return None
+        matches = {
+            result["rubrics_version_id"]
+            for result in execution.get("test_results", ())
+            if result.get("rubrics_version_id")
+            and result.get("input_revision") == revision
+            and recipe_id_for(conn, result.get("recipe_id")) == version["object_id"]
+            and version_id_for(conn, result.get("version_id")) == version["id"]
+        }
+        if matches:
+            return next(iter(matches)) if len(matches) == 1 else None
+        if (
+            execution.get("input_revision") == revision
+            and execution.get("analyzed_input_revision") in (None, revision)
+        ):
+            return execution.get("rubrics_version_id")
+        return None
 
     def append_version(
         self,
