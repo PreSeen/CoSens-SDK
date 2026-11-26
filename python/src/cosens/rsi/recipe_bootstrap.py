@@ -96,7 +96,8 @@ def _download_active(cloud, recipe_id, version_id):
         or not re.fullmatch(r"[a-f0-9]{64}", sha256)
     ):
         raise InvalidState("cloud Recipe version has no verified published ZIP")
-    archive = cloud.recipe_download(recipe_id, recipe_version_id=selected_id)
+    signed_url = cloud.recipe_download(recipe_id, recipe_version_id=selected_id)
+    archive = cloud._download_recipe_zip(signed_url)
     if hashlib.sha256(archive).hexdigest() != sha256:
         raise Conflict("cloud Recipe ZIP SHA-256 does not match the selected version")
     return selected_id, archive, sha256

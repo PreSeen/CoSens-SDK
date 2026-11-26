@@ -74,6 +74,8 @@ To restart a local task, call `task_restart(taskId, { idempotency_key: requestId
 
 `await rsi.task_get(taskId)` returns `recipe_version_id` and `recipe_zip_path` once the final ZIP is ready. Publish the task with `rsi.recipes_upsert({ task_id: taskId })`. Pass `recipe_id` in the options to target an existing cloud Recipe. The upload uses the client's `config.headers` and the destination set by `COSENS_RSI_BASE_URL`, which defaults to the CoSens endpoint. A cloud client takes a ZIP path with `cloud.recipes_upsert(path)`.
 
+`await cloud.recipe_download(recipeId, recipeVersionId)` returns the temporary signed download URL as a string. Fetch that URL to retrieve the ZIP.
+
 See the [complete TS and Python interface reference](https://github.com/PreSeen/CoSens-SDK/blob/main/python/docs/local-rsi.md) and the [CoSens docs](https://cosens.ai/docs/). Run `npm run check` to build, typecheck and test the public package.
 
 ### Virtual User selection

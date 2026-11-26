@@ -18,6 +18,7 @@ export const DEFAULT_CLOUD_BASE_URL = `https://friday-memeory-dev.rosettalab.top
 /** The CoSens gateway accepts request bodies up to 10 MiB. */
 export const MAX_CLOUD_REQUEST_BYTES = 10 * 1024 * 1024;
 export const MAX_RECIPE_ZIP_BYTES = 8 * 1024 * 1024;
+export const DEFAULT_CLOUD_TIMEOUT_SECONDS = 60;
 
 export type CloudOptions = {
   api_key?: string;
@@ -185,7 +186,7 @@ export class CloudClient {
     if (!this.#headers.has('User-Agent')) this.#headers.set('User-Agent', USER_AGENT);
     const virtualUserId = selectedVirtualUser(options);
     if (virtualUserId !== undefined) this.#headers.set('X-Virtual-User-Id', virtualUserId);
-    const timeout = options.timeout ?? 60;
+    const timeout = options.timeout ?? DEFAULT_CLOUD_TIMEOUT_SECONDS;
     if (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0)
       throw new TypeError('timeout must be a positive number of seconds');
     this.#timeoutMs = timeout * 1000;
@@ -346,12 +347,19 @@ export class CloudClient {
     });
   }
 
-  recipe_download(id: string, recipeVersionId: string): Promise<Uint8Array> {
-    return this.request(
-      'GET',
-      `/recipes/${segment(id)}/versions/${segment(recipeVersionId)}/download`,
-      { binary: true },
+  async recipe_download(id: string, recipeVersionId: string): Promise<string> {
+    const result = await this.request(
+      'POST',
+      `/recipes/${segment(id)}/versions/${segment(recipeVersionId)}/download-url`,
     );
+    const address: string = typeof result?.url === 'string' ? result.url : '';
+    const url = /^https?:\/\/[^/?#\\\s]+(?:[/?]|$)/iu.test(address)
+      && !/[#\\\s]/u.test(address)
+      ? URL.parse(address)
+      : null;
+    if (!url || url.username || url.password)
+      throw new RSIError('invalid_response', 'CoSens returned an invalid Recipe download URL');
+    return address;
   }
 
   recipe_test(request: {

@@ -51,11 +51,19 @@ def _setup(tmp_path, monkeypatch, *, shared_headers=True):
 def _cloud(monkeypatch, archive, *, selected=VERSION, active=VERSION, published="published", sha256=None,
            authorization="Bearer fixture-cloud-token", metadata_barrier=None):
     calls = []
+    signed = f"https://objects.example/{selected}.zip?signature=fixture"
 
     def send(request):
+        calls.append((request.method, request.url.path, request.url.params.get("version")))
+        if str(request.url) == signed:
+            assert request.method == "GET"
+            assert "Authorization" not in request.headers
+            return httpx.Response(200, content=archive)
         assert request.headers["Authorization"] == authorization
         assert request.url.host == "rsi.example"
-        calls.append((request.method, request.url.path, request.url.params.get("version")))
+        if request.url.path == f"/api/v1/recipes/{RECIPE}/versions/{selected}/download-url":
+            assert request.method == "POST"
+            return httpx.Response(200, json={"url": signed})
         if request.method == "POST":
             assert request.url.path == "/api/v1/recipes_upsert"
             message = BytesParser(policy=policy.default).parsebytes(
@@ -76,11 +84,9 @@ def _cloud(monkeypatch, archive, *, selected=VERSION, active=VERSION, published=
                 "selected_version": {
                     "id": selected, "object_id": RECIPE, "publication_state": published,
                     "package_sha256": sha256 or hashlib.sha256(archive).hexdigest(),
-                    "download_path": f"/v1/recipes/{RECIPE}/versions/{selected}/download",
                 },
             })
-        assert request.url.path == f"/api/v1/recipes/{RECIPE}/versions/{selected}/download"
-        return httpx.Response(200, content=archive)
+        pytest.fail(f"Unexpected Recipe request: {request.method} {request.url.path}")
 
     transport = httpx.MockTransport(send)
     monkeypatch.setattr(cloud, "CloudRSIClient", lambda **kw: CloudRSIClient(transport=transport, **kw))
@@ -92,7 +98,7 @@ def test_bootstrap_pins_official_package_and_next_upload_keeps_recipe_id(tmp_pat
     calls = _cloud(monkeypatch, archive)
     created = client.execution_create(**request)
     assert created["recipe_id"] == RECIPE
-    assert [(method, selector) for method, _, selector in calls] == [("GET", "active"), ("GET", None)]
+    assert [(method, selector) for method, _, selector in calls] == [("GET", "active"), ("POST", None), ("GET", None)]
     store = client._queue.store
     saved = store.get(created["id"], "execution")
     assert saved["base_recipe_version_id"] == saved["publication_base_version_id"] == VERSION
@@ -110,7 +116,7 @@ def test_bootstrap_pins_official_package_and_next_upload_keeps_recipe_id(tmp_pat
     offline = client.execution_create(**{**request, "idempotency_key": "another-task"})
     client.execution_cancel(offline["id"])
     assert store.get(offline["id"], "execution")["base_recipe_version_id"] == VERSION
-    assert len(calls) == 2
+    assert len(calls) == 3
 
     execution_id, fence = store.claim("test-worker", 60, 1, execution_id=created["id"])
     candidate = store.publish_candidate(
@@ -138,7 +144,7 @@ def test_bootstrap_pins_official_package_and_next_upload_keeps_recipe_id(tmp_pat
         },
     })
     assert store.get(reopened["id"], "execution")["base_recipe_version_id"] == VERSION
-    assert len(calls) == 3
+    assert len(calls) == 4
 
 
 def test_bootstrap_pinned_selection_requires_current_published_version(tmp_path, monkeypatch):
@@ -219,7 +225,7 @@ def test_explicitly_pinned_approved_local_version_remains_usable_after_archival(
 
 
 @pytest.mark.parametrize(("options", "error", "message", "calls"), [
-    ({"sha256": "0" * 64}, Conflict, "SHA-256", 2),
+    ({"sha256": "0" * 64}, Conflict, "SHA-256", 3),
     ({"published": "staged"}, InvalidState, "verified published ZIP", 1),
 ])
 def test_invalid_cloud_version_leaves_no_local_task_or_recipe(tmp_path, monkeypatch, options, error, message, calls):

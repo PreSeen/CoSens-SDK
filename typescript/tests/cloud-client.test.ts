@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { pathToFileURL } from 'node:url';
+import { MAX_RECIPE_ZIP_BYTES } from '../src/rsi/cloud.js';
 import { CloudClient, RSIClient, RSIError } from '../src/rsi/index.js';
 import { uploadLocalRecipe } from '../src/rsi/local-recipe-upload.js';
 import { Store } from '../src/rsi/store.js';
@@ -124,14 +125,14 @@ test('cloud RSI versions the default, environment and explicit base prefixes onc
   await new CloudClient({ api_key: 'fixture', base_url: 'https://direct.example/' }).execution_get('run');
   await new CloudClient({ api_key: 'fixture', base_url: 'https://stage.example/mounted/' }).execution_get('run');
   await new CloudClient({ api_key: 'fixture', base_url: 'https://stage.example/mounted/v1/' })
-    .request('GET', '/v1/recipes/recipe_1/versions/version_1/download');
+    .request('GET', '/v1/recipes/recipe_1');
   for (const marker of ['?', '#']) {
     assert.throws(() => new CloudClient({ api_key: 'fixture', base_url: `https://stage.example/api${marker}` }), /base_url/);
   }
   assert.deepEqual(seen, [
     'https://friday-memeory-dev.rosettalab.top/v1/executions/run', 'https://stage.example/api/v1/executions/run',
     'https://direct.example/v1/executions/run', 'https://stage.example/mounted/v1/executions/run',
-    'https://stage.example/mounted/v1/recipes/recipe_1/versions/version_1/download',
+    'https://stage.example/mounted/v1/recipes/recipe_1',
   ]);
 });
 
@@ -361,22 +362,48 @@ test('cloud recipes_upsert uploads ZIP bytes from a local path and file URI', as
   });
 });
 
-test('cloud recipe_download returns ZIP bytes for the requested version', async () => {
-  const zip = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0xfe]);
-  await withService({
-    'GET /api/v1/recipes/recipe_1/versions/version_1/download': [200, zip],
-    'GET /api/v1/recipes/recipe_1/versions/version_other/download': [
-      404, { error: { code: 'not_found', message: 'missing version' } },
-    ],
-  }, async (base_url, seen) => {
-    const client = new RSIClient({ mode: 'cloud', api_key: 'k', base_url });
-    assert.deepEqual(await client.recipe_download('recipe_1', 'version_1'), zip);
-    await assert.rejects(
-      client.recipe_download('recipe_1', 'version_other'),
-      (error: unknown) => error instanceof RSIError && error.code === 'not_found',
-    );
-    assert.equal(seen[0].url, '/api/v1/recipes/recipe_1/versions/version_1/download');
+test('cloud recipe_download returns the signed URL without fetching it', async () => {
+  await withService({}, async (storageBase, storageRequests) => {
+    const signedUrl = new URL('/signed-recipe.zip?signature=a%2Bb%2Fc', storageBase).href;
+    await withService({
+      'POST /api/v1/recipes/recipe_1/versions/version_1/download-url': [200, { url: signedUrl }],
+      'POST /api/v1/recipes/recipe_1/versions/version_other/download-url': [
+        404, { error: { code: 'not_found', message: 'missing version' } },
+      ],
+    }, async (base_url, seen) => {
+      const client = new CloudClient({ base_url }, new Headers({
+        Authorization: 'Bearer k', Cookie: 'session=fixture',
+        'X-Auth-Type': 'api_key', 'X-Virtual-User-Id': 'vu_fixture', 'Idempotency-Key': 'fixture',
+      }));
+      assert.equal(await client.recipe_download('recipe_1', 'version_1'), signedUrl);
+      await assert.rejects(client.recipe_download('recipe_1', 'version_other'), {
+        code: 'not_found', status: 404,
+      });
+      assert.deepEqual(seen.map(({ method, url }) => `${method} ${url}`), [
+        'POST /api/v1/recipes/recipe_1/versions/version_1/download-url',
+        'POST /api/v1/recipes/recipe_1/versions/version_other/download-url',
+      ]);
+      assert.equal(seen[0].headers.authorization, 'Bearer k');
+      assert.equal(seen[0].headers.cookie, 'session=fixture');
+      assert.deepEqual(storageRequests, []);
+    });
   });
+});
+
+test('cloud recipe_download validates signed URLs', async (t) => {
+  let signedUrl = 'https://storage.example/signed-recipe.zip?signature=fixture';
+  const fetch = t.mock.method(globalThis, 'fetch', async (url: URL) => {
+    assert.equal(url.host, 'gateway.example');
+    return Response.json({ url: signedUrl });
+  });
+  const client = new RSIClient({ mode: 'cloud', api_key: 'k', base_url: 'https://gateway.example/api' });
+  assert.equal(await client.recipe_download('recipe_1', 'version_1'), signedUrl);
+
+  for (const url of ['/relative.zip', 'https:storage.example/file', 'file:///local.zip', 'https://user:pass@storage.example/file']) {
+    signedUrl = url;
+    await assert.rejects(client.recipe_download('recipe_1', 'version_1'), { code: 'invalid_response' });
+  }
+  assert.equal(fetch.mock.callCount(), 5);
 });
 
 test('local execution bootstraps a verified cloud Recipe and later publishes into it', async (t) => {
@@ -385,7 +412,10 @@ test('local execution bootstraps a verified cloud Recipe and later publishes int
     data_dir, model_id: 'fixture', base_url: 'http://localhost:9/v1', api_key: 'fixture-model-key',
     config: {
       auto_start: false,
-      headers: { Authorization: 'Bearer fixture-cosens-token', 'X-Virtual-User-Id': 'vu_fixture' },
+      headers: {
+        Authorization: 'Bearer fixture-cosens-token', Cookie: 'session=fixture',
+        'X-Auth-Type': 'api_key', 'X-Virtual-User-Id': 'vu_fixture', 'Idempotency-Key': 'fixture',
+      },
     },
   });
   const store = new Store(data_dir);
@@ -414,15 +444,14 @@ test('local execution bootstraps a verified cloud Recipe and later publishes int
     id: recipeId, archived_at: null, active_version_id: versionId,
     selected_version: {
       id: versionId, object_id: recipeId, publication_state: 'published', package_sha256: digest,
-      download_path: `/v1/recipes/${recipeId}/versions/${versionId}/download`,
     },
   };
   const get = `GET /api/v1/recipes/${recipeId}`;
-  const download = `GET /api/v1/recipes/${recipeId}/versions/${versionId}/download`;
+  const download = `POST /api/v1/recipes/${recipeId}/versions/${versionId}/download-url`;
   const receipt = { recipe_id: recipeId, recipe_version_id: 'version_next' };
   const replies: Record<string, [number, unknown]> = {
     [get]: [200, { ...metadata, selected_version: { ...metadata.selected_version, package_sha256: '0'.repeat(64) } }],
-    [download]: [200, archive],
+    'GET /signed-recipe.zip': [200, archive],
     'POST /api/v1/recipes_upsert': [200, receipt],
   };
   const request = {
@@ -433,6 +462,11 @@ test('local execution bootstraps a verified cloud Recipe and later publishes int
 
   await withService(replies, async (base_url, seen) => {
     process.env.COSENS_RSI_BASE_URL = base_url;
+    const signedUrl = new URL('/signed-recipe.zip', base_url).href;
+    replies[download] = [200, { url: signedUrl }];
+    replies['GET /signed-recipe.zip'] = [200, new Uint8Array(MAX_RECIPE_ZIP_BYTES + 1)];
+    await assert.rejects(local.execution_create(request), /8 MiB/);
+    replies['GET /signed-recipe.zip'] = [200, archive];
     await assert.rejects(local.execution_create(request), /SHA-256/);
     assert.deepEqual(await local.execution_list(), []);
     assert.deepEqual(await local.recipe_list(), []);
@@ -457,9 +491,15 @@ test('local execution bootstraps a verified cloud Recipe and later publishes int
     const enteredRecipe = first.evidence.find(({ role }) => role === 'recipe');
     assert.equal(enteredRecipe?.path, realpathSync(join(installed, 'RECIPE.md')));
     assert.equal(store.get<Execution>(first.id, 'execution').base_recipe_version_id, versionId);
-    for (const request of seen) {
+    for (const request of seen.filter(({ url }) => url.startsWith('/api/'))) {
       assert.equal(request.headers.authorization, 'Bearer fixture-cosens-token');
       assert.equal(request.headers['x-virtual-user-id'], 'vu_fixture');
+    }
+    const storageRequests = seen.filter(({ url }) => url === '/signed-recipe.zip');
+    assert.ok(storageRequests.length > 0);
+    for (const { headers } of storageRequests) {
+      for (const name of ['authorization', 'cookie', 'x-auth-type', 'x-virtual-user-id', 'idempotency-key'])
+        assert.equal(headers[name], undefined, name);
     }
     assert.ok(seen.some(({ method, url }) => method === 'GET' && url.includes(`?version=${versionId}`)));
 
@@ -510,7 +550,7 @@ test('local execution bootstraps a verified cloud Recipe and later publishes int
       ...metadata, active_version_id: otherVersion,
       selected_version: { ...metadata.selected_version, id: otherVersion },
     }];
-    replies[`GET /api/v1/recipes/${recipeId}/versions/${otherVersion}/download`] = [200, archive];
+    replies[`POST /api/v1/recipes/${recipeId}/versions/${otherVersion}/download-url`] = [200, { url: signedUrl }];
     const otherRequest = {
       ...request, idempotency_key: 'cloud-version-from-other-device',
       recipe_reference: { ...request.recipe_reference, recipe_version_id: otherVersion },

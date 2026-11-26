@@ -9,7 +9,7 @@ from zipfile import ZipFile
 import httpx
 import pytest
 
-from cosens.rsi import CloudRSIClient, Conflict, InvalidState, NotFound, RSIClient
+from cosens.rsi import CloudRSIClient, Conflict, InvalidState, NotFound, RSIClient, RSIError
 
 
 def recording(responses=None):
@@ -41,6 +41,8 @@ def test_cloud_api_versions_default_environment_and_explicit_prefixes_once(monke
 
     def handle(request):
         urls.append(str(request.url))
+        if request.url.path.endswith("/download-url"):
+            return httpx.Response(200, json={"url": "https://objects.example/recipe.zip?signature=value"})
         return httpx.Response(200, json={})
 
     def client(base_url=None):
@@ -59,7 +61,7 @@ def test_cloud_api_versions_default_environment_and_explicit_prefixes_once(monke
     assert urls == [
         "https://friday-memeory-dev.rosettalab.top/v1/executions/run", "https://stage.example/api/v1/executions/run",
         "https://direct.example/v1/executions/run", "https://stage.example/mounted/v1/executions/run",
-        "https://stage.example/mounted/v1/recipes/recipe_1/versions/version_1/download",
+        "https://stage.example/mounted/v1/recipes/recipe_1/versions/version_1/download-url",
     ]
 
 
@@ -232,17 +234,80 @@ def test_recipes_upsert_rejects_remote_file_uri_and_over_limit_zip(tmp_path):
     assert seen == []
 
 
-def test_recipe_download_reads_exact_zip_bytes_and_keeps_service_errors():
+def test_recipe_download_returns_exact_url_and_keeps_service_errors():
     zip_bytes = b"PK\x03\x04\x00\xff\xfe"
+    signed = "https://rsi.example/objects/recipe.zip?signature=test%2Fvalue&expires=123"
+    seen = []
 
     def handle(request):
-        assert request.method == "GET"
-        assert request.url.path.startswith("/api/v1/recipes/recipe_1/versions/")
-        if request.url.path.endswith("/version_1/download"):
+        seen.append(request)
+        if str(request.url) == signed:
+            assert request.method == "GET"
+            assert request.extensions["timeout"]["read"] == 7
+            assert "authorization" not in request.headers
+            assert "cookie" not in request.headers
+            assert "x-auth-type" not in request.headers
+            assert "x-virtual-user-id" not in request.headers
+            assert "idempotency-key" not in request.headers
             return httpx.Response(200, content=zip_bytes, headers={"Content-Type": "application/zip"})
+        assert request.method == "POST"
+        assert request.url.path.startswith("/api/v1/recipes/recipe_1/versions/")
+        assert request.headers["authorization"] == "Bearer k"
+        assert request.headers["x-virtual-user-id"] == "vu_a"
+        if request.url.path.endswith("/version_1/download-url"):
+            return httpx.Response(200, json={"url": signed}, headers={"Set-Cookie": "session=fixture; Path=/"})
         return httpx.Response(404, json={"error": {"code": "not_found", "message": "missing version"}})
 
-    client = CloudRSIClient(api_key="k", base_url="https://rsi.example/api", transport=httpx.MockTransport(handle))
-    assert client.recipe_download("recipe_1", recipe_version_id="version_1") == zip_bytes
+    client = CloudRSIClient(
+        api_key="k", base_url="https://rsi.example/api", timeout=7,
+        virtual_user_id="vu_a", transport=httpx.MockTransport(handle),
+    )
+    assert client.recipe_download("recipe_1", recipe_version_id="version_1") == signed
     with pytest.raises(NotFound, match="missing version"):
         client.recipe_download("recipe_1", recipe_version_id="version_other")
+    assert [request.method for request in seen] == ["POST", "POST"]
+
+    assert client._download_recipe_zip(signed) == zip_bytes
+    assert [request.method for request in seen] == ["POST", "POST", "GET"]
+
+
+@pytest.mark.parametrize("url", [
+    None,
+    "/relative",
+    "file:///tmp/recipe.zip",
+    "https://user@objects.example/recipe.zip",
+    "https://objects.example/recipe.zip#secret",
+])
+def test_recipe_download_rejects_invalid_signed_urls(url):
+    calls = []
+
+    def handle(request):
+        calls.append(request.method)
+        assert request.method == "POST"
+        return httpx.Response(200, json={"url": url})
+
+    client = CloudRSIClient(api_key="k", base_url="https://rsi.example", transport=httpx.MockTransport(handle))
+    with pytest.raises(RSIError, match="invalid Recipe download URL"):
+        client.recipe_download("recipe_1", recipe_version_id="version_1")
+    assert calls == ["POST"]
+
+
+@pytest.mark.parametrize("object_status", [302, 200])
+def test_internal_recipe_zip_download_rejects_redirects_and_oversized_streams(object_status):
+    calls = []
+
+    def handle(request):
+        calls.append(request.url.host)
+        if request.url.host == "rsi.example":
+            return httpx.Response(200, json={"url": "https://objects.example/recipe.zip?signature=secret"})
+        assert request.url.host == "objects.example"
+        if object_status == 302:
+            return httpx.Response(302, headers={"Location": "https://redirect.example/recipe.zip"})
+        return httpx.Response(200, stream=httpx.ByteStream(b"x" * (8 * 1024 * 1024 + 1)))
+
+    client = CloudRSIClient(api_key="k", base_url="https://rsi.example", transport=httpx.MockTransport(handle))
+    signed = client.recipe_download("recipe_1", recipe_version_id="version_1")
+    with pytest.raises(RSIError, match="HTTP 302" if object_status == 302 else "8 MiB") as error:
+        client._download_recipe_zip(signed)
+    assert "signature" not in str(error.value)
+    assert calls == ["rsi.example", "objects.example"]
