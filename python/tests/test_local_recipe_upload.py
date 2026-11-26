@@ -822,11 +822,30 @@ def test_upload_reuses_an_existing_target_for_only_the_requested_task(tmp_path, 
     source_markdown.write_text(MARKDOWN.replace("test-recipe", "source-recipe"), encoding="utf-8")
     source = client._queue.recipe_insert(*read_recipe_file(source_markdown))
     source_pair = (source["id"], source["active_version_id"])
+    material_id = "material_" + "a" * 32
+    with store.transaction() as conn:
+        rubric = store.insert(conn, "rubrics", {"name": "Exact grading standard"})
+        generating_rubric = store.append_version(conn, rubric, {
+            "criteria": [{"id": "old", "description": "Learn the workflow", "source": "task"}],
+        })
+        rubric_version = store.append_version(conn, rubric, {
+            "criteria": [{
+                "id": "c1", "description": "Include the requested sections", "source": "task",
+                "required": True, "evidence": [{"material_id": material_id, "locator": material_id + "/0"}],
+            }],
+            "pass_threshold": 0.8,
+        })
+        original_version = store.version_in(conn, *source_pair)
+        original_version["provenance"] = {"rubrics_version_id": generating_rubric["id"]}
+        conn.execute("UPDATE versions SET data=? WHERE id=?", (json.dumps(original_version), source_pair[1]))
     resource = tmp_path / source["storage_path"] / source_pair[1] / "assets" / "note.txt"
     resource.parent.mkdir()
     resource.write_bytes(b"verified exact resource")
     task_id = _completed_execution(client, *source_pair)
     sibling_task = _completed_execution(client, *source_pair)
+    with store.transaction() as conn:
+        execution = store.get_in(conn, task_id, "execution")
+        store.save(conn, {**execution, "rubrics_version_id": rubric_version["id"]})
     execution_before = client.execution_get(task_id)
     before = client.task_get(task_id)
     with pytest.raises(Conflict, match="target is linked to a different cloud destination"):
@@ -840,16 +859,29 @@ def test_upload_reuses_an_existing_target_for_only_the_requested_task(tmp_path, 
     with store.transaction() as conn:
         store.save(conn, target)
     with pytest.raises(RSIError, match="could not be reached"):
-        publishing.recipes_upsert(task_id, recipe_id=V1["recipe_id"])
+        publishing.recipes_upsert(
+            task_id, recipe_id=V1["recipe_id"], expected_latest_version_id=V1["recipe_version_id"]
+        )
     with pytest.raises(Conflict, match="belongs to a different Task"):
         publishing.recipes_upsert(sibling_task)
     with pytest.raises(Conflict, match="different cloud Recipe target"):
         publishing.recipes_upsert(task_id, recipe_id="recipe_other")
+    with pytest.raises(Conflict, match="retry the pending local Recipe upload"):
+        publishing.recipes_upsert(
+            task_id, recipe_id=V1["recipe_id"], expected_latest_version_id="version_other"
+        )
 
     assert publishing.recipes_upsert(task_id) == V2
     assert calls[1] == calls[2] == calls[3]
     key, fields = calls[2]
     assert fields["recipe_id"] == V1["recipe_id"].encode()
+    assert fields["expected_latest_version_id"] == V1["recipe_version_id"].encode()
+    assert json.loads(fields["rubrics"]) == {
+        "criteria": [{
+            "id": "c1", "description": "Include the requested sections", "source": "task", "required": True,
+        }],
+        "pass_threshold": 0.8,
+    }
     fingerprint = hashlib.sha256(fields["file"]).hexdigest()
     binding = f"{source_pair[0]}\0{source_pair[1]}\0{fingerprint}\0{V1['recipe_id']}\0{task_id}"
     assert key == "local-recipe-upload-" + hashlib.sha256(binding.encode()).hexdigest()
@@ -858,6 +890,12 @@ def test_upload_reuses_an_existing_target_for_only_the_requested_task(tmp_path, 
     assert client.recipe_get(source_pair[0])["active_version_id"] == source_pair[1]
     assert client.task_get(sibling_task)["recipe_version_id"] == source_pair[1]
     assert client.recipe_get(V1["recipe_id"])["active_version_id"] == V2["recipe_version_id"]
+    assert client.rubrics_get(
+        V2["recipe_id"], recipe_version_id=V2["recipe_version_id"],
+    )["selected_version"]["id"] == rubric_version["id"]
+    assert client.rubrics_get(
+        source_pair[0], recipe_version_id=source_pair[1],
+    )["selected_version"]["id"] == generating_rubric["id"]
     assert client.recipe_get(V1["recipe_id"])["name"] == "source-recipe"
     assert (tmp_path / target["storage_path"] / V2["recipe_version_id"] / "assets" / "note.txt").read_bytes() == resource.read_bytes()
     assert client.task_get(target_task)["recipe_version_id"] == V1["recipe_version_id"]

@@ -5,8 +5,14 @@ from __future__ import annotations
 import hashlib
 import re
 
-from .cloud import _matches_recipe_destination, _read_recipe_zip, _recipe_base_aliases, _validate_recipe_upload
-from .models import Conflict, InvalidState, NotFound, RSIError
+from .cloud import (
+    _matches_recipe_destination,
+    _read_recipe_zip,
+    _recipe_base_aliases,
+    _upload_rubrics,
+    _validate_recipe_upload,
+)
+from .models import Conflict, InvalidState, NotFound, RSIError, parse_stored_rubrics
 from .recipe_bootstrap import install_recipe_version_files
 from .recipe_file import read_recipe_file
 from .recipe_identity import (
@@ -29,18 +35,23 @@ from .task import assert_frozen_package_matches, freeze_task_package, is_approve
 _TERMINAL_UPLOAD_STATUS = {400, 403, 404, 409, 413, 422}
 
 
-def _same_request(conn, plan, recipe_id, version_id, zip_sha256, key, destination):
+def _same_request(conn, plan, recipe_id, version_id, zip_sha256, key, destination, expected_latest_version_id):
     return (
         recipe_id_for(conn, plan["local_recipe_id"]) == recipe_id
         and version_id_for(conn, plan["local_recipe_version_id"]) == version_id
         and plan["zip_sha256"] == zip_sha256
         and (key is None or plan["idempotency_key"] == key)
+        and (
+            expected_latest_version_id is None
+            or plan.get("expected_latest_version_id") == expected_latest_version_id
+        )
         and _matches_recipe_destination(plan, destination)
     )
 
 
 def _saved_receipt(
     conn, recipe_id, version_id, key, destination, zip_sha256=None, *, target_recipe_id=None, task=None,
+    expected_latest_version_id=None,
 ):
     saved = task_upload_receipt(conn, task["task_id"], recipe_id, version_id, task["execution_id"]) if task else None
     saved = saved or journal_entry(conn, RECEIPT, version_id)
@@ -52,6 +63,7 @@ def _saved_receipt(
     if not _same_request(
         conn, plan, recipe_id, version_id,
         plan["zip_sha256"] if zip_sha256 is None else zip_sha256, key, destination,
+        expected_latest_version_id,
     ):
         raise Conflict(
             "local Recipe version already has a cloud receipt for a different ZIP, key or destination"
@@ -94,6 +106,7 @@ def _occupied_target(store, conn, target, destination, *, task_id):
 
 def _plan_upload(
     store, conn, recipe_id, version_id, zip_sha256, key, destination, target_recipe_id, task,
+    expected_latest_version_id,
 ):
     require_idle_recipe(conn, recipe_id, version_id)
     require_unclaimed_upload_target(conn, recipe_id, recipe_id)
@@ -109,7 +122,7 @@ def _plan_upload(
         if target_recipe_id is not None and target_recipe_id != target:
             raise Conflict("pending local Recipe upload has a different cloud Recipe target")
         if not _same_request(
-            conn, plan, recipe_id, version_id, zip_sha256, key, destination
+            conn, plan, recipe_id, version_id, zip_sha256, key, destination, expected_latest_version_id,
         ):
             raise Conflict(
                 "retry the pending local Recipe upload with the same version, ZIP and idempotency key and destination"
@@ -161,6 +174,15 @@ def _plan_upload(
     }
     if occupied is not None:
         plan.update(task)
+    if expected_latest_version_id is not None:
+        plan["expected_latest_version_id"] = expected_latest_version_id
+    if task is not None:
+        rubric = store.recipe_rubrics_version(
+            conn, store.version_in(conn, recipe_id, version_id), execution_id=task["execution_id"],
+        )
+        if rubric is not None:
+            plan["rubrics_version_id"] = rubric["id"]
+            plan["rubrics"] = _upload_rubrics(parse_stored_rubrics(rubric["content"]))
     store.remember(conn, PENDING, recipe_id, plan, {})
     return plan
 
@@ -180,9 +202,17 @@ def _link_task_recipe(store, conn, plan, receipt, zip_bytes, destination):
     directory = install_recipe_version_files(store, recipe, version_id, zip_bytes)
     content, markdown = read_recipe_file(directory / ENTRYPOINT)
     recipe["name"] = content["name"]
+    provenance = {"source": "cloud", "package_sha256": plan["zip_sha256"]}
+    rubric_id = plan.get("rubrics_version_id")
+    if rubric_id is None:
+        original = store.version_in(conn, plan["local_recipe_id"], plan["local_recipe_version_id"])
+        rubric = store.recipe_rubrics_version(conn, original, execution_id=plan["execution_id"])
+        rubric_id = rubric["id"] if rubric is not None else None
+    if rubric_id is not None:
+        provenance["rubrics_version_id"] = rubric_id
     store.append_version(
         conn, recipe, content, recipe_markdown=markdown, version_id=version_id,
-        provenance={"source": "cloud", "package_sha256": plan["zip_sha256"]},
+        provenance=provenance,
     )
     conn.execute(
         "UPDATE versions SET status='archived' WHERE recipe_id=? AND status='available'",
@@ -199,8 +229,11 @@ def _link_task_recipe(store, conn, plan, receipt, zip_bytes, destination):
     return {**plan, "local_recipe_id": recipe_id, "local_recipe_version_id": version_id}
 
 
-def upload_task(store, task_id, key, destination, cloud_factory, *, target_recipe_id=None):
-    _validate_recipe_upload(target_recipe_id, key)
+def upload_task(
+    store, task_id, key, destination, cloud_factory, *, target_recipe_id=None,
+    expected_latest_version_id=None,
+):
+    _validate_recipe_upload(target_recipe_id, key, expected_latest_version_id)
     with store.transaction() as conn:
         execution = task_chain(store, conn, task_id)[-1]
         if not is_approved(execution):
@@ -210,6 +243,7 @@ def upload_task(store, task_id, key, destination, cloud_factory, *, target_recip
         selected_task = {"task_id": task_id, "execution_id": execution["id"]}
         receipt = _saved_receipt(
             conn, recipe_id, version_id, key, destination, target_recipe_id=target_recipe_id, task=selected_task,
+            expected_latest_version_id=expected_latest_version_id,
         )
         if receipt is not None:
             return receipt
@@ -233,6 +267,7 @@ def upload_task(store, task_id, key, destination, cloud_factory, *, target_recip
         return upload_recipe(
             store, cloud, filename, zip_bytes, recipe_id, version_id, key,
             target_recipe_id=target_recipe_id, task=selected_task,
+            expected_latest_version_id=expected_latest_version_id,
         )
     finally:
         cloud.close()
@@ -240,8 +275,9 @@ def upload_task(store, task_id, key, destination, cloud_factory, *, target_recip
 
 def upload_recipe(
     store, cloud, filename, zip_bytes, recipe_id, version_id, key, *, target_recipe_id=None, task=None,
+    expected_latest_version_id=None,
 ):
-    _validate_recipe_upload(target_recipe_id, key)
+    _validate_recipe_upload(target_recipe_id, key, expected_latest_version_id)
     zip_sha256 = hashlib.sha256(zip_bytes).hexdigest()
     destination = cloud._recipe_upload_destination()
     with store.transaction() as conn:
@@ -251,6 +287,7 @@ def upload_recipe(
         receipt = _saved_receipt(
             conn, recipe_id, version_id, key, destination, zip_sha256,
             target_recipe_id=target_recipe_id, task=task,
+            expected_latest_version_id=expected_latest_version_id,
         )
         if receipt is not None:
             return receipt
@@ -275,7 +312,7 @@ def upload_recipe(
         assert_recipe_package_matches(directory, zip_bytes)
         plan = _plan_upload(
             store, conn, recipe_id, version_id, zip_sha256, key, destination, target_recipe_id,
-            task,
+            task, expected_latest_version_id,
         )
         assert_frozen_package_matches(conn, version_id, zip_sha256, task_id=plan.get("task_id"))
 
@@ -286,6 +323,8 @@ def upload_recipe(
             zip_bytes,
             recipe_id=target,
             idempotency_key=plan["idempotency_key"],
+            expected_latest_version_id=plan.get("expected_latest_version_id"),
+            rubrics=plan.get("rubrics"),
         )
     except (RSIError, ValueError) as error:
         terminal = getattr(error, "status", None) in _TERMINAL_UPLOAD_STATUS
@@ -325,6 +364,11 @@ def upload_recipe(
             version_plan = _link_task_recipe(store, conn, plan, receipt, zip_bytes, destination)
         else:
             promote_recipe_identity(store, conn, recipe_id, version_id, receipt)
+            if rubric_id := plan.get("rubrics_version_id"):
+                conn.execute(
+                    "UPDATE versions SET data=json_set(data,'$.provenance.rubrics_version_id',?) WHERE id=?",
+                    (rubric_id, receipt["recipe_version_id"]),
+                )
             version_plan = plan
         if not journal_entry(conn, IDENTITY, receipt["recipe_id"]):
             store.remember(conn, IDENTITY, receipt["recipe_id"], destination, {})

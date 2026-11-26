@@ -291,6 +291,7 @@ class RSIClient:
         *,
         recipe_id: str | None = None,
         idempotency_key: str | None = None,
+        expected_latest_version_id: str | None = None,
     ) -> dict[str, str]:
         """Publish the approved Recipe ZIP for a local Task."""
         from .cloud import CloudRSIClient, _local_upload_destination
@@ -309,7 +310,7 @@ class RSIClient:
 
         return upload_task(
             self._queue.store, task_id, idempotency_key, destination, cloud_client,
-            target_recipe_id=recipe_id,
+            target_recipe_id=recipe_id, expected_latest_version_id=expected_latest_version_id,
         )
 
     def recipe_get(self, recipe_id, *, version="active"):
