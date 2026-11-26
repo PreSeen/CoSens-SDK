@@ -246,6 +246,7 @@ TS 用 `execution_list({ execution_ids: [id1, id2] })`，Python 用 `execution_l
 - 本地 SDK 在创建 Execution 时复制文件快照。详情的 `evidence[]` 返回文件列表，包含角色、哈希和定位符。旧记录沿用原快照读取。
 - 宿主在取得用户交付确认后调用接口。SDK 使用 `idempotency_key` 记录本次提交。
 - SDK 自动用 Recipe 重跑当前任务。创建时标为 `input` 的文件同时用于学习和测试。测试在独立工作区生成新产物，再按 Rubric 评分。上下文、历史参考、确认产物、反馈和 `recipe` 文件只用于学习。该得分衡量当前任务能否复现。
+- 当任务输入来自聊天时，宿主在创建 Execution 时提交重放所需的用户原文，保留数据、顺序和指定的输出文件名。TypeScript 可传 `evidence.input_text`，SDK 将它保存为独立的 UTF-8 `input` 快照。也可由宿主把原文保存成文件，以 `role: 'input'` 提交。完整聊天仍通过 `context_path` 提交。
 - `idempotency_key` 是本次提交的稳定非空字符串。同一操作重试保留原键和输入。旧接口已经提交的执行可按 ID 查询或恢复，使用旧提交的幂等键提交新格式会报冲突。
 - Worker 自动提炼并锁定 Recipe 名称、生成 Rubrics、保存候选及测试结果。自动学习最多两轮。
 - 如果宿主显式调用 `recipe_test` 改测另一个 Recipe，Execution 会切换到指定的测试目标。原先为这一条执行预建、尚无任何版本的 Recipe 会归档。

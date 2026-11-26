@@ -4,6 +4,7 @@ import { CloudClient, type CloudOptions, type RecipeUpsertOptions, type RecipeUp
 import {
   fail,
   RecipeReferenceSchema,
+  TaskInputTextSchema,
   type EvidenceFile,
   type Execution as StoredExecution,
 } from './models.js';
@@ -51,7 +52,7 @@ const evidence = z.strictObject({
   files: z.array(evidenceFile).max(1000),
 });
 const executionCreate = z.strictObject({
-  evidence,
+  evidence: evidence.extend({ input_text: TaskInputTextSchema.optional() }),
   idempotency_key: text,
   recipe_reference: RecipeReferenceSchema.optional(),
 });
@@ -251,7 +252,7 @@ export class RSIClient {
   async execution_create(request: ExecutionCreate): Promise<Execution> {
     if (this.#cloud) return this.#cloud.execution_create(request);
     const {
-      evidence: { context_path, files },
+      evidence: { context_path, files, input_text },
       idempotency_key,
       recipe_reference,
     } = executionCreate.parse(request);
@@ -263,6 +264,7 @@ export class RSIClient {
           ? [...files, { path: recipe_reference.path, role: 'recipe' }]
           : files,
       },
+      input_text,
       idempotency_key,
       confirmation_ref: idempotency_key,
       base: recipeId ? { kind: 'recipe', id: recipeId, version_id: recipe_reference?.recipe_version_id } : null,

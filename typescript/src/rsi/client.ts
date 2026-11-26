@@ -3,7 +3,7 @@ import { existsSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { authorizedTestFiles, snapshot } from './materials.js';
+import { authorizedTestFiles, digest, snapshot } from './materials.js';
 import { restartExecution } from './progress.js';
 import { Store, uid, now, encode, type RetryTarget } from './store.js';
 import { isHeaderBinding } from './model-headers.js';
@@ -48,6 +48,7 @@ import {
 
 type EvidenceExecutionCreate = {
   evidence: MaterialManifest;
+  input_text?: string;
   confirmation_ref: string;
   idempotency_key: string;
   base: RecipeBase | null;
@@ -379,13 +380,17 @@ export class RSIClient {
   }
 
   async execution_create_with_evidence(
-    request: EvidenceExecutionCreate,
+    { input_text, ...request }: EvidenceExecutionCreate,
     cloudHeaders?: Headers,
   ): Promise<Execution> {
     const { evidence, confirmation_ref, idempotency_key, base } = request;
+    const inputText = input_text === undefined ? undefined : Buffer.from(input_text);
+    const replayRequest = inputText
+      ? { ...request, input_text_sha256: digest(inputText) }
+      : request;
     const scope = 'execution_create';
     const replay = () =>
-      this.store.replay<{ id: string }>(scope, idempotency_key, request);
+      this.store.replay<{ id: string }>(scope, idempotency_key, replayRequest);
     const previous = replay();
     if (!previous && this.auto_start) this.check_runtime();
     const bootstrap = !previous && base && !findLocalRecipeBase(this.store, base)
@@ -409,7 +414,7 @@ export class RSIClient {
             { path: baseRecipePath(this.store, selected.recipe, selected.versionId), role: 'recipe' as const },
           ],
         } : evidence;
-        const data = snapshot(this.data_dir, selectedEvidence, this.config);
+        const data = snapshot(this.data_dir, selectedEvidence, this.config, inputText);
         materialDirectory = join(this.data_dir, 'materials', data.id);
         const learningPaths = new Set(
           data.files
@@ -441,7 +446,7 @@ export class RSIClient {
           },
         });
         writeTaskRecipe(this.store, created);
-        this.store.remember(scope, idempotency_key, request, {
+        this.store.remember(scope, idempotency_key, replayRequest, {
           id: created.id,
         });
         return created;

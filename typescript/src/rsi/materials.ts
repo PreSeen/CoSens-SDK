@@ -19,6 +19,7 @@ import { join, extname, basename, resolve, sep, isAbsolute } from 'node:path';
 import { unzipSync } from 'fflate';
 import {
   ManifestSchema,
+  TASK_INPUT_FILENAME,
   fail,
   type MaterialManifest,
   type LocalConfig,
@@ -74,10 +75,13 @@ export function snapshot(
   root: string,
   input: MaterialManifest,
   config: LocalConfig,
+  inputText?: Uint8Array,
 ) {
-  const manifest = ManifestSchema.parse(input),
-    id = uid('material'),
-    directory = join(root, 'materials', id);
+  const manifest = ManifestSchema.parse(input);
+  if (inputText && manifest.files.length === 1000)
+    fail('invalid_argument', 'material bundle may contain at most 1000 attachments');
+  const id = uid('material');
+  const directory = join(root, 'materials', id);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const refs = [
     {
@@ -89,6 +93,14 @@ export function snapshot(
   ];
   const files: EvidenceFile[] = [];
   let total = 0;
+  const writeAttachment = (file: Omit<EvidenceFile, 'sha256' | 'size'>, data: Uint8Array) => {
+    total += data.length;
+    if (data.length > config.max_file_bytes || total > config.max_bundle_bytes)
+      fail('invalid_argument', 'material bundle exceeds size limit');
+    writeFileSync(file.snapshot, data, { mode: 0o400 });
+    chmodSync(file.snapshot, 0o400);
+    files.push({ ...file, sha256: digest(data), size: data.length });
+  };
   try {
     for (const [index, ref] of refs.entries()) {
       const path = realpathSync(ref.path);
@@ -107,20 +119,17 @@ export function snapshot(
           'invalid_argument',
           'material must be a regular file within max_file_bytes',
         );
-      const data = readFileSync(path);
-      total += data.length;
-      if (
-        data.length > config.max_file_bytes ||
-        total > config.max_bundle_bytes
-      )
-        fail('invalid_argument', 'material bundle exceeds size limit');
-      writeFileSync(target, data, { mode: 0o400 });
-      chmodSync(target, 0o400);
-      files.push({
-        ...file,
-        sha256: digest(data),
-        size: data.length,
-      });
+      writeAttachment(file, readFileSync(path));
+    }
+    if (inputText) {
+      const path = join(directory, TASK_INPUT_FILENAME);
+      writeAttachment({
+        path,
+        snapshot: path,
+        locator: `${id}/${refs.length}`,
+        role: 'input',
+        description: 'Current user request',
+      }, inputText);
     }
     return {
       id,
