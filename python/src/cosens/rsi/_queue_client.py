@@ -158,6 +158,59 @@ class RSIClient:
             "rubrics", rubrics_id, version_id, include_content=include_content
         )
 
+    def rubrics_for_recipe(self, recipe_id, version_id):
+        """Return the immutable Rubrics version associated with the Recipe version."""
+        if not version_id:
+            raise ValueError("recipe version ID is required")
+        with self.store.connect() as conn:
+            conn.execute("BEGIN")
+            recipe = self.store.get_in(conn, recipe_id, "recipe")
+            version = self.store.version_in(conn, recipe["id"], version_id)
+            provenance = version.get("provenance") or {}
+            rubrics_version_id = provenance.get("rubrics_version_id")
+            if rubrics_version_id is None:
+                rubrics_version_id = self._legacy_recipe_rubrics(conn, version, provenance)
+            row = conn.execute(
+                "SELECT rubrics_id FROM versions WHERE id=? AND rubrics_id IS NOT NULL",
+                (rubrics_version_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFound("Recipe version has no associated Rubrics")
+            rubric = self.store.get_in(conn, row["rubrics_id"], "rubrics")
+            selected = self.store.version_in(conn, rubric["id"], rubrics_version_id)
+            return {**rubric, "selected_version": selected}
+
+    def _legacy_recipe_rubrics(self, conn, version, provenance):
+        execution_id, revision = provenance.get("execution_id"), provenance.get("input_revision")
+        if not isinstance(execution_id, str) or not execution_id or type(revision) is not int:
+            return None
+        row = conn.execute(
+            "SELECT id FROM versions WHERE operation_key=? AND rubrics_id IS NOT NULL",
+            (f"rubrics:{execution_id}:{revision}",),
+        ).fetchone()
+        if row is not None:
+            return row["id"]
+        try:
+            execution = self.store.get_in(conn, execution_id, "execution")
+        except NotFound:
+            return None
+        matches = {
+            result["rubrics_version_id"]
+            for result in execution.get("test_results", ())
+            if result.get("rubrics_version_id")
+            and result.get("input_revision") == revision
+            and recipe_id_for(conn, result.get("recipe_id")) == version["object_id"]
+            and version_id_for(conn, result.get("version_id")) == version["id"]
+        }
+        if matches:
+            return next(iter(matches)) if len(matches) == 1 else None
+        if (
+            execution.get("input_revision") == revision
+            and execution.get("analyzed_input_revision") in (None, revision)
+        ):
+            return execution.get("rubrics_version_id")
+        return None
+
     def recipe_insert(self, content, markdown):
         with self.store.transaction() as conn:
             recipe = self.store.create_recipe(conn, name=content["name"])
