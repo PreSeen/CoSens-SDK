@@ -385,7 +385,7 @@ def test_old_schema_migrates_without_changing_unpublished_recipe(tmp_path, monke
         assert conn.execute("PRAGMA user_version").fetchone() == (10,)
 
 
-def test_existing_cloud_schema_keeps_recipe_and_version_tables(tmp_path, monkeypatch):
+def test_existing_cloud_account_marker_still_migrates_recipe_catalog(tmp_path, monkeypatch):
     _, first = _legacy_fixture_recipe(tmp_path, monkeypatch)
     with sqlite3.connect(tmp_path / "rsi.sqlite3") as conn:
         conn.execute("CREATE TABLE cloud_recipe_account (account_id TEXT NOT NULL)")
@@ -393,8 +393,8 @@ def test_existing_cloud_schema_keeps_recipe_and_version_tables(tmp_path, monkeyp
     reopened = RSIClient(data_dir=tmp_path)
     assert reopened.recipe_get(first["id"]) == first
     with sqlite3.connect(tmp_path / "rsi.sqlite3") as conn:
-        assert conn.execute("PRAGMA user_version").fetchone() == (9,)
-        assert conn.execute("SELECT type FROM sqlite_master WHERE name='versions'").fetchone() == ("table",)
+        assert conn.execute("PRAGMA user_version").fetchone() == (10,)
+        assert conn.execute("SELECT type FROM sqlite_master WHERE name='versions'").fetchone() == ("view",)
 
 
 @pytest.mark.parametrize("pruned", [False, True])

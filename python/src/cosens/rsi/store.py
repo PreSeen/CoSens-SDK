@@ -27,6 +27,7 @@ from .recipe_identity import (
     recipe_object_relation,
     version_id_for,
 )
+from .store_cloud_migration import backfill_cloud_task_recipe_paths, migrate_cloud_recipe_state
 from .store_schema import (
     LEGACY_RECIPES,
     MIGRATE_RECIPE_VERSIONS,
@@ -101,7 +102,7 @@ class Store:
     def _initialize(self):
         with self.connect() as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version == 10 or (version == 9 and self._is_cloud_database(conn)):
+            if version == 10:
                 return
         with self.transaction() as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -227,16 +228,8 @@ class Store:
             conn.execute("PRAGMA user_version = 9")
             self._migrate_task_recipes(conn)
 
-    @staticmethod
-    def _is_cloud_database(conn):
-        return conn.execute(
-            """SELECT 1 FROM sqlite_master
-               WHERE type='table' AND name IN ('cloud_recipe_account', 'cloud_recipe_publications')"""
-        ).fetchone() is not None
-
     def _migrate_task_recipes(self, conn):
-        if self._is_cloud_database(conn):
-            return
+        migrate_cloud_recipe_state(conn)
         statement = ""
         for line in MIGRATE_TASK_RECIPES.splitlines(keepends=True):
             statement += line
@@ -246,6 +239,7 @@ class Store:
         if statement.strip():
             raise InvalidState("incomplete local Task Recipe migration")
         backfill_task_recipes(self, conn)
+        backfill_cloud_task_recipe_paths(conn)
         conn.execute("PRAGMA user_version = 10")
 
     def _migrate_recipe_content(self, conn):
