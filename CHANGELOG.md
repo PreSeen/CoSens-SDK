@@ -14,6 +14,7 @@ Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned
 
 ### Breaking
 
+- Python and TypeScript `rubrics_get()` now take a Recipe ID and an exact Recipe version ID. The SDKs remove `rubrics_list()`.
 - Python and TypeScript `recipe_download()` now return a signed URL string from `POST /download-url`. Use that URL to download the ZIP.
 - Local Recipe replay runs Python and TypeScript with the Worker account's host permissions. Remove `test_python_image` and `test_script_mode` from new local client configurations. The Worker reads previously saved configurations and disregards the retired settings.
 - `recipe_list()` no longer returns `status`. Use `task_list()` or `task_get()` for local task status and `active_version_id` to find the available Recipe version.

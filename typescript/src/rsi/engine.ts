@@ -398,6 +398,7 @@ export class Engine {
         {
           execution_id: this.id,
           input_revision: state.revision,
+          rubrics_version_id: state.rubric,
         },
       );
       if (resources.size) stageRecipePackageFiles(this.recipeVersionDirectory(version), resources);

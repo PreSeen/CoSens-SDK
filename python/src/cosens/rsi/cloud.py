@@ -249,11 +249,11 @@ class CloudRSIClient:
 
     # Rubrics
 
-    def rubrics_list(self, *, offset, archived):
-        return self._request("GET", "/rubrics", params={"offset": offset, "archived": str(bool(archived)).lower()})
-
-    def rubrics_get(self, rubrics_id, *, version):
-        return self._request("GET", f"/rubrics/{_segment(rubrics_id)}", params={"version": version})
+    def rubrics_get(self, recipe_id: str, *, recipe_version_id: str):
+        """Get the Rubrics used to generate the specified Recipe version."""
+        return self._request(
+            "GET", f"/recipes/{_segment(recipe_id)}/versions/{_segment(recipe_version_id)}/rubrics"
+        )
 
     # Recipe
 

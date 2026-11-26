@@ -14,10 +14,6 @@ import { bindModelHeaders, credentialScopeId } from './model-headers.js';
 import { readTask, readTaskSummary, readTasks } from './task.js';
 
 const text = z.string().min(1);
-const page = z.strictObject({
-  offset: z.number().int().nonnegative(),
-  archived: z.boolean(),
-});
 const revision = z.number().int().positive();
 const requestHeaders = z.record(z.string(), z.string());
 const config = z.strictObject({
@@ -107,7 +103,7 @@ export type Execution = Pick<
   >[];
 };
 export type ExecutionCreate = z.input<typeof executionCreate>;
-export type Page = z.input<typeof page>;
+export type Page = { offset: number; archived: boolean };
 export type ExecutionListQuery = z.input<typeof executionListQuery>;
 export type TaskRestartOptions = z.input<typeof taskRestartOptions>;
 export type RecipeListQuery = z.input<typeof recipeListQuery>;
@@ -337,16 +333,11 @@ export class RSIClient {
     });
   }
 
-  async rubrics_list(query: Page) {
-    if (this.#cloud) return this.#cloud.rubrics_list(query);
-    return this.#queue.rubrics_list(page.parse(query));
-  }
-
-  async rubrics_get(id: string, version: string) {
-    if (this.#cloud) return this.#cloud.rubrics_get(id, version);
-    return this.#queue.rubrics_get(
-      id,
-      version === 'latest' ? {} : { version_id: text.parse(version) },
+  async rubrics_get(recipeId: string, recipeVersionId: string): Promise<ReturnType<QueueClient['rubrics_get']>> {
+    if (this.#cloud) return this.#cloud.rubrics_get(recipeId, recipeVersionId);
+    return this.#queue.recipe_version_rubrics_get(
+      text.parse(recipeId),
+      text.parse(recipeVersionId),
     );
   }
 

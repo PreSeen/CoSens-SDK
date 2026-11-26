@@ -567,15 +567,15 @@ class Store:
             if recipe["archived_at"]:
                 raise InvalidState("recipe was archived during learning")
             name = recipe.get("name") or execution.get("name") or content["name"]
+            provenance = {"execution_id": execution_id, "input_revision": revision}
+            if execution.get("rubrics_version_id"):
+                provenance["rubrics_version_id"] = execution["rubrics_version_id"]
             version = self.append_version(
                 conn,
                 {**recipe, "name": name},
                 {**content, "name": name},
                 operation_key=operation_key,
-                provenance={
-                    "execution_id": execution_id,
-                    "input_revision": revision,
-                },
+                provenance=provenance,
             )
             execution.update(
                 name=name,

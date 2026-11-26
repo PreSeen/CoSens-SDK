@@ -216,8 +216,10 @@ test('cloud create uploads user text as a replay input', async (t) => {
 });
 
 test('cloud reads map to routes and errors keep their codes', async () => {
+  const rubrics = { id: 'rubrics_1', selected_version: { id: 'rubrics_version_1' } };
   await withService(
     {
+      'GET /api/v1/recipes/r1/versions/v1/rubrics': [200, rubrics],
       'GET /api/v1/executions/missing': [
         404,
         { error: { code: 'not_found', message: 'not found' } },
@@ -227,6 +229,9 @@ test('cloud reads map to routes and errors keep their codes', async () => {
       const client = new RSIClient({ mode: 'cloud', api_key: 'k', base_url });
       await client.execution_list({ execution_ids: ['a', 'b'] });
       await client.recipe_get('r1', 'active');
+      assert.deepEqual(await client.rubrics_get('r1', 'v1'), rubrics);
+      assert.equal('rubrics_list' in client, false);
+      assert.equal('rubrics_list' in CloudClient.prototype, false);
       await client.recipe_version_set_archived('r1', {
         version_id: 'v1',
         archived: true,
@@ -236,6 +241,7 @@ test('cloud reads map to routes and errors keep their codes', async () => {
         [
           'GET /api/v1/executions?execution_ids=a%2Cb',
           'GET /api/v1/recipes/r1?version=active',
+          'GET /api/v1/recipes/r1/versions/v1/rubrics',
           'PUT /api/v1/recipes/r1/versions/v1/archived',
         ],
       );

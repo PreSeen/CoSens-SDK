@@ -49,7 +49,7 @@ SDK 向 `<base_url>/chat/completions` 发送模型请求，使用 `Authorization
 
 ## 业务接口
 
-TS 的创建和测试参数放在一个对象内，Python 的字段用关键字传入。读写已有对象时，两版先传对象 ID。分页列表接收分页对象。TS 直接把 `evidence` 对象传给追加接口，并把澄清和版本归档的字段放在 ID 后的参数对象内。Python 使用关键字。`recipe_get` 和 `rubrics_get` 的第二项在 TS 中是位置参数，在 Python 中使用关键字。
+TS 的创建和测试参数放在一个对象内，Python 的字段用关键字传入。读写已有对象时，两版先传对象 ID。TS 直接把 `evidence` 对象传给追加接口，并把澄清和版本归档的字段放在 ID 后的参数对象内。Python 使用关键字。`recipe_get` 和 `rubrics_get` 的第二项在 TS 中是位置参数，在 Python 中使用关键字。
 
 | 方法 | 必填参数 | 选填参数 | 返回与用途 |
 | --- | --- | --- | --- |
@@ -62,8 +62,7 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 | `execution_append_evidence` | `execution_id`（字符串）、`evidence`（对象） | 无顶层选填项。`evidence` 字段要求见下表。 | 给进行中的 Execution 追加证据并重新分析。 |
 | `execution_cancel` | `execution_id`（字符串） | 无 | 取消排队或进行中的 Execution。 |
 | `execution_clarification_answer` | `execution_id`、`question_id`（字符串）、`question_revision`（正整数）、`answer`（非空文本或非空选项 ID 数组） | 无 | 提交单题答案，返回原执行 ID 和可空的子执行 ID。 |
-| `rubrics_list` | `offset`（非负整数）、`archived`（布尔值） | 无 | 分页列出评分标准及最新版本 ID。 |
-| `rubrics_get` | `rubrics_id`（字符串）、`version`（`"latest"` 或版本 ID） | 无 | 返回选中的评分标准版本。 |
+| `rubrics_get` | `recipe_id`、`recipe_version_id`（均为字符串） | 无 | 按 Recipe 版本读取生成时采用的评分标准。返回 Rubrics 对象和 `selected_version`。 |
 | `recipe_list` | 无 | `query`，提供时须含 `recipe_ids: string[]`（Python 为 `list[str]`）。 | 返回首次学习条目和现有 Recipe 的摘要。 |
 | `recipes_upsert` | 本地模式传 `task_id`。云端模式传 ZIP 路径或 `file://` URI。 | `recipe_id`（指定已有云端 Recipe）和 `idempotency_key`。 | 上传 ZIP 并返回正式的 `recipe_id`、`recipe_version_id`。本地模式同步更新 SQLite 中的 ID。 |
 | `recipe_download` | `recipe_id`、`recipe_version_id`（TS 第二个位置参数对应版本 ID） | 无 | 云端模式返回指定版本 ZIP 的短期签名 URL，客户端可使用该链接直接下载。 |
@@ -210,7 +209,7 @@ recipe_file = (
 
 在没有未决澄清时，上一个可用版本保留到编号更高的版本验证通过。切换和旧版归档在同一个事务完成。旧版可按 ID 读取，`selected_version.archived` 表示所查版本的归档状态。恢复仅支持最近发布的版本。手动归档只作用于指定版本，更新的版本通过验证后仍会自动可用。
 
-`rubrics_list()` 固定每页 50 条。`offset` 从 0 开始，`archived=false` 查未归档对象，`true` 查已归档对象。
+用 `rubrics_get(recipe_id, recipe_version_id=version_id)` 读取指定版本关联的评分标准。云端通过 `GET /v1/recipes/{recipe_id}/versions/{recipe_version_id}/rubrics` 查询。导入的 ZIP 版本若没有评分标准关联，查询返回 `not_found`。
 
 ### 按 ID 查询 Execution
 

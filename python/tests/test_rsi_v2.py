@@ -13,6 +13,7 @@ from pydantic import ValidationError
 pytest.importorskip("langgraph")
 
 from cosens.rsi import Conflict, InvalidState, NotFound
+from cosens.rsi import RSIClient as PublicRSIClient
 from cosens.rsi._queue_client import RSIClient
 from cosens.rsi.materials import atomic_json, read_snapshot
 from cosens.rsi.models import LeaseLost, RecipeContent, RubricsContent
@@ -1078,6 +1079,63 @@ def test_learning_appends_an_immutable_recipe_version(client, tmp_path):
         assert version["object_id"] == rubric["id"]
         assert version["id"] == rubric["latest_version_id"]
         assert version["content"]["criteria"]
+
+    public = PublicRSIClient(data_dir=client.data_dir)
+    assert not hasattr(public, "rubrics_list")
+    for recipe_version, execution in ((retained, first), (latest, revised)):
+        rubrics_version_id = execution["rubrics_version_id"]
+        assert recipe_version["provenance"]["rubrics_version_id"] == rubrics_version_id
+        version = client.store.version_by_id(rubrics_version_id, "rubrics")
+        assert public.rubrics_get(recipe_id, recipe_version_id=recipe_version["id"]) == client.rubrics_get(
+            version["object_id"], version_id=rubrics_version_id
+        )
+
+    imported = client.recipe_insert(latest["content"], None)
+    with pytest.raises(NotFound):
+        public.rubrics_get(imported["id"], recipe_version_id=imported["active_version_id"])
+    with pytest.raises(NotFound):
+        public.rubrics_get(imported["id"], recipe_version_id=latest["id"])
+
+
+@pytest.mark.parametrize("source", ["analysis", "test_result", "current_revision", "stale_analysis", None])
+def test_rubrics_get_recovers_only_the_originating_legacy_revision(client, tmp_path, source):
+    initial = run(client, material(client, tmp_path)["id"])
+    client.run_pending(runtime=FileRuntime())
+    unrelated = existing_versioned_object(client, "rubrics", name="Later rubric", content={
+        "criteria": [{"id": "later", "description": "Check a later revision", "source": "agent_inference"}],
+    })
+    with client.store.transaction() as conn:
+        execution = client.store.get_in(conn, initial["id"], "execution")
+        recipe_id = execution["recipe_id"]
+        recipe_version_id = execution["recipe_version_id"]
+        rubrics_version_id = execution["rubrics_version_id"]
+        version = client.store.version_in(conn, recipe_id, recipe_version_id)
+        version["provenance"].pop("rubrics_version_id", None)
+        conn.execute("UPDATE versions SET data=? WHERE id=?", (json.dumps(version), recipe_version_id))
+        if source != "analysis":
+            conn.execute("UPDATE versions SET operation_key=NULL WHERE id=?", (rubrics_version_id,))
+        [original_test] = execution["test_results"]
+        later_test = {
+            **original_test,
+            "id": "later-replay",
+            "input_revision": execution["input_revision"] + 1,
+            "rubrics_version_id": unrelated["latest_version_id"],
+        }
+        execution["test_results"] = [original_test, later_test] if source == "test_result" else [later_test]
+        if source == "stale_analysis":
+            execution["analyzed_input_revision"] += 1
+        elif source != "current_revision":
+            execution["input_revision"] += 1
+            execution["rubrics_version_id"] = unrelated["latest_version_id"]
+        client.store.save(conn, execution)
+
+    public = PublicRSIClient(data_dir=client.data_dir)
+    if source in (None, "stale_analysis"):
+        with pytest.raises(NotFound):
+            public.rubrics_get(recipe_id, recipe_version_id=recipe_version_id)
+    else:
+        rubric = public.rubrics_get(recipe_id, recipe_version_id=recipe_version_id)
+        assert rubric["selected_version"]["id"] == rubrics_version_id
 
 
 def test_crash_reclaims_expired_run_and_resumes_checkpoint(client, tmp_path):
