@@ -7,6 +7,8 @@ import { USER_AGENT } from './chat-completions.js';
 import {
   RecipeReferenceSchema,
   RSIError,
+  TASK_INPUT_FILENAME,
+  TaskInputTextSchema,
   type Recipe,
   type RecipeReference,
 } from './models.js';
@@ -249,16 +251,26 @@ export class CloudClient {
   }
 
   async execution_create(request: {
-    evidence: EvidenceInput;
+    evidence: EvidenceInput & { input_text?: string };
     idempotency_key: string;
     recipe_reference?: RecipeReference;
   }) {
     if (!request?.idempotency_key)
       throw new TypeError('idempotency_key must be a nonempty string');
+    const inputText = TaskInputTextSchema.optional().parse(request.evidence?.input_text);
+    const evidence = await evidenceBody(request.evidence, request.recipe_reference);
+    if (inputText !== undefined) {
+      evidence.files.push({
+        name: TASK_INPUT_FILENAME,
+        content: inputText,
+        encoding: 'utf-8',
+        role: 'input',
+      });
+    }
     return this.request('POST', '/executions', {
       body: {
         idempotency_key: request.idempotency_key,
-        ...(await evidenceBody(request.evidence, request.recipe_reference)),
+        ...evidence,
       },
     });
   }
@@ -275,6 +287,8 @@ export class CloudClient {
   }
 
   async execution_append_evidence(id: string, evidence: EvidenceInput) {
+    if (Object.hasOwn(evidence ?? {}, 'input_text'))
+      throw new TypeError('input_text requires execution_create');
     const body = await evidenceBody(evidence);
     return this.request('POST', `/executions/${segment(id)}/evidence`, {
       body,

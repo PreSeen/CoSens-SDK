@@ -21,6 +21,7 @@ import { RSIClient as PublicRSIClient } from '../src/rsi/index.js';
 import { RecipeSchema, type Runtime } from '../src/rsi/models.js';
 import { Engine } from '../src/rsi/engine.js';
 import { ChatRuntime } from '../src/rsi/runtime.js';
+import { bindModelHeaders } from '../src/rsi/model-headers.js';
 import { buildRecipePackage } from '../src/rsi/recipe-package.js';
 import { seedLegacyRecipe, seedRecipe } from './recipe-fixtures.js';
 import {
@@ -2138,6 +2139,121 @@ test('recipe_list shows first-time learning and preserves the usable version dur
     client.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('current-case replay reads the user text without exposing the conversation or original artifact', async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'cosens-rsi-text-replay-'));
+  const base_url = 'http://127.0.0.1:1/v1';
+  const model_id = 'text-replay-fixture';
+  const api_key = 'text-replay-key';
+  const { name, value } = bindModelHeaders(base_url, model_id, { Authorization: `Bearer ${api_key}` });
+  const previous = process.env[name];
+  process.env[name] = value;
+  const host = new PublicRSIClient({
+    data_dir: directory, model_id, base_url, api_key, config: { auto_start: false },
+  });
+  const worker = new RSIClient({ data_dir: directory, auto_start: false });
+  t.after(() => {
+    host.close();
+    worker.close();
+    if (previous === undefined) delete process.env[name];
+    else process.env[name] = previous;
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const todo = '确认本周销售额\n核对退款金额\n发送周报\n';
+  const input_text = `保持原顺序写入 todo.md：\n${todo}`;
+  const context_path = join(directory, 'context.md');
+  const artifact = join(directory, 'todo.md');
+  const conversation = `User: ${input_text}\nAssistant: I created the historical output.`;
+  writeFileSync(context_path, conversation);
+  writeFileSync(artifact, todo);
+  const replayCatalogRoles: string[][] = [];
+  let replayText: string | undefined;
+  t.mock.method(globalThis, 'fetch', async (_url, options) => {
+    const input = JSON.parse(String(options.body));
+    const { evidence_catalog: catalog } = JSON.parse(input.messages[1].content);
+    const tools = new Set(input.tools.map((tool: { function: { name: string } }) => tool.function.name));
+    const reads = input.messages.filter((message: { role: string }) => message.role === 'tool');
+    let call: [string, object] | undefined;
+    if (tools.has('FeedbackExtraction')) {
+      call = ['FeedbackExtraction', { items: [] }];
+    } else if (tools.has('Analysis')) {
+      if (reads.length === 0) {
+        const context = catalog.find((entry: { role: string }) => entry.role === 'context');
+        call = ['read_evidence', { locator: context.locator }];
+      } else {
+        assert.equal(JSON.parse(reads[0].content).text, conversation);
+        call = ['Analysis', {
+          recipe_name: 'Write ordered tasks',
+          sufficient_information: true,
+          rubrics: {
+            criteria: [{ id: 'todo', description: 'Preserve task order', source: 'agent_inference' }],
+          },
+        }];
+      }
+    } else if (tools.has('RecipeContent')) {
+      call = ['RecipeContent', {
+        name: 'Write ordered tasks',
+        description: 'Create task files',
+        instructions: 'Put the supplied tasks into the requested file.',
+      }];
+    } else if (tools.has('Assessment')) {
+      call = ['Assessment', {
+        verifiable: true,
+        scores: [{ criterion_id: 'todo', score: 1, evidence: 'test/todo.md' }],
+        reason: 'Task order preserved',
+      }];
+    } else if (reads.length === 0) {
+      replayCatalogRoles.push(catalog.map((entry: { role: string }) => entry.role));
+      if (catalog.length) call = ['read_evidence', { locator: catalog[0].locator }];
+    } else if (reads.length === 1) {
+      const text: string = JSON.parse(reads[0].content).text;
+      replayText = text;
+      const [instruction, ...tasks] = text.split('\n');
+      const path = instruction.match(/[\w.-]+\.md/)?.[0];
+      if (path) call = ['write_output', { path, content: tasks.join('\n') }];
+    }
+    return Response.json({
+      choices: [{
+        finish_reason: call ? 'tool_calls' : 'stop',
+        message: {
+          role: 'assistant',
+          content: call ? null : 'Done',
+          tool_calls: call ? [{
+            id: `call-${reads.length}`,
+            type: 'function',
+            function: { name: call[0], arguments: JSON.stringify(call[1]) },
+          }] : [],
+        },
+      }],
+    });
+  });
+
+  const evidence = { context_path, files: [{ path: artifact, role: 'artifact' as const }] };
+  const original = await host.execution_create({ evidence, idempotency_key: 'context-only' });
+  await worker.run_pending();
+  const originalResult = await host.execution_get(original.id);
+  assert.equal(originalResult.status, 'completed', JSON.stringify(originalResult.error));
+  const [missing] = originalResult.test_results;
+  assert.equal(missing.status, 'unverifiable');
+  assert.equal(missing.reason, 'Recipe executor produced no verifiable output files');
+
+  const request = { evidence: { ...evidence, input_text }, idempotency_key: 'with-user-text' };
+  const withText = await host.execution_create(request);
+  assert.equal((await host.execution_create(request)).id, withText.id);
+  await assert.rejects(host.execution_create({
+    ...request,
+    evidence: { ...evidence, input_text: `${input_text}归档周报\n` },
+  }), /idempotency key reused with different arguments/);
+  await worker.run_pending();
+  const result = await host.execution_get(withText.id);
+  assert.equal(result.status, 'completed', JSON.stringify(result.error));
+  assert.deepEqual(replayCatalogRoles, [[], ['input']]);
+  assert.equal(replayText, input_text);
+  const [replayed] = result.test_results;
+  assert.equal(replayed.status, 'passed');
+  assert.deepEqual(replayed.artifacts.map(({ locator }) => locator), ['test/todo.md']);
+  assert.equal(readFileSync(replayed.artifacts[0].path, 'utf8'), todo);
 });
 
 test('direct model loop preserves tool order and correlates every response with its call', async (t) => {

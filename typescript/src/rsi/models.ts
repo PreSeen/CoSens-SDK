@@ -16,6 +16,11 @@ export const fail = (code: string, message: string): never => {
   throw new RSIError(code, message);
 };
 const text = z.string().min(1);
+export const TaskInputTextSchema = z.string().refine(
+  (value) => /\S/u.test(value) && !value.includes('\0'),
+  'input_text must contain non-whitespace text without NUL characters',
+);
+export const TASK_INPUT_FILENAME = 'task-input.txt';
 export const ModelConfigSchema = z.strictObject({
   model: text,
   base_url: z

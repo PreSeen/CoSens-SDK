@@ -182,6 +182,38 @@ test('cloud create uploads only the named files', async () => {
   });
 });
 
+test('cloud create uploads user text as a replay input', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'rsi-cloud-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const inputText = '按原顺序写入 todo.md：\n确认本周销售额\n核对退款金额\n发送周报\n';
+  const context = `[user] ${inputText}[assistant] Finished todo.md`;
+  const contextPath = join(dir, 'context.txt');
+  const artifactPath = join(dir, 'todo.md');
+  writeFileSync(contextPath, context);
+  writeFileSync(artifactPath, 'delivered output');
+
+  await withService({}, async (base_url, seen) => {
+    const client = new RSIClient({ mode: 'cloud', api_key: 'k', base_url });
+    await client.execution_create({
+      evidence: {
+        context_path: contextPath,
+        files: [{ path: artifactPath, role: 'artifact' }],
+        input_text: inputText,
+      },
+      idempotency_key: 'chat-delivery',
+    });
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0].body, {
+      idempotency_key: 'chat-delivery',
+      context: { name: 'context.txt', content: context, encoding: 'utf-8' },
+      files: [
+        { name: 'todo.md', content: 'delivered output', encoding: 'utf-8', role: 'artifact' },
+        { name: 'task-input.txt', content: inputText, encoding: 'utf-8', role: 'input' },
+      ],
+    });
+  });
+});
+
 test('cloud reads map to routes and errors keep their codes', async () => {
   await withService(
     {
