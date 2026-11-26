@@ -149,7 +149,7 @@ class ChatRuntime:
         by_locator = {f["locator"]: f for f in files}
         reads = []
         python_runs = []
-        python_enabled = workspace is not None and context.get("requires_python") is True
+        python_enabled = workspace is not None and bool(self.client.config.test_python_image)
         last_file = None
         long_page_messages = {}
 
@@ -483,8 +483,8 @@ class ChatRuntime:
             "Otherwise set sufficient_information=true, hypothesis=null and questions=[]. Limit applicability to what the evidence supports. "
             "Derive scoring criteria by combining task requirements and observed execution with the separately extracted user_feedback rules. Use extracted feedback for user_feedback criteria and carry over their source citations. Merge overlapping requirements into a single criterion. "
             "Each criterion must be verifiable on future executions. State the applicable condition for each conditional criterion and keep distinct scenarios separate so each can be verified independently. "
-            "Set rubrics.requires_python=true only when a task requirement explicitly calls for actual Python execution or Python-based validation, not when Python is just a possible implementation. "
-            "Cite sources only in each criterion's evidence field. Express the underlying requirement without including details specific to a past execution or requiring its replay. "
+            "Express required calculations, deliverables and checks as outcome criteria. Require a specific language, tool or method only when supported task requirements explicitly specify it. "
+            "Cite the sources for each criterion in its evidence field. Express the underlying requirement without including details specific to a past execution or requiring its replay. "
             "If fixed Rubrics are supplied, preserve their standard. "
             "When learning evidence contains corrective feedback or a documented correction, fill attribution.possible_causes. "
             "Describe the observed issue separately from a plausible reason, explain the uncertainty, and cite the exact material_id and locator of each source you read. "
@@ -511,6 +511,7 @@ class ChatRuntime:
             "The description briefly states what the Recipe does and when to use it. Write the procedure as Markdown in instructions. "
             "Correct verified test failures and failed objective checks. Do not change rules solely because a scenario was unverified. Use analysis.attribution to turn supported corrections into reusable steps or checks. "
             "Preserve the exact terms and values of requirements that the evidence establishes as fixed across executions. "
+            "Distinguish required execution methods from incidental tools used in a prior execution. Leave the choice of method open when the requirements permit it. "
             "Parameterize details supplied at execution time. A future executor must be able to apply the Recipe using the inputs available to that execution. "
             "Abstract evidence into rules and applicability conditions without copying case-specific details, evidence references or secrets. "
             "Treat uncertain causes as hypotheses and use conditional checks where the evidence supports them."
@@ -525,19 +526,13 @@ class ChatRuntime:
                 "Keep package files unchanged. "
             )
         python_instruction = ""
-        if context.get("requires_python") is True:
-            if context.get("package_files"):
-                python_instruction = (
-                    "Run supplied Python scripts with run_python without rewriting them. "
-                    "For a task-specific script, use write_output at a new scripts/ path. "
-                    "Use catalog sandbox_path values for inputs and workspace-relative paths for package assets. "
-                )
-            else:
-                python_instruction = (
-                    "Write a script under scripts/ with write_output, then call run_python with that path and any arguments. "
-                    "Use catalog sandbox_path values to read the authorized inputs. "
-                )
-            python_instruction += "Write deliverables to the current output directory. "
+        if self.client.config.test_python_image:
+            python_instruction = (
+                "You may use run_python when it helps satisfy the task. Run a staged script unchanged, "
+                "or use write_output at a new scripts/ path for a task-specific script. "
+                "Use catalog sandbox_path values for authorized inputs and write deliverables to the current output directory. "
+                "If the tool fails or is unavailable, use another permitted method if it satisfies the criteria. "
+            )
         return self._call(
             stage="recipe test executor",
             context=context,
@@ -546,9 +541,9 @@ class ChatRuntime:
             trace_path=trace_path,
             instruction=(
                 "Actually perform test_task using recipe.instructions. Read task inputs with read_evidence; "
-                "write the resulting deliverable files with write_output. "
+                "produce the resulting deliverable files in the test workspace with the available tools. "
                 f"{file_instruction}{python_instruction}"
-                "For every required check, execute it and report its observed result. "
+                "Follow the supplied Rubric criteria. For every required check, execute it and report its observed result. "
                 "If these tools cannot perform the task, explain the missing capability. Claim completion only when the required work was executed successfully. No shell or network tools exist."
             ),
         )
@@ -565,8 +560,9 @@ class ChatRuntime:
             "Never score a scenario absent from this run as zero, grant it credit, or infer its outcome from the Recipe. "
             "For an exercised criterion with sufficient evidence, use status=verified and a numeric score from 0 to 1. "
             "If the condition was exercised and the required behavior is observably missing or wrong, score that as a verified failure. "
-            "For criteria requiring execution of a particular check, require evidence of that check's actual execution and observed result in the executor trace. A source file, tool invocation alone, or an artifact claiming a check passed cannot establish this. "
+            "For criteria requiring actual execution of a script, method or check, require observed evidence of its successful execution and result in the executor trace. A source file, tool invocation alone, or an artifact claiming a check passed cannot establish this. "
+            "Accept an alternative execution method only when it satisfies the criterion. A failed or unavailable optional tool call alone does not invalidate a result supported by other observed evidence. "
             "If an applicable criterion cannot be judged from the available evidence, mark it unverified and set verifiable=false. "
-            "A scenario simply not exercised does not make the entire test unverifiable. "
+            "A scenario simply not exercised does not make the entire test unverifiable. Skipping an applicable required operation does not make its condition unexercised: score an observed failure or omission as a verified failure, and set verifiable=false when execution evidence is unavailable. "
             "Base judgments on actual evidence and do not seek learning files.",
         )

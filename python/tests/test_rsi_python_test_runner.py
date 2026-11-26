@@ -7,11 +7,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 pytest.importorskip("langgraph.checkpoint.sqlite")
 
 from cosens.rsi import RSIClient
 from cosens.rsi.chat_completions import Assistant
+from cosens.rsi.models import RubricsContent, parse_stored_rubrics
 from cosens.rsi.python_runner import _installed_image
 
 
@@ -68,31 +70,65 @@ def gateway(completion):
             server.shutdown()
             thread.join()
 
+def test_stored_rubrics_ignore_obsolete_python_flag():
+    criteria = [{
+        "id": "verified_csv",
+        "description": "Verify the calculated quantities",
+        "source": "agent_inference",
+        "evidence": [],
+        "required": True,
+    }]
+    legacy = {"criteria": criteria, "pass_threshold": 0.9, "requires_python": True}
+    with pytest.raises(ValidationError, match="requires_python"):
+        RubricsContent.model_validate(legacy)
+    assert parse_stored_rubrics(legacy) == {"criteria": criteria, "pass_threshold": 0.9}
+    assert legacy["requires_python"] is True
+
 
 @pytest.mark.parametrize(
     ("mode", "test_status"),
     [
         ("docker", "passed"),
-        ("nonzero", "failed"),
-        ("unavailable", "unverifiable"),
-        ("unconfigured", "unverifiable"),
+        ("nonzero", "passed"),
+        ("unavailable", "passed"),
+        ("rejected", "passed"),
+        ("unconfigured", "passed"),
         ("skipped", "failed"),
         ("text", "passed"),
+        ("incidental", "passed"),
     ],
 )
-def test_recipe_replay_python_requirements(tmp_path, monkeypatch, mode, test_status):
+def test_recipe_replay_with_optional_python(tmp_path, monkeypatch, mode, test_status):
     image = "python:3.12-slim"
-    requires_python = mode != "text"
+    python_configured = mode not in {"unconfigured", "incidental"}
+    execution_required = mode in {"docker", "skipped"}
+    criterion_description = (
+        "Run the Python check and verify the calculated quantities in the resulting CSV"
+        if execution_required
+        else "Verify the calculated quantities in the output CSV"
+    )
     if mode in {"docker", "nonzero"} and _installed_image(image) is None:
         pytest.skip("Docker and the locally installed Python test image are required")
     if mode == "unavailable":
         monkeypatch.setattr("cosens.rsi.python_runner._installed_image", lambda _image: None)
-    context = tmp_path / "task-context.md"
-    context.write_text(
-        "The user requires actually running Python to compute and verify a CSV deliverable."
-        if requires_python
-        else "The user requires a CSV deliverable based on the supplied evidence."
+    python_quote = "Run Python to compute and verify the CSV deliverable."
+    outcome_requirement = (
+        "Compute the totals, deliver a CSV summary and a Markdown report, "
+        "and check the numbers agree."
     )
+    if mode == "incidental":
+        context = tmp_path / "task-context.json"
+        context.write_text(json.dumps({
+            "version": 1,
+            "messages": [
+                {"type": "user", "text": outcome_requirement},
+                {"type": "assistant", "content": python_quote},
+            ],
+            "feedback": "",
+        }))
+    else:
+        context = tmp_path / "task-context.md"
+        context.write_text(python_quote if execution_required else outcome_requirement)
     current = tmp_path / "current.csv"
     current.write_text("quantity\n6\n")
     historical = tmp_path / "archived-data.csv"
@@ -144,23 +180,25 @@ print('Read-only input and calculated quantity verified')
             return tool_reply("FeedbackExtraction", {"items": []})
         if "Analysis" in tools:
             source = catalog[0]
+            evidence = {
+                "material_id": source["material_id"],
+                "locator": source["locator"],
+            }
+            assert "requires_python" not in json.dumps(definitions)
             return tool_reply("Analysis", {
                 "recipe_name": "Compute verified quantities",
                 "sufficient_information": True,
                 "rubrics": {
-                    "requires_python": requires_python,
                     "criteria": [{
                         "id": "verified_csv",
-                        "description": "Verify the calculated quantities in the output CSV",
+                        "description": criterion_description,
                         "source": "task",
-                        "evidence": [{
-                            "material_id": source["material_id"],
-                            "locator": source["locator"],
-                        }],
+                        "evidence": [evidence],
                     }],
                 },
             })
         if "RecipeContent" in tools:
+            assert "requires_python" not in payload["context"]["analysis"]["rubrics"]
             return tool_reply("RecipeContent", {
                 "name": "Compute verified quantities",
                 "description": "Calculate and verify CSV quantities",
@@ -168,32 +206,52 @@ print('Read-only input and calculated quantity verified')
             })
         if "Assessment" in tools:
             assert "run_python" not in tools
-            assert payload["context"]["rubrics"].get("requires_python", False) is requires_python
+            assert "requires_python" not in payload["context"]["rubrics"]
             if not responses:
                 return tool_reply("read_evidence", {"locator": "test/verified.csv"})
             assert responses[0]["text"] == expected
-            if requires_python:
+            if execution_required or mode in {"unavailable", "rejected", "nonzero"}:
                 if len(responses) == 1:
                     return tool_reply("read_evidence", {"locator": "test/executor-trace.json"})
                 trace = json.loads(responses[1]["text"])
-                assert trace["python_runs"][0]["exit_code"] == 0
-                assert "calculated quantity verified" in trace["python_runs"][0]["stdout"]
+                if mode == "docker":
+                    assert trace["python_runs"][0]["exit_code"] == 0
+                    assert "calculated quantity verified" in trace["python_runs"][0]["stdout"]
+                elif mode == "skipped":
+                    assert "python_runs" not in trace
+                elif mode == "nonzero":
+                    assert trace["python_runs"][0]["exit_code"] == 17
+                else:
+                    assert trace["python_runs"][0]["status"] == mode
+                    assert trace["python_runs"][0]["exit_code"] is None
             assessed.append(True)
             return tool_reply("Assessment", {
                 "verifiable": True,
                 "scores": [{
                     "criterion_id": "verified_csv",
                     "status": "verified",
-                    "score": 1,
-                    "evidence": "Verified calculated values in test/verified.csv",
+                    "score": 0 if mode == "skipped" else 1,
+                    "evidence": (
+                        "The required Python execution is absent from the executor trace"
+                        if mode == "skipped"
+                        else "Verified calculated values in test/verified.csv"
+                    ),
                 }],
-                "reason": "Verified the Python run and calculated output",
+                "reason": (
+                    "No observed execution for a required check"
+                    if mode == "skipped"
+                    else "Verified the calculated output"
+                ),
             })
-        assert mode != "unconfigured", "The executor should not start without required Python"
-        assert ("run_python" in tools) is requires_python
-        assert payload["context"].get("requires_python", False) is requires_python
+        assert ("run_python" in tools) is python_configured
+        assert "requires_python" not in payload["context"]
+        assert payload["context"]["criteria"] == [{
+            "id": "verified_csv",
+            "description": criterion_description,
+            "required": True,
+        }]
         assert len(catalog) == 1 and catalog[0]["role"] == "input"
-        if not requires_python:
+        if not python_configured:
             assert "sandbox_path" not in catalog[0]
             if not responses:
                 return tool_reply("write_output", {"path": "verified.csv", "content": expected})
@@ -203,15 +261,21 @@ print('Read-only input and calculated quantity verified')
             return Assistant(role="assistant", content="The CSV is ready for verification.")
         assert catalog[0]["sandbox_path"].endswith("/current.csv")
         if not responses:
-            if mode == "skipped":
+            if mode in {"skipped", "text"}:
                 return tool_reply("write_output", {"path": "verified.csv", "content": expected})
+            if mode == "rejected":
+                return tool_reply("run_python", {"path": "scripts/missing.py"})
             source = "raise SystemExit(17)" if mode == "nonzero" else script
             return tool_reply("write_output", {"path": "scripts/verify.py", "content": source})
-        if len(responses) == 1 and mode != "skipped":
+        if len(responses) == 1 and mode in {"docker", "unavailable", "nonzero"}:
             return tool_reply("run_python", {
                 "path": "scripts/verify.py",
                 "args": [catalog[0]["sandbox_path"], "2"],
             })
+        if (mode == "rejected" and len(responses) == 1) or (
+            mode in {"unavailable", "nonzero"} and len(responses) == 2
+        ):
+            return tool_reply("write_output", {"path": "verified.csv", "content": expected})
         return Assistant(role="assistant", content="The verification finished.")
 
     detached = mode == "docker"
@@ -225,7 +289,7 @@ print('Read-only input and calculated quantity verified')
             api_key="synthetic-fixture",
             config={
                 "auto_start": detached,
-                **({"test_python_image": image} if mode not in {"unconfigured", "text"} else {}),
+                **({"test_python_image": image} if python_configured else {}),
             },
         )
         accepted = client.execution_create(
@@ -248,14 +312,9 @@ print('Read-only input and calculated quantity verified')
     assert execution["status"] == "completed", execution
     assert execution["result"]["test_status"] == test_status, execution
     assert execution["result"]["published"] is (test_status == "passed")
-    assert bool(assessed) is (test_status == "passed")
+    assert len(assessed) == (2 if test_status == "failed" else 1)
     assert len(execution["test_results"]) == (2 if test_status == "failed" else 1)
     tested = execution["test_results"][-1]
-    if mode == "unconfigured":
-        assert "test_python_image" in tested["reason"]
-        assert "trace_path" not in tested
-        assert not tested["artifacts"]
-        return
     trace = json.loads(Path(tested["trace_path"]).read_text())
     assert "HISTORICAL_RECORD" not in json.dumps(trace)
     assert all("scripts/" not in artifact["locator"] for artifact in tested["artifacts"])
@@ -263,11 +322,5 @@ print('Read-only input and calculated quantity verified')
         assert tested["score"] == 1
         assert Path(tested["artifacts"][0]["path"]).read_text() == expected
         assert client.recipe_get(execution["recipe_id"])["active_version_id"] == tested["version_id"]
-        if not requires_python:
-            assert "python_runs" not in trace
-    elif mode == "nonzero":
-        assert trace["python_runs"][0]["exit_code"] == 17
-    elif mode == "unavailable":
-        assert trace["python_runs"][0]["status"] == "unavailable"
-    else:
+    if mode in {"unconfigured", "incidental", "text", "skipped"}:
         assert "python_runs" not in trace

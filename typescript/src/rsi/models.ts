@@ -130,13 +130,19 @@ export const RubricsSchema = z
       )
       .min(1),
     pass_threshold: z.number().min(0).max(1).default(0.8),
-    requires_python: z.boolean().optional(),
   })
   .refine(
     (r) => new Set(r.criteria.map((c) => c.id)).size === r.criteria.length,
     'criterion IDs must be unique',
   );
 export type RubricsContent = z.input<typeof RubricsSchema>;
+export function parseStoredRubrics(content: unknown) {
+  if (content && typeof content === 'object' && 'requires_python' in content) {
+    const { requires_python: _legacy, ...rubrics } = content;
+    return RubricsSchema.parse(rubrics);
+  }
+  return RubricsSchema.parse(content);
+}
 export const QuestionSchema = z
   .strictObject({
     id: text,

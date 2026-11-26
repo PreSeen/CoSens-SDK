@@ -13,6 +13,7 @@ from .models import (
     InputChanged,
     ModelOutputError,
     RecipeContent,
+    parse_stored_rubrics,
 )
 from .portability import LearningLiterals, recipe_rule_text, rubric_rule_text
 from .recipe_package import (
@@ -142,9 +143,9 @@ class Engine:
                 "analysis": {
                     **execution["analysis"],
                     "questions": execution["questions"],
-                    "rubrics": self.store.version_by_id(rubrics_version_id, "rubrics")[
-                        "content"
-                    ],
+                    "rubrics": parse_stored_rubrics(
+                        self.store.version_by_id(rubrics_version_id, "rubrics")["content"]
+                    ),
                 },
                 "rubrics_version_id": rubrics_version_id,
             }
@@ -156,9 +157,9 @@ class Engine:
             "rubrics_version_id"
         )
         if fixed_rubrics_id:
-            context["fixed_rubrics"] = self.store.version_by_id(
-                fixed_rubrics_id, "rubrics"
-            )["content"]
+            context["fixed_rubrics"] = parse_stored_rubrics(
+                self.store.version_by_id(fixed_rubrics_id, "rubrics")["content"]
+            )
         files = self.files(execution)
         literals = self.learning_literals(execution)
         feedback = None
@@ -263,7 +264,10 @@ class Engine:
         context = {
             **self.context(execution),
             "recipe_name": recipe_name,
-            "analysis": state["analysis"],
+            "analysis": {
+                **state["analysis"],
+                "rubrics": parse_stored_rubrics(state["analysis"]["rubrics"]),
+            },
             "previous_test": state.get("test"),
         }
         base_id = state.get("version_id") or execution.get("base_recipe_version_id")
@@ -356,7 +360,7 @@ class Engine:
             return {"test": previous}
         recipe = self.store.version(state["recipe_id"], state["version_id"])
         rubric = self.store.version_by_id(state["rubrics_version_id"], "rubrics")
-        requires_python = rubric["content"].get("requires_python", False)
+        rubrics = parse_stored_rubrics(rubric["content"])
         task = execution["policy"].get("test_task")
         result = {
             "id": test_id,
@@ -376,10 +380,6 @@ class Engine:
             result["reason"] = (
                 "Host did not supply a reproducible test task; Recipe is not validated"
             )
-        elif requires_python and not self.client.config.test_python_image:
-            result["reason"] = (
-                "Required Python execution is not configured (set test_python_image)"
-            )
         else:
             test_files = self.files(execution, test=True)
             literals = self.learning_literals(
@@ -389,16 +389,14 @@ class Engine:
             )
             # Existing versions must pass the same boundary without rewriting their rules.
             if literals.found_in(recipe_rule_text(recipe["content"])) or literals.found_in(
-                rubric_rule_text(rubric["content"])
+                rubric_rule_text(rubrics)
             ):
                 raise ModelOutputError("Test rules contain learning-only literals")
-            python_requirement = {"requires_python": True} if requires_python else {}
             test_rubrics = {
-                "pass_threshold": rubric["content"]["pass_threshold"],
-                **python_requirement,
+                "pass_threshold": rubrics["pass_threshold"],
                 "criteria": [
                     {field: c[field] for field in ("id", "description", "required")}
-                    for c in rubric["content"]["criteria"]
+                    for c in rubrics["criteria"]
                 ],
             }
             attempt = self.directory(state) / ("test-" + uid("attempt"))
@@ -426,8 +424,8 @@ class Engine:
                 {
                     "test_task": {"instruction": task["instruction"]},
                     "recipe": instructions,
+                    "criteria": test_rubrics["criteria"],
                     **({"package_files": sorted(package_files)} if package_files else {}),
-                    **python_requirement,
                 },
                 test_files,
                 workspace,
@@ -474,30 +472,7 @@ class Engine:
                 trace_path=str(attempt / "executor-trace.json"),
             )
 
-            python_runs = {}
-            if requires_python and isinstance(executor_result, dict):
-                receipts = executor_result.get("python_runs")
-                if isinstance(receipts, list):
-                    python_runs = {run["path"]: run for run in receipts}
-            python_passed = bool(python_runs) and all(
-                run["status"] == "completed" and run["exit_code"] == 0
-                for run in python_runs.values()
-            )
-            if requires_python and not python_passed:
-                unavailable = next(
-                    (run for run in python_runs.values() if run["status"] == "unavailable"),
-                    None,
-                )
-                result.update(
-                    status="unverifiable" if unavailable else "failed",
-                    reason=(
-                        unavailable.get("stderr")
-                        or "Python sandbox is unavailable for Recipe validation"
-                        if unavailable
-                        else "Recipe executor did not complete required Python execution"
-                    ),
-                )
-            elif not artifacts:
+            if not artifacts:
                 result["reason"] = "Recipe executor produced no verifiable output files"
             else:
                 checks = self.objective_checks(workspace, task["checks"])
@@ -536,7 +511,7 @@ class Engine:
                     evaluator_trace_path=str(attempt / "evaluator-trace.json"),
                 )
                 if assessment["verifiable"]:
-                    criteria = rubric["content"]["criteria"]
+                    criteria = rubrics["criteria"]
                     scores = {
                         s["criterion_id"]: s["score"] for s in assessment["scores"]
                     }
@@ -553,7 +528,7 @@ class Engine:
                         result["score"] = sum(verified_scores.values()) / len(
                             verified_scores
                         )
-                    threshold = rubric["content"]["pass_threshold"]
+                    threshold = rubrics["pass_threshold"]
                     if not all(c["passed"] for c in checks):
                         result["status"] = "failed"
                     elif result["score"] is not None:

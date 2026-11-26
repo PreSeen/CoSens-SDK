@@ -155,13 +155,19 @@ class Criterion(Contract):
 class RubricsContent(Contract):
     criteria: list[Criterion] = Field(min_length=1)
     pass_threshold: float = Field(default=0.8, ge=0, le=1)
-    requires_python: bool = False
 
     @model_validator(mode="after")
     def unique_ids(self):
         if len({c.id for c in self.criteria}) != len(self.criteria):
             raise ValueError("criterion IDs must be unique")
         return self
+
+
+def parse_stored_rubrics(content):
+    # Ignore the obsolete tool requirement in stored Rubrics and checkpoints.
+    normalized = dict(content)
+    normalized.pop("requires_python", None)
+    return RubricsContent.model_validate(normalized).model_dump()
 
 
 class Option(Contract):

@@ -24,13 +24,12 @@ import {
   stageRecipePackageFiles,
 } from './recipe-package.js';
 import { freezeTaskArtifact } from './task.js';
-import type { PythonRun } from './test-python.js';
 import {
   AnalysisSchema,
   FeedbackExtractionSchema,
   AssessmentSchema,
   RecipeSchema,
-  RubricsSchema,
+  parseStoredRubrics,
   RSIError,
   fail,
   type Analysis,
@@ -157,7 +156,7 @@ export class Engine {
         analysis: {
           ...execution.analysis!,
           questions: execution.questions,
-          rubrics: RubricsSchema.parse(
+          rubrics: parseStoredRubrics(
             this.store.version_by_id(execution.rubrics_version_id!, 'rubrics')
               .content,
           ),
@@ -167,7 +166,7 @@ export class Engine {
     }
     const fixed = execution.test_request?.rubrics_version_id;
     const fixedRubrics = fixed
-      ? RubricsSchema.parse(this.store.version_by_id(fixed, 'rubrics').content)
+      ? parseStoredRubrics(this.store.version_by_id(fixed, 'rubrics').content)
       : undefined;
     const files = this.evidence(execution);
     const literals = this.learningLiterals(execution);
@@ -351,7 +350,10 @@ export class Engine {
     const context: Record<string, unknown> = {
       ...this.context(execution),
       recipe_name: this.store.executionRecipeName(execution),
-      analysis: state.analysis,
+      analysis: state.analysis && {
+        ...state.analysis,
+        rubrics: parseStoredRubrics(state.analysis.rubrics),
+      },
       previous_test: state.test,
       base_recipe:
         base?.content ??
@@ -466,11 +468,7 @@ export class Engine {
       result.version_id,
     );
     const rubricVersion = this.store.version_by_id(state.rubric, 'rubrics');
-    const rubrics = RubricsSchema.parse(rubricVersion.content);
-    if (rubrics.requires_python && !this.client.config.test_python_image) {
-      result.reason = 'Required Python execution is not configured (set test_python_image)';
-      return;
-    }
+    const rubrics = parseStoredRubrics(rubricVersion.content);
     const literals = this.learningLiterals(
       execution,
       recipe.provenance.execution_id,
@@ -484,7 +482,6 @@ export class Engine {
       fail('invalid_model_output', 'Test rules contain learning-only literals');
     const testRubrics = {
       pass_threshold: rubrics.pass_threshold,
-      ...(rubrics.requires_python ? { requires_python: true } : {}),
       criteria: rubrics.criteria.map(({ id, description, required }) => ({
         id,
         description,
@@ -515,11 +512,11 @@ export class Engine {
       {
         recipe: recipe.content,
         test_task: { instruction: task.instruction },
+        criteria: testRubrics.criteria,
         ...(resources.size ? {
           package_files: [...resources.keys()].sort(),
           package_usage: 'Use staged package files at their exact paths. Keep them unchanged.',
         } : {}),
-        ...(rubrics.requires_python ? { requires_python: true } : {}),
       },
       inputs,
       workspace,
@@ -542,31 +539,6 @@ export class Engine {
           'Actual Recipe test output',
         ),
       );
-    const latestRuns = new Map<string, PythonRun>();
-    if (
-      rubrics.requires_python && summary && typeof summary === 'object' &&
-      'python_runs' in summary && Array.isArray(summary.python_runs)
-    ) {
-      for (const run of summary.python_runs as PythonRun[]) latestRuns.set(run.path, run);
-    }
-    const runs = [...latestRuns.values()];
-    const unavailable = runs.find((run) => run.status === 'unavailable');
-    const failed = runs.find((run) => run.exit_code !== 0);
-    if (unavailable) {
-      result.reason = unavailable.stderr;
-      atomic_json(join(attempt, 'result.json'), result);
-      return;
-    }
-    if (failed || (rubrics.requires_python && !runs.length)) {
-      result.status = 'failed';
-      result.reason = failed?.status === 'rejected'
-        ? failed.stderr
-        : failed
-          ? `Python script ${failed.path} exited with code ${failed.exit_code}`
-          : 'Required Python execution was skipped';
-      atomic_json(join(attempt, 'result.json'), result);
-      return;
-    }
     if (!result.artifacts.length) {
       result.reason = 'Recipe executor produced no verifiable output files';
       return;

@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { RSIClient } from 'cosens-sdk/rsi';
 import { RSIClient as QueueClient } from '../src/rsi/client.js';
+import { parseStoredRubrics, RubricsSchema } from '../src/rsi/models.js';
 
 const image = process.env.RSI_TEST_PYTHON_IMAGE ?? 'python:3.12-slim';
 const dockerAvailable = spawnSync('docker', ['image', 'inspect', image], {
@@ -48,7 +49,22 @@ print("Input count, data isolation, network and filesystem checks passed")
 
 const report = 'channel,sales\nonline,28\nstore,14\ntotal,42\n';
 
-for (const mode of ['run', 'skip', 'unavailable', 'unconfigured', 'nonzero', 'text'] as const) {
+test('stored Rubrics ignore the former Python flag without changing their criteria', () => {
+  const criteria = [{
+    id: 'total',
+    description: 'Verify the sales total',
+    source: 'agent_inference',
+    evidence: [],
+    required: true,
+  }];
+  const legacy = { criteria, pass_threshold: 0.9, requires_python: true };
+  assert.equal(RubricsSchema.safeParse(legacy).success, false);
+  assert.deepEqual(parseStoredRubrics(legacy), { criteria, pass_threshold: 0.9 });
+});
+
+for (const mode of [
+  'run', 'nonzero', 'fallback', 'available-unused', 'unconfigured', 'text',
+] as const) {
   test(`local recipe test Python runner: ${mode}`, {
     skip: (mode === 'run' || mode === 'nonzero') && !dockerAvailable,
   }, async () => {
@@ -57,10 +73,15 @@ for (const mode of ['run', 'skip', 'unavailable', 'unconfigured', 'nonzero', 'te
     const contextPath = join(root, 'context.md');
     const current = join(root, 'current.csv');
     const history = join(root, 'prior.csv');
-    const requiresPython = mode !== 'text';
-    writeFileSync(contextPath, requiresPython
-      ? 'The task explicitly requires Python to calculate sales totals and run automated checks.'
-      : 'The task requires a sales report based on the supplied data.');
+    const needsRealExecution = mode === 'run' || mode === 'nonzero' || mode === 'unconfigured';
+    const pythonConfigured = mode !== 'text' && mode !== 'unconfigured';
+    const attemptsPython = mode === 'run' || mode === 'nonzero' || mode === 'fallback';
+    const criterionDescription = needsRealExecution
+      ? 'Run Python to calculate and verify the total'
+      : 'Calculate and verify the total';
+    writeFileSync(contextPath, needsRealExecution
+      ? '必须用 Python 计算销售额并执行校验。'
+      : '计算净销售额，输出 CSV 汇总，并核对各渠道与总计。');
     writeFileSync(current, 'channel,sales\nonline,28\nstore,14\n');
     writeFileSync(history, 'channel,sales\nhistoric,5000\n');
     let assessments = 0;
@@ -71,7 +92,7 @@ for (const mode of ['run', 'skip', 'unavailable', 'unconfigured', 'nonzero', 'te
         const request = JSON.parse(body);
         const tools = new Set(request.tools.map((tool: { function: { name: string } }) => tool.function.name));
         const messages = request.messages as { role: string; content?: string }[];
-        const catalog = JSON.parse(messages[1].content!).evidence_catalog;
+        const { context, evidence_catalog: catalog } = JSON.parse(messages[1].content!);
         const outputs = messages.filter((message) => message.role === 'tool');
         let call: [string, object] | undefined;
         if (tools.has('FeedbackExtraction')) {
@@ -81,9 +102,8 @@ for (const mode of ['run', 'skip', 'unavailable', 'unconfigured', 'nonzero', 'te
             recipe_name: 'Calculate sales totals',
             sufficient_information: true,
             rubrics: {
-              requires_python: requiresPython,
               criteria: [{
-                id: 'verified-total', description: 'Calculate and verify the total',
+                id: 'verified-total', description: criterionDescription,
                 source: 'agent_inference',
               }],
             },
@@ -92,50 +112,60 @@ for (const mode of ['run', 'skip', 'unavailable', 'unconfigured', 'nonzero', 'te
           call = ['RecipeContent', {
             name: 'Calculate sales totals',
             description: 'Summarize tabular sales',
-            instructions: requiresPython
-              ? 'Run a Python script to aggregate by channel and verify the result.'
-              : 'Aggregate sales by channel and verify the result.',
+            instructions: criterionDescription,
           }];
         } else if (tools.has('Assessment')) {
           assessments++;
-          if (outputs.length === 0) {
+          if (mode === 'unconfigured' && outputs.length === 0) {
+            call = ['read_evidence', { locator: 'trace/executor.json' }];
+          } else if (mode === 'unconfigured') {
+            const trace = JSON.parse(JSON.parse(outputs[0].content!).text);
+            assert.equal(trace.python_runs, undefined);
+            call = ['Assessment', {
+              verifiable: false,
+              scores: [{
+                criterion_id: 'verified-total', status: 'unverified',
+                score: null, evidence: 'No successful Python execution was observed.',
+              }],
+              reason: 'Required script execution could not be verified',
+            }];
+          } else if (outputs.length === 0) {
             call = ['read_evidence', { locator: 'test/report.csv' }];
-          } else if (requiresPython && outputs.length === 1) {
+          } else if (mode === 'run' && outputs.length === 1) {
             assert.match(outputs[0].content!, /online,28\\r\\nstore,14\\r\\ntotal,42/);
             call = ['read_evidence', { locator: 'trace/executor.json' }];
           } else {
-            if (requiresPython) {
+            if (mode === 'run') {
               assert.match(outputs[1].content!, /Input count, data isolation, network and filesystem checks passed/);
             } else {
               assert.equal(JSON.parse(outputs[0].content!).text, report);
             }
             call = ['Assessment', {
               verifiable: true,
-              scores: [{ criterion_id: 'verified-total', score: 1, evidence: 'Verified report.csv and actual exit code' }],
+              scores: [{ criterion_id: 'verified-total', score: 1, evidence: 'Verified report.csv' }],
               reason: 'Computed and verified',
             }];
           }
         } else {
-          assert.notEqual(mode, 'unconfigured', 'The executor should not start without required Python');
-          assert.equal(tools.has('run_python'), requiresPython);
+          assert.equal(tools.has('run_python'), pythonConfigured);
+          assert.deepEqual(context.criteria, [
+            { id: 'verified-total', description: criterionDescription, required: true },
+          ]);
           assert.deepEqual(catalog.map((entry: { role: string }) => entry.role), ['input']);
-          if (!requiresPython) {
-            assert.equal(catalog[0].sandbox_path, undefined);
+          if (!attemptsPython) {
+            assert.equal(typeof catalog[0].sandbox_path, pythonConfigured ? 'string' : 'undefined');
             if (outputs.length === 0) {
               call = ['write_output', { path: 'report.csv', content: report }];
-            } else if (outputs.length === 1) {
-              call = ['run_python', { path: 'scripts/unneeded.py' }];
-            } else {
-              assert.equal(outputs[1].content, 'Unknown or unauthorized tool.');
             }
-          } else if (outputs.length === 0 && mode === 'skip') {
-            call = ['write_output', { path: 'report.csv', content: report }];
           } else if (outputs.length === 0) {
             const code = mode === 'nonzero' ? script + '\nraise SystemExit(4)\n' : script;
             call = ['write_output', { path: 'scripts/stats.py', content: code }];
-          } else if (outputs.length === 1 && mode !== 'skip') {
+          } else if (outputs.length === 1) {
             assert.match(catalog[0].sandbox_path, /^\/workspace\/inputs\/material_[^/]+\/1\/current\.csv$/);
             call = ['run_python', { path: 'scripts/stats.py', args: [catalog[0].sandbox_path] }];
+          } else if (mode === 'fallback' && outputs.length === 2) {
+            assert.equal(JSON.parse(outputs[1].content!).status, 'unavailable');
+            call = ['write_output', { path: 'report.csv', content: report }];
           }
         }
         res.setHeader('Content-Type', 'application/json');
@@ -164,9 +194,9 @@ for (const mode of ['run', 'skip', 'unavailable', 'unconfigured', 'nonzero', 'te
       api_key: 'fixture',
       config: {
         auto_start: true,
-        ...(mode === 'unconfigured' || mode === 'text' ? {} : {
-          test_python_image: mode === 'unavailable' ? 'cosens-rsi-test:missing-' + process.pid : image,
-        }),
+        ...(pythonConfigured ? {
+          test_python_image: mode === 'fallback' ? 'cosens-rsi-test:missing-' + process.pid : image,
+        } : {}),
       },
     });
     const reader = new QueueClient({ data_dir, auto_start: false });
@@ -181,20 +211,23 @@ for (const mode of ['run', 'skip', 'unavailable', 'unconfigured', 'nonzero', 'te
       const complete = await reader.wait(started.id, { timeout: 35, poll_interval: 0.05 });
       assert.equal(complete.status, 'completed', JSON.stringify(complete.error));
       const attempt = complete.test_results.at(-1)!;
-      if (mode === 'unconfigured') {
-        assert.equal(complete.result?.published, false);
-        assert.equal(assessments, 0);
-        assert.equal(attempt.status, 'unverifiable');
-        assert.match(attempt.reason!, /test_python_image/);
-        assert.equal(attempt.trace_path, undefined);
-        assert.deepEqual(attempt.artifacts, []);
-        return;
-      }
       const trace = JSON.parse(readFileSync(attempt.trace_path!, 'utf8'));
       assert.doesNotMatch(JSON.stringify(trace), /prior\.csv|historic,5000/);
-      if (mode === 'run' || mode === 'text') {
+      if (mode === 'unconfigured' || mode === 'nonzero') {
+        assert.equal(complete.result?.published, false);
+        assert.equal(attempt.status, 'unverifiable');
+        if (mode === 'unconfigured') {
+          assert.equal(assessments, 2);
+          assert.match(attempt.reason!, /script execution could not be verified/);
+          assert.equal(trace.python_runs, undefined);
+        } else {
+          assert.equal(assessments, 0);
+          assert.deepEqual(attempt.artifacts, []);
+          assert.equal(trace.python_runs[0].exit_code, 4);
+        }
+      } else {
+        assert.equal(complete.result?.test_status, 'passed', attempt.reason);
         assert.equal(complete.result?.published, true, attempt.reason);
-        assert.equal(complete.result?.test_status, 'passed');
         assert.equal(attempt.score, 1);
         const recipe = await client.recipe_get(attempt.recipe_id);
         assert.equal(recipe.active_version_id, attempt.version_id);
@@ -208,24 +241,12 @@ for (const mode of ['run', 'skip', 'unavailable', 'unconfigured', 'nonzero', 'te
         } else {
           assert.equal(assessments, 2);
           assert.equal(readFileSync(attempt.artifacts[0].path, 'utf8'), report);
-          assert.equal(trace.python_runs, undefined);
-        }
-      } else {
-        assert.equal(complete.result?.published, false);
-        assert.equal(assessments, 0);
-        if (mode === 'skip') {
-          assert.equal(attempt.status, 'failed');
-          assert.match(attempt.reason!, /Python execution was skipped/);
-          assert.equal(trace.python_runs, undefined);
-        } else if (mode === 'unavailable') {
-          assert.equal(attempt.status, 'unverifiable');
-          assert.equal(complete.test_results.length, 1);
-          assert.equal(trace.python_runs[0].status, 'unavailable');
-          assert.equal(trace.python_runs[0].exit_code, null);
-        } else {
-          assert.equal(attempt.status, 'failed');
-          assert.deepEqual(attempt.artifacts, []);
-          assert.equal(trace.python_runs[0].exit_code, 4);
+          if (mode === 'fallback') {
+            assert.equal(trace.python_runs[0].status, 'unavailable');
+            assert.equal(trace.python_runs[0].exit_code, null);
+          } else {
+            assert.equal(trace.python_runs, undefined);
+          }
         }
       }
     } finally {

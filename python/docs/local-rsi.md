@@ -253,11 +253,11 @@ TS 用 `execution_list({ execution_ids: [id1, id2] })`，Python 用 `execution_l
 
 ### 测试中运行 Python
 
-当 Rubric 要求运行 Python 且本地 Client 配置了 `test_python_image`，测试模型可用 `write_output` 把脚本写到 `scripts/`，再调用 `run_python({ path, args })`。`path` 是脚本相对路径，`args` 是参数数组，省略时为 `[]`。Docker 使用本机已有镜像。脚本在 `/workspace/outputs` 中运行，从 `/workspace/inputs` 读取本轮获准测试的只读文件。工具将真实退出码、标准输出和标准错误写入测试轨迹。测试产物由隔离工作区收集，待运行脚本与产物分开。
+本地 Client 配置了 `test_python_image` 时，回放可选用 `run_python({ path, args })`。测试模型可用 `write_output` 将脚本写到 `scripts/`。`path` 是脚本相对路径，`args` 是参数数组，省略时为 `[]`。Docker 使用本机已有镜像。脚本在 `/workspace/outputs` 中运行，从 `/workspace/inputs` 读取本轮获准测试的只读文件。工具将真实退出码、标准输出和标准错误写入测试轨迹。测试产物由隔离工作区收集，待运行脚本与产物分开。
 
 容器禁用网络并限制运行时间和资源。使用未声明 `VOLUME` 的可信镜像，由镜像预装任务所需的依赖，例如读取 Excel 所需的库。模型请求头、宿主的其他路径和学习材料不会挂载到容器。
 
-分析识别到任务明确要求实跑 Python 时，Rubric 会标记 `requires_python: true`。评分继续使用原阈值。需要实跑而缺少成功执行证据时，Recipe 无法发布。镜像或 Docker 不可用时，测试结果为 `unverifiable`，详情见 `test_results[].reason` 和测试轨迹。评审根据实际执行和产物核对每项校验。
+评审依据 Rubric 的具体要求和实际产物评分。配置缺失、镜像或 Docker 不可用、可选的 Python 调用失败时，回放可以采用符合要求的其他方法，工具结果仍保留在测试轨迹中。任务明确要求运行某个脚本、方法或检查时，评审需要观察到成功执行和相应结果才能通过该项。
 
 ### 更新和澄清参数
 
