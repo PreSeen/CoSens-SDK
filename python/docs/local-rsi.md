@@ -20,15 +20,15 @@ TS 可用 `new RSIClient()` 或 `new RSIClient({ mode: "cloud", api_key, base_ur
 | --- | --- | --- |
 | `mode` | TS 传云端配置对象时必填。Python 选填。 | 取值 `"cloud"`。无参构造默认选择云端。 |
 | `api _key` | 选填。有可用凭证才能发起调用。 | 非空字符串，省略时读取 `COSENS_API_KEY`。 |
-| `base_url` | 选填。 | 字符串，省略时依次使用 `COSENS_RSI_BASE_URL` 和 `https://friday-rsi-cn.stardust-ai.com/api/v1`。SDK 会为尚未带 `/v1` 的 API 前缀补上该后缀。 |
+| `base_url` | 未设置 `COSENS_RSI_BASE_URL` 时必填。 | RSI 网关的 API 前缀。显式配置优先，SDK 会为尚未带 `/v1` 的前缀补上该后缀。 |
 
-TS 也可以直接 `new CloudClient({ api_key, base_url })`，配置对象和两个字段均可省略。该类提供 `request(method, path, options?)`，其中 HTTP 方法 `method` 和相对 API 路径 `path` 必填，`options.body` 和 `options.params` 选填。TS 云端请求超时为 60 秒。Python 直接构造 `CloudRSIClient(api_key=..., base_url=..., timeout=..., transport=...)` 时，四项均选填，`timeout` 默认 60 秒，`transport` 默认 `None`，可传自定义 HTTPX transport。这两个参数属于 `CloudRSIClient`。
+TS 也可以直接 `new CloudClient({ api_key, base_url })`，Python 可以直接构造 `CloudRSIClient(api_key=..., base_url=..., timeout=..., transport=...)`。省略 `api_key` 或 `base_url` 时分别读取 `COSENS_API_KEY` 或 `COSENS_RSI_BASE_URL`，构造客户端时需要有效凭证和 HTTP(S) 网关地址。地址不能包含内嵌凭证、查询参数或锚点。TS 的 `CloudClient` 提供 `request(method, path, options?)`，其中 HTTP 方法 `method` 和相对 API 路径 `path` 必填，`options.body` 和 `options.params` 选填。TS 云端请求超时为 60 秒。Python 的 `timeout` 默认 60 秒，`transport` 默认 `None`，可传自定义 HTTPX transport。
 
 学习由 CoSens 服务端执行。SDK 上传 `evidence` 中列出的文件和选填的 `recipe_reference` 文件，单次编码后 JSON 请求体上限为 10 MiB。
 
 ### 本地模式
 
-TS 用 `new RSIClient({ data_dir, model_id, api_key, base_url, config })`。Python 用 `RSIClient(data_dir=..., model_id=..., api_key=..., base_url=..., config=...)`，可显式传 `mode="local"`。只读查询可只传 `data_dir`，也可同时传 `config: null`（TS）或 `config=None`（Python）。只上传已有任务时，初始化可只传 `data_dir` 和包含 `headers` 的 `config`。
+TS 用 `new RSIClient({ data_dir, model_id, api_key, base_url, config })`。Python 用 `RSIClient(data_dir=..., model_id=..., api_key=..., base_url=..., config=...)`，可显式传 `mode="local"`。只读查询可只传 `data_dir`，也可同时传 `config: null`（TS）或 `config=None`（Python）。只上传已有任务时，可用 `data_dir`、`config.headers` 和 RSI 网关地址初始化。
 
 | 参数 | 必填条件 | 类型、默认值和用途 |
 | --- | --- | --- |
@@ -38,6 +38,7 @@ TS 用 `new RSIClient({ data_dir, model_id, api_key, base_url, config })`。Pyth
 | `base_url` | 运行本地 Execution 时必填。 | 支持工具调用的 OpenAI-compatible Chat Completions 基地址。 |
 | `config` | 选填。 | 本地运行和 Recipe 云端读写选项。 |
 | `config.headers` | 选填，省略等同 `{}`。 | 本地 SDK 查找、下载和上传云端 Recipe 时使用的 HTTP 请求头，键和值都是字符串。 |
+| `config.rsi_base_url` | 需要访问云端 Recipe 且未设置 `COSENS_RSI_BASE_URL` 时必填。 | RSI 网关的 API 前缀。显式配置优先，SDK 会自动补齐 `/v1`。 |
 | `config.credential_scope` | 选填。需要在 token 刷新后自动匹配同账号任务时传入。 | 宿主为已认证账号指定的稳定非空标识。同账号刷新 token 时沿用该值，共用 `data_dir` 的不同账号使用不同值。SQLite 保存标识的哈希。 |
 | `config.auto_start` | 选填，默认 `true`。 | 为 `true` 时入队后自动调度 Worker，为 `false` 时由宿主调用 `recover()`。 |
 | `config.max_tokens` | 选填。 | 正整数，限制单次模型调用的输出。省略时由模型服务决定。 |
@@ -86,7 +87,7 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 
 `recipe_reference` 在创建时提供。普通本地参考文件的正文用于首轮生成，本地 Execution 的 `evidence` 用 `role="recipe"` 标识对应的快照。普通历史材料使用 `role="reference"`。
 
-在新设备上更新云端 Recipe 时，传入正式 `recipe_id`。如果本地缺少基准版本，SDK 会从 CoSens 查询当前已发布且可用的版本，校验 ZIP 并保存包内全部文件，然后用包内的 `RECIPE.md` 创建任务。提供 `recipe_version_id` 时锁定该版本。若版本缺少本地记录并且云端已切到其他可用版本，SDK 返回版本冲突。下载使用 `COSENS_RSI_BASE_URL` 或默认的 CoSens 地址，并通过 `config.headers` 或 `COSENS_API_KEY` 认证。本地模型 Key 留在模型调用链路。
+在新设备上更新云端 Recipe 时，传入正式 `recipe_id`。如果本地缺少基准版本，SDK 会从配置的 RSI 网关查询当前已发布且可用的版本，校验 ZIP 并保存包内全部文件，然后用包内的 `RECIPE.md` 创建任务。提供 `recipe_version_id` 时锁定该版本。若版本缺少本地记录并且云端已切到其他可用版本，SDK 返回版本冲突。下载使用 `config.rsi_base_url` 或 `COSENS_RSI_BASE_URL`，并通过 `config.headers` 或 `COSENS_API_KEY` 认证。本地模型 Key 留在模型调用链路。
 
 SQLite 采用包的正式 Recipe ID 和版本 ID，并保存云端关联。缓存就绪后可以离线使用该版本。生成的新版本保留基准版本的资源，测试时可以使用这些资源。新产物仍通过 `recipes_upsert()` 将新版本写入同一个云端 Recipe。
 
@@ -153,7 +154,7 @@ receipt = client.recipes_upsert(task_id=task_id, recipe_id=cloud_recipe_id)
 const receipt = await client.recipes_upsert({ task_id: taskId, recipe_id: cloudRecipeId });
 ```
 
-本地 `recipes_upsert()` 从环境变量 `COSENS_RSI_BASE_URL` 读取上传地址，省略环境变量时使用 `https://friday-rsi-cn.stardust-ai.com/api/v1`。SDK 会为尚未带 `/v1` 的 API 前缀补上该后缀。发起上传请求时，认证和账号信息取自初始化 `RSIClient` 时传入的 `config.headers`，其中可包含 `X-Virtual-User-Id`。SDK 生成 multipart 请求头，使用传入的 `idempotency_key` 或自动生成幂等键。
+本地 `recipes_upsert()` 使用 `config.rsi_base_url` 或 `COSENS_RSI_BASE_URL` 指定 RSI 网关。发起上传请求时，认证和账号信息取自初始化 `RSIClient` 时传入的 `config.headers`，其中可包含 `X-Virtual-User-Id`。SDK 生成 multipart 请求头，使用传入的 `idempotency_key` 或自动生成幂等键。重试待完成的上传时，需配置原 RSI 网关。已完成的上传可离线读取原回执。
 
 上传成功后，SDK 按回执更新任务行的 `recipe_id` 和 `recipe_version_id`。`recipes.id` 始终是任务 ID。未同步的本地任务发布到已存在的云端 Recipe 时，发布结果关联到本次任务，原 Execution 的生成和测试历史可继续追溯。后续用 `execution_create()` 更新同一 Recipe 时可传正式 `recipe_id`。
 

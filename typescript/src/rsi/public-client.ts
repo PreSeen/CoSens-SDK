@@ -16,14 +16,17 @@ import { readTask, readTaskSummary, readTasks } from './task.js';
 const text = z.string().min(1);
 const revision = z.number().int().positive();
 const requestHeaders = z.record(z.string(), z.string());
-const config = z.strictObject({
+const connectionValue = z.string().trim().min(1);
+const localCloudConfig = z.strictObject({
   headers: requestHeaders.optional(),
+  rsi_base_url: connectionValue.optional(),
+});
+const config = localCloudConfig.extend({
   credential_scope: z.string().trim().min(1).optional(),
   auto_start: z.boolean().optional(),
   max_tokens: z.number().int().positive().optional(),
   timeout: z.number().positive().max(3600).optional(),
 });
-const connectionValue = z.string().trim().min(1);
 const localExecutionOptions = z.strictObject({
   data_dir: text,
   model_id: connectionValue,
@@ -33,7 +36,7 @@ const localExecutionOptions = z.strictObject({
 });
 const localReadOptions = z.strictObject({
   data_dir: text,
-  config: z.strictObject({ headers: requestHeaders }).nullish(),
+  config: localCloudConfig.nullish(),
 });
 const versionArchive = z.strictObject({
   version_id: text,
@@ -131,7 +134,7 @@ export type RSIClientOptions = LocalOptions | ({ mode: 'cloud' } & CloudOptions)
 /**
  * RSI atoms in cloud mode (default) or local mode.
  *
- * `new RSIClient()` uses the CoSens service with `COSENS_API_KEY`.
+ * `new RSIClient()` uses `COSENS_API_KEY` and `COSENS_RSI_BASE_URL`.
  * `new RSIClient({ data_dir, model_id, api_key, base_url })` runs the local
  * Worker with your own model. Both modes expose the same async methods.
  * Local Recipe reads also return a storage_path relative to data_dir.
@@ -140,6 +143,7 @@ export class RSIClient {
   readonly #queue!: QueueClient;
   readonly #cloud?: CloudClient;
   readonly #uploadHeaders?: Headers;
+  readonly #rsiBaseUrl?: string;
   readonly data_dir: string | null;
   readonly mode: 'cloud' | 'local';
 
@@ -153,28 +157,29 @@ export class RSIClient {
     }
     this.mode = 'local';
     const hasModel = 'model_id' in options || 'api_key' in options || 'base_url' in options;
-    const local = hasModel ? localExecutionOptions.parse(options) : localReadOptions.parse(options);
-    const { data_dir, config: settings } = local;
+    const connection = hasModel ? localExecutionOptions.parse(options) : undefined;
+    const { data_dir, config: settings } = connection ?? localReadOptions.parse(options);
+    this.#rsiBaseUrl = settings?.rsi_base_url;
     try {
       this.#uploadHeaders = new Headers(settings?.headers);
     } catch {
       fail('invalid_argument', 'Invalid Recipe upload headers');
     }
-    const modelSettings = 'model_id' in local ? local.config : undefined;
+    const modelSettings = connection?.config;
     const scope = modelSettings?.credential_scope === undefined
       ? undefined
       : credentialScopeId(modelSettings.credential_scope);
-    const binding = 'model_id' in local
-      ? bindModelHeaders(local.base_url, local.model_id, { Authorization: `Bearer ${local.api_key}` }, scope)
+    const binding = connection
+      ? bindModelHeaders(connection.base_url, connection.model_id, { Authorization: `Bearer ${connection.api_key}` }, scope)
       : undefined;
     this.#queue = new QueueClient({
       data_dir,
-      ...('model_id' in local && binding
+      ...(connection && binding
         ? {
             config: {
               model: {
-                model: local.model_id,
-                base_url: local.base_url,
+                model: connection.model_id,
+                base_url: connection.base_url,
                 api_key_env: binding.name,
                 ...(scope === undefined ? {} : { credential_scope: scope }),
                 ...(modelSettings?.max_tokens === undefined
@@ -264,7 +269,7 @@ export class RSIClient {
       idempotency_key,
       confirmation_ref: idempotency_key,
       base: recipeId ? { kind: 'recipe', id: recipeId, version_id: recipe_reference?.recipe_version_id } : null,
-    }, this.#uploadHeaders);
+    }, this.#uploadHeaders, this.#rsiBaseUrl);
     return {
       ...this.#presentExecution(execution),
       recipe_id: execution.recipe_id!,
@@ -364,7 +369,7 @@ export class RSIClient {
     }
     if (!request || typeof request !== 'object' || request instanceof URL || options !== undefined)
       return fail('invalid_argument', 'local Recipe upload requires { task_id }');
-    return uploadLocalTaskRecipe(this.#queue.store, request, this.#uploadHeaders);
+    return uploadLocalTaskRecipe(this.#queue.store, request, this.#uploadHeaders, this.#rsiBaseUrl);
   }
 
   async recipe_get(id: string, version = 'active') {

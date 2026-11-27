@@ -38,6 +38,7 @@ class LocalOptions(Contract):
     model_config = ConfigDict(hide_input_in_errors=True)
 
     headers: dict[str, str] = Field(default_factory=dict)
+    rsi_base_url: NonBlankText | None = None
     credential_scope: Text | None = None
     auto_start: StrictBool = True
     max_tokens: Positive | None = None
@@ -72,7 +73,8 @@ _ARCHIVED = TypeAdapter(StrictBool)
 class RSIClient:
     """RSI atoms in cloud mode (default) or local mode.
 
-    `RSIClient()` uses the CoSens service with `COSENS_API_KEY`.
+    `RSIClient()` uses the CoSens service configured by `COSENS_RSI_BASE_URL`
+    with `COSENS_API_KEY`.
     `RSIClient(data_dir=..., model_id=..., api_key=..., base_url=...)` runs
     the local Worker with your own model. Local Recipe reads include a
     storage_path relative to data_dir.
@@ -106,7 +108,7 @@ class RSIClient:
     ):
         settings = LocalOptions.model_validate(config if config is not None else {})
         endpoint_requested = any(value is not None for value in (model_id, api_key, base_url))
-        worker_settings = config is not None and settings.model_fields_set != {"headers"}
+        worker_settings = settings.model_fields_set - {"headers", "rsi_base_url"}
         endpoint = (
             ModelEndpoint(model_id=model_id, api_key=api_key, base_url=base_url)
             if endpoint_requested or worker_settings
@@ -124,6 +126,7 @@ class RSIClient:
             else None
         )
         self._upload_headers = normalize_request_headers(settings.headers)
+        self._rsi_base_url = settings.rsi_base_url
         self._queue = QueueClient(
             data_dir=data_dir,
             config={
@@ -199,13 +202,17 @@ class RSIClient:
         return self._present_execution(execution)
 
     def _resolve_recipe_base(self, base):
-        from .cloud import CloudRSIClient
+        from .cloud import CloudRSIClient, _cloud_base_url
         from .recipe_bootstrap import resolve_base
 
         def cloud_client():
+            base_url = _cloud_base_url(self._rsi_base_url, option="config.rsi_base_url")
             if not self._upload_headers and not os.environ.get("COSENS_API_KEY"):
                 raise NotFound("recipe not found locally; configure CoSens credentials to fetch it")
-            return CloudRSIClient(_shared_headers=self._upload_headers)
+            return CloudRSIClient(
+                base_url=base_url,
+                _shared_headers=self._upload_headers,
+            )
 
         return resolve_base(self._queue.store, base, cloud_client)
 
@@ -297,7 +304,7 @@ class RSIClient:
         from .recipe_sync import upload_task
 
         task_id = _TEXT.validate_python(task_id)
-        destination = _local_upload_destination(self._upload_headers)
+        destination = _local_upload_destination(self._upload_headers, self._rsi_base_url)
 
         def cloud_client():
             if not self._upload_headers:

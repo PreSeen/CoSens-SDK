@@ -26,6 +26,7 @@ def recording(responses=None):
 
 def test_default_is_cloud_and_data_dir_selects_local(tmp_path, monkeypatch):
     monkeypatch.setenv("COSENS_API_KEY", "k")
+    monkeypatch.setenv("COSENS_RSI_BASE_URL", "https://rsi.example/api")
     assert isinstance(RSIClient(), CloudRSIClient)
     local = RSIClient(data_dir=tmp_path, config=None)
     assert local.mode == "local"
@@ -36,7 +37,7 @@ def test_default_is_cloud_and_data_dir_selects_local(tmp_path, monkeypatch):
         RSIClient()
 
 
-def test_cloud_api_versions_default_environment_and_explicit_prefixes_once(monkeypatch):
+def test_cloud_api_requires_url_and_versions_environment_and_explicit_prefixes_once(monkeypatch):
     urls = []
 
     def handle(request):
@@ -49,8 +50,11 @@ def test_cloud_api_versions_default_environment_and_explicit_prefixes_once(monke
         return CloudRSIClient(api_key="k", base_url=base_url, transport=httpx.MockTransport(handle))
 
     monkeypatch.delenv("COSENS_RSI_BASE_URL", raising=False)
-    client().execution_get("run")
+    with pytest.raises(ValueError, match="base_url or COSENS_RSI_BASE_URL"):
+        client()
     monkeypatch.setenv("COSENS_RSI_BASE_URL", "https://stage.example/api/")
+    with pytest.raises(ValueError, match="base_url"):
+        client("")
     client().execution_get("run")
     client("https://direct.example/").execution_get("run")
     client("https://stage.example/mounted/").execution_get("run")
@@ -59,7 +63,7 @@ def test_cloud_api_versions_default_environment_and_explicit_prefixes_once(monke
         with pytest.raises(ValueError, match="base_url"):
             client(f"https://stage.example/api{marker}")
     assert urls == [
-        "https://friday-rsi-cn.stardust-ai.com/api/v1/executions/run", "https://stage.example/api/v1/executions/run",
+        "https://stage.example/api/v1/executions/run",
         "https://direct.example/v1/executions/run", "https://stage.example/mounted/v1/executions/run",
         "https://stage.example/mounted/v1/recipes/recipe_1/versions/version_1/download-url",
     ]
@@ -174,21 +178,22 @@ def test_uploads_over_the_gateway_limit_fail_before_sending(tmp_path):
 
 def test_virtual_user_is_instance_scoped_and_rejected_in_local_mode(tmp_path):
     transport, seen = recording()
-    a = CloudRSIClient(api_key="k", transport=transport, virtual_user_id="vu_a")
-    b = CloudRSIClient(api_key="k", transport=transport, virtual_user_id="vu_b")
-    ordinary = CloudRSIClient(api_key="k", transport=transport)
+    options = {"api_key": "k", "base_url": "https://rsi.example/api"}
+    a = CloudRSIClient(**options, transport=transport, virtual_user_id="vu_a")
+    b = CloudRSIClient(**options, transport=transport, virtual_user_id="vu_b")
+    ordinary = CloudRSIClient(**options, transport=transport)
     a.execution_get("a")
     b.execution_get("b")
     ordinary.execution_get("c")
     assert [r["headers"].get("x-virtual-user-id") for r in seen] == ["vu_a", "vu_b", None]
-    assert isinstance(RSIClient(api_key="k", virtual_user_id="vu_a"), CloudRSIClient)
+    assert isinstance(RSIClient(**options, virtual_user_id="vu_a"), CloudRSIClient)
     with pytest.raises(ValueError):
         RSIClient(data_dir=tmp_path, virtual_user_id="vu_a")
 
 
 def test_recipe_insert_is_not_public_in_either_mode(tmp_path):
     assert not hasattr(RSIClient(data_dir=tmp_path), "recipe_insert")
-    assert not hasattr(CloudRSIClient(api_key="k"), "recipe_insert")
+    assert not hasattr(CloudRSIClient(api_key="k", base_url="https://rsi.example/api"), "recipe_insert")
 
 
 def test_recipes_upsert_uploads_zip_from_path_and_file_uri(tmp_path):
@@ -226,7 +231,7 @@ def test_recipes_upsert_uploads_zip_from_path_and_file_uri(tmp_path):
 
 def test_recipes_upsert_rejects_remote_file_uri_and_over_limit_zip(tmp_path):
     transport, seen = recording()
-    client = CloudRSIClient(api_key="k", transport=transport)
+    client = CloudRSIClient(api_key="k", base_url="https://rsi.example/api", transport=transport)
     with pytest.raises(ValueError, match="local path"):
         client.recipes_upsert("file://remote.example/recipe.zip")
     path = tmp_path / "too-large.zip"

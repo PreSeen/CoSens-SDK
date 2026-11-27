@@ -55,6 +55,9 @@ def _saved_receipt(
     plan, receipt = saved
     if target_recipe_id is not None and target_recipe_id != receipt["recipe_id"]:
         raise Conflict("local Recipe version already has a receipt for a different cloud Recipe")
+    if destination["base_url"] is None:
+        # Only a completed receipt can be read without a configured destination.
+        destination = {**destination, "base_url": plan["base_url"]}
     if not _same_request(
         conn, plan, recipe_id, version_id,
         plan["zip_sha256"] if zip_sha256 is None else zip_sha256, key, destination,
@@ -234,6 +237,8 @@ def upload_task(store, task_id, key, destination, cloud_factory, *, target_recip
         )
         if receipt is not None:
             return receipt
+        if destination["base_url"] is None:
+            raise InvalidState("set config.rsi_base_url or COSENS_RSI_BASE_URL to upload a Recipe")
         pending = journal_entry(conn, PENDING, recipe_id)
         pending_sha256 = None
         if pending:

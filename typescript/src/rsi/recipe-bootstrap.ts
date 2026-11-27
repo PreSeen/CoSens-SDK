@@ -111,12 +111,14 @@ async function fetchRecipeZip(url: string): Promise<Uint8Array> {
   }
 }
 
-export async function fetchCloudRecipeBase(store: Store, base: RecipeBase, headers?: Headers): Promise<Bootstrap> {
+export async function fetchCloudRecipeBase(
+  store: Store, base: RecipeBase, headers?: Headers, rsiBaseUrl?: string,
+): Promise<Bootstrap> {
   if ((!headers || headers.keys().next().done) && !process.env.COSENS_API_KEY)
     return fail('not_found', 'recipe not found in local SQLite; configure CoSens credentials to fetch it');
   const recipeId = identifier.parse(store.resolveRecipeId(base.id));
   const requested = base.version_id ? identifier.parse(store.resolveVersionId(base.version_id)) : undefined;
-  const destination = recipeCloudDestination({}, headers);
+  const destination = recipeCloudDestination({ base_url: rsiBaseUrl }, headers, 'config.rsi_base_url');
   replayDestination(store, recipeIdentityScope, recipeId, destination);
   const cloud = new CloudClient({ base_url: destination.base_url }, headers);
   const response = cloudRecipe.safeParse(await cloud.recipe_get(recipeId, requested ?? 'active'));

@@ -25,13 +25,14 @@ type Seen = {
   body: any;
 };
 
-function setTestEnv(t: TestContext, key: string, value: string) {
+function setTestEnv(t: TestContext, key: string, value: string | undefined) {
   const prior = process.env[key];
   t.after(() => {
     if (prior === undefined) delete process.env[key];
     else process.env[key] = prior;
   });
-  process.env[key] = value;
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
 }
 
 async function withService(
@@ -79,47 +80,41 @@ async function withService(
   }
 }
 
-test('new RSIClient() is cloud; data_dir selects local', () => {
-  const previous = process.env.COSENS_API_KEY;
-  process.env.COSENS_API_KEY = 'k';
-  try {
-    assert.equal(new RSIClient().mode, 'cloud');
-    const dir = mkdtempSync(join(tmpdir(), 'rsi-mode-'));
-    const local = new RSIClient({ data_dir: dir, config: null });
-    assert.equal(local.mode, 'local');
-    local.close();
-    const uploadOnly = new RSIClient({ data_dir: dir, config: { headers: { 'X-Test-Auth': 'fixture' } } });
-    assert.equal(uploadOnly.mode, 'local');
-    uploadOnly.close();
-    assert.throws(() => new RSIClient({
-      data_dir: dir, config: { headers: {}, auto_start: false },
-    } as never), /auto_start/);
-    delete process.env.COSENS_API_KEY;
-    assert.throws(() => new RSIClient(), /COSENS_API_KEY/);
-    const connection = { model_id: 'fixture', api_key: 'fixture-key', base_url: 'http://localhost:9/v1' };
-    for (const field of Object.keys(connection)) {
-      const partial = Object.fromEntries(Object.entries(connection).filter(([name]) => name !== field));
-      assert.throws(() => new RSIClient({ data_dir: dir, ...partial } as never), new RegExp(field));
-    }
-  } finally {
-    if (previous === undefined) delete process.env.COSENS_API_KEY;
-    else process.env.COSENS_API_KEY = previous;
+test('new RSIClient() is cloud; data_dir selects local', (t) => {
+  setTestEnv(t, 'COSENS_API_KEY', 'k');
+  setTestEnv(t, 'COSENS_RSI_BASE_URL', undefined);
+  assert.throws(() => new RSIClient(), /base_url.*COSENS_RSI_BASE_URL/);
+  process.env.COSENS_RSI_BASE_URL = 'https://gateway.example/api';
+  const dir = mkdtempSync(join(tmpdir(), 'rsi-mode-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.equal(new RSIClient().mode, 'cloud');
+  delete process.env.COSENS_RSI_BASE_URL;
+  const local = new RSIClient({ data_dir: dir, config: null });
+  assert.equal(local.mode, 'local');
+  local.close();
+  const uploadOnly = new RSIClient({ data_dir: dir, config: { headers: { 'X-Test-Auth': 'fixture' } } });
+  assert.equal(uploadOnly.mode, 'local');
+  uploadOnly.close();
+  assert.throws(() => new RSIClient({
+    data_dir: dir, config: { headers: {}, auto_start: false },
+  } as never), /auto_start/);
+  delete process.env.COSENS_API_KEY;
+  assert.throws(() => new RSIClient(), /COSENS_API_KEY/);
+  const connection = { model_id: 'fixture', api_key: 'fixture-key', base_url: 'http://localhost:9/v1' };
+  for (const field of Object.keys(connection)) {
+    const partial = Object.fromEntries(Object.entries(connection).filter(([name]) => name !== field));
+    assert.throws(() => new RSIClient({ data_dir: dir, ...partial } as never), new RegExp(field));
   }
 });
 
-test('cloud RSI versions the default, environment and explicit base prefixes once', async (t) => {
-  const originalBase = process.env.COSENS_RSI_BASE_URL;
-  t.after(() => {
-    if (originalBase === undefined) delete process.env.COSENS_RSI_BASE_URL;
-    else process.env.COSENS_RSI_BASE_URL = originalBase;
-  });
+test('cloud RSI requires a configured address and versions the base prefix once', async (t) => {
+  setTestEnv(t, 'COSENS_RSI_BASE_URL', undefined);
   const seen: string[] = [];
   t.mock.method(globalThis, 'fetch', async (url: URL) => {
     seen.push(url.href);
     return Response.json({});
   });
-  delete process.env.COSENS_RSI_BASE_URL;
-  await new CloudClient({ api_key: 'fixture' }).execution_get('run');
+  assert.throws(() => new CloudClient({ api_key: 'fixture' }), /base_url.*COSENS_RSI_BASE_URL/);
   process.env.COSENS_RSI_BASE_URL = 'https://stage.example/api/';
   await new CloudClient({ api_key: 'fixture' }).execution_get('run');
   await new CloudClient({ api_key: 'fixture', base_url: 'https://direct.example/' }).execution_get('run');
@@ -130,7 +125,7 @@ test('cloud RSI versions the default, environment and explicit base prefixes onc
     assert.throws(() => new CloudClient({ api_key: 'fixture', base_url: `https://stage.example/api${marker}` }), /base_url/);
   }
   assert.deepEqual(seen, [
-    'https://friday-rsi-cn.stardust-ai.com/api/v1/executions/run', 'https://stage.example/api/v1/executions/run',
+    'https://stage.example/api/v1/executions/run',
     'https://direct.example/v1/executions/run', 'https://stage.example/mounted/v1/executions/run',
     'https://stage.example/mounted/v1/recipes/recipe_1',
   ]);
@@ -268,9 +263,10 @@ test('virtual user selection is isolated per cloud client', async (t) => {
     seen.push(new Headers(init?.headers).get('x-virtual-user-id'));
     return Response.json({});
   });
-  const a = new RSIClient({ mode: 'cloud', api_key: 'k', virtualUserId: 'vu_a' });
-  const b = new RSIClient({ mode: 'cloud', api_key: 'k', virtualUserId: 'vu_b' });
-  const ordinary = new RSIClient({ mode: 'cloud', api_key: 'k' });
+  const options = { mode: 'cloud', api_key: 'k', base_url: 'https://gateway.example/api' } as const;
+  const a = new RSIClient({ ...options, virtualUserId: 'vu_a' });
+  const b = new RSIClient({ ...options, virtualUserId: 'vu_b' });
+  const ordinary = new RSIClient(options);
   await Promise.all([a.execution_get('a'), b.execution_get('b'), ordinary.execution_get('c')]);
   assert.deepEqual(seen, ['vu_a', 'vu_b', null]);
   assert.throws(() => new RSIClient({ data_dir: '/tmp/nope', config: null, virtualUserId: 'vu_a' } as never));
@@ -424,7 +420,7 @@ test('cloud recipe_download validates signed URLs', async (t) => {
 
 test('local execution bootstraps a verified cloud Recipe and later publishes into it', async (t) => {
   const data_dir = mkdtempSync(join(tmpdir(), 'rsi-cloud-base-'));
-  const local = new RSIClient({
+  const localOptions = {
     data_dir, model_id: 'fixture', base_url: 'http://localhost:9/v1', api_key: 'fixture-model-key',
     config: {
       auto_start: false,
@@ -433,13 +429,12 @@ test('local execution bootstraps a verified cloud Recipe and later publishes int
         'X-Auth-Type': 'api_key', 'X-Virtual-User-Id': 'vu_fixture', 'Idempotency-Key': 'fixture',
       },
     },
-  });
+  };
+  const offlineClient = new RSIClient(localOptions);
   const store = new Store(data_dir);
-  const originalBase = process.env.COSENS_RSI_BASE_URL;
+  setTestEnv(t, 'COSENS_RSI_BASE_URL', undefined);
   t.after(() => {
-    if (originalBase === undefined) delete process.env.COSENS_RSI_BASE_URL;
-    else process.env.COSENS_RSI_BASE_URL = originalBase;
-    local.close();
+    offlineClient.close();
     store.close();
     rmSync(data_dir, { recursive: true, force: true });
   });
@@ -476,8 +471,11 @@ test('local execution bootstraps a verified cloud Recipe and later publishes int
     recipe_reference: { path: callerPath, recipe_id: recipeId, recipe_version_id: versionId },
   };
 
+  await assert.rejects(offlineClient.execution_create(request), /config\.rsi_base_url.*COSENS_RSI_BASE_URL/);
   await withService(replies, async (base_url, seen) => {
-    process.env.COSENS_RSI_BASE_URL = base_url;
+    const local = new RSIClient({ ...localOptions, config: { ...localOptions.config, rsi_base_url: base_url } });
+    t.after(() => local.close());
+    process.env.COSENS_RSI_BASE_URL = base_url + '/wrong';
     const signedUrl = new URL('/signed-recipe.zip', base_url).href;
     replies[download] = [200, { url: signedUrl }];
     replies['GET /signed-recipe.zip'] = [200, new Uint8Array(MAX_RECIPE_ZIP_BYTES + 1)];
@@ -525,9 +523,9 @@ test('local execution bootstraps a verified cloud Recipe and later publishes int
     await assert.rejects(uploadLocalRecipe(store, originalZip, {
       base_url, local_recipe_id: recipeId, local_recipe_version_id: versionId,
     }), /already published in the cloud/);
-    process.env.COSENS_RSI_BASE_URL = 'http://127.0.0.1:1/api';
-    assert.equal((await local.execution_create(request)).id, first.id);
-    const offline = await local.execution_create({
+    delete process.env.COSENS_RSI_BASE_URL;
+    assert.equal((await offlineClient.execution_create(request)).id, first.id);
+    const offline = await offlineClient.execution_create({
       ...request, idempotency_key: 'offline-cloud-recipe', recipe_reference: { path: callerPath, recipe_id: recipeId },
     });
     assert.notEqual(offline.id, first.id);
@@ -552,7 +550,6 @@ test('local execution bootstraps a verified cloud Recipe and later publishes int
     assert.ok(recipe_version_id);
     assert.equal(recipe_version_id, task.artifact.recipe_version_id);
     assert.equal(task.recipe_zip_path, task.artifact.zip_path);
-    process.env.COSENS_RSI_BASE_URL = base_url;
     assert.deepEqual(await local.recipes_upsert({ task_id: task.task_id }), receipt);
     assert.equal(seen.at(-1)?.body.get('recipe_id'), recipeId);
     assert.equal((await local.task_get(first.id)).recipe_version_id, receipt.recipe_version_id);
@@ -560,7 +557,6 @@ test('local execution bootstraps a verified cloud Recipe and later publishes int
     const draft = store.tx(() => store.append(store.get<Recipe>(recipeId, 'recipe'), {
       name: 'Local draft', description: 'Unpublished draft', instructions: 'Keep local changes.',
     }));
-    process.env.COSENS_RSI_BASE_URL = base_url;
     const otherVersion = 'version_other_device';
     replies[get] = [200, {
       ...metadata, active_version_id: otherVersion,
@@ -693,7 +689,15 @@ test('local upsert selects the exact Task ZIP and replays even when its ZIP is p
     await assert.rejects(uploadVersion(repackedZip, initial), /frozen Task Recipe ZIP/);
     assert.equal(seen.length, 0);
     replies['POST /api/v1/recipes_upsert'] = [503, { error: { code: 'unavailable', message: 'retry Task upload' } }];
-    await assert.rejects(local.recipes_upsert(selectedUpload), /retry Task upload/);
+    delete process.env.COSENS_RSI_BASE_URL;
+    await assert.rejects(local.recipes_upsert(selectedUpload), /config\.rsi_base_url.*COSENS_RSI_BASE_URL/);
+    assert.equal(seen.length, 0);
+    process.env.COSENS_RSI_BASE_URL = base_url;
+    const initialUpload = local.recipes_upsert(selectedUpload);
+    delete process.env.COSENS_RSI_BASE_URL;
+    await assert.rejects(initialUpload, /retry Task upload/);
+    await assert.rejects(local.recipes_upsert(selectedUpload), /config\.rsi_base_url.*COSENS_RSI_BASE_URL/);
+    process.env.COSENS_RSI_BASE_URL = base_url;
     await assert.rejects(otherTenant.recipes_upsert(selectedUpload), /another upload is pending/);
     assert.equal(seen.length, 1);
     const pendingKey = seen[0].headers['idempotency-key'];
@@ -702,12 +706,14 @@ test('local upsert selects the exact Task ZIP and replays even when its ZIP is p
     seen.length = 0;
     rmSync(task.artifact.zip_path);
     replies['POST /api/v1/recipes_upsert'] = [200, first];
-    const uploadOnly = new RSIClient({ data_dir, config: { headers } });
+    process.env.COSENS_RSI_BASE_URL = base_url + '/wrong';
+    const uploadOnly = new RSIClient({ data_dir, config: { headers, rsi_base_url: base_url } });
     try {
       assert.deepEqual(await uploadOnly.recipes_upsert(selectedUpload), first);
     } finally {
       uploadOnly.close();
     }
+    process.env.COSENS_RSI_BASE_URL = base_url;
     assert.equal(seen[0].headers['idempotency-key'], pendingKey);
     assert.deepEqual(await local.recipes_upsert(selectedUpload), first);
     assert.deepEqual(await local.recipes_upsert({ ...selectedUpload, recipe_id: first.recipe_id }), first);
@@ -986,6 +992,7 @@ test('local publication can bind an explicit cloud target and safely resume that
     assert.deepEqual(store.db.prepare('SELECT recipe_id,recipe_version_id,recipe_zip_path FROM recipes WHERE id=?').get(other.task_id), {
       ...linked, recipe_zip_path: null,
     });
+    delete process.env.COSENS_RSI_BASE_URL;
     const offline = new RSIClient({ data_dir, config: null });
     const totalRequests = seen.length;
     try {

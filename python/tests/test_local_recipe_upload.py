@@ -33,10 +33,11 @@ def _fixture_recipe(tmp_path, **options):
     return client, first
 
 
-def _publishing_client(data_dir, *, headers=None):
+def _publishing_client(data_dir, *, headers=None, rsi_base_url=None):
     return RSIClient(
         data_dir=data_dir, config={
             "headers": {"Authorization": "Bearer fixture-key"} if headers is None else headers,
+            "rsi_base_url": rsi_base_url,
         },
     )
 
@@ -150,9 +151,10 @@ def _completed_execution(client, recipe_id, version_id):
 
 def test_local_upload_uses_upload_headers(tmp_path, monkeypatch):
     monkeypatch.delenv("COSENS_API_KEY", raising=False)
-    monkeypatch.setenv("COSENS_RSI_BASE_URL", RSI_URL)
+    monkeypatch.setenv("COSENS_RSI_BASE_URL", "https://ignored.example/api")
     config = {
         "auto_start": False,
+        "rsi_base_url": RSI_URL + "/v1/",
         "headers": {
             "Authorization": "Bearer fixture-access-token",
             "X-Auth-Type": "access_token",
@@ -179,6 +181,7 @@ def test_local_upload_uses_upload_headers(tmp_path, monkeypatch):
 
     calls = _transport(monkeypatch, receive, authorization="Bearer fixture-access-token")
     assert client.recipes_upsert(task_id, idempotency_key="upload-key") == V1
+    monkeypatch.delenv("COSENS_RSI_BASE_URL")
     tenant_only = _publishing_client(tmp_path, headers={"X-Virtual-User-Id": "vu_fixture"})
     assert tenant_only.recipes_upsert(task_id=task_id, idempotency_key="upload-key") == V1
     different_tenant = _publishing_client(tmp_path, headers={"X-Virtual-User-Id": "vu_other"})
@@ -642,6 +645,7 @@ def test_task_final_zip_survives_reload_and_cloud_identity_adoption(tmp_path, mo
     assert cloud_only["recipe_version_id"] == V1["recipe_version_id"]
     assert cloud_only["recipe_zip_path"] is None
     monkeypatch.delenv("COSENS_API_KEY", raising=False)
+    monkeypatch.delenv("COSENS_RSI_BASE_URL")
     assert reopened.recipes_upsert(execution_id, idempotency_key="upload-task") == V1
     assert reopened.recipes_upsert(execution_id, recipe_id=V1["recipe_id"], idempotency_key="upload-task") == V1
     assert reopened.recipes_upsert(task_id=execution_id) == V1
@@ -656,6 +660,7 @@ def test_task_final_zip_survives_reload_and_cloud_identity_adoption(tmp_path, mo
 
 
 def test_public_local_upload_rejects_provisional_task_and_old_recipe_pair(tmp_path, monkeypatch):
+    monkeypatch.delenv("COSENS_RSI_BASE_URL", raising=False)
     client, recipe = _fixture_recipe(tmp_path)
     version_id = recipe["active_version_id"]
     task_id = _completed_execution(client, recipe["id"], version_id)
@@ -700,10 +705,24 @@ def test_local_upload_requires_configured_headers_before_creating_pending_reques
 def test_header_only_local_client_keeps_model_endpoint_validation(tmp_path):
     headers = {"Authorization": "Bearer mock-cloud"}
     assert RSIClient(data_dir=tmp_path, config={"headers": headers}).mode == "local"
+    assert RSIClient(data_dir=tmp_path, config={"rsi_base_url": RSI_URL}).mode == "local"
     with pytest.raises(ValueError, match="model_id"):
         RSIClient(data_dir=tmp_path, config={"headers": headers, "timeout": 2})
     with pytest.raises(ValueError, match="base_url"):
         RSIClient(data_dir=tmp_path, config={"headers": headers}, model_id="incomplete")
+
+
+def test_local_only_requires_rsi_url_for_a_new_upload(tmp_path, monkeypatch):
+    monkeypatch.delenv("COSENS_RSI_BASE_URL", raising=False)
+    client, recipe = _fixture_recipe(tmp_path, config={"headers": {"Authorization": "Bearer fixture-key"}})
+    task_id = _completed_execution(client, recipe["id"], recipe["active_version_id"])
+    monkeypatch.setattr(cloud, "CloudRSIClient", lambda **_: pytest.fail("unexpected cloud client"))
+
+    assert client.task_get(task_id)["recipe_id"] == recipe["id"]
+    with pytest.raises(InvalidState, match=r"config\.rsi_base_url or COSENS_RSI_BASE_URL"):
+        client.recipes_upsert(task_id)
+    with client._queue.store.connect() as conn:
+        assert not conn.execute("SELECT 1 FROM idempotency WHERE scope=?", (PENDING,)).fetchone()
 
 
 def test_local_upload_selects_requested_task_after_newer_version_becomes_active(tmp_path, monkeypatch):
@@ -752,11 +771,16 @@ def test_local_upload_retries_task_with_original_frozen_zip_after_timeout(tmp_pa
         return httpx.Response(200, json=V1)
 
     calls = _transport(monkeypatch, receive)
-    monkeypatch.setenv("COSENS_RSI_BASE_URL", RSI_URL)
+    monkeypatch.setenv("COSENS_RSI_BASE_URL", "https://different.example/api/")
     with pytest.raises(RSIError, match="could not be reached"):
+        _publishing_client(tmp_path, rsi_base_url=RSI_URL).recipes_upsert(task_id, idempotency_key="retry-task")
+    with pytest.raises(Conflict, match="same version, ZIP and idempotency key and destination"):
+        _publishing_client(tmp_path).recipes_upsert(task_id, idempotency_key="retry-task")
+    monkeypatch.delenv("COSENS_RSI_BASE_URL")
+    with pytest.raises(InvalidState, match="COSENS_RSI_BASE_URL"):
         _publishing_client(tmp_path).recipes_upsert(task_id, idempotency_key="retry-task")
 
-    assert _publishing_client(tmp_path).recipes_upsert(task_id, idempotency_key="retry-task") == V1
+    assert _publishing_client(tmp_path, rsi_base_url=RSI_URL + "/v1/").recipes_upsert(task_id, idempotency_key="retry-task") == V1
     assert calls[0] == calls[1]
 
 

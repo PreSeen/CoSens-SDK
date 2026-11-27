@@ -22,7 +22,6 @@ from .chat_completions import USER_AGENT
 from .models import Conflict, InvalidState, NotFound, RecipeReference, RSIError, RubricsContent
 
 _CLOUD_API_VERSION = "/v1"
-DEFAULT_BASE_URL = "https://friday-rsi-cn.stardust-ai.com/api" + _CLOUD_API_VERSION
 # The CoSens gateway accepts request bodies up to 10 MiB.
 MAX_REQUEST_BYTES = 10 * 1024 * 1024
 MAX_RECIPE_ZIP_BYTES = 8 * 1024 * 1024
@@ -111,11 +110,17 @@ def _validate_virtual_user_id(value):
         raise ValueError("virtual_user_id must be a nonempty header value")
 
 
-def _cloud_base_url(base_url=None):
-    url = httpx.URL(base_url or os.environ.get("COSENS_RSI_BASE_URL") or DEFAULT_BASE_URL)
+def _cloud_base_url(base_url=None, *, option="base_url", required=True):
+    if base_url is None:
+        base_url = os.environ.get("COSENS_RSI_BASE_URL") or None
+    if base_url is None:
+        if not required:
+            return None
+        raise ValueError(f"set {option} or COSENS_RSI_BASE_URL to the RSI gateway URL")
+    url = httpx.URL(base_url)
     value = str(url)
     if url.scheme not in {"http", "https"} or not url.host or url.userinfo or "?" in value or "#" in value:
-        raise ValueError("base_url must be an HTTP(S) address without embedded credentials, query or fragment")
+        raise ValueError(f"{option} must be an HTTP(S) address without embedded credentials, query or fragment")
     base = value.rstrip("/")
     return base if url.raw_path.rstrip(b"/").endswith(_CLOUD_API_VERSION.encode()) else base + _CLOUD_API_VERSION
 
@@ -136,9 +141,12 @@ def _matches_recipe_destination(recorded, current):
     )
 
 
-def _local_upload_destination(shared_headers):
+def _local_upload_destination(shared_headers, base_url):
     virtual_user_id = httpx.Headers(shared_headers, encoding="iso-8859-1").get("X-Virtual-User-Id")
-    return _recipe_destination(None, virtual_user_id)
+    return {
+        "base_url": _cloud_base_url(base_url, option="config.rsi_base_url", required=False),
+        "virtual_user_id": virtual_user_id,
+    }
 
 
 class CloudRSIClient:

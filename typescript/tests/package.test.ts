@@ -10,7 +10,6 @@ import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const INTERNAL_NAMES = new RegExp('fri' + 'day|star' + 'dust', 'i');
-const PUBLIC_RSI_ENDPOINT = 'https://friday-rsi-cn.stardust-ai.com/api';
 
 let packed: string[] | undefined;
 
@@ -68,7 +67,7 @@ test('packed files contain no internal names', () => {
   const hits = packedFiles().filter(
     (path) =>
       INTERNAL_NAMES.test(path) ||
-      INTERNAL_NAMES.test(readFileSync(join(root, path), 'utf8').replaceAll(PUBLIC_RSI_ENDPOINT, '')),
+      INTERNAL_NAMES.test(readFileSync(join(root, path), 'utf8')),
   );
   assert.deepEqual(hits, []);
 });

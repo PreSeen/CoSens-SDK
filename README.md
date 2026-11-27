@@ -2,8 +2,8 @@
 
 CoSens turns confirmed task evidence into reusable Recipes. The SDK is available in TypeScript and Python. Both provide Execution, Rubrics, and Recipe atomic functions in two modes with the same methods and results:
 
-- **Cloud (default)**: `RSIClient()` sends the evidence files you name to CoSens, which learns with CoSens models. Set `COSENS_API_KEY`.
-- **Local**: `RSIClient(data_dir=..., config=...)` runs the Worker on your machine with your own tool-calling model (`RSI_MODEL_API_KEY`). Nothing leaves the machine except your model calls.
+- **Cloud (default)**: `RSIClient()` sends the evidence files you name to the configured CoSens RSI gateway. Set `COSENS_RSI_BASE_URL` and `COSENS_API_KEY`, or supply `base_url` and `api_key` when constructing the client.
+- **Local**: `RSIClient(data_dir=..., config=...)` runs the Worker on your machine with your own tool-calling model. To publish a Recipe or download a missing baseline, set `config.rsi_base_url` or `COSENS_RSI_BASE_URL`.
 
 ```text
 Host Hook → SDK → (cloud service | local SQLite queue) → worker

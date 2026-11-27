@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import {
   CloudClient,
+  configuredRsiBaseUrl,
   matchesRecipeCloudDestination,
   openRecipeZip,
   recipeCloudBaseAliases,
@@ -76,6 +77,7 @@ type PreparedUpload = Receipt | {
   pendingKey: string;
 };
 type PreparedLocalUpload = Receipt | {
+  base_url: string;
   path: string;
   ids: Pick<UploadRequest, 'local_recipe_id' | 'local_recipe_version_id'>;
   task: TaskSelection;
@@ -192,10 +194,11 @@ export async function uploadLocalTaskRecipe(
   store: Store,
   options: LocalRecipeUpsertOptions,
   uploadHeaders?: Headers,
+  rsiBaseUrl?: string,
 ): Promise<RecipeUpsertResult> {
   const { task_id, recipe_id, idempotency_key } = localOptionsSchema.parse(options);
   validateRecipeUpsertOptions({ recipe_id, idempotency_key });
-  const destination = recipeCloudDestination({}, uploadHeaders);
+  const configuredBaseUrl = configuredRsiBaseUrl(rsiBaseUrl);
   const prepared = store.tx<PreparedLocalUpload>(() => {
     const execution = readTaskChain(store, task_id).at(-1)!;
     if (!hasApprovedResult(execution))
@@ -205,8 +208,14 @@ export async function uploadLocalTaskRecipe(
       local_recipe_version_id: store.resolveVersionId(execution.recipe_version_id),
     };
     const task = { task_id, execution_id: execution.id };
-    const selection = { ...ids, ...destination, idempotency_key };
     const saved = publishedUpload(store, ids.local_recipe_version_id, task);
+    if (configuredBaseUrl === undefined && !saved)
+      return fail('invalid_state', 'set config.rsi_base_url or COSENS_RSI_BASE_URL to upload a Recipe');
+    // A saved receipt can be checked locally without a configured gateway.
+    const destination = recipeCloudDestination(
+      { base_url: configuredBaseUrl ?? saved?.request.base_url }, uploadHeaders, 'config.rsi_base_url',
+    );
+    const selection = { ...ids, ...destination, idempotency_key };
     if (saved) {
       if (!sameUploadSelection(store, saved.request, selection)
           || (recipe_id !== undefined && recipe_id !== saved.result.recipe_id))
@@ -223,11 +232,11 @@ export async function uploadLocalTaskRecipe(
     const artifact = taskArtifact(store, task_id, execution, pending?.request.zip_sha256);
     if (!artifact && pending) return fail('conflict', 'pending Recipe upload requires the original frozen ZIP');
     if (!artifact) return fail('invalid_state', 'Task has no frozen Recipe ZIP to upload');
-    return { path: artifact.zip_path, ids, task };
+    return { path: artifact.zip_path, ids, task, base_url: destination.base_url };
   });
   if ('receipt' in prepared) return prepared.receipt;
   return uploadLocalRecipe(store, prepared.path, {
-    ...prepared.ids, recipe_id, idempotency_key, base_url: destination.base_url,
+    ...prepared.ids, recipe_id, idempotency_key, base_url: prepared.base_url,
   }, uploadHeaders, prepared.task);
 }
 

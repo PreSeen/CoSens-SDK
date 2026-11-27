@@ -391,6 +391,7 @@ export class RSIClient {
   async execution_create_with_evidence(
     { input_text, ...request }: EvidenceExecutionCreate,
     cloudHeaders?: Headers,
+    rsiBaseUrl?: string,
   ): Promise<Execution> {
     const { evidence, confirmation_ref, idempotency_key, base } = request;
     const inputText = input_text === undefined ? undefined : Buffer.from(input_text);
@@ -403,7 +404,7 @@ export class RSIClient {
     const previous = replay();
     if (!previous && this.auto_start) this.check_runtime();
     const bootstrap = !previous && base && !findLocalRecipeBase(this.store, base)
-      ? await fetchCloudRecipeBase(this.store, base, cloudHeaders)
+      ? await fetchCloudRecipeBase(this.store, base, cloudHeaders, rsiBaseUrl)
       : undefined;
 
     let materialDirectory: string | undefined;

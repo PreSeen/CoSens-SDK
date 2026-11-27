@@ -21,7 +21,7 @@ NEXT_VERSION = "version_official_next"
 MARKDOWN = "---\nname: Confirm balances\ndescription: Verify the balance\n---\n\nUse the published baseline.\n"
 
 
-def _setup(tmp_path, monkeypatch, *, shared_headers=True):
+def _setup(tmp_path, monkeypatch, *, shared_headers=True, rsi_base_url=None):
     context = tmp_path / "context.txt"
     context.write_text("Check the balance.")
     payload = tmp_path / "payload"
@@ -34,6 +34,7 @@ def _setup(tmp_path, monkeypatch, *, shared_headers=True):
     monkeypatch.setenv("COSENS_API_KEY", "fixture-cloud-api-key")
     options = {
         "auto_start": False,
+        "rsi_base_url": rsi_base_url,
         **({"headers": {"Authorization": "Bearer fixture-cloud-token", "X-Auth-Type": "access_token"}} if shared_headers else {}),
     }
     client = RSIClient(
@@ -94,7 +95,9 @@ def _cloud(monkeypatch, archive, *, selected=VERSION, active=VERSION, published=
 
 
 def test_bootstrap_pins_official_package_and_next_upload_keeps_recipe_id(tmp_path, monkeypatch):
-    client, request, archive = _setup(tmp_path, monkeypatch)
+    rsi_base_url = "https://rsi.example/api/v1/"
+    client, request, archive = _setup(tmp_path, monkeypatch, rsi_base_url=rsi_base_url)
+    monkeypatch.setenv("COSENS_RSI_BASE_URL", "https://ignored.example/api")
     calls = _cloud(monkeypatch, archive)
     created = client.execution_create(**request)
     assert created["recipe_id"] == RECIPE
@@ -109,12 +112,18 @@ def test_bootstrap_pins_official_package_and_next_upload_keeps_recipe_id(tmp_pat
     assert (directory / "helpers" / "snippet.txt").read_text() == "supporting data"
     assert Path(next(file["path"] for file in created["evidence"] if file["role"] == "recipe")).read_text() == MARKDOWN
     assert client.execution_create(**request)["id"] == created["id"]
-    with closing(cloud.CloudRSIClient(_shared_headers=client._upload_headers)) as service:
+    with closing(cloud.CloudRSIClient(base_url=rsi_base_url, _shared_headers=client._upload_headers)) as service:
         with pytest.raises(InvalidState, match="already published"):
             upload_recipe(store, service, "already-published.zip", archive, RECIPE, VERSION, None)
 
-    offline = client.execution_create(**{**request, "idempotency_key": "another-task"})
-    client.execution_cancel(offline["id"])
+    with monkeypatch.context() as missing_endpoint:
+        missing_endpoint.delenv("COSENS_RSI_BASE_URL")
+        offline_client = RSIClient(
+            data_dir=client.data_dir, model_id="local-model", api_key="fixture-model-key",
+            base_url="https://model.example/v1", config={"auto_start": False},
+        )
+        offline = offline_client.execution_create(**{**request, "idempotency_key": "another-task"})
+        offline_client.execution_cancel(offline["id"])
     assert store.get(offline["id"], "execution")["base_recipe_version_id"] == VERSION
     assert len(calls) == 3
 
@@ -257,4 +266,15 @@ def test_missing_local_recipe_without_cosens_credentials_keeps_not_found(tmp_pat
     with pytest.raises(NotFound, match="recipe not found locally; configure CoSens credentials"):
         client.execution_create(**request)
 
+    assert client.task_list() == []
+
+
+def test_missing_local_recipe_requires_rsi_gateway(tmp_path, monkeypatch):
+    client, request, _ = _setup(tmp_path, monkeypatch, shared_headers=False)
+    monkeypatch.delenv("COSENS_API_KEY")
+    monkeypatch.delenv("COSENS_RSI_BASE_URL")
+    monkeypatch.setattr(cloud, "CloudRSIClient", lambda **_: pytest.fail("unexpected cloud request"))
+
+    with pytest.raises(ValueError, match=r"config\.rsi_base_url or COSENS_RSI_BASE_URL"):
+        client.execution_create(**request)
     assert client.task_list() == []

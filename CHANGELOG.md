@@ -6,7 +6,7 @@ Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned
 
 - Python and TypeScript preserve the Rubrics associated with a published Task version and send its criteria with the ZIP. The service assigns the next version number when uploading to an existing Recipe.
 - TypeScript `execution_create()` accepts `evidence.input_text` as a replay input for tasks whose request comes from chat.
-- Python and TypeScript cloud RSI requests, including local Recipe sync, use `/v1` under the configured gateway prefix. The default is `https://friday-rsi-cn.stardust-ai.com/api/v1`. To resume Recipe uploads that used the overseas gateway, set `COSENS_RSI_BASE_URL` to `https://rsi.cosens.ai/api/v1`.
+- Python and TypeScript cloud RSI requests, including local Recipe sync, use `/v1` under the configured gateway prefix.
 - A local Task can publish its approved ZIP as a new version of a cloud Recipe that is already cached on the device.
 - Local `execution_create()` can download a missing published Recipe before queuing an update and keep its formal cloud identity. Local Recipe references can pin a version with `recipe_version_id`.
 - Local RSI in Python and TypeScript adds `task_list()`, `task_get()`, and `task_restart()` for task cards, clarification history, and execution restarts. Task details expose a ZIP for the final qualified Recipe version.
@@ -15,11 +15,12 @@ Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned
 
 ### Breaking
 
+- Cloud RSI requires `base_url` or `COSENS_RSI_BASE_URL`. Local Recipe downloads and uploads require `config.rsi_base_url` or the same environment variable. Set the original gateway URL when resuming a pending upload.
 - Python and TypeScript `rubrics_get()` now take a Recipe ID and an exact Recipe version ID. The SDKs remove `rubrics_list()`.
 - Python and TypeScript `recipe_download()` now return a signed URL string from `POST /download-url`. Use that URL to download the ZIP.
 - Local Recipe replay runs Python and TypeScript with the Worker account's host permissions. Remove `test_python_image` and `test_script_mode` from new local client configurations. The Worker reads previously saved configurations and disregards the retired settings.
 - `recipe_list()` no longer returns `status`. Use `task_list()` or `task_get()` for local task status and `active_version_id` to find the available Recipe version.
-- The Python and TypeScript SDKs remove `recipe_insert()`. Local `recipes_upsert()` takes a `task_id` and finds the task's final ZIP. An optional `recipe_id` publishes a new version of that cloud Recipe. The upload uses `config.headers` and the endpoint from `COSENS_RSI_BASE_URL` or the default CoSens endpoint. Both modes accept `idempotency_key`; cloud clients pass a ZIP path.
+- The Python and TypeScript SDKs remove `recipe_insert()`. Local `recipes_upsert()` takes a `task_id` and finds the task's final ZIP. An optional `recipe_id` publishes a new version of that cloud Recipe. The upload uses `config.headers` for authentication. Both modes accept `idempotency_key`; cloud clients pass a ZIP path.
 - Local `RSIClient` now requires `model_id`, `api_key`, and `base_url` as constructor arguments when configured to run an Execution. Move the model ID and URL out of `config` and supply the model key as `api_key`. The SDK sends the key as a Bearer token to the OpenAI-compatible model endpoint. `config.headers` carries CoSens authentication for local Recipe downloads and uploads.
 
 ## TypeScript 0.10.1

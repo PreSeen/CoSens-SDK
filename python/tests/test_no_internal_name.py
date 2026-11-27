@@ -14,13 +14,12 @@ import zipfile
 from pathlib import Path
 
 INTERNAL_NAMES = re.compile("fri" "day|star" "dust", re.IGNORECASE)
-PUBLIC_RSI_ENDPOINT = "https://friday-rsi-cn.stardust-ai.com/api"
 PYTHON_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PYTHON_ROOT.parent
 
 
 def _hits(name, data):
-    text = data.decode("utf-8", errors="ignore").replace(PUBLIC_RSI_ENDPOINT, "")
+    text = data.decode("utf-8", errors="ignore")
     return [f"{name}: {m.group(0)}" for m in INTERNAL_NAMES.finditer(text)]
 
 

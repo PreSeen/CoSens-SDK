@@ -8,7 +8,7 @@ npm install cosens-sdk
 
 The package is an ES module. CommonJS code can load it with `require('cosens-sdk/rsi')`, which Node.js supports for ES modules from 22.12. The entry points are `cosens-sdk` (everything), `cosens-sdk/rsi` and `cosens-sdk/memory`.
 
-Cloud mode is the default. `new RSIClient()` uses the CoSens service with `COSENS_API_KEY` and uploads the supplied `evidence` and optional `recipe_reference`.
+Cloud mode is the default. `new RSIClient()` uses `COSENS_API_KEY` for authentication and `COSENS_RSI_BASE_URL` for the gateway address. It uploads the supplied `evidence` and optional `recipe_reference`.
 
 ```ts
 import { RSIClient } from 'cosens-sdk/rsi';
@@ -20,9 +20,9 @@ const run = await cloud.execution_create({
 });
 ```
 
-All methods are async in both modes. `new RSIClient({ mode: 'cloud', ... })` takes `api_key`, `base_url`, `timeout` in seconds (default 60) and `virtualUserId`. Cloud RSI uses `COSENS_RSI_BASE_URL` or defaults to `https://friday-rsi-cn.stardust-ai.com/api/v1`. The SDK appends `/v1` to a configured API prefix when needed. Service errors are `RSIError` with the service's `code` and the HTTP `status`. For local mode, pass `data_dir` and your own model as below.
+All methods are async in both modes. `new RSIClient({ mode: 'cloud', ... })` takes `api_key`, `base_url`, `timeout` in seconds (default 60) and `virtualUserId`. Set `base_url` to override `COSENS_RSI_BASE_URL`. The SDK appends `/v1` to a configured gateway prefix when needed. Service errors are `RSIError` with the service's `code` and the HTTP `status`. For local mode, pass `data_dir` and your own model as below.
 
-To run local RSI, pass `model_id`, `api_key`, and `base_url` to the constructor. The model must support Chat Completions and tool calls. Use `config.headers` to authorize cloud Recipe downloads and uploads from a local client. Local `execution_create()` can download a missing published Recipe before queuing an update, and `recipe_reference.recipe_version_id` can pin the baseline. If you package a standalone Node with the host, set `RSI_NODE_EXECUTABLE` and include the SDK worker and the matching `better-sqlite3` native dependency.
+To run local RSI, pass `model_id`, `api_key`, and the model's `base_url` to the constructor. The model must support Chat Completions and tool calls. Local clients use `config.rsi_base_url` or `COSENS_RSI_BASE_URL` for Recipe uploads and downloads of missing published Recipes. Use `config.headers` for gateway authentication. Local reads and updates with a cached Recipe require no gateway address. Use `recipe_reference.recipe_version_id` to pin the baseline of an update. If you package a standalone Node with the host, set `RSI_NODE_EXECUTABLE` and include the SDK worker and the matching `better-sqlite3` native dependency.
 
 ```ts
 import { RSIClient } from 'cosens-sdk/rsi';
@@ -72,7 +72,7 @@ Pass just `data_dir` for read-only clients. After rotating the model key, create
 
 To restart a local task, call `task_restart(taskId, { idempotency_key: requestId, evidence })`. Omit `evidence` to run with the existing materials. The task keeps its card ID and starts a new Execution. Reuse the key when resending the same restart request.
 
-`await rsi.task_get(taskId)` returns `recipe_version_id` and `recipe_zip_path` once the final ZIP is ready. Publish the task with `rsi.recipes_upsert({ task_id: taskId })`. Pass `recipe_id` in the options to target an existing cloud Recipe. The upload uses the client's `config.headers` and the destination set by `COSENS_RSI_BASE_URL`, which defaults to the CoSens endpoint. A cloud client takes a ZIP path with `cloud.recipes_upsert(path)`.
+`await rsi.task_get(taskId)` returns `recipe_version_id` and `recipe_zip_path` once the final ZIP is ready. Publish the task with `rsi.recipes_upsert({ task_id: taskId })`. Pass `recipe_id` in the options to target an existing cloud Recipe. For uploads from a client without a model, pass `data_dir` and `config` with the same gateway settings. A cloud client takes a ZIP path with `cloud.recipes_upsert(path)`.
 
 Task publication includes the Rubrics used to approve that version, when available, and omits local evidence references. A cloud ZIP upload can supply Rubrics explicitly with `cloud.recipes_upsert(path, { rubrics })`. A pending local upload retains the Rubrics for retries.
 

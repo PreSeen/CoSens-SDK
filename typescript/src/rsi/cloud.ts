@@ -16,7 +16,6 @@ import {
 } from './models.js';
 
 const CLOUD_API_VERSION = '/v1';
-export const DEFAULT_CLOUD_BASE_URL = `https://friday-rsi-cn.stardust-ai.com/api${CLOUD_API_VERSION}`;
 /** The CoSens gateway accepts request bodies up to 10 MiB. */
 export const MAX_CLOUD_REQUEST_BYTES = 10 * 1024 * 1024;
 export const MAX_RECIPE_ZIP_BYTES = 8 * 1024 * 1024;
@@ -36,18 +35,27 @@ export type RecipeUpsertOptions = {
 type RecipeUploadFields = Omit<RecipeUpsertOptions, 'rubrics'> & { rubrics?: string };
 export type RecipeUpsertResult = { recipe_id: string; recipe_version_id: string };
 
-function cloudBase(options: CloudOptions) {
-  const base = new URL(options.base_url ?? process.env.COSENS_RSI_BASE_URL ?? DEFAULT_CLOUD_BASE_URL);
-  if (!['http:', 'https:'].includes(base.protocol) || base.href !== base.origin + base.pathname)
-    throw new TypeError('base_url must be an HTTP(S) address without embedded credentials, query or fragment');
+type BaseUrlOption = 'base_url' | 'config.rsi_base_url';
+
+export function configuredRsiBaseUrl(baseUrl?: string) {
+  return baseUrl ?? (process.env.COSENS_RSI_BASE_URL || undefined);
+}
+
+function cloudBase(options: CloudOptions, optionName: BaseUrlOption = 'base_url') {
+  const address = configuredRsiBaseUrl(options.base_url);
+  if (address === undefined)
+    throw new TypeError(`set ${optionName} or COSENS_RSI_BASE_URL to the RSI gateway URL`);
+  const base = URL.parse(address);
+  if (!base || !['http:', 'https:'].includes(base.protocol) || base.href !== base.origin + base.pathname)
+    throw new TypeError(`${optionName} must be an HTTP(S) address without embedded credentials, query or fragment`);
   const prefix = base.pathname.replace(/\/+$/, '');
   base.pathname = prefix.endsWith(CLOUD_API_VERSION) ? prefix : prefix + CLOUD_API_VERSION;
   return base.href;
 }
 
-export function recipeCloudDestination(options: CloudOptions, sharedHeaders?: Headers) {
+export function recipeCloudDestination(options: CloudOptions, sharedHeaders?: Headers, optionName?: BaseUrlOption) {
   return {
-    base_url: cloudBase(options),
+    base_url: cloudBase(options, optionName),
     virtual_user_id: selectedVirtualUser(options) ?? sharedHeaders?.get('X-Virtual-User-Id') ?? null,
   };
 }
