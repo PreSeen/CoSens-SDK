@@ -85,17 +85,11 @@ def _read_recipe_zip(path):
     return file.name, zip_bytes
 
 
-def _validate_recipe_upload(recipe_id, idempotency_key, expected_latest_version_id=None):
+def _validate_recipe_upload(recipe_id, idempotency_key):
     if recipe_id is not None and (
         not isinstance(recipe_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", recipe_id)
     ):
         raise ValueError("recipe_id must contain 1–64 letters, digits, underscores or hyphens")
-    if expected_latest_version_id is not None and (
-        recipe_id is None
-        or not isinstance(expected_latest_version_id, str)
-        or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", expected_latest_version_id)
-    ):
-        raise ValueError("expected_latest_version_id requires recipe_id and a valid version ID")
     if idempotency_key is not None and (
         not isinstance(idempotency_key, str)
         or not idempotency_key
@@ -286,29 +280,23 @@ class CloudRSIClient:
         *,
         recipe_id: str | None = None,
         idempotency_key: str | None = None,
-        expected_latest_version_id: str | None = None,
         rubrics: dict | None = None,
     ) -> dict[str, str]:
         """Upload a Recipe ZIP as a new Recipe or a new version of an existing one."""
         filename, zip_bytes = _read_recipe_zip(path)
         return self._recipes_upsert_bytes(
             filename, zip_bytes, recipe_id=recipe_id, idempotency_key=idempotency_key,
-            expected_latest_version_id=expected_latest_version_id,
             rubrics=_upload_rubrics(rubrics) if rubrics is not None else None,
         )
 
     def _recipe_upload_destination(self):
         return _recipe_destination(self._http.base_url, self._http.headers.get("X-Virtual-User-Id"))
 
-    def _recipes_upsert_bytes(
-        self, filename, zip_bytes, *, recipe_id, idempotency_key,
-        expected_latest_version_id=None, rubrics=None,
-    ):
-        _validate_recipe_upload(recipe_id, idempotency_key, expected_latest_version_id)
+    def _recipes_upsert_bytes(self, filename, zip_bytes, *, recipe_id, idempotency_key, rubrics=None):
+        _validate_recipe_upload(recipe_id, idempotency_key)
         fields = {
             key: value for key, value in {
                 "recipe_id": recipe_id,
-                "expected_latest_version_id": expected_latest_version_id,
                 "rubrics": dumps(rubrics, ensure_ascii=False, sort_keys=True) if rubrics is not None else None,
             }.items() if value is not None
         }

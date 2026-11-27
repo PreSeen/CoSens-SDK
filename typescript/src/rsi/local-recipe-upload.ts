@@ -39,7 +39,6 @@ const destinationOptions = {
 const localOptionsSchema = z.strictObject({
   task_id: nonempty,
   recipe_id: nonempty.optional(),
-  expected_latest_version_id: nonempty.optional(),
   idempotency_key: nonempty.optional(),
 });
 export type LocalRecipeUpsertOptions = z.input<typeof localOptionsSchema>;
@@ -47,7 +46,6 @@ const versionOptionsSchema = z.strictObject({
   local_recipe_id: nonempty,
   local_recipe_version_id: nonempty,
   recipe_id: nonempty.optional(),
-  expected_latest_version_id: nonempty.optional(),
   ...destinationOptions,
 });
 const identifier = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
@@ -63,7 +61,6 @@ type UploadRequest = Destination & {
   local_recipe_version_id: string;
   zip_sha256: string;
   idempotency_key: string | undefined;
-  expected_latest_version_id?: string;
 };
 type TaskSelection = { task_id: string; execution_id: string };
 type UploadPlan = UploadRequest & Partial<TaskSelection> & {
@@ -95,8 +92,6 @@ function sameUploadSelection(store: Store, recorded: UploadPlan, request: Omit<U
   return store.resolveRecipeId(recorded.local_recipe_id) === store.resolveRecipeId(request.local_recipe_id)
     && store.resolveVersionId(recorded.local_recipe_version_id) === store.resolveVersionId(request.local_recipe_version_id)
     && (request.idempotency_key === undefined || recorded.idempotency_key === request.idempotency_key)
-    && (request.expected_latest_version_id === undefined
-      || recorded.expected_latest_version_id === request.expected_latest_version_id)
     && matchesRecipeCloudDestination(recorded, request);
 }
 
@@ -198,8 +193,8 @@ export async function uploadLocalTaskRecipe(
   options: LocalRecipeUpsertOptions,
   uploadHeaders?: Headers,
 ): Promise<RecipeUpsertResult> {
-  const { task_id, recipe_id, expected_latest_version_id, idempotency_key } = localOptionsSchema.parse(options);
-  validateRecipeUpsertOptions({ recipe_id, expected_latest_version_id, idempotency_key });
+  const { task_id, recipe_id, idempotency_key } = localOptionsSchema.parse(options);
+  validateRecipeUpsertOptions({ recipe_id, idempotency_key });
   const destination = recipeCloudDestination({}, uploadHeaders);
   const prepared = store.tx<PreparedLocalUpload>(() => {
     const execution = readTaskChain(store, task_id).at(-1)!;
@@ -210,7 +205,7 @@ export async function uploadLocalTaskRecipe(
       local_recipe_version_id: store.resolveVersionId(execution.recipe_version_id),
     };
     const task = { task_id, execution_id: execution.id };
-    const selection = { ...ids, ...destination, expected_latest_version_id, idempotency_key };
+    const selection = { ...ids, ...destination, idempotency_key };
     const saved = publishedUpload(store, ids.local_recipe_version_id, task);
     if (saved) {
       if (!sameUploadSelection(store, saved.request, selection)
@@ -232,7 +227,7 @@ export async function uploadLocalTaskRecipe(
   });
   if ('receipt' in prepared) return prepared.receipt;
   return uploadLocalRecipe(store, prepared.path, {
-    ...prepared.ids, recipe_id, expected_latest_version_id, idempotency_key, base_url: destination.base_url,
+    ...prepared.ids, recipe_id, idempotency_key, base_url: destination.base_url,
   }, uploadHeaders, prepared.task);
 }
 
@@ -243,16 +238,15 @@ export async function uploadLocalRecipe(
   uploadHeaders?: Headers,
   task?: TaskSelection,
 ): Promise<RecipeUpsertResult> {
-  const { local_recipe_id, local_recipe_version_id, recipe_id, expected_latest_version_id, idempotency_key, ...cloudOptions }
-    = versionOptionsSchema.parse(options);
-  validateRecipeUpsertOptions({ recipe_id, expected_latest_version_id, idempotency_key });
+  const { local_recipe_id, local_recipe_version_id, recipe_id, idempotency_key, ...cloudOptions } = versionOptionsSchema.parse(options);
+  validateRecipeUpsertOptions({ recipe_id, idempotency_key });
   const destination = recipeCloudDestination(cloudOptions, uploadHeaders);
   const { file, filename } = await openRecipeZip(path);
   // Send the same immutable bytes used to derive the idempotency key.
   const bytes = await file.arrayBuffer();
   const zip_sha256 = createHash('sha256').update(new Uint8Array(bytes)).digest('hex');
   const request: UploadRequest = {
-    local_recipe_id, local_recipe_version_id, zip_sha256, expected_latest_version_id, idempotency_key, ...destination,
+    local_recipe_id, local_recipe_version_id, zip_sha256, idempotency_key, ...destination,
   };
 
   const prepared = store.tx<PreparedUpload>(() => {
@@ -323,10 +317,7 @@ export async function uploadLocalRecipe(
     response = await uploadRecipeZip(
       cloud,
       { file: new Blob([bytes], { type: 'application/zip' }), filename },
-      {
-        recipe_id: plan.cloud_recipe_id ?? undefined, idempotency_key: plan.idempotency_key,
-        expected_latest_version_id: plan.expected_latest_version_id, rubrics: plan.rubrics,
-      },
+      { recipe_id: plan.cloud_recipe_id ?? undefined, idempotency_key: plan.idempotency_key, rubrics: plan.rubrics },
     );
   } catch (error) {
     const terminal = uploadFailedPermanently(error);

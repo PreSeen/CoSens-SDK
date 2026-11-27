@@ -30,7 +30,6 @@ export type CloudOptions = {
 } & VirtualUserSelection;
 export type RecipeUpsertOptions = {
   recipe_id?: string;
-  expected_latest_version_id?: string;
   idempotency_key?: string;
   rubrics?: RubricsContent;
 };
@@ -152,21 +151,16 @@ export function serializeUploadRubrics(content: unknown): string {
 }
 
 export function validateRecipeUpsertOptions(options: RecipeUpsertOptions): RecipeUploadFields {
-  const allowed = ['recipe_id', 'expected_latest_version_id', 'idempotency_key', 'rubrics'];
+  const allowed = ['recipe_id', 'idempotency_key', 'rubrics'];
   if (Object.keys(options).some((key) => !allowed.includes(key)))
-    throw new TypeError('cloud Recipe upload accepts only recipe_id, expected_latest_version_id, idempotency_key and rubrics options');
-  const { recipe_id, expected_latest_version_id, idempotency_key, rubrics } = options;
+    throw new TypeError('cloud Recipe upload accepts only recipe_id, idempotency_key and rubrics options');
+  const { recipe_id, idempotency_key, rubrics } = options;
   const identifier = /^[A-Za-z0-9_-]{1,64}$/;
   if (
     recipe_id !== undefined
     && (typeof recipe_id !== 'string' || !identifier.test(recipe_id))
   ) {
     throw new TypeError('recipe_id must contain 1–64 letters, digits, underscores or hyphens');
-  }
-  if (expected_latest_version_id !== undefined) {
-    if (recipe_id === undefined) throw new TypeError('expected_latest_version_id requires recipe_id');
-    if (typeof expected_latest_version_id !== 'string' || !identifier.test(expected_latest_version_id))
-      throw new TypeError('expected_latest_version_id must contain 1–64 letters, digits, underscores or hyphens');
   }
   if (
     idempotency_key !== undefined
@@ -182,12 +176,11 @@ export function validateRecipeUpsertOptions(options: RecipeUpsertOptions): Recip
 export function uploadRecipeZip(
   cloud: CloudClient,
   { file, filename }: { file: Blob; filename: string },
-  { recipe_id, expected_latest_version_id, idempotency_key, rubrics }: RecipeUploadFields,
+  { recipe_id, idempotency_key, rubrics }: RecipeUploadFields,
 ): Promise<RecipeUpsertResult> {
   const multipart = new FormData();
   multipart.set('file', file, filename);
   if (recipe_id !== undefined) multipart.set('recipe_id', recipe_id);
-  if (expected_latest_version_id !== undefined) multipart.set('expected_latest_version_id', expected_latest_version_id);
   if (rubrics !== undefined) multipart.set('rubrics', rubrics);
   return cloud.request('POST', '/recipes_upsert', { multipart, idempotency_key });
 }

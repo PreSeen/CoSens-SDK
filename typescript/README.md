@@ -74,7 +74,7 @@ To restart a local task, call `task_restart(taskId, { idempotency_key: requestId
 
 `await rsi.task_get(taskId)` returns `recipe_version_id` and `recipe_zip_path` once the final ZIP is ready. Publish the task with `rsi.recipes_upsert({ task_id: taskId })`. Pass `recipe_id` in the options to target an existing cloud Recipe. The upload uses the client's `config.headers` and the destination set by `COSENS_RSI_BASE_URL`, which defaults to the CoSens endpoint. A cloud client takes a ZIP path with `cloud.recipes_upsert(path)`.
 
-Task publication includes the Rubrics used to approve that version, when available, and omits local evidence references. A cloud ZIP upload can supply Rubrics explicitly with `cloud.recipes_upsert(path, { rubrics })`. For updates, pass `recipe_id` and `expected_latest_version_id` together to make publication conditional on the cloud version captured before generating. A pending local upload retains these values for retries.
+Task publication includes the Rubrics used to approve that version, when available, and omits local evidence references. A cloud ZIP upload can supply Rubrics explicitly with `cloud.recipes_upsert(path, { rubrics })`. A pending local upload retains the Rubrics for retries.
 
 `await cloud.recipe_download(recipeId, recipeVersionId)` returns the temporary signed download URL as a string. Fetch that URL to retrieve the ZIP.
 
