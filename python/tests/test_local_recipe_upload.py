@@ -15,6 +15,7 @@ import pytest
 from cosens.rsi import CloudRSIClient, Conflict, InvalidState, NotFound, RSIClient, cloud
 from cosens.rsi.models import RSIError
 from cosens.rsi.recipe_file import read_recipe_file
+from cosens.rsi.recipe_identity import PENDING
 from cosens.rsi.recipe_sync import upload_recipe
 from cosens.rsi.store import Store
 
@@ -859,23 +860,22 @@ def test_upload_reuses_an_existing_target_for_only_the_requested_task(tmp_path, 
     with store.transaction() as conn:
         store.save(conn, target)
     with pytest.raises(RSIError, match="could not be reached"):
-        publishing.recipes_upsert(
-            task_id, recipe_id=V1["recipe_id"], expected_latest_version_id=V1["recipe_version_id"]
+        publishing.recipes_upsert(task_id, recipe_id=V1["recipe_id"])
+    with store.transaction() as conn:
+        # A journal made by the previous SDK must still be resumable after upgrading.
+        conn.execute(
+            "UPDATE idempotency SET request=json_set(request,'$.expected_latest_version_id',?) WHERE scope=? AND key=?",
+            (V1["recipe_version_id"], PENDING, source_pair[0]),
         )
     with pytest.raises(Conflict, match="belongs to a different Task"):
         publishing.recipes_upsert(sibling_task)
     with pytest.raises(Conflict, match="different cloud Recipe target"):
         publishing.recipes_upsert(task_id, recipe_id="recipe_other")
-    with pytest.raises(Conflict, match="retry the pending local Recipe upload"):
-        publishing.recipes_upsert(
-            task_id, recipe_id=V1["recipe_id"], expected_latest_version_id="version_other"
-        )
-
     assert publishing.recipes_upsert(task_id) == V2
     assert calls[1] == calls[2] == calls[3]
     key, fields = calls[2]
     assert fields["recipe_id"] == V1["recipe_id"].encode()
-    assert fields["expected_latest_version_id"] == V1["recipe_version_id"].encode()
+    assert "expected_latest_version_id" not in fields
     assert json.loads(fields["rubrics"]) == {
         "criteria": [{
             "id": "c1", "description": "Include the requested sections", "source": "task", "required": True,

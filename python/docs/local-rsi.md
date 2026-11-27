@@ -64,7 +64,7 @@ TS 的创建和测试参数放在一个对象内，Python 的字段用关键字�
 | `execution_clarification_answer` | `execution_id`、`question_id`（字符串）、`question_revision`（正整数）、`answer`（非空文本或非空选项 ID 数组） | 无 | 提交单题答案，返回原执行 ID 和可空的子执行 ID。 |
 | `rubrics_get` | `recipe_id`、`recipe_version_id`（均为字符串） | 无 | 按 Recipe 版本读取生成时采用的评分标准。返回 Rubrics 对象和 `selected_version`。 |
 | `recipe_list` | 无 | `query`，提供时须含 `recipe_ids: string[]`（Python 为 `list[str]`）。 | 返回首次学习条目和现有 Recipe 的摘要。 |
-| `recipes_upsert` | 本地模式传 `task_id`。云端模式传 ZIP 路径或 `file://` URI。 | `recipe_id`、`idempotency_key`、`expected_latest_version_id`（和 `recipe_id` 一起传入）。云端 ZIP 上传也可指定 `rubrics`。 | 上传 ZIP 并返回正式的 `recipe_id`、`recipe_version_id`。本地模式同步更新 SQLite 中的 ID。 |
+| `recipes_upsert` | 本地模式传 `task_id`。云端模式传 ZIP 路径或 `file://` URI。 | `recipe_id`、`idempotency_key`。云端 ZIP 上传也可指定 `rubrics`。 | 上传 ZIP 并返回正式的 `recipe_id`、`recipe_version_id`。本地模式同步更新 SQLite 中的 ID。 |
 | `recipe_download` | `recipe_id`、`recipe_version_id`（TS 第二个位置参数对应版本 ID） | 无 | 云端模式返回指定版本 ZIP 的短期签名 URL，客户端可使用该链接直接下载。 |
 | `recipe_get` | `recipe_id`（字符串） | `version`（`"active"`、`"latest"` 或版本 ID，默认 `"active"`） | 返回 Recipe 和 `selected_version`。 |
 | `recipe_test` | `execution_id`、`recipe_id`、`version_id`、`rubrics_version_id`（均为字符串） | 无 | 在活动 Execution 内安排指定版本测试。 |
@@ -161,7 +161,7 @@ const receipt = await client.recipes_upsert({ task_id: taskId, recipe_id: cloudR
 
 在云端模式下，直接把 ZIP 路径传给 `recipes_upsert()`。传入已有的正式 `recipe_id` 时发布新版本，省略时创建 Recipe。
 
-更新时可传 `expected_latest_version_id`。如果提交前云端最新发布版本已变化，服务返回 `409`。本地 Task 发布时会同步已采用的 Rubrics，包括标准和通过阈值，并保留本地关联。证据定位信息仅留在本地。云端 ZIP 上传可以显式传入同样的 Rubrics 内容。
+服务为上传分配下一个版本号。本地 Task 发布时会同步已采用的 Rubrics，包括标准和通过阈值，并保留本地关联。证据定位信息仅留在本地。云端 ZIP 上传可以显式传入同样的 Rubrics 内容。
 
 ### Recipe 详情返回结构
 
