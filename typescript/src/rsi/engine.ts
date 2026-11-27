@@ -1,6 +1,6 @@
 import { compactAnalysis } from './execution-data.js';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { basename, join, relative, sep } from 'node:path';
 import Database from 'better-sqlite3';
 import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
 import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite';
@@ -12,8 +12,10 @@ import {
   digest,
   inside,
   read_snapshot,
+  read_snapshot_text,
   workspace_files,
 } from './materials.js';
+import { replayUserRequest } from './replay-context.js';
 import { LearningLiterals, rubricRuleText } from './portability.js';
 import { uid } from './store.js';
 import { stageProgress } from './progress.js';
@@ -29,6 +31,7 @@ import {
   FeedbackExtractionSchema,
   AssessmentSchema,
   RecipeSchema,
+  TASK_INPUT_FILENAME,
   parseStoredRubrics,
   RSIError,
   fail,
@@ -490,6 +493,19 @@ export class Engine {
       })),
     };
     const inputs = this.evidence(execution, true);
+    let testTask = task;
+    const host = task.replay_current_case
+      ? /^([a-z][a-z\d-]*)-authoring:[^:]+$/u.exec(execution.policy.confirmation_ref)?.[1]
+      : undefined;
+    if (host &&
+        !inputs.some((file) => file.path === file.snapshot && basename(file.path) === TASK_INPUT_FILENAME)) {
+      // Explicit input_text takes precedence over the request in the host's sealed transcript.
+      const context = this.evidence(execution).find((file) => file.role === 'context');
+      const request = context && replayUserRequest(read_snapshot_text(context), host);
+      if (request !== undefined) {
+        testTask = { ...task, instruction: `${task.instruction}\n\nOriginal user request:\n${request}` };
+      }
+    }
     const attempt = join(this.directory(state.revision), uid('test-attempt'));
     const workspace = join(attempt, 'outputs');
     const scripts = join(attempt, 'scripts');
@@ -505,14 +521,14 @@ export class Engine {
     stageRecipePackageFiles(scripts, scriptFiles);
     const trace = join(attempt, 'executor-trace.json');
     atomic_json(join(attempt, 'test-input.json'), {
-      test_task: task,
+      test_task: testTask,
       recipe,
       rubrics_version_id: state.rubric,
     });
     const summary = await this.runtime.execute(
       {
         recipe: recipe.content,
-        test_task: { instruction: task.instruction },
+        test_task: { instruction: testTask.instruction },
         criteria: testRubrics.criteria,
         ...(resources.size ? {
           package_files: [...resources.keys()].sort(),
@@ -584,7 +600,7 @@ export class Engine {
     const assessment = AssessmentSchema.parse(
       await this.runtime.assess(
         {
-          test_task: task,
+          test_task: testTask,
           rubrics: testRubrics,
           objective_checks: result.checks,
           recipe: recipe.content,
