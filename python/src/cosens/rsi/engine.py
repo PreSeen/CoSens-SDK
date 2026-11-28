@@ -37,6 +37,9 @@ class State(TypedDict, total=False):
 
 class Engine:
     package_recipes = False
+    # Recipe replay runs model-written scripts with the Worker account's permissions.
+    # A service engine, whose Worker shares a host, declares False.
+    runs_replay_scripts = True
 
     def __init__(self, client, runtime, owner, fence, execution_id):
         self.client, self.store, self.runtime = client, client.store, runtime
@@ -420,8 +423,10 @@ class Engine:
                     "rubrics_version_id": rubric["id"],
                 },
             )
+            host_limits = {} if self.runs_replay_scripts else {"no_code_execution": True}
             executor_result = self.runtime.execute(
                 {
+                    **host_limits,
                     "test_task": {"instruction": task["instruction"]},
                     "recipe": instructions,
                     "criteria": test_rubrics["criteria"],
@@ -495,6 +500,7 @@ class Engine:
                 assessment = Assessment.model_validate(
                     self.runtime.assess(
                         {
+                            **host_limits,
                             "test_task": task,
                             "rubrics": test_rubrics,
                             "objective_checks": checks,

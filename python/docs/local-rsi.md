@@ -255,7 +255,7 @@ TS 用 `execution_list({ execution_ids: [id1, id2] })`，Python 用 `execution_l
 
 ### 回放中运行脚本
 
-不允许运行模型代码的机器（例如多人共用的服务端），在 Worker 进程的环境里设 `COSENS_RSI_REPLAY_SCRIPTS=off`。回放时不提供 `run_python`、`run_typescript` 和 `input_path`，模型直接写出交付物；只能靠执行代码判断的评分项记为无法验证。它是机器的设置，已经排队、恢复和澄清续跑的任务同样生效。默认 `on`，取值只能是 `on` 或 `off`。目前只有 Python SDK 读取这个设置。
+是否运行脚本由引擎类决定，不是配置项。本地使用的 `Engine` 运行脚本；与其他账号共用主机的服务端引擎声明 `runs_replay_scripts = False`，回放时不提供 `run_python`、`run_typescript` 和 `input_path`，只能靠执行代码判断的评分项记为无法验证。目前只有 Python SDK 有这个区分。
 
 两版 SDK 的本地回放默认提供 `run_python` 和 `run_typescript`，由 LangGraph 按任务选用。工具优先复用当前 Worker 的解释器或 PATH 中兼容的解释器。缺失时，SDK 下载并校验固定版本的 CPython 或 Node.js，安装到 `data_dir/runtimes` 供后续回放复用。
 
