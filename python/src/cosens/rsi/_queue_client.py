@@ -1079,6 +1079,9 @@ class RSIClient:
             )
         if (config or self.config).model.api_key_env not in self.credential_names():
             raise InvalidState("Model headers are unavailable for this execution")
+        from .runtime import replay_scripts_enabled
+
+        replay_scripts_enabled()
 
     def recover(
         self,
