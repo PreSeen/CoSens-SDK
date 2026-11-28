@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -108,6 +109,18 @@ class RunScriptArgs(Contract):
     args: list[Annotated[StrictStr, Field(max_length=4096)]] = Field(
         default_factory=list, max_length=64
     )
+
+
+def replay_scripts_enabled() -> bool:
+    """Whether this host lets Recipe replay run model-written scripts.
+
+    A setting of the machine, not of an Execution: it also applies to work that
+    was queued, recovered or continued with an earlier configuration.
+    """
+    value = os.environ.get("COSENS_RSI_REPLAY_SCRIPTS", "on")
+    if value not in ("on", "off"):
+        raise ValueError("COSENS_RSI_REPLAY_SCRIPTS must be on or off")
+    return value == "on"
 
 
 class ChatRuntime:
@@ -264,10 +277,11 @@ class ChatRuntime:
                 """Execute a staged TypeScript script on the host and return its execution receipt."""
                 return execute_host("typescript", path, args)
 
-            tools.extend([
-                Tool("run_python", execute_python.__doc__, RunScriptArgs, execute_python),
-                Tool("run_typescript", execute_typescript.__doc__, RunScriptArgs, execute_typescript),
-            ])
+            if replay_scripts_enabled():
+                tools.extend([
+                    Tool("run_python", execute_python.__doc__, RunScriptArgs, execute_python),
+                    Tool("run_typescript", execute_typescript.__doc__, RunScriptArgs, execute_typescript),
+                ])
 
         catalog = [
             {
@@ -278,7 +292,11 @@ class ChatRuntime:
                 "material_id": f["locator"].split("/")[0]
                 if f["locator"].startswith("material_")
                 else None,
-                **({"input_path": host_input_path(f)} if workspace is not None else {}),
+                **(
+                    {"input_path": host_input_path(f)}
+                    if workspace is not None and replay_scripts_enabled()
+                    else {}
+                ),
             }
             for f in files
         ]
@@ -533,6 +551,16 @@ class ChatRuntime:
                 "Use staged package_files at their exact paths through read_output. "
                 "Keep package files unchanged. "
             )
+        script_instruction = (
+            "Use run_python or run_typescript when it helps satisfy the task. "
+            "Run staged scripts unchanged or write a task-specific script under scripts/. "
+            "For TypeScript, use erasable type syntax so the script can run with Bun or Node.js. "
+            "Pass catalog input_path values as arguments relative to the script's working directory. "
+            "Write deliverables inside that working directory. "
+            if replay_scripts_enabled()
+            else "This host does not allow code execution. "
+            "Produce the deliverables directly, and say which checks could not be executed. "
+        )
         return self._call(
             stage="recipe test executor",
             context=context,
@@ -543,11 +571,8 @@ class ChatRuntime:
                 "Actually perform test_task using recipe.instructions. Read task inputs with read_evidence; "
                 "produce the resulting deliverable files in the test workspace with the available tools. "
                 f"{file_instruction}"
-                "Use run_python or run_typescript when it helps satisfy the task. "
-                "Run staged scripts unchanged or write a task-specific script under scripts/. "
-                "For TypeScript, use erasable type syntax so the script can run with Bun or Node.js. "
-                "Pass catalog input_path values as arguments relative to the script's working directory. "
-                "Write deliverables inside that working directory. Use only the authorized inputs and report actual results. "
+                f"{script_instruction}"
+                "Use only the authorized inputs and report actual results. "
                 "If a tool fails or is unavailable, use another permitted method if it satisfies the criteria. "
                 "Follow the supplied Rubric criteria. For every required check, execute it and report its observed result. "
                 "If these tools cannot perform the task, explain the missing capability. Claim completion only when the required work was executed successfully. No direct shell or network tools are available."
@@ -555,6 +580,14 @@ class ChatRuntime:
         )
 
     def assess(self, context, files, trace_path):
+        host_instruction = (
+            ""
+            if replay_scripts_enabled()
+            else " This host does not allow code execution, so the executor could not run any. "
+            "For a criterion whose condition applies to this run and that can only be satisfied by executing code, "
+            "use status=unverified and score=null and set verifiable=false; do not score the missing execution as "
+            "a failure. The rules for scenarios this run did not exercise still apply."
+        )
         return self._call(
             stage="independent test evaluator",
             context=context,
@@ -570,5 +603,6 @@ class ChatRuntime:
             "Accept an alternative execution method only when it satisfies the criterion. A failed or unavailable optional tool call alone does not invalidate a result supported by other observed evidence. "
             "If an applicable criterion cannot be judged from the available evidence, mark it unverified and set verifiable=false. "
             "A scenario simply not exercised does not make the entire test unverifiable. Skipping an applicable required operation does not make its condition unexercised: score an observed failure or omission as a verified failure, and set verifiable=false when execution evidence is unavailable. "
-            "Base judgments on actual evidence and do not seek learning files.",
+            "Base judgments on actual evidence and do not seek learning files."
+            + host_instruction,
         )

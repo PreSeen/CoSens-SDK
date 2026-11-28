@@ -47,8 +47,10 @@ def drain(
 ):
     from ._queue_client import RSIClient
     from .engine import Engine
-    from .runtime import ChatRuntime
+    from .runtime import ChatRuntime, replay_scripts_enabled
 
+    # A misconfigured host must fail before claiming work, which then stays queued.
+    replay_scripts_enabled()
     engine_class = Engine if engine_class is None else engine_class
     store, config = client.store, client.config
     credentials = None if runtime is not None else client.credential_names()

@@ -21,6 +21,7 @@ from cosens.rsi import host_runtime
 from cosens.rsi.chat_completions import Assistant
 from cosens.rsi.models import RubricsContent, parse_stored_rubrics
 from cosens.rsi.python_runner import run_host_script
+from cosens.rsi.runtime import replay_scripts_enabled
 
 
 def tool_reply(name, args):
@@ -103,11 +104,17 @@ def test_stored_rubrics_ignore_obsolete_python_flag():
         ("host-python", "passed"),
         ("host-typescript", "passed"),
         ("legacy-host-python", "passed"),
+        ("scripts-off", "passed"),
+        ("scripts-off-required", "unverifiable"),
     ],
 )
 def test_recipe_replay_with_native_tools(tmp_path, monkeypatch, mode, test_status):
     host_mode = mode in {"host-python", "host-typescript", "legacy-host-python"}
-    execution_required = mode in {"host-python", "skipped"}
+    execution_required = mode in {"host-python", "skipped", "scripts-off-required"}
+    scripts_off = mode.startswith("scripts-off")
+    monkeypatch.delenv("COSENS_RSI_REPLAY_SCRIPTS", raising=False)
+    if scripts_off:
+        monkeypatch.setenv("COSENS_RSI_REPLAY_SCRIPTS", "off")
     criterion_description = (
         "Run the Python check and verify the calculated quantities in the resulting CSV"
         if execution_required
@@ -149,6 +156,7 @@ def test_recipe_replay_with_native_tools(tmp_path, monkeypatch, mode, test_statu
     historical = tmp_path / "archived-data.csv"
     historical.write_text("HISTORICAL_RECORD\n77723\n")
     expected = "quantity,doubled\n6,12\n"
+    marker = tmp_path / "script-ran"
     host_scripts = {
         "host-python": (
             "run_python", "scripts/host.py",
@@ -220,6 +228,19 @@ console.log('Calculated on host');
             assert "run_python" not in tools
             assert "run_typescript" not in tools
             assert "requires_python" not in payload["context"]["rubrics"]
+            assert ("does not allow code execution" in messages[0]["content"]) is scripts_off
+            if mode == "scripts-off-required":
+                assessed.append(True)
+                return tool_reply("Assessment", {
+                    "verifiable": False,
+                    "scores": [{
+                        "criterion_id": "verified_csv",
+                        "status": "unverified",
+                        "score": None,
+                        "evidence": "This host does not run code",
+                    }],
+                    "reason": "The required execution could not happen",
+                })
             if not responses:
                 return tool_reply("read_evidence", {"locator": "test/verified.csv"})
             assert responses[0]["text"] == expected
@@ -257,7 +278,13 @@ console.log('Calculated on host');
                     else "Verified the calculated output"
                 ),
             })
-        assert {"run_python", "run_typescript"} <= tools
+        if scripts_off:
+            assert not {"run_python", "run_typescript"} & tools
+            assert "run_python" not in messages[0]["content"]
+            assert "input_path" not in catalog[0]
+        else:
+            assert {"run_python", "run_typescript"} <= tools
+            assert catalog[0]["input_path"].startswith("../inputs/")
         assert "requires_python" not in payload["context"]
         assert payload["context"]["criteria"] == [{
             "id": "verified_csv",
@@ -266,7 +293,6 @@ console.log('Calculated on host');
         }]
         assert len(catalog) == 1 and catalog[0]["role"] == "input"
         assert "sandbox_path" not in catalog[0]
-        assert catalog[0]["input_path"].startswith("../inputs/")
         if host_mode:
             language_mode = "host-typescript" if mode == "host-typescript" else "host-python"
             tool, script_path, source = host_scripts[language_mode]
@@ -279,6 +305,19 @@ console.log('Calculated on host');
                 })
             assert responses[1]["exit_code"] == 0, responses[1]
             return Assistant(role="assistant", content="The verification finished.")
+        if scripts_off:
+            # The model writes a script and calls the tool anyway: nothing may run.
+            if not responses:
+                return tool_reply("write_output", {
+                    "path": "scripts/ran.py",
+                    "content": f"open({str(marker)!r}, 'w').write('ran')",
+                })
+            if len(responses) == 1:
+                return tool_reply("run_python", {"path": "scripts/ran.py"})
+            if len(responses) == 2:
+                assert responses[1] == "Unknown or unauthorized tool.", responses[1]
+                return tool_reply("write_output", {"path": "verified.csv", "content": expected})
+            return Assistant(role="assistant", content="The deliverable is written.")
         if not responses:
             if mode in {"skipped", "text", "incidental"}:
                 return tool_reply("write_output", {"path": "verified.csv", "content": expected})
@@ -348,8 +387,47 @@ console.log('Calculated on host');
         assert tested["score"] == 1
         assert Path(tested["artifacts"][0]["path"]).read_text() == expected
         assert client.recipe_get(execution["recipe_id"])["active_version_id"] == tested["version_id"]
-    if mode in {"incidental", "text", "skipped"}:
+    if mode in {"incidental", "text", "skipped"} or scripts_off:
         assert "python_runs" not in trace
+    assert not marker.exists()
+
+
+def test_host_script_setting_accepts_only_on_or_off(monkeypatch):
+    monkeypatch.delenv("COSENS_RSI_REPLAY_SCRIPTS", raising=False)
+    assert replay_scripts_enabled() is True
+    monkeypatch.setenv("COSENS_RSI_REPLAY_SCRIPTS", "off")
+    assert replay_scripts_enabled() is False
+    monkeypatch.setenv("COSENS_RSI_REPLAY_SCRIPTS", "false")
+    with pytest.raises(ValueError, match="COSENS_RSI_REPLAY_SCRIPTS"):
+        replay_scripts_enabled()
+
+
+def test_invalid_host_script_setting_leaves_work_queued(tmp_path, monkeypatch):
+    context = tmp_path / "task-context.md"
+    context.write_text("Summarize the task.")
+    client = RSIClient(
+        data_dir=tmp_path / "db",
+        model_id="fixture",
+        base_url="http://127.0.0.1:1/v1",
+        api_key="synthetic-fixture",
+        config={"auto_start": False},
+    )
+    accepted = client.execution_create(
+        evidence={"context_path": str(context), "files": []},
+        idempotency_key="bad-host-setting",
+    )
+    alias, binding = client._queue._model_header_binding
+    monkeypatch.setenv(alias, binding)
+    monkeypatch.setenv("COSENS_RSI_REPLAY_SCRIPTS", "false")
+    with pytest.raises(ValueError, match="COSENS_RSI_REPLAY_SCRIPTS"):
+        client._queue.run_pending()
+    # Dispatch fails to the caller, before a Worker slot is taken or a process starts.
+    started = []
+    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: started.append(a))
+    with pytest.raises(ValueError, match="COSENS_RSI_REPLAY_SCRIPTS"):
+        client._queue.recover()
+    assert not started
+    assert client.execution_get(accepted["id"])["status"] == "queued"
 
 
 def test_public_config_rejects_obsolete_script_settings(tmp_path):
