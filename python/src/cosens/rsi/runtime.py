@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -109,18 +108,6 @@ class RunScriptArgs(Contract):
     args: list[Annotated[StrictStr, Field(max_length=4096)]] = Field(
         default_factory=list, max_length=64
     )
-
-
-def replay_scripts_enabled() -> bool:
-    """Whether this host lets Recipe replay run model-written scripts.
-
-    A setting of the machine, not of an Execution: it also applies to work that
-    was queued, recovered or continued with an earlier configuration.
-    """
-    value = os.environ.get("COSENS_RSI_REPLAY_SCRIPTS", "on")
-    if value not in ("on", "off"):
-        raise ValueError("COSENS_RSI_REPLAY_SCRIPTS must be on or off")
-    return value == "on"
 
 
 class ChatRuntime:
@@ -277,7 +264,7 @@ class ChatRuntime:
                 """Execute a staged TypeScript script on the host and return its execution receipt."""
                 return execute_host("typescript", path, args)
 
-            if replay_scripts_enabled():
+            if not context.get("no_code_execution"):
                 tools.extend([
                     Tool("run_python", execute_python.__doc__, RunScriptArgs, execute_python),
                     Tool("run_typescript", execute_typescript.__doc__, RunScriptArgs, execute_typescript),
@@ -294,7 +281,7 @@ class ChatRuntime:
                 else None,
                 **(
                     {"input_path": host_input_path(f)}
-                    if workspace is not None and replay_scripts_enabled()
+                    if workspace is not None and not context.get("no_code_execution")
                     else {}
                 ),
             }
@@ -552,14 +539,14 @@ class ChatRuntime:
                 "Keep package files unchanged. "
             )
         script_instruction = (
-            "Use run_python or run_typescript when it helps satisfy the task. "
+            "This host does not allow code execution. "
+            "Produce the deliverables directly, and say which checks could not be executed. "
+            if context.get("no_code_execution")
+            else "Use run_python or run_typescript when it helps satisfy the task. "
             "Run staged scripts unchanged or write a task-specific script under scripts/. "
             "For TypeScript, use erasable type syntax so the script can run with Bun or Node.js. "
             "Pass catalog input_path values as arguments relative to the script's working directory. "
             "Write deliverables inside that working directory. "
-            if replay_scripts_enabled()
-            else "This host does not allow code execution. "
-            "Produce the deliverables directly, and say which checks could not be executed. "
         )
         return self._call(
             stage="recipe test executor",
@@ -581,12 +568,12 @@ class ChatRuntime:
 
     def assess(self, context, files, trace_path):
         host_instruction = (
-            ""
-            if replay_scripts_enabled()
-            else " This host does not allow code execution, so the executor could not run any. "
+            " This host does not allow code execution, so the executor could not run any. "
             "For a criterion whose condition applies to this run and that can only be satisfied by executing code, "
             "use status=unverified and score=null and set verifiable=false; do not score the missing execution as "
             "a failure. The rules for scenarios this run did not exercise still apply."
+            if context.get("no_code_execution")
+            else ""
         )
         return self._call(
             stage="independent test evaluator",

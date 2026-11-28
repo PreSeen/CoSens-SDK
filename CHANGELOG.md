@@ -4,7 +4,7 @@ Python (`cosens-sdk` on PyPI) and TypeScript (`cosens-sdk` on npm) are versioned
 
 ## Unreleased
 
-- Python: set `COSENS_RSI_REPLAY_SCRIPTS=off` on a Worker host that must not run model-written code. Recipe replay then offers no `run_python` or `run_typescript` tool, and checks that need execution stay unverified. The default `on` keeps local behavior.
+- Python: a service engine declares `runs_replay_scripts = False`, and its Recipe replay then offers no `run_python` or `run_typescript` tool and runs no model-written code; checks that need execution stay unverified. Local replay is unchanged. A service that replays Recipes on a shared host must declare this in the same change that moves it to this version.
 - Python and TypeScript preserve the Rubrics associated with a published Task version and send its criteria with the ZIP. The service assigns the next version number when uploading to an existing Recipe.
 - TypeScript `execution_create()` accepts `evidence.input_text` as a replay input for tasks whose request comes from chat.
 - Python and TypeScript cloud RSI requests, including local Recipe sync, use `/v1` under the configured gateway prefix.

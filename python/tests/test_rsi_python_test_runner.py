@@ -21,7 +21,9 @@ from cosens.rsi import host_runtime
 from cosens.rsi.chat_completions import Assistant
 from cosens.rsi.models import RubricsContent, parse_stored_rubrics
 from cosens.rsi.python_runner import run_host_script
-from cosens.rsi.runtime import replay_scripts_enabled
+from cosens.rsi.engine import Engine
+from cosens.rsi.runtime import ChatRuntime
+from cosens.rsi.worker import drain
 
 
 def tool_reply(name, args):
@@ -37,6 +39,24 @@ def tool_reply(name, args):
             ],
         }
     )
+
+
+class ScriptlessEngine(Engine):
+    """A service engine, which never runs model-written code."""
+
+    runs_replay_scripts = False
+
+
+class WrappedRuntime:
+    """A host adapter that only forwards the Runtime calls."""
+
+    __slots__ = ("inner",)
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
 
 
 @contextmanager
@@ -112,9 +132,7 @@ def test_recipe_replay_with_native_tools(tmp_path, monkeypatch, mode, test_statu
     host_mode = mode in {"host-python", "host-typescript", "legacy-host-python"}
     execution_required = mode in {"host-python", "skipped", "scripts-off-required"}
     scripts_off = mode.startswith("scripts-off")
-    monkeypatch.delenv("COSENS_RSI_REPLAY_SCRIPTS", raising=False)
-    if scripts_off:
-        monkeypatch.setenv("COSENS_RSI_REPLAY_SCRIPTS", "off")
+
     criterion_description = (
         "Run the Python check and verify the calculated quantities in the resulting CSV"
         if execution_required
@@ -372,7 +390,16 @@ console.log('Calculated on host');
         else:
             alias, binding = client._queue._model_header_binding
             monkeypatch.setenv(alias, binding)
-            client._queue.run_pending()
+            if scripts_off:
+                # The engine's policy reaches a runtime the host supplied, wrapped or not.
+                supplied = (
+                    WrappedRuntime(ChatRuntime(client._queue, "supplied", lambda: None))
+                    if mode == "scripts-off-required"
+                    else None
+                )
+                drain(client._queue, runtime=supplied, engine_class=ScriptlessEngine)
+            else:
+                client._queue.run_pending()
     execution = client.execution_get(accepted["id"])
     assert execution["status"] == "completed", execution
     assert execution["result"]["test_status"] == test_status, execution
@@ -390,44 +417,6 @@ console.log('Calculated on host');
     if mode in {"incidental", "text", "skipped"} or scripts_off:
         assert "python_runs" not in trace
     assert not marker.exists()
-
-
-def test_host_script_setting_accepts_only_on_or_off(monkeypatch):
-    monkeypatch.delenv("COSENS_RSI_REPLAY_SCRIPTS", raising=False)
-    assert replay_scripts_enabled() is True
-    monkeypatch.setenv("COSENS_RSI_REPLAY_SCRIPTS", "off")
-    assert replay_scripts_enabled() is False
-    monkeypatch.setenv("COSENS_RSI_REPLAY_SCRIPTS", "false")
-    with pytest.raises(ValueError, match="COSENS_RSI_REPLAY_SCRIPTS"):
-        replay_scripts_enabled()
-
-
-def test_invalid_host_script_setting_leaves_work_queued(tmp_path, monkeypatch):
-    context = tmp_path / "task-context.md"
-    context.write_text("Summarize the task.")
-    client = RSIClient(
-        data_dir=tmp_path / "db",
-        model_id="fixture",
-        base_url="http://127.0.0.1:1/v1",
-        api_key="synthetic-fixture",
-        config={"auto_start": False},
-    )
-    accepted = client.execution_create(
-        evidence={"context_path": str(context), "files": []},
-        idempotency_key="bad-host-setting",
-    )
-    alias, binding = client._queue._model_header_binding
-    monkeypatch.setenv(alias, binding)
-    monkeypatch.setenv("COSENS_RSI_REPLAY_SCRIPTS", "false")
-    with pytest.raises(ValueError, match="COSENS_RSI_REPLAY_SCRIPTS"):
-        client._queue.run_pending()
-    # Dispatch fails to the caller, before a Worker slot is taken or a process starts.
-    started = []
-    monkeypatch.setattr("subprocess.Popen", lambda *a, **k: started.append(a))
-    with pytest.raises(ValueError, match="COSENS_RSI_REPLAY_SCRIPTS"):
-        client._queue.recover()
-    assert not started
-    assert client.execution_get(accepted["id"])["status"] == "queued"
 
 
 def test_public_config_rejects_obsolete_script_settings(tmp_path):
